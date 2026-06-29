@@ -543,6 +543,9 @@ function BrowserConsult({ setNotice, refresh }) {
   const [draft, setDraft] = useState('');
   const [external, setExternal] = useState('');
   const [consultations, setConsultations] = useState([]);
+  const [browserUrl, setBrowserUrl] = useState('https://chatgpt.com/');
+  const [browserResult, setBrowserResult] = useState(null);
+  const [browserBusy, setBrowserBusy] = useState(false);
 
   async function load() {
     setCap(await api('/api/browser/capabilities'));
@@ -561,11 +564,42 @@ function BrowserConsult({ setNotice, refresh }) {
     await refresh();
   }
 
+  async function openControlledBrowser() {
+    setBrowserBusy(true);
+    try {
+      const result = await api('/api/browser/open', {
+        method: 'POST',
+        body: JSON.stringify({ url: browserUrl })
+      });
+      setBrowserResult(result);
+      setNotice(`Opened browser: ${result.title || result.url}`);
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setBrowserBusy(false);
+    }
+  }
+
   return (
     <section className="two-column browser-flow">
       <div className="panel">
         <h2>Consultation Draft</h2>
         <p>{cap?.playwright ? 'Playwright is available for browser automation.' : 'Manual browser stub is active. Paste external responses here for review.'}</p>
+        <label>Controlled browser URL</label>
+        <div className="inline-form">
+          <input value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} placeholder="https://chatgpt.com/" />
+          <button onClick={openControlledBrowser} disabled={browserBusy || !cap?.playwright}>
+            <Globe2 size={16} /> {browserBusy ? 'Opening...' : 'Open'}
+          </button>
+        </div>
+        {browserResult && (
+          <div className="browser-result">
+            <Pill tone="good">Opened</Pill>
+            <strong>{browserResult.title || browserResult.url}</strong>
+            <span>{browserResult.url}</span>
+            {browserResult.excerpt && <small>{browserResult.excerpt}</small>}
+          </div>
+        )}
         <input value={title} onChange={(event) => setTitle(event.target.value)} />
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Local draft to critique..." />
         <textarea value={external} onChange={(event) => setExternal(event.target.value)} placeholder="Captured cloud response or manual paste..." />

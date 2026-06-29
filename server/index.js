@@ -57,6 +57,14 @@ function spawnCli(command, args) {
   }
 }
 
+function normalizeBrowserUrl(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) throw new Error('URL is required.');
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^[\w.-]+\.[a-z]{2,}(\/.*)?$/i.test(trimmed)) return `https://${trimmed}`;
+  throw new Error('Enter a full http(s) URL or a domain such as chatgpt.com.');
+}
+
 async function packageAvailable(packageName) {
   try {
     await import(packageName);
@@ -405,6 +413,40 @@ app.get('/api/browser/capabilities', async (_req, res) => {
     ok(res, { playwright: true, mode: 'available' });
   } catch {
     ok(res, { playwright: false, mode: 'manual consultation stub', note: 'Install Playwright to enable controlled browser consultation.' });
+  }
+});
+
+app.post('/api/browser/open', async (req, res) => {
+  let url;
+  try {
+    url = normalizeBrowserUrl(req.body.url);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+
+  try {
+    const { chromium } = await import('playwright');
+    const userDataDir = path.join(root, 'data', 'browser-profile');
+    fs.mkdirSync(userDataDir, { recursive: true });
+    const context = await chromium.launchPersistentContext(userDataDir, {
+      headless: false,
+      viewport: null,
+      args: ['--start-maximized']
+    });
+    const page = context.pages()[0] || await context.newPage();
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    const title = await page.title().catch(() => '');
+    const currentUrl = page.url();
+    const visibleText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    ok(res, {
+      url: currentUrl,
+      title,
+      profile: userDataDir,
+      excerpt: visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200),
+      note: 'Browser opened with a persistent local Playwright profile. Cloud responses remain advisory and must be reviewed before promotion.'
+    });
+  } catch (error) {
+    fail(res, 500, error.message || 'Browser automation failed.');
   }
 });
 

@@ -574,6 +574,20 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 }
 .review-card h3 { margin: 10px 0 6px; }
 .review-card p { color: var(--soft); font-size: 13px; }
+.browser-result {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  margin-bottom: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.browser-result span, .browser-result small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
 .decision-row { margin-top: 12px; flex-wrap: wrap; }
 .inline-form { margin-bottom: 14px; }
 .inline-form input { min-width: 0; }
