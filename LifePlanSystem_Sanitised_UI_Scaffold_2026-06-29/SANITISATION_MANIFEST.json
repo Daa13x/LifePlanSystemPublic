@@ -1,0 +1,33 @@
+{
+  "name": "LifePlanSystem Sanitised UI Scaffold",
+  "date": "2026-06-29",
+  "privacy": "sanitised_no_personal_memory",
+  "source_of_truth": "Markdown/Git repository",
+  "goal": "UI/pass-through control layer for repo-backed AI planning and memory system",
+  "included": [
+    "README.md",
+    "docs/architecture/MEMORY_PIPELINE.md",
+    "docs/architecture/MUTUAL_CALIBRATION_LAYER.md",
+    "docs/architecture/SYSTEM_ARCHITECTURE.md",
+    "docs/architecture/WRITE_SAFETY_MODEL.md",
+    "docs/handoffs/COLLABORATOR_HANDOFF.md",
+    "docs/ui/UI_PRODUCT_SPEC.md",
+    "rules/LIS_RULES_SANITISED.md",
+    "source_of_truth/README.md",
+    "source_of_truth/memory/INBOX.md",
+    "source_of_truth/open_questions.md",
+    "source_of_truth/predictions.md",
+    "templates/AI_REPO_REVIEW_PROMPT.md",
+    "templates/APPROVAL_PROPOSAL_TEMPLATE.md",
+    "templates/MEMORY_INBOX_ENTRY_TEMPLATE.md",
+    "templates/UI_SCREEN_SPEC_TEMPLATE.md"
+  ],
+  "excluded": [
+    "private memories",
+    "therapy context",
+    "relationship details",
+    "health details",
+    "legal details",
+    "personal source-of-truth facts"
+  ]
+}
