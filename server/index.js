@@ -552,6 +552,26 @@ app.post('/api/source/stage-all', async (_req, res) => {
   ok(res, { status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
 });
 
+app.post('/api/source/fetch', async (_req, res) => {
+  const result = await runCli('git', ['fetch', '--all', '--prune'], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git fetch failed');
+  ok(res, {
+    output: result.stdout || result.stderr || 'Fetch complete.',
+    status: (await runCli('git', ['status', '--short', '--branch'])).stdout
+  });
+});
+
+app.post('/api/source/pull', async (_req, res) => {
+  const branch = await runCli('git', ['branch', '--show-current']);
+  if (!branch.stdout) return fail(res, 400, 'Cannot pull from detached HEAD.');
+  const result = await runCli('git', ['pull', '--ff-only', 'origin', branch.stdout], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  if (!result.ok) return fail(res, 409, result.stderr || result.stdout || 'git pull --ff-only failed');
+  ok(res, {
+    output: result.stdout || result.stderr || 'Already up to date.',
+    status: (await runCli('git', ['status', '--short', '--branch'])).stdout
+  });
+});
+
 app.post('/api/source/commit', async (req, res) => {
   const message = req.body.message?.trim();
   if (!message) return fail(res, 400, 'Commit message is required.');

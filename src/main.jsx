@@ -948,6 +948,8 @@ function SourceControl({ setNotice }) {
         <div className="decision-row">
           <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!hasChanges}><Check size={16} /> Stage all</button>
           <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')}><Check size={16} /> Commit</button>
+          <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')}><RefreshCcw size={16} /> Fetch</button>
+          <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')}><Download size={16} /> Pull</button>
           <button onClick={() => action('/api/source/push', {}, 'Pushed current branch.')}><Upload size={16} /> Push</button>
         </div>
       </div>
