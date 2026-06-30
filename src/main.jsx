@@ -7,6 +7,7 @@ import {
   Check,
   ChevronRight,
   Circle,
+  Clipboard,
   Clock3,
   Download,
   FileText,
@@ -612,9 +613,11 @@ function BrowserConsult({ setNotice, refresh }) {
   const [draft, setDraft] = useState('');
   const [external, setExternal] = useState('');
   const [consultations, setConsultations] = useState([]);
+  const [targetAgent, setTargetAgent] = useState('ChatGPT');
   const [browserUrl, setBrowserUrl] = useState('https://chatgpt.com/');
   const [browserResult, setBrowserResult] = useState(null);
   const [browserBusy, setBrowserBusy] = useState(false);
+  const [consultPrompt, setConsultPrompt] = useState('');
 
   async function load() {
     setCap(await api('/api/browser/capabilities'));
@@ -623,7 +626,7 @@ function BrowserConsult({ setNotice, refresh }) {
   useEffect(() => { load().catch((err) => setNotice(err.message)); }, []);
 
   async function saveConsultation() {
-    const created = await api('/api/consultations', { method: 'POST', body: JSON.stringify({ title, local_draft: draft }) });
+    const created = await api('/api/consultations', { method: 'POST', body: JSON.stringify({ title, local_draft: draft, target_agent: targetAgent }) });
     if (external.trim()) {
       await api(`/api/consultations/${created.id}`, { method: 'PATCH', body: JSON.stringify({ external_response: external, status: 'captured' }) });
     }
@@ -631,6 +634,33 @@ function BrowserConsult({ setNotice, refresh }) {
     setExternal('');
     await load();
     await refresh();
+  }
+
+  function buildConsultPrompt() {
+    const prompt = [
+      `You are acting as an external consultant for Life Planner, a local-first personal executive assistant.`,
+      `Target: ${targetAgent}.`,
+      ``,
+      `Review the local draft below. Critique it, call out missing context or risky assumptions, and suggest concrete improvements.`,
+      `Do not claim authority over memory, priorities, or plans. Your response will be pasted back into Life Planner as a reviewable suggestion only.`,
+      ``,
+      `Local draft:`,
+      draft.trim() || '(No local draft supplied yet.)'
+    ].join('\n');
+    setConsultPrompt(prompt);
+    return prompt;
+  }
+
+  async function copyConsultPrompt(promptOverride = '') {
+    const prompt = promptOverride || consultPrompt || buildConsultPrompt();
+    await navigator.clipboard.writeText(prompt);
+    setNotice('Consultation prompt copied. Paste it into the cloud agent after login.');
+  }
+
+  async function openWithPrompt() {
+    const prompt = buildConsultPrompt();
+    await copyConsultPrompt(prompt);
+    await openControlledBrowser();
   }
 
   async function openControlledBrowser() {
@@ -653,12 +683,27 @@ function BrowserConsult({ setNotice, refresh }) {
     <section className="two-column browser-flow">
       <div className="panel">
         <h2>Consultation Draft</h2>
-        <p>{cap?.playwright ? 'Playwright is available for browser automation.' : 'Manual browser stub is active. Paste external responses here for review.'}</p>
+        <p>{cap?.playwright ? 'Playwright is available for browser automation. Local models run as-is; this app writes the context prompt.' : 'Manual browser stub is active. Paste external responses here for review.'}</p>
+        <label>Cloud consultant</label>
+        <div className="inline-form">
+          <select value={targetAgent} onChange={(event) => setTargetAgent(event.target.value)}>
+            <option>ChatGPT</option>
+            <option>Gemini</option>
+            <option>Grok</option>
+            <option>Claude</option>
+            <option>Other web agent</option>
+          </select>
+          <button onClick={buildConsultPrompt}><Sparkles size={16} /> Build prompt</button>
+          <button onClick={copyConsultPrompt} disabled={!draft.trim() && !consultPrompt}><Clipboard size={16} /> Copy</button>
+        </div>
         <label>Controlled browser URL</label>
         <div className="inline-form">
           <input value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} placeholder="https://chatgpt.com/" />
           <button onClick={openControlledBrowser} disabled={browserBusy || !cap?.playwright}>
             <Globe2 size={16} /> {browserBusy ? 'Opening...' : 'Open'}
+          </button>
+          <button className="primary" onClick={openWithPrompt} disabled={browserBusy || !cap?.playwright || !draft.trim()}>
+            <Globe2 size={16} /> Copy + Open
           </button>
         </div>
         {browserResult && (
@@ -671,6 +716,7 @@ function BrowserConsult({ setNotice, refresh }) {
         )}
         <input value={title} onChange={(event) => setTitle(event.target.value)} />
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Local draft to critique..." />
+        {consultPrompt && <textarea value={consultPrompt} onChange={(event) => setConsultPrompt(event.target.value)} placeholder="Generated consultation prompt..." />}
         <textarea value={external} onChange={(event) => setExternal(event.target.value)} placeholder="Captured cloud response or manual paste..." />
         <button className="primary" onClick={saveConsultation}><Globe2 size={16} /> Save as reviewable suggestion</button>
       </div>
@@ -680,6 +726,7 @@ function BrowserConsult({ setNotice, refresh }) {
           <div className="review-card" key={item.id}>
             <Pill tone={item.status === 'captured' ? 'warn' : 'muted'}>{item.status}</Pill>
             <h3>{item.title}</h3>
+            <span>{item.target_agent}</span>
             <p>{item.local_draft}</p>
           </div>
         ))}

@@ -685,7 +685,8 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 }
 .decision-row { margin-top: 12px; flex-wrap: wrap; }
 .inline-form { margin-bottom: 14px; }
-.inline-form input { min-width: 0; }
+.inline-form input,
+.inline-form select { min-width: 0; }
 
 .browser-flow textarea { margin-top: 10px; min-height: 130px; }
 .model-row {
