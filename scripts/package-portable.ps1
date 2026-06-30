@@ -22,6 +22,9 @@ Push-Location $repoRoot
 try {
   npm.cmd install
   if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+  $env:PLAYWRIGHT_BROWSERS_PATH = "0"
+  npx.cmd playwright install chromium
+  if ($LASTEXITCODE -ne 0) { throw "playwright chromium install failed with exit code $LASTEXITCODE" }
   npm.cmd run build
   if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
 }
@@ -92,6 +95,7 @@ Get-ChildItem -LiteralPath $appRoot -Recurse -File |
 @echo off
 setlocal
 set LIFE_PLANNER_PORT=4177
+set PLAYWRIGHT_BROWSERS_PATH=0
 cd /d "%~dp0app"
 start "Life Planner Server" /min "%~dp0node\node.exe" server\index.js
 timeout /t 2 /nobreak >nul
@@ -102,6 +106,7 @@ start "" "http://127.0.0.1:%LIFE_PLANNER_PORT%/"
 @echo off
 setlocal
 set LIFE_PLANNER_PORT=4177
+set PLAYWRIGHT_BROWSERS_PATH=0
 cd /d "%~dp0app"
 "%~dp0node\node.exe" server\index.js
 "@ | Set-Content -Path (Join-Path $portableRoot "Run Server Console.cmd") -Encoding ASCII
@@ -114,6 +119,8 @@ Run `Start Life Planner.cmd`.
 The app opens at:
 
 http://127.0.0.1:4177/
+
+Playwright Chromium is installed into the bundled app dependencies, so Browser consultation can run without a separate browser-cache setup.
 
 Local runtime data is created under:
 

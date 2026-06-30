@@ -93,6 +93,8 @@ The app can be prepared as a self-contained portable folder with a bundled Node 
 npm run package:portable
 ```
 
+The portable build also installs Playwright Chromium into the bundled app dependencies for external browser consultation.
+
 Output:
 
 ```text
