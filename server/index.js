@@ -1255,6 +1255,34 @@ app.post('/api/source/login/hf', async (_req, res) => {
   ok(res, { message: 'Hugging Face CLI login started. Complete the prompt, then refresh source status.' });
 });
 
+app.post('/api/source/create/github', async (req, res) => {
+  const repo = String(req.body.repo || '').trim();
+  const visibility = req.body.visibility === 'private' ? '--private' : '--public';
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return fail(res, 400, 'Use owner/repo format, for example neuro-1977/lps.');
+  const cli = await runCli('gh', ['--version']);
+  if (!cli.available) return fail(res, 404, 'GitHub CLI is not installed or not on PATH. Use the Open GitHub New button instead.');
+  const auth = await runCli('gh', ['auth', 'status']);
+  if (!auth.ok) return fail(res, 401, 'GitHub CLI is not logged in. Use Login with Git first.');
+  const result = await runCli('gh', ['repo', 'create', repo, visibility, '--confirm'], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'GitHub repo creation failed.');
+  ok(res, { message: `GitHub repo ${repo} created. Set origin when ready, then push.`, output: result.stdout || result.stderr });
+});
+
+app.post('/api/source/create/hf', async (req, res) => {
+  const repo = String(req.body.repo || '').trim();
+  const type = ['model', 'dataset', 'space'].includes(req.body.type) ? req.body.type : 'model';
+  const visibility = req.body.visibility === 'private' ? '--private' : '';
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return fail(res, 400, 'Use owner/repo format, for example username/life-planner-models.');
+  const cli = await runCli('hf', ['--version']);
+  if (!cli.available) return fail(res, 404, 'Hugging Face CLI is not installed or not on PATH. Use the Open HF New button instead.');
+  const auth = await runCli('hf', ['auth', 'whoami']);
+  if (!auth.ok) return fail(res, 401, 'Hugging Face CLI is not logged in. Use Login with HF first or save an HF token in Settings.');
+  const args = ['repo', 'create', repo, '--type', type].concat(visibility ? [visibility] : []);
+  const result = await runCli('hf', args, { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'Hugging Face repo creation failed.');
+  ok(res, { message: `Hugging Face ${type} repo ${repo} created.`, output: result.stdout || result.stderr });
+});
+
 app.get('/api/repo/files', (req, res) => {
   const query = String(req.query.q || '').toLowerCase();
   const includeExt = new Set(['.md', '.mdx', '.json', '.txt', '.yml', '.yaml']);

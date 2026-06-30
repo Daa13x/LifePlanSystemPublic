@@ -1169,6 +1169,9 @@ function SourceControl({ setNotice }) {
   const [branches, setBranches] = useState({ current: '', branches: [] });
   const [branchToSwitch, setBranchToSwitch] = useState('');
   const [remoteUrl, setRemoteUrl] = useState('https://github.com/neuro-1977/lps.git');
+  const [githubRepo, setGithubRepo] = useState('neuro-1977/lps');
+  const [hfRepo, setHfRepo] = useState('');
+  const [hfRepoType, setHfRepoType] = useState('model');
   const [sourceBusy, setSourceBusy] = useState(false);
   const [operationOutput, setOperationOutput] = useState('');
 
@@ -1284,6 +1287,23 @@ function SourceControl({ setNotice }) {
         <div className="inline-form">
           <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} disabled={sourceBusy} />
           <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
+        </div>
+        <label>Create GitHub repo</label>
+        <div className="inline-form">
+          <input value={githubRepo} onChange={(event) => setGithubRepo(event.target.value)} disabled={sourceBusy} placeholder="owner/repo" />
+          <button onClick={() => action('/api/source/create/github', { repo: githubRepo, visibility: 'public' })} disabled={sourceBusy || !githubRepo.trim()}><Github size={16} /> Create public</button>
+          <button onClick={() => window.open('https://github.com/new', '_blank', 'noopener,noreferrer')} disabled={sourceBusy}>Open GitHub New</button>
+        </div>
+        <label>Create Hugging Face repo</label>
+        <div className="inline-form">
+          <input value={hfRepo} onChange={(event) => setHfRepo(event.target.value)} disabled={sourceBusy} placeholder="username/life-planner-models" />
+          <select value={hfRepoType} onChange={(event) => setHfRepoType(event.target.value)} disabled={sourceBusy}>
+            <option value="model">model</option>
+            <option value="dataset">dataset</option>
+            <option value="space">space</option>
+          </select>
+          <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'public' })} disabled={sourceBusy || !hfRepo.trim()}>Create public</button>
+          <button onClick={() => window.open('https://huggingface.co/new', '_blank', 'noopener,noreferrer')} disabled={sourceBusy}>Open HF New</button>
         </div>
         <label>Commit message</label>
         <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change..." disabled={sourceBusy} />
