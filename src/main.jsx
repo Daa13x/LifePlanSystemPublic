@@ -861,7 +861,7 @@ function SourceControl({ setNotice }) {
   const [diff, setDiff] = useState(null);
   const [commitMessage, setCommitMessage] = useState('');
   const [branchName, setBranchName] = useState('codex/life-planner-ui');
-  const [remoteUrl, setRemoteUrl] = useState('https://github.com/Daa13x/LifePlanSystemPublic.git');
+  const [remoteUrl, setRemoteUrl] = useState('https://github.com/neuro-1977/lps.git');
 
   async function refresh() {
     try {
@@ -896,13 +896,15 @@ function SourceControl({ setNotice }) {
         <div className="source-actions">
           <button onClick={refresh}><RefreshCcw size={16} /> Refresh</button>
           <button onClick={() => action('/api/source/login/github')}><Github size={16} /> Login with Git</button>
-          <a className="source-link" href="https://github.com/Daa13x/LifePlanSystemPublic" target="_blank" rel="noreferrer"><Github size={16} /> Open repo</a>
+          <a className="source-link" href="https://github.com/neuro-1977/lps" target="_blank" rel="noreferrer"><Github size={16} /> Open push repo</a>
+          <a className="source-link" href="https://github.com/Daa13x/LifePlanSystemPublic" target="_blank" rel="noreferrer"><Github size={16} /> Upstream merge target</a>
           <button onClick={() => action('/api/source/login/hf')}>Login with HF</button>
         </div>
       </div>
 
       <div className="panel">
         <h2>Connection</h2>
+        <p>Active pushes go to <code>neuro-1977/lps</code>. Merge handoff target is <code>Daa13x/LifePlanSystemPublic</code>.</p>
         <div className="connection-grid">
           <div>
             <span>Branch</span>
