@@ -940,6 +940,8 @@ function RepositoryExplorer({ setNotice }) {
   const [selected, setSelected] = useState(null);
   const [draft, setDraft] = useState('');
   const [summary, setSummary] = useState('');
+  const [newPath, setNewPath] = useState('');
+  const [renamePath, setRenamePath] = useState('');
 
   async function loadFiles(nextQuery = query) {
     try {
@@ -960,19 +962,26 @@ function RepositoryExplorer({ setNotice }) {
     }
   }
 
-  async function stageProposal() {
-    if (!selected) return;
+  async function stageRepoProposal(operation = 'update', overrides = {}) {
+    const targetFile = overrides.targetFile || selected?.path;
+    if (!targetFile) return;
     try {
       await api('/api/repo/proposals', {
         method: 'POST',
         body: JSON.stringify({
-          targetFile: selected.path,
-          content: draft,
-          summary,
-          risk: selected.path.includes('source_of_truth') || selected.path.includes('rules/') ? 'high' : 'medium'
+          operation,
+          targetFile,
+          fromFile: overrides.fromFile,
+          content: operation === 'delete' || operation === 'rename' ? '' : draft,
+          previousContent: selected?.content,
+          summary: overrides.summary || summary,
+          risk: operation === 'update' && !(targetFile.includes('source_of_truth') || targetFile.includes('rules/')) ? 'medium' : 'high',
+          source: 'Repository Explorer'
         })
       });
-      setNotice('Repository write proposal staged for approval.');
+      if (operation === 'create') setNewPath('');
+      if (operation === 'rename') setRenamePath('');
+      setNotice(`Repository ${operation} proposal staged for approval.`);
     } catch (err) {
       setNotice(err.message);
     }
@@ -986,6 +995,11 @@ function RepositoryExplorer({ setNotice }) {
         <div className="inline-form">
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search repo files" />
           <button onClick={() => loadFiles()}><RefreshCcw size={16} /></button>
+        </div>
+        <label>New file proposal</label>
+        <div className="inline-form">
+          <input value={newPath} onChange={(event) => setNewPath(event.target.value)} placeholder="docs/new-note.md" />
+          <button onClick={() => stageRepoProposal('create', { targetFile: newPath, summary: `Create ${newPath}` })} disabled={!newPath.trim()}><Plus size={16} /> Create</button>
         </div>
         <div className="file-list">
           {files.map((file) => (
@@ -1008,11 +1022,17 @@ function RepositoryExplorer({ setNotice }) {
             </div>
             <label>Proposal summary</label>
             <input value={summary} onChange={(event) => setSummary(event.target.value)} />
+            <label>Rename target</label>
+            <div className="inline-form">
+              <input value={renamePath} onChange={(event) => setRenamePath(event.target.value)} placeholder={selected.path} />
+              <button onClick={() => stageRepoProposal('rename', { targetFile: renamePath, fromFile: selected.path, summary: `Rename ${selected.path} to ${renamePath}` })} disabled={!renamePath.trim()}><ShieldCheck size={16} /> Rename</button>
+            </div>
             <label>File content</label>
             <textarea className="repo-editor" value={draft} onChange={(event) => setDraft(event.target.value)} />
             <div className="decision-row">
-              <button className="primary" onClick={stageProposal}><ShieldCheck size={16} /> Stage proposal</button>
+              <button className="primary" onClick={() => stageRepoProposal('update')}><ShieldCheck size={16} /> Stage update</button>
               <button onClick={() => setDraft(selected.content)}><RefreshCcw size={16} /> Reset draft</button>
+              <button className="danger" onClick={() => stageRepoProposal('delete', { targetFile: selected.path, summary: `Delete ${selected.path}` })}><Trash2 size={16} /> Delete proposal</button>
             </div>
           </>
         ) : (

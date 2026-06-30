@@ -596,14 +596,31 @@ app.post('/api/approvals/:id/:decision', (req, res) => {
         `).run(payload.type || 'current state', payload.title, payload.body, payload.source || 'approved proposal', payload.confidence || 0.7, payload.evidence || `Approval ${approval.id}`, payload.owner || 'user', payload.next_action || 'Review during next planner pass.');
       }
       if (approval.action_type === 'repo_write') {
+        const operation = payload.operation || 'update';
         const target = safeWorkspacePath(payload.targetFile);
-        if (isProtectedWorkspacePath(target.normalized)) return fail(res, 400, `Protected runtime/private file cannot be written: ${target.normalized}`);
-        const current = fs.existsSync(target.absolute) ? fs.readFileSync(target.absolute, 'utf8') : '';
-        if (Object.hasOwn(payload, 'previousContent') && current !== String(payload.previousContent || '')) {
-          return fail(res, 409, `File changed after this proposal was created. Refresh ${target.normalized} before approving.`);
+        if (isProtectedWorkspacePath(target.normalized)) return fail(res, 400, `Protected runtime/private file cannot be changed: ${target.normalized}`);
+        if (operation === 'rename') {
+          const from = safeWorkspacePath(payload.fromFile);
+          if (isProtectedWorkspacePath(from.normalized)) return fail(res, 400, `Protected runtime/private file cannot be renamed: ${from.normalized}`);
+          if (!fs.existsSync(from.absolute) || !fs.statSync(from.absolute).isFile()) return fail(res, 404, 'Source file not found.');
+          if (fs.existsSync(target.absolute)) return fail(res, 409, `Target already exists: ${target.normalized}`);
+          const current = fs.readFileSync(from.absolute, 'utf8');
+          if (Object.hasOwn(payload, 'previousContent') && current !== String(payload.previousContent || '')) return fail(res, 409, `File changed after this proposal was created. Refresh ${from.normalized} before approving.`);
+          fs.mkdirSync(path.dirname(target.absolute), { recursive: true });
+          fs.renameSync(from.absolute, target.absolute);
+        } else if (operation === 'delete') {
+          if (!fs.existsSync(target.absolute) || !fs.statSync(target.absolute).isFile()) return fail(res, 404, 'File not found.');
+          const current = fs.readFileSync(target.absolute, 'utf8');
+          if (Object.hasOwn(payload, 'previousContent') && current !== String(payload.previousContent || '')) return fail(res, 409, `File changed after this proposal was created. Refresh ${target.normalized} before approving.`);
+          fs.unlinkSync(target.absolute);
+        } else {
+          const exists = fs.existsSync(target.absolute);
+          if (operation === 'create' && exists) return fail(res, 409, `File already exists: ${target.normalized}`);
+          const current = exists ? fs.readFileSync(target.absolute, 'utf8') : '';
+          if (Object.hasOwn(payload, 'previousContent') && current !== String(payload.previousContent || '')) return fail(res, 409, `File changed after this proposal was created. Refresh ${target.normalized} before approving.`);
+          fs.mkdirSync(path.dirname(target.absolute), { recursive: true });
+          fs.writeFileSync(target.absolute, payload.content || '', 'utf8');
         }
-        fs.mkdirSync(path.dirname(target.absolute), { recursive: true });
-        fs.writeFileSync(target.absolute, payload.content || '', 'utf8');
       }
       if (approval.action_type === 'update_memory') {
         const target = row('SELECT * FROM knowledge_items WHERE id = ?', [payload.id]);
@@ -1143,6 +1160,7 @@ app.get('/api/repo/files', (req, res) => {
 app.get('/api/repo/file', (req, res) => {
   try {
     const target = safeWorkspacePath(req.query.path);
+    if (isProtectedWorkspacePath(target.normalized)) return fail(res, 403, `Protected/private file cannot be previewed: ${target.normalized}`);
     if (!fs.existsSync(target.absolute) || !fs.statSync(target.absolute).isFile()) return fail(res, 404, 'File not found.');
     const content = fs.readFileSync(target.absolute, 'utf8');
     ok(res, { path: target.normalized, content, updatedAt: fs.statSync(target.absolute).mtime.toISOString() });
@@ -1153,17 +1171,23 @@ app.get('/api/repo/file', (req, res) => {
 
 app.post('/api/repo/proposals', (req, res) => {
   try {
+    const operation = req.body.operation || 'update';
     const target = safeWorkspacePath(req.body.targetFile);
     if (isProtectedWorkspacePath(target.normalized)) return fail(res, 400, `Protected runtime/private file cannot be proposed for writing: ${target.normalized}`);
+    const from = req.body.fromFile ? safeWorkspacePath(req.body.fromFile) : null;
+    if (from && isProtectedWorkspacePath(from.normalized)) return fail(res, 400, `Protected runtime/private file cannot be proposed for writing: ${from.normalized}`);
     const current = fs.existsSync(target.absolute) ? fs.readFileSync(target.absolute, 'utf8') : '';
     const content = String(req.body.content || '');
-    const title = req.body.title?.trim() || `Update ${target.normalized}`;
+    const verb = operation === 'create' ? 'Create' : operation === 'delete' ? 'Delete' : operation === 'rename' ? 'Rename' : 'Update';
+    const title = req.body.title?.trim() || `${verb} ${operation === 'rename' && from ? from.normalized : target.normalized}`;
     const payload = {
+      operation,
       targetFile: target.normalized,
+      fromFile: from?.normalized,
       content,
-      previousContent: current,
-      summary: req.body.summary || 'Repository file update proposal.',
-      risk: req.body.risk || 'medium',
+      previousContent: Object.hasOwn(req.body, 'previousContent') ? String(req.body.previousContent || '') : current,
+      summary: req.body.summary || `Repository file ${operation} proposal.`,
+      risk: req.body.risk || (operation === 'update' ? 'medium' : 'high'),
       source: req.body.source || 'Repository Explorer'
     };
     const id = db.prepare(`
