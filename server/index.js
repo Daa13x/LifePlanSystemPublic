@@ -630,6 +630,17 @@ app.get('/api/hardware', async (_req, res) => {
   const cores = os.cpus()?.length || 0;
   const totalRamGb = Math.round((os.totalmem() / 1024 / 1024 / 1024) * 10) / 10;
   let gpus = [];
+  const nvidia = await runCli('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'], { timeout: 10000 });
+  if (nvidia.ok && nvidia.stdout) {
+    gpus = nvidia.stdout.split('\n').filter(Boolean).map((line) => {
+      const [name, memoryMb] = line.split(',').map((part) => part.trim());
+      return {
+        name: name || 'NVIDIA GPU',
+        vramGb: memoryMb ? Math.round((Number(memoryMb) / 1024) * 10) / 10 : null,
+        source: 'nvidia-smi'
+      };
+    });
+  }
   if (process.platform === 'win32') {
     const gpuResult = await runCli('powershell.exe', [
       '-NoProfile',
@@ -639,12 +650,21 @@ app.get('/api/hardware', async (_req, res) => {
     if (gpuResult.ok && gpuResult.stdout) {
       try {
         const parsed = JSON.parse(gpuResult.stdout);
-        gpus = (Array.isArray(parsed) ? parsed : [parsed]).filter(Boolean).map((gpu) => ({
+        const cimGpus = (Array.isArray(parsed) ? parsed : [parsed]).filter(Boolean).map((gpu) => ({
           name: gpu.Name || 'Unknown GPU',
-          vramGb: gpu.AdapterRAM ? Math.round((Number(gpu.AdapterRAM) / 1024 / 1024 / 1024) * 10) / 10 : null
+          vramGb: gpu.AdapterRAM ? Math.round((Number(gpu.AdapterRAM) / 1024 / 1024 / 1024) * 10) / 10 : null,
+          source: 'win32-cim'
         }));
+        if (gpus.length) {
+          gpus = gpus.map((gpu) => {
+            const fallback = cimGpus.find((candidate) => candidate.name === gpu.name);
+            return fallback ? { ...gpu, fallbackVramGb: fallback.vramGb } : gpu;
+          });
+        } else {
+          gpus = cimGpus;
+        }
       } catch {
-        gpus = [];
+        if (!gpus.length) gpus = [];
       }
     }
   }
@@ -946,6 +966,23 @@ app.post('/api/source/stage-file', async (req, res) => {
   }
 });
 
+app.post('/api/source/unstage-file', async (req, res) => {
+  try {
+    const target = safeWorkspacePath(req.body.path);
+    const result = await runCli('git', ['restore', '--staged', '--', target.normalized]);
+    if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git restore --staged failed');
+    ok(res, { status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.post('/api/source/unstage-all', async (_req, res) => {
+  const result = await runCli('git', ['restore', '--staged', '.']);
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git restore --staged failed');
+  ok(res, { status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+});
+
 app.post('/api/source/fetch', async (_req, res) => {
   const result = await runCli('git', ['fetch', '--all', '--prune'], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git fetch failed');
@@ -983,6 +1020,30 @@ app.post('/api/source/branch', async (req, res) => {
   const result = await runCli('git', ['switch', '-c', branch]);
   if (!result.ok) return fail(res, 500, result.stderr || 'git branch creation failed');
   ok(res, { branch, output: result.stdout || result.stderr });
+});
+
+app.get('/api/source/branches', async (_req, res) => {
+  const current = await runCli('git', ['branch', '--show-current']);
+  const local = await runCli('git', ['branch', '--format=%(refname:short)']);
+  const remote = await runCli('git', ['branch', '-r', '--format=%(refname:short)']);
+  const branches = [
+    ...local.stdout.split('\n').filter(Boolean).map((name) => ({ name, current: name === current.stdout, remote: false })),
+    ...remote.stdout.split('\n')
+      .filter((name) => name && !name.includes('HEAD') && name !== 'origin')
+      .map((name) => ({ name, current: false, remote: true }))
+  ];
+  ok(res, { current: current.stdout, branches });
+});
+
+app.post('/api/source/checkout', async (req, res) => {
+  const branch = req.body.branch?.trim();
+  if (!branch) return fail(res, 400, 'Branch name is required.');
+  const snapshot = await gitStatusSnapshot();
+  if (snapshot.hasConflicts) return fail(res, 409, `Resolve conflicts before switching branches: ${snapshot.conflictFiles.join(', ')}`);
+  if (snapshot.changedFiles.length && !req.body.allowDirty) return fail(res, 409, 'Working tree has changes. Commit, stash, or explicitly allow dirty branch switch.');
+  const result = await runCli('git', ['switch', branch]);
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git switch failed');
+  ok(res, { branch, output: result.stdout || result.stderr, status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
 });
 
 app.post('/api/source/push', async (_req, res) => {

@@ -979,6 +979,8 @@ function SourceControl({ setNotice }) {
   const [diff, setDiff] = useState(null);
   const [commitMessage, setCommitMessage] = useState('');
   const [branchName, setBranchName] = useState('codex/life-planner-ui');
+  const [branches, setBranches] = useState({ current: '', branches: [] });
+  const [branchToSwitch, setBranchToSwitch] = useState('');
   const [remoteUrl, setRemoteUrl] = useState('https://github.com/neuro-1977/lps.git');
   const [sourceBusy, setSourceBusy] = useState(false);
   const [operationOutput, setOperationOutput] = useState('');
@@ -987,6 +989,9 @@ function SourceControl({ setNotice }) {
     try {
       setSource(await api('/api/source/status'));
       setDiff(await api('/api/source/diff'));
+      const branchData = await api('/api/source/branches');
+      setBranches(branchData);
+      setBranchToSwitch((current) => current || branchData.current || '');
     } catch (err) {
       setNotice(err.message);
     }
@@ -1012,6 +1017,7 @@ function SourceControl({ setNotice }) {
   }
 
   const changedFiles = source?.changedFiles || [];
+  const localBranches = (branches.branches || []).filter((branch) => !branch.remote);
   const hasChanges = changedFiles.length > 0;
   const protectedFiles = changedFiles.filter((file) => file.protected);
   const canStageAll = hasChanges && !sourceBusy && !source?.hasConflicts && protectedFiles.length === 0;
@@ -1078,6 +1084,15 @@ function SourceControl({ setNotice }) {
           <input value={branchName} onChange={(event) => setBranchName(event.target.value)} disabled={sourceBusy} />
           <button onClick={() => action('/api/source/branch', { branch: branchName }, `Created branch ${branchName}`)} disabled={sourceBusy}><GitBranch size={16} /> Create</button>
         </div>
+        <label>Switch branch</label>
+        <div className="inline-form">
+          <select value={branchToSwitch} onChange={(event) => setBranchToSwitch(event.target.value)} disabled={sourceBusy}>
+            {localBranches.map((branch) => (
+              <option value={branch.name} key={branch.name}>{branch.name}</option>
+            ))}
+          </select>
+          <button onClick={() => action('/api/source/checkout', { branch: branchToSwitch }, `Switched to ${branchToSwitch}`)} disabled={sourceBusy || !branchToSwitch || branchToSwitch === source?.branch}><GitBranch size={16} /> Switch</button>
+        </div>
         <label>Origin remote</label>
         <div className="inline-form">
           <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} disabled={sourceBusy} />
@@ -1087,6 +1102,7 @@ function SourceControl({ setNotice }) {
         <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change..." disabled={sourceBusy} />
         <div className="decision-row">
           <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!canStageAll}><Check size={16} /> Stage all</button>
+          <button onClick={() => action('/api/source/unstage-all', {}, 'Unstaged all files.')} disabled={sourceBusy || !changedFiles.some((file) => file.staged)}><X size={16} /> Unstage all</button>
           <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')} disabled={!canCommit}><Check size={16} /> Commit</button>
           <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch</button>
           <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull</button>
@@ -1108,7 +1124,13 @@ function SourceControl({ setNotice }) {
                 <strong>{file.path}</strong>
                 <span>{file.status}{file.staged ? ' staged' : ' unstaged'}</span>
               </div>
-              {file.protected ? <Pill tone="bad">Protected</Pill> : <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>}
+              {file.protected ? (
+                <Pill tone="bad">Protected</Pill>
+              ) : file.staged ? (
+                <button onClick={() => action('/api/source/unstage-file', { path: file.path }, `Unstaged ${file.path}`)} disabled={sourceBusy}><X size={14} /> Unstage</button>
+              ) : (
+                <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>
+              )}
             </div>
           ))}
         </div>
@@ -1243,7 +1265,15 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <div className="connection-grid">
           <div><span>CPU</span><strong>{hardware?.cpu || 'Detecting...'}</strong><small>{hardware?.cores || 0} logical core(s)</small></div>
           <div><span>System RAM</span><strong>{hardware ? `${hardware.totalRamGb} GB` : 'Detecting...'}</strong><small>{hardware?.recommendation || 'Checking local hardware.'}</small></div>
-          <div><span>GPU / VRAM</span><strong>{hardware?.gpus?.[0]?.name || 'No GPU detected'}</strong><small>{hardware?.maxVramGb ? `${hardware.maxVramGb} GB max reported VRAM` : 'CPU/RAM mode likely.'}</small></div>
+          <div>
+            <span>GPU / VRAM</span>
+            <strong>{hardware?.gpus?.[0]?.name || 'No GPU detected'}</strong>
+            <small>
+              {hardware?.maxVramGb
+                ? `${hardware.maxVramGb} GB VRAM via ${hardware.gpus?.[0]?.source || 'hardware probe'}${hardware.gpus?.[0]?.fallbackVramGb && hardware.gpus[0].fallbackVramGb !== hardware.maxVramGb ? `; Windows fallback said ${hardware.gpus[0].fallbackVramGb} GB` : ''}`
+                : 'CPU/RAM mode likely.'}
+            </small>
+          </div>
           <div><span>Suggested tier</span><Pill tone={hardware?.tier === 'large' ? 'good' : hardware?.tier === 'medium' ? 'info' : 'warn'}>{hardware?.tier || 'detecting'}</Pill><small>Start conservative; upgrade if responses are fast.</small></div>
         </div>
         <label>Filter suggestions</label>
