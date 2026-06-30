@@ -721,7 +721,19 @@ function BrowserConsult({ setNotice, refresh }) {
   useEffect(() => { load().catch((err) => setNotice(err.message)); }, []);
 
   async function saveConsultation() {
-    const created = await api('/api/consultations', { method: 'POST', body: JSON.stringify({ title, local_draft: draft, target_agent: targetAgent }) });
+    const prompt = consultPrompt || buildConsultPrompt();
+    const created = await api('/api/consultations', {
+      method: 'POST',
+      body: JSON.stringify({
+        title,
+        local_draft: draft,
+        target_agent: targetAgent,
+        prompt,
+        opened_url: browserResult?.url,
+        opened_title: browserResult?.title,
+        sent_at: browserResult ? new Date().toISOString() : null
+      })
+    });
     if (external.trim()) {
       await api(`/api/consultations/${created.id}`, { method: 'PATCH', body: JSON.stringify({ external_response: external, status: 'captured' }) });
     }
@@ -822,6 +834,7 @@ function BrowserConsult({ setNotice, refresh }) {
             <Pill tone={item.status === 'captured' ? 'warn' : 'muted'}>{item.status}</Pill>
             <h3>{item.title}</h3>
             <span>{item.target_agent}</span>
+            {item.opened_url && <small>{item.opened_url}</small>}
             <p>{item.local_draft}</p>
           </div>
         ))}

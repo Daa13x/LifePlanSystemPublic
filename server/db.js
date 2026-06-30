@@ -119,12 +119,31 @@ export function migrate() {
       title TEXT NOT NULL,
       local_draft TEXT NOT NULL,
       target_agent TEXT NOT NULL DEFAULT 'manual browser',
+      prompt TEXT,
+      opened_url TEXT,
+      opened_title TEXT,
+      sent_at TEXT,
+      captured_at TEXT,
       external_response TEXT,
       status TEXT NOT NULL DEFAULT 'draft',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  for (const column of [
+    ['prompt', 'TEXT'],
+    ['opened_url', 'TEXT'],
+    ['opened_title', 'TEXT'],
+    ['sent_at', 'TEXT'],
+    ['captured_at', 'TEXT']
+  ]) {
+    try {
+      db.exec(`ALTER TABLE consultations ADD COLUMN ${column[0]} ${column[1]}`);
+    } catch {
+      // Column already exists.
+    }
+  }
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
   if (projectCount === 0) {

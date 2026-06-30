@@ -831,7 +831,18 @@ app.post('/api/consultations', (req, res) => {
   const title = req.body.title?.trim() || 'External consultation';
   const localDraft = req.body.local_draft?.trim();
   if (!localDraft) return fail(res, 400, 'Local draft is required.');
-  const id = db.prepare('INSERT INTO consultations (title, local_draft, target_agent) VALUES (?, ?, ?)').run(title, localDraft, req.body.target_agent || 'manual browser').lastInsertRowid;
+  const id = db.prepare(`
+    INSERT INTO consultations (title, local_draft, target_agent, prompt, opened_url, opened_title, sent_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    title,
+    localDraft,
+    req.body.target_agent || 'manual browser',
+    req.body.prompt || null,
+    req.body.opened_url || null,
+    req.body.opened_title || null,
+    req.body.sent_at || null
+  ).lastInsertRowid;
   ok(res, row('SELECT * FROM consultations WHERE id = ?', [id]));
 });
 
@@ -839,10 +850,24 @@ app.patch('/api/consultations/:id', (req, res) => {
   db.prepare(`
     UPDATE consultations
     SET external_response = COALESCE(?, external_response),
+        prompt = COALESCE(?, prompt),
+        opened_url = COALESCE(?, opened_url),
+        opened_title = COALESCE(?, opened_title),
+        sent_at = COALESCE(?, sent_at),
+        captured_at = COALESCE(?, captured_at),
         status = COALESCE(?, status),
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(req.body.external_response ?? null, req.body.status ?? null, req.params.id);
+  `).run(
+    req.body.external_response ?? null,
+    req.body.prompt ?? null,
+    req.body.opened_url ?? null,
+    req.body.opened_title ?? null,
+    req.body.sent_at ?? null,
+    req.body.captured_at ?? (req.body.external_response ? new Date().toISOString() : null),
+    req.body.status ?? null,
+    req.params.id
+  );
   if (req.body.external_response) {
     const consultation = row('SELECT * FROM consultations WHERE id = ?', [req.params.id]);
     db.prepare(`
