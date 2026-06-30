@@ -541,6 +541,23 @@ app.post('/api/memory/candidates/:id/:decision', (req, res) => {
   ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: plannerData() });
 });
 
+app.patch('/api/memory/candidates/:id', (req, res) => {
+  const candidate = row('SELECT * FROM memory_candidates WHERE id = ?', [req.params.id]);
+  if (!candidate) return fail(res, 404, 'Candidate not found.');
+  if (!['candidate', 'deferred'].includes(candidate.status)) return fail(res, 409, 'Only candidate or deferred memory can be edited.');
+  const confidence = req.body.confidence === undefined ? candidate.confidence : Math.max(0, Math.min(1, Number(req.body.confidence) || 0));
+  db.prepare(`
+    UPDATE memory_candidates
+    SET type = COALESCE(?, type),
+        title = COALESCE(?, title),
+        body = COALESCE(?, body),
+        evidence = COALESCE(?, evidence),
+        confidence = ?
+    WHERE id = ?
+  `).run(req.body.type || null, req.body.title || null, req.body.body || null, req.body.evidence || null, confidence, candidate.id);
+  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: plannerData() });
+});
+
 app.post('/api/approvals/:id/:decision', (req, res) => {
   try {
     if (!['approve', 'deny', 'defer'].includes(req.params.decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
@@ -625,6 +642,10 @@ app.post('/api/approvals/:id/:decision', (req, res) => {
       if (approval.action_type === 'update_memory') {
         const target = row('SELECT * FROM knowledge_items WHERE id = ?', [payload.id]);
         if (!target) return fail(res, 404, 'Knowledge item not found.');
+        const previous = payload.previous || {};
+        if (Object.hasOwn(previous, 'updated_at') && String(target.updated_at || '') !== String(previous.updated_at || '')) return fail(res, 409, 'Memory changed after this proposal was created. Refresh before approving.');
+        if (Object.hasOwn(previous, 'status') && String(target.status || '') !== String(previous.status || '')) return fail(res, 409, 'Memory status changed after this proposal was created. Refresh before approving.');
+        if (Object.hasOwn(previous, 'confidence') && Number(target.confidence || 0) !== Number(previous.confidence || 0)) return fail(res, 409, 'Memory confidence changed after this proposal was created. Refresh before approving.');
         const updates = payload.updates || {};
         const nextStatus = updates.status || target.status;
         const allowedStatuses = ['active', 'stable', 'stale', 'deprecated', 'superseded', 'archived', 'pending review'];

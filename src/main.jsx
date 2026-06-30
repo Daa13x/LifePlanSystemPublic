@@ -480,10 +480,39 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
 }
 
 function Memory({ memory, refresh }) {
+  const [candidateEdits, setCandidateEdits] = useState({});
+
   async function decide(id, decision) {
     await api(`/api/memory/candidates/${id}/${decision}`, { method: 'POST' });
     refresh();
   }
+
+  async function saveCandidate(candidate) {
+    const patch = candidateEdits[candidate.id] || {};
+    await api(`/api/memory/candidates/${candidate.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
+    refresh();
+  }
+
+  async function proposeMemoryUpdate(item, updates, summary) {
+    await api('/api/approvals', {
+      method: 'POST',
+      body: JSON.stringify({
+        action_type: 'update_memory',
+        title: summary,
+        priority: updates.status === 'superseded' ? 'P1' : 'P2',
+        payload: {
+          id: item.id,
+          previous: { status: item.status, confidence: item.confidence, updated_at: item.updated_at },
+          updates,
+          summary,
+          risk: updates.status === 'superseded' ? 'medium' : 'low',
+          source: 'Memory review'
+        }
+      })
+    });
+    refresh();
+  }
+
   return (
     <section className="two-column">
       <div className="panel">
@@ -497,7 +526,14 @@ function Memory({ memory, refresh }) {
               <p>{candidate.body}</p>
               <span>{candidate.evidence}</span>
             </div>
+            <div className="memory-edit-grid">
+              <input value={candidateEdits[candidate.id]?.title ?? candidate.title} onChange={(event) => setCandidateEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), title: event.target.value } }))} />
+              <input value={candidateEdits[candidate.id]?.type ?? candidate.type} onChange={(event) => setCandidateEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), type: event.target.value } }))} />
+              <input type="number" min="0" max="1" step="0.05" value={candidateEdits[candidate.id]?.confidence ?? candidate.confidence} onChange={(event) => setCandidateEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), confidence: event.target.value } }))} />
+              <input value={candidateEdits[candidate.id]?.evidence ?? candidate.evidence} onChange={(event) => setCandidateEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), evidence: event.target.value } }))} />
+            </div>
             <div className="decision-row">
+              <button onClick={() => saveCandidate(candidate)}><Check size={16} /> Save metadata</button>
               <button onClick={() => decide(candidate.id, 'approve')}><Check size={16} /> Approve</button>
               <button onClick={() => decide(candidate.id, 'defer')}><Clock3 size={16} /> Defer</button>
               <button className="danger" onClick={() => decide(candidate.id, 'deny')}><X size={16} /> Deny</button>
@@ -509,7 +545,16 @@ function Memory({ memory, refresh }) {
         <h2>Approved Knowledge</h2>
         <p>Canonical database items with status, confidence, evidence, owner, and next action.</p>
         <div className="table-list">
-          {memory.items.map((item) => <ItemRow item={item} key={item.id} />)}
+          {memory.items.map((item) => (
+            <div className="memory-row" key={item.id}>
+              <ItemRow item={item} />
+              <div className="mini-actions text-actions">
+                <button onClick={() => proposeMemoryUpdate(item, { status: item.status, confidence: item.confidence, evidence: 'Reviewed from Memory tab.', next_action: item.next_action }, `Review memory: ${item.title}`)}>Review</button>
+                <button onClick={() => proposeMemoryUpdate(item, { status: 'stale', confidence: Math.min(Number(item.confidence || 0), 0.45), evidence: 'Marked stale from Memory tab.', next_action: 'Verify before relying on this memory.' }, `Mark stale: ${item.title}`)}>Stale</button>
+                <button className="danger" onClick={() => proposeMemoryUpdate(item, { status: 'superseded', confidence: 0.3, evidence: 'Superseded from Memory tab.', next_action: 'Use newer approved memory instead.' }, `Supersede memory: ${item.title}`)}>Supersede</button>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </section>

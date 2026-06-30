@@ -644,6 +644,23 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   background: var(--panel);
   border: 1px solid var(--line);
 }
+
+.memory-edit-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px 90px;
+  gap: 8px;
+  margin-top: 10px;
+}
+.memory-edit-grid input:last-child { grid-column: 1 / -1; }
+.memory-row {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+}
+.memory-row .item-row { border-bottom: 0; }
+.text-actions button {
+  width: auto;
+  padding: 0 10px;
+}
 .context-chips button span {
   overflow: hidden;
   text-overflow: ellipsis;
