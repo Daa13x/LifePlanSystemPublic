@@ -86,12 +86,81 @@ async function npxRun(args) {
 }
 
 function safeWorkspacePath(relativePath = '') {
-  const normalized = String(relativePath).replaceAll('\\', '/').replace(/^\/+/, '');
-  if (!normalized || normalized.includes('\0')) throw new Error('Invalid path.');
+  const raw = String(relativePath || '').trim();
+  if (!raw || raw.includes('\0')) throw new Error('Invalid path.');
+  if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('\\\\') || raw.startsWith('//')) {
+    throw new Error('Use a workspace-relative path, not an absolute path.');
+  }
+  const normalized = raw.replaceAll('\\', '/').replace(/^\/+/, '');
+  if (!normalized || normalized.split('/').some((part) => part === '..')) throw new Error('Path must stay inside the workspace.');
   const absolute = path.resolve(root, normalized);
   const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
   if (absolute !== root && !absolute.startsWith(rootWithSep)) throw new Error('Path must stay inside the workspace.');
   return { normalized, absolute };
+}
+
+function isProtectedWorkspacePath(filePath = '') {
+  const normalized = String(filePath).replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase();
+  const protectedRoots = ['.git/', 'data/', 'dist/', 'node_modules/', 'release/', '.cache/'];
+  const protectedNames = ['.env', '.env.local', '.env.production'];
+  const protectedExts = ['.sqlite', '.sqlite3', '.db', '.gguf', '.safetensors', '.onnx', '.log'];
+  return protectedRoots.some((rootName) => normalized.startsWith(rootName))
+    || protectedNames.includes(normalized)
+    || protectedExts.some((ext) => normalized.endsWith(ext));
+}
+
+function parseGitStatus(statusText = '') {
+  return statusText.split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line && !line.startsWith('##'))
+    .map((line) => {
+      const status = line.slice(0, 2).trim() || '??';
+      const filePath = line.slice(3).trim();
+      return {
+        status,
+        path: filePath,
+        staged: line[0] && line[0] !== ' ' && line[0] !== '?',
+        protected: isProtectedWorkspacePath(filePath)
+      };
+    });
+}
+
+async function gitStatusSnapshot() {
+  const [status, conflicts, branch, upstream, aheadBehind] = await Promise.all([
+    runCli('git', ['status', '--short', '--branch']),
+    runCli('git', ['diff', '--name-only', '--diff-filter=U']),
+    runCli('git', ['branch', '--show-current']),
+    runCli('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
+    runCli('git', ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'])
+  ]);
+  const changedFiles = parseGitStatus(status.stdout);
+  const conflictFiles = conflicts.stdout ? conflicts.stdout.split('\n').filter(Boolean) : [];
+  const counts = { added: 0, modified: 0, deleted: 0, untracked: 0, protected: 0 };
+  for (const file of changedFiles) {
+    if (file.protected) counts.protected += 1;
+    if (file.status.includes('?')) counts.untracked += 1;
+    else if (file.status.includes('A')) counts.added += 1;
+    else if (file.status.includes('D')) counts.deleted += 1;
+    else counts.modified += 1;
+  }
+  let ahead = 0;
+  let behind = 0;
+  if (aheadBehind.ok && aheadBehind.stdout) {
+    const [nextAhead, nextBehind] = aheadBehind.stdout.split(/\s+/).map((value) => Number(value) || 0);
+    ahead = nextAhead;
+    behind = nextBehind;
+  }
+  return {
+    branch: branch.stdout || '(detached)',
+    status: status.stdout,
+    changedFiles,
+    conflictFiles,
+    hasConflicts: conflictFiles.length > 0,
+    upstream: upstream.ok ? upstream.stdout : '',
+    ahead,
+    behind,
+    counts
+  };
 }
 
 function allRows(sql, params = []) {
@@ -282,32 +351,41 @@ app.post('/api/memory/candidates/:id/:decision', (req, res) => {
 });
 
 app.post('/api/approvals/:id/:decision', (req, res) => {
-  if (!['approve', 'deny', 'defer'].includes(req.params.decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
-  const approval = row('SELECT * FROM approvals WHERE id = ?', [req.params.id]);
-  if (!approval) return fail(res, 404, 'Approval not found.');
-  const status = req.params.decision === 'approve' ? 'approved' : req.params.decision === 'deny' ? 'denied' : 'deferred';
-  if (status === 'approved') {
-    const payload = JSON.parse(approval.payload);
-    if (approval.action_type === 'create_project') {
-      db.prepare(`
-        INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
-        VALUES (?, ?, ?, 'approved proposal', ?, date('now'), ?, ?)
-      `).run(payload.name, payload.status || 'active', payload.owner || 'user', payload.confidence || 0.75, payload.evidence || `Approval ${approval.id}`, payload.next_action || 'Define next action.');
+  try {
+    if (!['approve', 'deny', 'defer'].includes(req.params.decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
+    const approval = row('SELECT * FROM approvals WHERE id = ?', [req.params.id]);
+    if (!approval) return fail(res, 404, 'Approval not found.');
+    const status = req.params.decision === 'approve' ? 'approved' : req.params.decision === 'deny' ? 'denied' : 'deferred';
+    if (status === 'approved') {
+      const payload = JSON.parse(approval.payload);
+      if (approval.action_type === 'create_project') {
+        db.prepare(`
+          INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
+          VALUES (?, ?, ?, 'approved proposal', ?, date('now'), ?, ?)
+        `).run(payload.name, payload.status || 'active', payload.owner || 'user', payload.confidence || 0.75, payload.evidence || `Approval ${approval.id}`, payload.next_action || 'Define next action.');
+      }
+      if (approval.action_type === 'add_memory') {
+        db.prepare(`
+          INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action)
+          VALUES (?, ?, ?, ?, 'active', ?, date('now'), ?, ?, ?)
+        `).run(payload.type || 'current state', payload.title, payload.body, payload.source || 'approved proposal', payload.confidence || 0.7, payload.evidence || `Approval ${approval.id}`, payload.owner || 'user', payload.next_action || 'Review during next planner pass.');
+      }
+      if (approval.action_type === 'repo_write') {
+        const target = safeWorkspacePath(payload.targetFile);
+        if (isProtectedWorkspacePath(target.normalized)) return fail(res, 400, `Protected runtime/private file cannot be written: ${target.normalized}`);
+        const current = fs.existsSync(target.absolute) ? fs.readFileSync(target.absolute, 'utf8') : '';
+        if (Object.hasOwn(payload, 'previousContent') && current !== String(payload.previousContent || '')) {
+          return fail(res, 409, `File changed after this proposal was created. Refresh ${target.normalized} before approving.`);
+        }
+        fs.mkdirSync(path.dirname(target.absolute), { recursive: true });
+        fs.writeFileSync(target.absolute, payload.content || '', 'utf8');
+      }
     }
-    if (approval.action_type === 'add_memory') {
-      db.prepare(`
-        INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action)
-        VALUES (?, ?, ?, ?, 'active', ?, date('now'), ?, ?, ?)
-      `).run(payload.type || 'current state', payload.title, payload.body, payload.source || 'approved proposal', payload.confidence || 0.7, payload.evidence || `Approval ${approval.id}`, payload.owner || 'user', payload.next_action || 'Review during next planner pass.');
-    }
-    if (approval.action_type === 'repo_write') {
-      const target = safeWorkspacePath(payload.targetFile);
-      fs.mkdirSync(path.dirname(target.absolute), { recursive: true });
-      fs.writeFileSync(target.absolute, payload.content || '', 'utf8');
-    }
+    db.prepare('UPDATE approvals SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);
+    ok(res, plannerData());
+  } catch (error) {
+    fail(res, 400, error.message);
   }
-  db.prepare('UPDATE approvals SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);
-  ok(res, plannerData());
 });
 
 app.post('/api/approvals', (req, res) => {
@@ -584,10 +662,9 @@ app.post('/api/tooling/install', async (req, res) => {
 });
 
 app.get('/api/source/status', async (_req, res) => {
-  const [inside, branch, status, remotes, log, userName, userEmail, ghStatus, hfWhoami] = await Promise.all([
+  const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami] = await Promise.all([
     runCli('git', ['rev-parse', '--is-inside-work-tree']),
-    runCli('git', ['branch', '--show-current']),
-    runCli('git', ['status', '--short', '--branch']),
+    gitStatusSnapshot(),
     runCli('git', ['remote', '-v']),
     runCli('git', ['log', '--oneline', '--decorate', '-n', '8']),
     runCli('git', ['config', 'user.name']),
@@ -600,8 +677,15 @@ app.get('/api/source/status', async (_req, res) => {
 
   ok(res, {
     repoPath: root,
-    branch: branch.stdout || '(detached)',
-    status: status.stdout,
+    branch: snapshot.branch,
+    status: snapshot.status,
+    changedFiles: snapshot.changedFiles,
+    conflictFiles: snapshot.conflictFiles,
+    hasConflicts: snapshot.hasConflicts,
+    ahead: snapshot.ahead,
+    behind: snapshot.behind,
+    upstream: snapshot.upstream,
+    counts: snapshot.counts,
     remotes: remotes.stdout,
     log: log.stdout,
     user: {
@@ -628,9 +712,25 @@ app.get('/api/source/diff', async (_req, res) => {
 });
 
 app.post('/api/source/stage-all', async (_req, res) => {
+  const snapshot = await gitStatusSnapshot();
+  if (snapshot.hasConflicts) return fail(res, 409, `Resolve conflicts before staging: ${snapshot.conflictFiles.join(', ')}`);
+  const protectedFiles = snapshot.changedFiles.filter((file) => file.protected).map((file) => file.path);
+  if (protectedFiles.length) return fail(res, 409, `Protected/private files are present and were not staged: ${protectedFiles.join(', ')}`);
   const result = await runCli('git', ['add', '-A']);
   if (!result.ok) return fail(res, 500, result.stderr || 'git add failed');
   ok(res, { status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+});
+
+app.post('/api/source/stage-file', async (req, res) => {
+  try {
+    const target = safeWorkspacePath(req.body.path);
+    if (isProtectedWorkspacePath(target.normalized)) return fail(res, 409, `Protected/private file cannot be staged: ${target.normalized}`);
+    const result = await runCli('git', ['add', '--', target.normalized]);
+    if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git add failed');
+    ok(res, { status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
 });
 
 app.post('/api/source/fetch', async (_req, res) => {
@@ -656,6 +756,9 @@ app.post('/api/source/pull', async (_req, res) => {
 app.post('/api/source/commit', async (req, res) => {
   const message = req.body.message?.trim();
   if (!message) return fail(res, 400, 'Commit message is required.');
+  const snapshot = await gitStatusSnapshot();
+  if (snapshot.hasConflicts) return fail(res, 409, `Resolve conflicts before committing: ${snapshot.conflictFiles.join(', ')}`);
+  if (snapshot.changedFiles.some((file) => file.protected && file.staged)) return fail(res, 409, 'A protected/private file is staged. Unstage it before committing.');
   const result = await runCli('git', ['commit', '-m', message], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git commit failed');
   ok(res, { output: result.stdout, log: (await runCli('git', ['log', '--oneline', '--decorate', '-n', '8'])).stdout });
@@ -739,6 +842,7 @@ app.get('/api/repo/file', (req, res) => {
 app.post('/api/repo/proposals', (req, res) => {
   try {
     const target = safeWorkspacePath(req.body.targetFile);
+    if (isProtectedWorkspacePath(target.normalized)) return fail(res, 400, `Protected runtime/private file cannot be proposed for writing: ${target.normalized}`);
     const current = fs.existsSync(target.absolute) ? fs.readFileSync(target.absolute, 'utf8') : '';
     const content = String(req.body.content || '');
     const title = req.body.title?.trim() || `Update ${target.normalized}`;
