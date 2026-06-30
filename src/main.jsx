@@ -585,6 +585,20 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
 
 function Projects({ projects, setProjects, setNotice, refreshAll }) {
   const [name, setName] = useState('');
+  const [editing, setEditing] = useState(null);
+  const [projectDraft, setProjectDraft] = useState({ name: '', status: 'active', owner: 'user', confidence: 0.75, next_action: '' });
+
+  function startEdit(project) {
+    setEditing(project);
+    setProjectDraft({
+      name: project.name || '',
+      status: project.status || 'active',
+      owner: project.owner || 'user',
+      confidence: Number(project.confidence || 0.75),
+      next_action: project.next_action || ''
+    });
+  }
+
   async function createProject() {
     if (!name.trim()) return;
     try {
@@ -604,15 +618,86 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
       setNotice(err.message);
     }
   }
+
+  async function proposeProjectUpdate() {
+    if (!editing || !projectDraft.name.trim()) return;
+    try {
+      await api('/api/approvals', {
+        method: 'POST',
+        body: JSON.stringify({
+          action_type: 'update_project',
+          title: `Update project: ${editing.name}`,
+          priority: 'P2',
+          payload: {
+            id: editing.id,
+            previous: {
+              name: editing.name,
+              status: editing.status,
+              owner: editing.owner,
+              confidence: editing.confidence,
+              next_action: editing.next_action || ''
+            },
+            updates: {
+              ...projectDraft,
+              confidence: Number(projectDraft.confidence),
+              evidence: 'Project update proposed from Projects view.'
+            },
+            summary: `Update ${editing.name}`,
+            risk: 'medium',
+            source: 'Projects view'
+          }
+        })
+      });
+      setEditing(null);
+      setNotice('Project update proposal added to approval queue.');
+      await refreshAll();
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
   return (
-    <section className="panel">
+    <section className="projects-layout">
+      <div className="panel">
       <div className="inline-form">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="New project name" />
         <button className="primary" onClick={createProject}><Plus size={16} /> Propose project</button>
       </div>
       <div className="table-list">
-        {projects.map((project) => <ItemRow item={{ ...project, type: 'project', title: project.name }} key={project.id} />)}
+        {projects.map((project) => (
+          <div className="project-row" key={project.id}>
+            <ItemRow item={{ ...project, type: 'project', title: project.name }} />
+            <button onClick={() => startEdit(project)}>Edit</button>
+          </div>
+        ))}
       </div>
+      </div>
+      {editing && (
+        <div className="panel">
+          <h2>Edit Project Proposal</h2>
+          <p>Project changes go through approval before updating the database.</p>
+          <label>Name</label>
+          <input value={projectDraft.name} onChange={(event) => setProjectDraft((draft) => ({ ...draft, name: event.target.value }))} />
+          <label>Status</label>
+          <select value={projectDraft.status} onChange={(event) => setProjectDraft((draft) => ({ ...draft, status: event.target.value }))}>
+            <option>active</option>
+            <option>blocked</option>
+            <option>waiting</option>
+            <option>stable</option>
+            <option>archived</option>
+          </select>
+          <label>Owner</label>
+          <input value={projectDraft.owner} onChange={(event) => setProjectDraft((draft) => ({ ...draft, owner: event.target.value }))} />
+          <label>Confidence</label>
+          <input type="number" min="0" max="1" step="0.05" value={projectDraft.confidence} onChange={(event) => setProjectDraft((draft) => ({ ...draft, confidence: event.target.value }))} />
+          <label>Next action</label>
+          <textarea value={projectDraft.next_action} onChange={(event) => setProjectDraft((draft) => ({ ...draft, next_action: event.target.value }))} />
+          <div className="decision-row">
+            <button className="primary" onClick={proposeProjectUpdate}><Check size={16} /> Propose update</button>
+            <button onClick={() => setEditing(null)}><X size={16} /> Cancel</button>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

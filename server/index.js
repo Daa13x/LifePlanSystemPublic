@@ -555,6 +555,40 @@ app.post('/api/approvals/:id/:decision', (req, res) => {
           VALUES (?, ?, ?, 'approved proposal', ?, date('now'), ?, ?)
         `).run(payload.name, payload.status || 'active', payload.owner || 'user', payload.confidence || 0.75, payload.evidence || `Approval ${approval.id}`, payload.next_action || 'Define next action.');
       }
+      if (approval.action_type === 'update_project') {
+        const target = row('SELECT * FROM projects WHERE id = ?', [payload.id]);
+        if (!target) return fail(res, 404, 'Project not found.');
+        const previous = payload.previous || {};
+        for (const key of ['name', 'status', 'owner', 'next_action']) {
+          if (Object.hasOwn(previous, key) && String(target[key] || '') !== String(previous[key] || '')) {
+            return fail(res, 409, `Project changed after this proposal was created. Refresh before approving.`);
+          }
+        }
+        if (Object.hasOwn(previous, 'confidence') && Number(target.confidence || 0) !== Number(previous.confidence || 0)) {
+          return fail(res, 409, 'Project confidence changed after this proposal was created. Refresh before approving.');
+        }
+        const updates = payload.updates || {};
+        db.prepare(`
+          UPDATE projects
+          SET name = COALESCE(?, name),
+              status = COALESCE(?, status),
+              owner = COALESCE(?, owner),
+              confidence = COALESCE(?, confidence),
+              last_reviewed = date('now'),
+              evidence = COALESCE(?, evidence),
+              next_action = COALESCE(?, next_action),
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(
+          updates.name ?? null,
+          updates.status ?? null,
+          updates.owner ?? null,
+          updates.confidence ?? null,
+          updates.evidence ?? `Approval ${approval.id}`,
+          updates.next_action ?? null,
+          target.id
+        );
+      }
       if (approval.action_type === 'add_memory') {
         db.prepare(`
           INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action)

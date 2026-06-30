@@ -650,7 +650,7 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   white-space: nowrap;
 }
 
-.two-column, .settings-grid {
+.two-column, .settings-grid, .projects-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
@@ -660,6 +660,24 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .panel { padding: 16px; }
 .panel > p { margin-top: 6px; margin-bottom: 14px; }
 .table-list { display: grid; gap: 0; }
+.project-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--line);
+}
+.project-row .item-row {
+  border-bottom: 0;
+}
+.project-row > button {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--soft);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+}
 .review-card {
   border: 1px solid var(--line);
   background: var(--panel-2);
