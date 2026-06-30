@@ -782,6 +782,7 @@ function BrowserConsult({ setNotice, refresh }) {
   const [browserResult, setBrowserResult] = useState(null);
   const [browserBusy, setBrowserBusy] = useState(false);
   const [consultPrompt, setConsultPrompt] = useState('');
+  const [activeConsultationId, setActiveConsultationId] = useState(null);
 
   async function load() {
     setCap(await api('/api/browser/capabilities'));
@@ -789,8 +790,9 @@ function BrowserConsult({ setNotice, refresh }) {
   }
   useEffect(() => { load().catch((err) => setNotice(err.message)); }, []);
 
-  async function saveConsultation() {
-    const prompt = consultPrompt || buildConsultPrompt();
+  async function ensureConsultation(promptOverride = '') {
+    if (activeConsultationId) return activeConsultationId;
+    const prompt = promptOverride || consultPrompt || buildConsultPrompt();
     const created = await api('/api/consultations', {
       method: 'POST',
       body: JSON.stringify({
@@ -803,11 +805,21 @@ function BrowserConsult({ setNotice, refresh }) {
         sent_at: browserResult ? new Date().toISOString() : null
       })
     });
+    setActiveConsultationId(created.id);
+    return created.id;
+  }
+
+  async function saveConsultation() {
+    const prompt = consultPrompt || buildConsultPrompt();
+    const consultationId = await ensureConsultation(prompt);
     if (external.trim()) {
-      await api(`/api/consultations/${created.id}`, { method: 'PATCH', body: JSON.stringify({ external_response: external, status: 'captured' }) });
+      await api(`/api/consultations/${consultationId}`, { method: 'PATCH', body: JSON.stringify({ external_response: external, status: 'captured' }) });
     }
     setDraft('');
     setExternal('');
+    setConsultPrompt('');
+    setActiveConsultationId(null);
+    setBrowserResult(null);
     await load();
     await refresh();
   }
@@ -835,16 +847,17 @@ function BrowserConsult({ setNotice, refresh }) {
 
   async function openWithPrompt() {
     const prompt = buildConsultPrompt();
+    const consultationId = await ensureConsultation(prompt);
     await copyConsultPrompt(prompt);
-    await openControlledBrowser();
+    await openControlledBrowser(consultationId);
   }
 
-  async function openControlledBrowser() {
+  async function openControlledBrowser(consultationId = activeConsultationId) {
     setBrowserBusy(true);
     try {
       const result = await api('/api/browser/open', {
         method: 'POST',
-        body: JSON.stringify({ url: browserUrl })
+        body: JSON.stringify({ url: browserUrl, consultation_id: consultationId })
       });
       setBrowserResult(result);
       setNotice(`Opened browser: ${result.title || result.url}`);
@@ -853,6 +866,12 @@ function BrowserConsult({ setNotice, refresh }) {
     } finally {
       setBrowserBusy(false);
     }
+  }
+
+  async function pasteExternalResponse() {
+    const text = await navigator.clipboard.readText();
+    setExternal(text);
+    setNotice(text ? 'Clipboard response pasted into consultation.' : 'Clipboard is empty.');
   }
 
   return (
@@ -893,6 +912,10 @@ function BrowserConsult({ setNotice, refresh }) {
         <input value={title} onChange={(event) => setTitle(event.target.value)} />
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Local draft to critique..." />
         {consultPrompt && <textarea value={consultPrompt} onChange={(event) => setConsultPrompt(event.target.value)} placeholder="Generated consultation prompt..." />}
+        <div className="inline-form">
+          <button onClick={pasteExternalResponse}><Clipboard size={16} /> Paste from clipboard</button>
+          {activeConsultationId && <Pill tone="info">Consultation #{activeConsultationId}</Pill>}
+        </div>
         <textarea value={external} onChange={(event) => setExternal(event.target.value)} placeholder="Captured cloud response or manual paste..." />
         <button className="primary" onClick={saveConsultation}><Globe2 size={16} /> Save as reviewable suggestion</button>
       </div>
@@ -905,6 +928,7 @@ function BrowserConsult({ setNotice, refresh }) {
             <span>{item.target_agent}</span>
             {item.opened_url && <small>{item.opened_url}</small>}
             <p>{item.local_draft}</p>
+            {item.external_response && <small>{item.external_response.slice(0, 300)}</small>}
           </div>
         ))}
       </div>

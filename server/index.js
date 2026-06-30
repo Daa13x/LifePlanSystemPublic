@@ -14,6 +14,8 @@ const port = Number(process.env.LIFE_PLANNER_PORT || 4177);
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
 let managedLlamaServer = null;
+let browserContext = null;
+let browserPage = null;
 
 app.use(express.json({ limit: '25mb' }));
 
@@ -944,6 +946,8 @@ app.post('/api/consultations', (req, res) => {
 });
 
 app.patch('/api/consultations/:id', (req, res) => {
+  const before = row('SELECT * FROM consultations WHERE id = ?', [req.params.id]);
+  if (!before) return fail(res, 404, 'Consultation not found.');
   db.prepare(`
     UPDATE consultations
     SET external_response = COALESCE(?, external_response),
@@ -965,7 +969,7 @@ app.patch('/api/consultations/:id', (req, res) => {
     req.body.status ?? null,
     req.params.id
   );
-  if (req.body.external_response) {
+  if (req.body.external_response && !before.external_response) {
     const consultation = row('SELECT * FROM consultations WHERE id = ?', [req.params.id]);
     db.prepare(`
       INSERT INTO memory_candidates (type, title, body, source, evidence, confidence)
@@ -996,16 +1000,31 @@ app.post('/api/browser/open', async (req, res) => {
     const { chromium } = await import('playwright');
     const userDataDir = path.join(root, 'data', 'browser-profile');
     fs.mkdirSync(userDataDir, { recursive: true });
-    const context = await chromium.launchPersistentContext(userDataDir, {
-      headless: false,
-      viewport: null,
-      args: ['--start-maximized']
-    });
-    const page = context.pages()[0] || await context.newPage();
+    if (!browserContext) {
+      browserContext = await chromium.launchPersistentContext(userDataDir, {
+        headless: false,
+        viewport: null,
+        args: ['--start-maximized']
+      });
+      browserContext.on('close', () => {
+        browserContext = null;
+        browserPage = null;
+      });
+    }
+    const pages = browserContext.pages();
+    browserPage = browserPage && !browserPage.isClosed() ? browserPage : pages[0] || await browserContext.newPage();
+    const page = browserPage;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     const title = await page.title().catch(() => '');
     const currentUrl = page.url();
     const visibleText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    if (req.body.consultation_id) {
+      db.prepare(`
+        UPDATE consultations
+        SET opened_url = ?, opened_title = ?, sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP), status = 'sent', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(currentUrl, title, req.body.consultation_id);
+    }
     ok(res, {
       url: currentUrl,
       title,
