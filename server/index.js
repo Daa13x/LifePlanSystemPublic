@@ -1200,6 +1200,7 @@ app.post('/api/source/commit', async (req, res) => {
   if (!message) return fail(res, 400, 'Commit message is required.');
   const snapshot = await gitStatusSnapshot();
   if (snapshot.hasConflicts) return fail(res, 409, `Resolve conflicts before committing: ${snapshot.conflictFiles.join(', ')}`);
+  if (!snapshot.changedFiles.some((file) => file.staged)) return fail(res, 400, 'Stage at least one file before committing.');
   if (snapshot.changedFiles.some((file) => file.protected && file.staged)) return fail(res, 409, 'A protected/private file is staged. Unstage it before committing.');
   const result = await runCli('git', ['commit', '-m', message], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git commit failed');
@@ -1396,10 +1397,12 @@ app.get('/api/export/json', (req, res) => {
     exported_at: new Date().toISOString(),
     mode,
     projects: allRows('SELECT * FROM projects'),
-    knowledge_items: allRows('SELECT * FROM knowledge_items'),
-    memory_candidates: allRows('SELECT * FROM memory_candidates')
+    knowledge_items: mode === 'backup'
+      ? allRows('SELECT * FROM knowledge_items')
+      : allRows("SELECT * FROM knowledge_items WHERE status IN ('active', 'stable')")
   };
   if (mode === 'backup') {
+    data.memory_candidates = allRows('SELECT * FROM memory_candidates');
     data.chat_sessions = allRows('SELECT * FROM chat_sessions WHERE deleted = 0');
     data.chat_messages = allRows('SELECT * FROM chat_messages');
     data.consultations = allRows('SELECT * FROM consultations');
@@ -1423,12 +1426,17 @@ app.get('/api/export/markdown', (_req, res) => {
 app.post('/api/import/json', (req, res) => {
   const data = req.body;
   if (!Array.isArray(data.projects) && !Array.isArray(data.knowledge_items)) return fail(res, 400, 'Import must include projects or knowledge_items arrays.');
-  const imported = { projects: 0, knowledge_items: 0 };
+  const mode = req.query.mode === 'import_all' || req.body.mode === 'import_all' ? 'import_all' : 'skip_duplicates';
+  const imported = { projects: 0, knowledge_items: 0, skipped_projects: 0, skipped_knowledge_items: 0, mode };
   const insertProject = db.prepare(`
     INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (const project of data.projects || []) {
+    if (mode === 'skip_duplicates' && project.name && row('SELECT id FROM projects WHERE name = ? LIMIT 1', [project.name])) {
+      imported.skipped_projects += 1;
+      continue;
+    }
     insertProject.run(project.name, project.status || 'active', project.owner || 'user', 'json import', project.confidence || 0.6, project.last_reviewed || null, project.evidence || '', project.next_action || '');
     imported.projects += 1;
   }
@@ -1437,6 +1445,10 @@ app.post('/api/import/json', (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (const item of data.knowledge_items || []) {
+    if (mode === 'skip_duplicates' && item.title && row('SELECT id FROM knowledge_items WHERE title = ? LIMIT 1', [item.title])) {
+      imported.skipped_knowledge_items += 1;
+      continue;
+    }
     insertItem.run(item.type || 'current state', item.title || 'Imported item', item.body || '', 'json import', item.status || 'pending review', item.confidence || 0.5, item.last_reviewed || null, item.evidence || '', item.owner || 'user', item.next_action || '');
     imported.knowledge_items += 1;
   }

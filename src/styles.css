@@ -126,6 +126,13 @@ h3 { font-size: 14px; font-weight: 700; }
 .topbar p { margin: 5px 0 0; }
 .top-actions, .row-actions, .decision-row, .inline-form { display: flex; align-items: center; gap: 8px; }
 
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+
 .theme-radio {
   height: 38px;
   display: inline-grid;

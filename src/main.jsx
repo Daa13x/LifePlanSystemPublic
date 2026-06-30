@@ -1235,7 +1235,7 @@ function SourceControl({ setNotice }) {
   const hasChanges = changedFiles.length > 0;
   const protectedFiles = changedFiles.filter((file) => file.protected);
   const canStageAll = hasChanges && !sourceBusy && !source?.hasConflicts && protectedFiles.length === 0;
-  const canCommit = !sourceBusy && Boolean(commitMessage.trim()) && !source?.hasConflicts;
+  const canCommit = !sourceBusy && Boolean(commitMessage.trim()) && changedFiles.some((file) => file.staged) && !source?.hasConflicts;
 
   return (
     <section className="source-layout">
@@ -1641,6 +1641,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
 function JsonImport({ setNotice }) {
   const [jsonText, setJsonText] = useState('');
   const [preview, setPreview] = useState(null);
+  const [importDuplicates, setImportDuplicates] = useState(false);
   async function previewJson() {
     try {
       const parsed = JSON.parse(jsonText);
@@ -1652,10 +1653,10 @@ function JsonImport({ setNotice }) {
   async function importJson() {
     try {
       const parsed = JSON.parse(jsonText);
-      const result = await api('/api/import/json', { method: 'POST', body: JSON.stringify(parsed) });
+      const result = await api(`/api/import/json?mode=${importDuplicates ? 'import_all' : 'skip_duplicates'}`, { method: 'POST', body: JSON.stringify(parsed) });
       setJsonText('');
       setPreview(null);
-      setNotice(`JSON imported: ${result.projects} project(s), ${result.knowledge_items} knowledge item(s).`);
+      setNotice(`JSON imported: ${result.projects} project(s), ${result.knowledge_items} knowledge item(s). Skipped ${result.skipped_projects} project duplicate(s), ${result.skipped_knowledge_items} knowledge duplicate(s).`);
     } catch (err) {
       setNotice(`JSON import failed: ${err.message}`);
     }
@@ -1663,6 +1664,10 @@ function JsonImport({ setNotice }) {
   return (
     <>
       <textarea value={jsonText} onChange={(event) => setJsonText(event.target.value)} placeholder='{"projects":[],"knowledge_items":[]}' />
+      <label className="toggle-row">
+        <input type="checkbox" checked={importDuplicates} onChange={(event) => setImportDuplicates(event.target.checked)} />
+        Import duplicates
+      </label>
       {preview && (
         <div className="import-preview">
           <strong>Preview</strong>
