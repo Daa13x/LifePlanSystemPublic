@@ -74,14 +74,22 @@ button:disabled {
 }
 
 .brand-mark {
-  width: 38px;
-  height: 38px;
+  width: 34px;
+  height: 34px;
   display: grid;
   place-items: center;
   border-radius: 8px;
-  color: #03130f;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  box-shadow: 0 0 24px rgba(53, 208, 170, 0.3);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: var(--panel-2);
+  box-shadow: 0 0 24px rgba(53, 208, 170, 0.24);
+}
+
+.brand-mark img {
+  width: 30px;
+  height: 30px;
+  display: block;
+  object-fit: cover;
 }
 
 .brand strong, .item-title, .model-row strong { display: block; color: var(--text); font-size: 14px; }

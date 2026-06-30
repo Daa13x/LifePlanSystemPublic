@@ -213,7 +213,7 @@ function plannerData() {
   const blockers = items.filter((item) => item.type === 'blocker' || item.status === 'blocked').slice(0, 5);
   const waiting = items.filter((item) => item.type === 'waiting' || item.owner === 'user').slice(0, 6);
   const automatic = items.filter((item) => item.owner === 'app' && item.status === 'active').slice(0, 5);
-  const nextBest = blockers[0] || pendingApprovals[0] || candidates[0] || focus[0] || items[0] || null;
+  const nextBest = pendingApprovals[0] || blockers[0] || candidates[0] || focus[0] || items[0] || null;
 
   return {
     summary: {
@@ -236,6 +236,42 @@ function plannerData() {
   };
 }
 
+async function refreshPlannerState() {
+  const changes = [];
+  const playwrightReady = await packageAvailable('playwright');
+  const browserBlocker = row(
+    "SELECT * FROM knowledge_items WHERE title = ? AND status NOT IN ('archived', 'deprecated', 'superseded')",
+    ['Cloud browser automation is not configured yet']
+  );
+
+  if (playwrightReady && browserBlocker) {
+    const existing = row(
+      "SELECT * FROM approvals WHERE action_type = 'update_memory' AND title = ? AND status = 'pending'",
+      ['Retire resolved Playwright blocker']
+    );
+    if (!existing) {
+      db.prepare(`
+        INSERT INTO approvals (action_type, title, payload, priority)
+        VALUES (?, ?, ?, 'P1')
+      `).run('update_memory', 'Retire resolved Playwright blocker', JSON.stringify({
+        id: browserBlocker.id,
+        updates: {
+          status: 'archived',
+          confidence: 0.9,
+          evidence: 'Planner refresh found the local Playwright package available.',
+          next_action: 'Use the Browser tab for cloud consultation when needed.'
+        }
+      }));
+      changes.push('Created approval to archive the resolved Playwright blocker.');
+    }
+  }
+
+  return {
+    changes,
+    message: changes.length ? changes.join(' ') : 'Planner refresh complete. No governed changes proposed.'
+  };
+}
+
 app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: path.resolve('data/life-planner.sqlite') }));
 
 app.get('/api/bootstrap', (_req, res) => {
@@ -249,6 +285,15 @@ app.get('/api/bootstrap', (_req, res) => {
 });
 
 app.get('/api/planner', (_req, res) => ok(res, plannerData()));
+
+app.post('/api/planner/refresh', async (_req, res) => {
+  try {
+    const result = await refreshPlannerState();
+    ok(res, { ...result, planner: plannerData() });
+  } catch (error) {
+    fail(res, 500, error.message || 'Planner refresh failed.');
+  }
+});
 
 app.get('/api/chat/sessions', (_req, res) => ok(res, allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC')));
 
@@ -379,6 +424,24 @@ app.post('/api/approvals/:id/:decision', (req, res) => {
         }
         fs.mkdirSync(path.dirname(target.absolute), { recursive: true });
         fs.writeFileSync(target.absolute, payload.content || '', 'utf8');
+      }
+      if (approval.action_type === 'update_memory') {
+        const target = row('SELECT * FROM knowledge_items WHERE id = ?', [payload.id]);
+        if (!target) return fail(res, 404, 'Knowledge item not found.');
+        const updates = payload.updates || {};
+        const nextStatus = updates.status || target.status;
+        const allowedStatuses = ['active', 'stable', 'stale', 'deprecated', 'superseded', 'archived', 'pending review'];
+        if (!allowedStatuses.includes(nextStatus)) return fail(res, 400, `Unsupported memory status: ${nextStatus}`);
+        db.prepare(`
+          UPDATE knowledge_items
+          SET status = ?,
+              confidence = COALESCE(?, confidence),
+              last_reviewed = date('now'),
+              evidence = COALESCE(?, evidence),
+              next_action = COALESCE(?, next_action),
+              updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(nextStatus, updates.confidence ?? null, updates.evidence ?? null, updates.next_action ?? null, target.id);
       }
     }
     db.prepare('UPDATE approvals SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);

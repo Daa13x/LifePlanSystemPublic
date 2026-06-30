@@ -169,11 +169,18 @@ function App() {
     setMemory(await api('/api/memory'));
   }
 
+  async function runPlannerRefresh() {
+    const result = await api('/api/planner/refresh', { method: 'POST' });
+    setPlanner(result.planner);
+    setMemory(await api('/api/memory'));
+    setNotice(result.message);
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark"><ShieldCheck size={20} /></div>
+          <div className="brand-mark"><img src="/life-planner-logo.png" alt="" /></div>
           <div>
             <strong>Life Planner</strong>
             <span>Local-first assistant</span>
@@ -209,7 +216,7 @@ function App() {
           </div>
         </header>
 
-        {view === 'planner' && <Planner planner={planner} refresh={reloadPlanner} />}
+        {view === 'planner' && <Planner planner={planner} refresh={reloadPlanner} runRefresh={runPlannerRefresh} />}
         {view === 'chat' && (
           <Chat
             sessions={sessions}
@@ -245,8 +252,10 @@ function App() {
   );
 }
 
-function Planner({ planner, refresh }) {
+function Planner({ planner, refresh, runRefresh }) {
   if (!planner) return <div className="loading">Loading planner context...</div>;
+  const nextBestBody = planner.nextBest?.body
+    || (planner.nextBest?.action_type ? 'Review and approve, deny, or defer this proposed change.' : 'Add goals, projects, or memory candidates to feed the planner.');
   const buckets = [
     ['Today’s Focus', planner.focus, 'good'],
     ['Blocked', planner.blockers, 'bad'],
@@ -268,7 +277,7 @@ function Planner({ planner, refresh }) {
           <ChevronRight size={24} />
           <div>
             <strong>{planner.nextBest?.title || 'No current item selected'}</strong>
-            <span>{planner.nextBest?.body || 'Add goals, projects, or memory candidates to feed the planner.'}</span>
+            <span>{nextBestBody}</span>
           </div>
         </div>
         <div className="metric-strip">
@@ -293,7 +302,7 @@ function Planner({ planner, refresh }) {
             {planner.candidates.map((item) => <ItemRow key={`candidate-${item.id}`} item={item} compact />)}
           </>
         )}
-        <button className="primary subtle" onClick={refresh}>Run planner refresh</button>
+        <button className="primary subtle" onClick={runRefresh}>Run planner refresh</button>
       </div>
 
       <div className="bucket-grid">
