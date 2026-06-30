@@ -13,6 +13,7 @@ const app = express();
 const port = Number(process.env.LIFE_PLANNER_PORT || 4177);
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
+let managedLlamaServer = null;
 
 app.use(express.json({ limit: '25mb' }));
 
@@ -263,6 +264,8 @@ async function localModelStatus() {
   const model = assignedPlannerModel();
   const endpoint = String(getSetting('localModelEndpoint', '') || '').trim();
   const llamaCliPath = String(getSetting('llamaCliPath', '') || '').trim();
+  const llamaServerPath = String(getSetting('llamaServerPath', '') || '').trim();
+  const llamaServerPort = Number(getSetting('llamaServerPort', 8080) || 8080);
   return {
     assigned: Boolean(model),
     model,
@@ -270,7 +273,13 @@ async function localModelStatus() {
     endpoint,
     llamaCliConfigured: Boolean(llamaCliPath),
     llamaCliPath,
-    llamaCliExists: Boolean(llamaCliPath && fs.existsSync(llamaCliPath))
+    llamaCliExists: Boolean(llamaCliPath && fs.existsSync(llamaCliPath)),
+    llamaServerConfigured: Boolean(llamaServerPath),
+    llamaServerPath,
+    llamaServerExists: Boolean(llamaServerPath && fs.existsSync(llamaServerPath)),
+    llamaServerPort,
+    managedServerRunning: Boolean(managedLlamaServer && !managedLlamaServer.killed),
+    managedEndpoint: managedLlamaServer && !managedLlamaServer.killed ? `http://127.0.0.1:${llamaServerPort}` : ''
   };
 }
 
@@ -316,6 +325,10 @@ async function runPlannerAssistant(sessionId, userMessage) {
 
   const prompt = buildAssistantPrompt(sessionId, userMessage);
   try {
+    if (status.managedEndpoint) {
+      const content = await runEndpointModel(status.managedEndpoint, prompt);
+      if (content) return { mode: 'managed llama-server', content };
+    }
     if (status.endpointConfigured) {
       const content = await runEndpointModel(status.endpoint, prompt);
       if (content) return { mode: 'local endpoint', content };
@@ -722,6 +735,42 @@ app.get('/api/models', (_req, res) => ok(res, allRows('SELECT * FROM model_regis
 
 app.get('/api/models/runtime', async (_req, res) => {
   ok(res, await localModelStatus());
+});
+
+app.post('/api/models/server/start', async (req, res) => {
+  const status = await localModelStatus();
+  if (!status.assigned) return fail(res, 400, 'Assign a Planner Assistant model before starting llama-server.');
+  const serverPath = String(req.body.llamaServerPath || status.llamaServerPath || '').trim();
+  const port = Number(req.body.port || status.llamaServerPort || 8080);
+  const contextSize = Number(req.body.contextSize || getSetting('llamaContextSize', 4096) || 4096);
+  if (!serverPath || !fs.existsSync(serverPath)) return fail(res, 400, 'Set a valid llama-server executable path first.');
+  if (managedLlamaServer && !managedLlamaServer.killed) return ok(res, await localModelStatus());
+
+  const args = ['-m', status.model.path, '--host', '127.0.0.1', '--port', String(port), '-c', String(contextSize)];
+  const child = spawn(serverPath, args, {
+    cwd: root,
+    detached: false,
+    stdio: 'ignore',
+    windowsHide: true
+  });
+  child.on('error', () => {});
+  child.on('exit', () => {
+    if (managedLlamaServer === child) managedLlamaServer = null;
+  });
+  managedLlamaServer = child;
+  setSetting('llamaServerPath', serverPath);
+  setSetting('llamaServerPort', port);
+  setSetting('llamaContextSize', contextSize);
+  setSetting('localModelEndpoint', `http://127.0.0.1:${port}`);
+  ok(res, { message: `llama-server starting on 127.0.0.1:${port}`, runtime: await localModelStatus() });
+});
+
+app.post('/api/models/server/stop', async (_req, res) => {
+  if (managedLlamaServer && !managedLlamaServer.killed) {
+    managedLlamaServer.kill();
+    managedLlamaServer = null;
+  }
+  ok(res, { message: 'Managed llama-server stopped.', runtime: await localModelStatus() });
 });
 
 app.get('/api/hardware', async (_req, res) => {

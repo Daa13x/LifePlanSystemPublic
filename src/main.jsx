@@ -1380,6 +1380,9 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [hfToken, setHfToken] = useState(settings.hfToken || '');
   const [localModelEndpoint, setLocalModelEndpoint] = useState(settings.localModelEndpoint || '');
   const [llamaCliPath, setLlamaCliPath] = useState(settings.llamaCliPath || '');
+  const [llamaServerPath, setLlamaServerPath] = useState(settings.llamaServerPath || '');
+  const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
+  const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 4096);
   const [repo, setRepo] = useState('');
   const [modelSearch, setModelSearch] = useState('instruct gguf');
   const [hardware, setHardware] = useState(null);
@@ -1401,7 +1404,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean),
         modelDownloadFolder: downloadFolder,
         localModelEndpoint,
-        llamaCliPath
+        llamaCliPath,
+        llamaServerPath,
+        llamaServerPort: Number(llamaServerPort),
+        llamaContextSize: Number(llamaContextSize)
       })
     });
     setSettings(data);
@@ -1422,6 +1428,22 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
     setModels(await api(`/api/models/${id}/assign`, { method: 'POST', body: JSON.stringify({ role: 'Planner Assistant' }) }));
     setRuntime(await api('/api/models/runtime'));
     setNotice('Loaded model assignment for Planner Assistant.');
+  }
+
+  async function startServer() {
+    await saveSettings();
+    const result = await api('/api/models/server/start', {
+      method: 'POST',
+      body: JSON.stringify({ llamaServerPath, port: Number(llamaServerPort), contextSize: Number(llamaContextSize) })
+    });
+    setRuntime(result.runtime);
+    setNotice(result.message);
+  }
+
+  async function stopServer() {
+    const result = await api('/api/models/server/stop', { method: 'POST' });
+    setRuntime(result.runtime);
+    setNotice(result.message);
   }
 
   async function lookupHF() {
@@ -1486,7 +1508,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <div className="runtime-card">
           <Pill tone={runtime?.assigned ? 'good' : 'warn'}>{runtime?.assigned ? 'Model assigned' : 'No model assigned'}</Pill>
           <strong>{runtime?.model?.name || 'Planner Assistant unavailable'}</strong>
-          <span>{runtime?.endpointConfigured ? `Endpoint: ${runtime.endpoint}` : runtime?.llamaCliConfigured ? `llama-cli: ${runtime.llamaCliExists ? 'found' : 'missing'}` : 'Configure a local endpoint or llama-cli to generate chat responses.'}</span>
+          <span>{runtime?.managedServerRunning ? `Managed llama-server running: ${runtime.managedEndpoint}` : runtime?.endpointConfigured ? `Endpoint: ${runtime.endpoint}` : runtime?.llamaCliConfigured ? `llama-cli: ${runtime.llamaCliExists ? 'found' : 'missing'}` : 'Configure a local endpoint, llama-server, or llama-cli to generate chat responses.'}</span>
         </div>
         <label>Model folders</label>
         <textarea value={modelFolders} onChange={(event) => setModelFolders(event.target.value)} placeholder="C:\\Models&#10;D:\\LLMs" />
@@ -1494,9 +1516,17 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <input value={localModelEndpoint} onChange={(event) => setLocalModelEndpoint(event.target.value)} placeholder="http://127.0.0.1:8080" />
         <label>llama-cli path</label>
         <input value={llamaCliPath} onChange={(event) => setLlamaCliPath(event.target.value)} placeholder="C:\\llama.cpp\\build\\bin\\llama-cli.exe" />
+        <label>llama-server path</label>
+        <input value={llamaServerPath} onChange={(event) => setLlamaServerPath(event.target.value)} placeholder="C:\\llama.cpp\\build\\bin\\llama-server.exe" />
+        <div className="inline-form">
+          <input type="number" value={llamaServerPort} onChange={(event) => setLlamaServerPort(event.target.value)} placeholder="8080" />
+          <input type="number" value={llamaContextSize} onChange={(event) => setLlamaContextSize(event.target.value)} placeholder="4096" />
+        </div>
         <div className="decision-row">
           <button onClick={saveSettings}><Check size={16} /> Save</button>
           <button className="primary" onClick={scan}><RefreshCcw size={16} /> Scan GGUF</button>
+          <button onClick={startServer} disabled={!llamaServerPath || !runtime?.assigned}><Bot size={16} /> Start server</button>
+          <button onClick={stopServer} disabled={!runtime?.managedServerRunning}><X size={16} /> Stop server</button>
         </div>
         <div className="table-list">
           {models.map((model) => (
