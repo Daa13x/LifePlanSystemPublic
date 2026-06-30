@@ -914,6 +914,8 @@ function SourceControl({ setNotice }) {
   const [commitMessage, setCommitMessage] = useState('');
   const [branchName, setBranchName] = useState('codex/life-planner-ui');
   const [remoteUrl, setRemoteUrl] = useState('https://github.com/neuro-1977/lps.git');
+  const [sourceBusy, setSourceBusy] = useState(false);
+  const [operationOutput, setOperationOutput] = useState('');
 
   async function refresh() {
     try {
@@ -927,16 +929,27 @@ function SourceControl({ setNotice }) {
   useEffect(() => { refresh(); }, []);
 
   async function action(path, body, success) {
+    if (sourceBusy) return;
+    setSourceBusy(true);
     try {
       const result = await api(path, { method: 'POST', body: JSON.stringify(body || {}) });
+      const output = result.output || result.status || result.log || result.message || '';
+      setOperationOutput(output);
       setNotice(success || result.message || result.output || 'Source control action complete.');
       await refresh();
     } catch (err) {
       setNotice(err.message);
+      setOperationOutput(err.message);
+    } finally {
+      setSourceBusy(false);
     }
   }
 
-  const hasChanges = Boolean(source?.status?.split('\n').some((line) => line && !line.startsWith('##')));
+  const changedFiles = source?.changedFiles || [];
+  const hasChanges = changedFiles.length > 0;
+  const protectedFiles = changedFiles.filter((file) => file.protected);
+  const canStageAll = hasChanges && !sourceBusy && !source?.hasConflicts && protectedFiles.length === 0;
+  const canCommit = !sourceBusy && Boolean(commitMessage.trim()) && !source?.hasConflicts;
 
   return (
     <section className="source-layout">
@@ -946,11 +959,11 @@ function SourceControl({ setNotice }) {
           <p>{source?.repoPath || 'Reading repository state...'}</p>
         </div>
         <div className="source-actions">
-          <button onClick={refresh}><RefreshCcw size={16} /> Refresh</button>
-          <button onClick={() => action('/api/source/login/github')}><Github size={16} /> Login with Git</button>
+          <button onClick={refresh} disabled={sourceBusy}><RefreshCcw size={16} /> Refresh</button>
+          <button onClick={() => action('/api/source/login/github')} disabled={sourceBusy}><Github size={16} /> Login with Git</button>
           <a className="source-link" href="https://github.com/neuro-1977/lps" target="_blank" rel="noreferrer"><Github size={16} /> Open push repo</a>
           <a className="source-link" href="https://github.com/Daa13x/LifePlanSystemPublic" target="_blank" rel="noreferrer"><Github size={16} /> Upstream merge target</a>
-          <button onClick={() => action('/api/source/login/hf')}>Login with HF</button>
+          <button onClick={() => action('/api/source/login/hf')} disabled={sourceBusy}>Login with HF</button>
         </div>
       </div>
 
@@ -961,6 +974,7 @@ function SourceControl({ setNotice }) {
           <div>
             <span>Branch</span>
             <strong>{source?.branch || 'Unknown'}</strong>
+            <small>{source?.upstream ? `${source.ahead || 0} ahead / ${source.behind || 0} behind ${source.upstream}` : 'No upstream detected'}</small>
           </div>
           <div>
             <span>Git user</span>
@@ -979,36 +993,59 @@ function SourceControl({ setNotice }) {
               {source?.huggingface?.authenticated ? 'Logged in' : source?.huggingface?.cliAvailable ? 'Login needed' : 'Unavailable'}
             </Pill>
           </div>
+          <div>
+            <span>Working tree</span>
+            <strong>{hasChanges ? `${changedFiles.length} changed` : 'Clean'}</strong>
+            <small>{source?.hasConflicts ? `${source.conflictFiles.length} conflict(s)` : `${protectedFiles.length} protected file(s)`}</small>
+          </div>
         </div>
       </div>
 
       <div className="panel">
         <h2>Write</h2>
-        <p>These buttons run local Git commands in this workspace. No cloud write happens unless you push.</p>
+        <p>These buttons run local Git commands in this workspace. Protected runtime files are blocked from staging and commits.</p>
+        {sourceBusy && <div className="source-warning info">Running source control operation...</div>}
+        {source?.hasConflicts && <div className="source-warning bad">Resolve conflicts before staging or committing: {source.conflictFiles.join(', ')}</div>}
+        {protectedFiles.length > 0 && <div className="source-warning warn">Protected files present: {protectedFiles.map((file) => file.path).join(', ')}</div>}
         <label>Create branch</label>
         <div className="inline-form">
-          <input value={branchName} onChange={(event) => setBranchName(event.target.value)} />
-          <button onClick={() => action('/api/source/branch', { branch: branchName }, `Created branch ${branchName}`)}><GitBranch size={16} /> Create</button>
+          <input value={branchName} onChange={(event) => setBranchName(event.target.value)} disabled={sourceBusy} />
+          <button onClick={() => action('/api/source/branch', { branch: branchName }, `Created branch ${branchName}`)} disabled={sourceBusy}><GitBranch size={16} /> Create</button>
         </div>
         <label>Origin remote</label>
         <div className="inline-form">
-          <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} />
-          <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated.')}><Github size={16} /> Set origin</button>
+          <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} disabled={sourceBusy} />
+          <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
         </div>
         <label>Commit message</label>
-        <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change..." />
+        <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change..." disabled={sourceBusy} />
         <div className="decision-row">
-          <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!hasChanges}><Check size={16} /> Stage all</button>
-          <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')}><Check size={16} /> Commit</button>
-          <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')}><RefreshCcw size={16} /> Fetch</button>
-          <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')}><Download size={16} /> Pull</button>
-          <button onClick={() => action('/api/source/push', {}, 'Pushed current branch.')}><Upload size={16} /> Push</button>
+          <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!canStageAll}><Check size={16} /> Stage all</button>
+          <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')} disabled={!canCommit}><Check size={16} /> Commit</button>
+          <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch</button>
+          <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull</button>
+          <button onClick={() => action('/api/source/push', {}, 'Pushed current branch.')} disabled={sourceBusy || source?.hasConflicts}><Upload size={16} /> Push</button>
         </div>
+        {operationOutput && <pre className="code-block compact-code">{operationOutput}</pre>}
       </div>
 
       <div className="panel">
         <h2>Status</h2>
         <pre className="code-block">{source?.status || 'No status yet.'}</pre>
+        <h2>Changed Files</h2>
+        <div className="source-file-list">
+          {changedFiles.length === 0 ? (
+            <Empty title="Clean" body="No changed files." />
+          ) : changedFiles.map((file) => (
+            <div className="source-file-row" key={`${file.status}-${file.path}`}>
+              <div>
+                <strong>{file.path}</strong>
+                <span>{file.status}{file.staged ? ' staged' : ' unstaged'}</span>
+              </div>
+              {file.protected ? <Pill tone="bad">Protected</Pill> : <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>}
+            </div>
+          ))}
+        </div>
         <h2>Remotes</h2>
         <pre className="code-block">{source?.remotes || 'No Git remotes configured yet.'}</pre>
       </div>

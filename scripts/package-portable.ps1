@@ -21,7 +21,9 @@ Write-Host "Repo: $repoRoot"
 Push-Location $repoRoot
 try {
   npm.cmd install
+  if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
   npm.cmd run build
+  if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
 }
 finally {
   Pop-Location
@@ -63,6 +65,28 @@ foreach ($item in $itemsToCopy) {
     Copy-Item -Path $source -Destination $appRoot -Recurse -Force
   }
 }
+
+$blockedPatterns = @(
+  "data",
+  ".env",
+  "*.sqlite",
+  "*.sqlite3",
+  "*.db",
+  "*.gguf",
+  "*.safetensors",
+  "*.onnx",
+  "*.log"
+)
+
+foreach ($pattern in $blockedPatterns) {
+  Get-ChildItem -LiteralPath $appRoot -Recurse -Force -ErrorAction SilentlyContinue -Filter $pattern |
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Get-ChildItem -LiteralPath $appRoot -Recurse -File |
+  ForEach-Object { $_.FullName.Substring($appRoot.Length + 1) -replace '\\', '/' } |
+  Sort-Object |
+  Set-Content -Path (Join-Path $portableRoot "PACKAGED_FILES.txt") -Encoding UTF8
 
 @"
 @echo off

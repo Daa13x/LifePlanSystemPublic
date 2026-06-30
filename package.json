@@ -13,7 +13,7 @@
     "start": "node server/index.js",
     "check": "npm run build",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
-    "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1; ISCC.exe installer/LifePlannerPortable.iss"
+    "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",

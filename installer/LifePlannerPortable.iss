@@ -26,7 +26,7 @@ Uninstallable=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "app\data\*,app\.env,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
 
 [Icons]
 Name: "{group}\Life Planner"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

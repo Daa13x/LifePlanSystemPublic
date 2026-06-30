@@ -43,6 +43,10 @@
 body { margin: 0; min-width: 1080px; background: var(--bg); }
 button, input, textarea { font: inherit; }
 button { border: 0; cursor: pointer; }
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
 
 .app-shell {
   min-height: 100vh;
@@ -558,6 +562,54 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   padding: 12px 16px;
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel-2) 58%, transparent);
+}
+
+.source-warning {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  color: var(--soft);
+  background: var(--panel-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.source-warning.info { border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); color: var(--blue); }
+.source-warning.warn { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); color: var(--amber); }
+.source-warning.bad { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); color: var(--red); }
+
+.source-file-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+
+.source-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 10px 12px;
+}
+
+.source-file-row strong,
+.source-file-row span {
+  display: block;
+}
+
+.source-file-row strong {
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.source-file-row span {
+  color: var(--muted);
+  font-size: 12px;
 }
 .context-bar .inline-form {
   margin-bottom: 8px;
