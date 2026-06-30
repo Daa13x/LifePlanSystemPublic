@@ -648,6 +648,33 @@ app.post('/api/approvals/:id/:decision', (req, res) => {
   }
 });
 
+app.post('/api/approvals/:id/revalidate', (req, res) => {
+  try {
+    const approval = row('SELECT * FROM approvals WHERE id = ?', [req.params.id]);
+    if (!approval) return fail(res, 404, 'Approval not found.');
+    const payload = JSON.parse(approval.payload || '{}');
+    if (approval.action_type === 'repo_write') {
+      const target = safeWorkspacePath(payload.operation === 'rename' ? payload.fromFile : payload.targetFile);
+      if (isProtectedWorkspacePath(target.normalized)) return fail(res, 400, `Protected/private file cannot be changed: ${target.normalized}`);
+      const exists = fs.existsSync(target.absolute);
+      const current = exists && fs.statSync(target.absolute).isFile() ? fs.readFileSync(target.absolute, 'utf8') : '';
+      const stale = Object.hasOwn(payload, 'previousContent') && current !== String(payload.previousContent || '');
+      return ok(res, { valid: !stale, stale, message: stale ? `File changed since proposal: ${target.normalized}` : 'Proposal still matches current file state.' });
+    }
+    if (approval.action_type === 'update_project') {
+      const target = row('SELECT * FROM projects WHERE id = ?', [payload.id]);
+      if (!target) return ok(res, { valid: false, stale: true, message: 'Project no longer exists.' });
+      const previous = payload.previous || {};
+      const stale = ['name', 'status', 'owner', 'next_action'].some((key) => Object.hasOwn(previous, key) && String(target[key] || '') !== String(previous[key] || ''))
+        || (Object.hasOwn(previous, 'confidence') && Number(target.confidence || 0) !== Number(previous.confidence || 0));
+      return ok(res, { valid: !stale, stale, message: stale ? 'Project changed since proposal.' : 'Proposal still matches current project state.' });
+    }
+    ok(res, { valid: true, stale: false, message: 'No external stale checks are required for this approval.' });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
 app.post('/api/approvals', (req, res) => {
   const { action_type, title, payload, priority } = req.body;
   if (!action_type || !title || !payload) return fail(res, 400, 'action_type, title, and payload are required.');

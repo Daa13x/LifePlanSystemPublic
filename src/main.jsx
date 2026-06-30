@@ -518,6 +518,7 @@ function Memory({ memory, refresh }) {
 
 function ApprovalQueue({ setNotice, refreshPlanner }) {
   const [items, setItems] = useState([]);
+  const [checks, setChecks] = useState({});
 
   async function load() {
     const data = await api('/api/planner');
@@ -552,6 +553,7 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
         <div className="approval-list">
           {items.map((item) => {
             const payload = JSON.parse(item.payload || '{}');
+            const check = checks[item.id];
             return (
               <div className="approval-card" key={item.id}>
                 <div className="panel-heading">
@@ -562,7 +564,18 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
                   </div>
                   <Pill tone="info">{item.action_type}</Pill>
                 </div>
-                {payload.targetFile && <pre className="code-block compact-code">Target: {payload.targetFile}{'\n'}Source: {payload.source || 'unknown'}</pre>}
+                {(payload.targetFile || payload.id) && (
+                  <pre className="code-block compact-code">
+{[
+  payload.operation && `Operation: ${payload.operation}`,
+  payload.fromFile && `From: ${payload.fromFile}`,
+  payload.targetFile && `Target: ${payload.targetFile}`,
+  payload.id && `Record id: ${payload.id}`,
+  `Source: ${payload.source || 'unknown'}`
+].filter(Boolean).join('\n')}
+                  </pre>
+                )}
+                {check && <div className={cx('source-warning', check.valid ? 'info' : 'bad')}>{check.message}</div>}
                 {payload.previousContent !== undefined && (
                   <div className="diff-columns">
                     <pre className="code-block compact-code">{payload.previousContent || '(new file)'}</pre>
@@ -570,6 +583,7 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
                   </div>
                 )}
                 <div className="decision-row">
+                  <button onClick={() => revalidate(item.id)}><RefreshCcw size={16} /> Revalidate</button>
                   <button className="primary" onClick={() => decide(item.id, 'approve')}><Check size={16} /> Approve</button>
                   <button onClick={() => decide(item.id, 'defer')}><Clock3 size={16} /> Defer</button>
                   <button className="danger" onClick={() => decide(item.id, 'deny')}><X size={16} /> Deny</button>
@@ -597,6 +611,16 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
       confidence: Number(project.confidence || 0.75),
       next_action: project.next_action || ''
     });
+  }
+
+  async function revalidate(id) {
+    try {
+      const result = await api(`/api/approvals/${id}/revalidate`, { method: 'POST' });
+      setChecks((current) => ({ ...current, [id]: result }));
+      setNotice(result.message);
+    } catch (err) {
+      setNotice(err.message);
+    }
   }
 
   async function createProject() {
