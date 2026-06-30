@@ -1,4 +1,29 @@
-# Life Planner
+﻿# LifePlanSystemPublic / Life Planner
+
+Public-safe Life Planner UI and local-first planning assistant. This branch contains the runnable app plus the sanitised collaboration scaffold.
+
+## Public Scaffold Purpose
+
+LifePlanSystemPublic is a clean collaboration scaffold for designing a UI around a Markdown/Git-backed LifePlanSystem. It deliberately excludes private memories, therapy context, health details, relationship details, legal details, and personal source-of-truth.
+
+Core rules:
+
+- Repository/Markdown remains source-of-truth.
+- AI proposes; user approves meaningful changes.
+- Historical records are preserved.
+- Facts, hypotheses, predictions, preferences, and interpretations are separated.
+- Important claims should have provenance and confidence.
+- The UI must not become a second competing memory system.
+
+Start here for scaffold context:
+
+- `docs/ui/UI_PRODUCT_SPEC.md`
+- `docs/architecture/SYSTEM_ARCHITECTURE.md`
+- `rules/LIS_RULES_SANITISED.md`
+- `docs/handoffs/COLLABORATOR_HANDOFF.md`
+
+---
+
 
 Local-first desktop planning assistant and repo control centre. The app is designed to help a user decide what deserves attention next, review memory safely, browse source files, and stage repo writes behind explicit approval.
 
