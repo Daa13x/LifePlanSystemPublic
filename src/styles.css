@@ -543,7 +543,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .message p { margin: 5px 0 0; color: var(--text); font-size: 14px; }
 .composer { padding: 14px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 10px; }
 
-input, textarea {
+input, textarea, select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -554,6 +554,41 @@ input, textarea {
 }
 textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .composer textarea { min-height: 50px; max-height: 140px; }
+.context-bar {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel-2) 58%, transparent);
+}
+.context-bar .inline-form {
+  margin-bottom: 8px;
+}
+.context-chips {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.context-chips > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.context-chips button {
+  max-width: 280px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-radius: 999px;
+  color: var(--soft);
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.context-chips button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .two-column, .settings-grid {
   display: grid;
@@ -607,6 +642,42 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.model-suggestions {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.suggestion-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.suggestion-row strong,
+.suggestion-row span,
+.suggestion-row small {
+  display: block;
+}
+.suggestion-row span,
+.suggestion-row small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: 4px;
+}
+.suggestion-row button {
+  min-height: 34px;
+  border-radius: 8px;
+  padding: 0 12px;
+  color: #041511;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  font-weight: 700;
 }
 .settings-grid label { display: block; margin: 12px 0 6px; color: var(--soft); }
 .import-export { display: grid; gap: 10px; }

@@ -14,7 +14,7 @@ This repository is currently pushed to `neuro-1977/lps` and is intended to be me
 - Repository explorer for Markdown/JSON/YAML/text files.
 - Staged repository write proposals. The app does not silently edit source-of-truth files.
 - Source control screen for local Git status, diff, branches, remotes, stage, commit, and push.
-- Tooling screen that detects and can locally install Playwright, Playwright Chromium, and Puppeteer.
+- Tooling screen that detects and can locally install Playwright plus its Chromium runtime for external browser/tab control.
 - Browser/cloud consultation workflow. Cloud output is saved as reviewable suggestion only.
 - Local model registry for `.gguf` files, Planner Assistant assignment, and Hugging Face GGUF download.
 - JSON and Markdown import/export.
@@ -62,12 +62,11 @@ npm run build
 
 ## Local Tooling Bootstrap
 
-The Tooling tab can install browser automation dependencies locally:
+The Tooling tab can install Playwright browser-control dependencies locally:
 
 ```bash
 npm install playwright
 npx playwright install chromium
-npm install puppeteer
 ```
 
 GitHub CLI is an OS-level dependency:
@@ -85,6 +84,63 @@ hf auth login
 ```
 
 HF tokens can also be stored through the Settings screen instead of CLI login.
+
+## Portable One-Folder Build
+
+The app can be prepared as a self-contained portable folder with a bundled Node runtime:
+
+```powershell
+npm run package:portable
+```
+
+Output:
+
+```text
+release/LifePlannerPortable/
+```
+
+Run:
+
+```text
+release/LifePlannerPortable/Start Life Planner.cmd
+```
+
+That starts the local server and opens:
+
+```text
+http://127.0.0.1:4177/
+```
+
+Runtime data is stored inside:
+
+```text
+release/LifePlannerPortable/app/data/
+```
+
+Do not commit or publish that `data` folder.
+
+### Inno Setup Installer
+
+Install Inno Setup, then run:
+
+```powershell
+npm run package:inno
+```
+
+or manually:
+
+```powershell
+npm run package:portable
+ISCC.exe installer/LifePlannerPortable.iss
+```
+
+Installer output:
+
+```text
+release/LifePlannerPortableSetup.exe
+```
+
+The installer places the same one-folder portable app layout under the selected install directory. It does not embed private runtime data from `data/`.
 
 ## Data And Privacy
 

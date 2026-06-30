@@ -1,6 +1,7 @@
 import express from 'express';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
@@ -202,16 +203,46 @@ app.get('/api/chat/sessions/:id/messages', (req, res) => {
   ok(res, allRows('SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC, id ASC', [req.params.id]));
 });
 
+app.get('/api/chat/sessions/:id/context', (req, res) => {
+  ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
+});
+
+app.post('/api/chat/sessions/:id/context', (req, res) => {
+  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
+  if (!session) return fail(res, 404, 'Session not found.');
+  try {
+    const target = safeWorkspacePath(req.body.path);
+    if (!fs.existsSync(target.absolute) || !fs.statSync(target.absolute).isFile()) return fail(res, 404, 'Context file not found.');
+    db.prepare(`
+      INSERT INTO chat_context_files (session_id, path)
+      VALUES (?, ?)
+      ON CONFLICT(session_id, path) DO NOTHING
+    `).run(req.params.id, target.normalized);
+    ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.delete('/api/chat/sessions/:id/context/:contextId', (req, res) => {
+  db.prepare('DELETE FROM chat_context_files WHERE id = ? AND session_id = ?').run(req.params.contextId, req.params.id);
+  ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
+});
+
 app.post('/api/chat/sessions/:id/messages', (req, res) => {
   const content = req.body.content?.trim();
   if (!content) return fail(res, 400, 'Message content is required.');
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
+  const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]);
   const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'user', content).lastInsertRowid;
   const candidateId = createCandidateFromMessage(Number(req.params.id), messageId, content);
-  const response = candidateId
+  const contextLine = contexts.length
+    ? `\n\nFiles in context: ${contexts.map((item) => item.path).join(', ')}. Source files are context only; I am not treating inference as source-of-truth.`
+    : '';
+  const response = (candidateId
     ? 'Saved your note as a memory candidate for review. I will not promote it until you approve it.'
-    : 'Saved to the chat history. I did not extract a memory candidate from this short note.';
+    : 'Saved to the chat history. I did not extract a memory candidate from this short note.') + contextLine;
   const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'assistant', response).lastInsertRowid;
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
   ok(res, {
@@ -303,6 +334,42 @@ app.post('/api/projects', (req, res) => {
 
 app.get('/api/models', (_req, res) => ok(res, allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')));
 
+app.get('/api/hardware', async (_req, res) => {
+  const cpu = os.cpus()?.[0]?.model || 'Unknown CPU';
+  const cores = os.cpus()?.length || 0;
+  const totalRamGb = Math.round((os.totalmem() / 1024 / 1024 / 1024) * 10) / 10;
+  let gpus = [];
+  if (process.platform === 'win32') {
+    const gpuResult = await runCli('powershell.exe', [
+      '-NoProfile',
+      '-Command',
+      "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json -Compress"
+    ], { timeout: 10000, maxBuffer: 1024 * 1024 });
+    if (gpuResult.ok && gpuResult.stdout) {
+      try {
+        const parsed = JSON.parse(gpuResult.stdout);
+        gpus = (Array.isArray(parsed) ? parsed : [parsed]).filter(Boolean).map((gpu) => ({
+          name: gpu.Name || 'Unknown GPU',
+          vramGb: gpu.AdapterRAM ? Math.round((Number(gpu.AdapterRAM) / 1024 / 1024 / 1024) * 10) / 10 : null
+        }));
+      } catch {
+        gpus = [];
+      }
+    }
+  }
+  const maxVramGb = Math.max(0, ...gpus.map((gpu) => Number(gpu.vramGb || 0)));
+  let tier = 'small';
+  let recommendation = 'Prefer 3B-4B instruct GGUF, Q4_K_M or Q5_K_M.';
+  if (totalRamGb >= 48 || maxVramGb >= 12) {
+    tier = 'large';
+    recommendation = '7B-9B instruct GGUF should be comfortable; try Q4_K_M/Q5_K_M, Q6 if memory allows.';
+  } else if (totalRamGb >= 24 || maxVramGb >= 8) {
+    tier = 'medium';
+    recommendation = 'Prefer 4B-7B instruct GGUF, Q4_K_M for responsiveness.';
+  }
+  ok(res, { cpu, cores, totalRamGb, gpus, maxVramGb, tier, recommendation });
+});
+
 app.post('/api/models/scan', (req, res) => {
   const folders = req.body.folders?.length ? req.body.folders : getSetting('modelFolders', []);
   const discovered = [];
@@ -347,6 +414,23 @@ app.get('/api/hf/files', async (req, res) => {
   if (!response.ok) return fail(res, response.status, `Hugging Face lookup failed: ${response.statusText}`);
   const files = (await response.json()).filter((f) => f.type === 'file' && f.path.toLowerCase().endsWith('.gguf'));
   ok(res, files);
+});
+
+app.get('/api/hf/search', async (req, res) => {
+  const query = String(req.query.q || 'GGUF instruct').trim();
+  const token = getSetting('hfToken', '');
+  const response = await fetch(`https://huggingface.co/api/models?search=${encodeURIComponent(query)}&limit=25`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {}
+  });
+  if (!response.ok) return fail(res, response.status, `Hugging Face search failed: ${response.statusText}`);
+  const models = (await response.json()).map((model) => ({
+    id: model.id,
+    downloads: model.downloads || 0,
+    likes: model.likes || 0,
+    tags: model.tags || [],
+    pipeline_tag: model.pipeline_tag || ''
+  })).filter((model) => model.id && (model.id.toLowerCase().includes('gguf') || model.tags.some((tag) => String(tag).toLowerCase().includes('gguf'))));
+  ok(res, models);
 });
 
 app.post('/api/hf/download', async (req, res) => {
@@ -458,7 +542,6 @@ app.get('/api/tooling/status', async (_req, res) => {
     runCli('hf', ['auth', 'whoami'])
   ]);
   const playwright = await packageAvailable('playwright');
-  const puppeteer = await packageAvailable('puppeteer');
   const playwrightChromium = playwright
     ? await npxRun(['playwright', 'install', '--dry-run', 'chromium'])
     : { ok: false, available: false, stderr: 'Playwright package is not installed.' };
@@ -471,7 +554,6 @@ app.get('/api/tooling/status', async (_req, res) => {
       chromiumCheck: playwrightChromium.ok,
       detail: playwrightChromium.stdout || playwrightChromium.stderr
     },
-    puppeteer: { available: puppeteer },
     githubCli: {
       available: ghStatus.available,
       authenticated: ghStatus.ok,
@@ -493,10 +575,9 @@ app.post('/api/tooling/install', async (req, res) => {
   const tool = req.body.tool;
   const installers = {
     playwright: () => npmInstall(['install', 'playwright']),
-    playwrightChromium: () => npxRun(['playwright', 'install', 'chromium']),
-    puppeteer: () => npmInstall(['install', 'puppeteer'])
+    playwrightChromium: () => npxRun(['playwright', 'install', 'chromium'])
   };
-  if (!installers[tool]) return fail(res, 400, 'Supported tools: playwright, playwrightChromium, puppeteer.');
+  if (!installers[tool]) return fail(res, 400, 'Supported tools: playwright, playwrightChromium.');
   const result = await installers[tool]();
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || `Failed to install ${tool}.`);
   ok(res, { tool, output: result.stdout || result.stderr || `${tool} installed locally.` });
@@ -737,6 +818,14 @@ app.post('/api/import/markdown', (req, res) => {
   ok(res, row('SELECT * FROM knowledge_items WHERE id = ?', [id]));
 });
 
+const distDir = path.join(root, 'dist');
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir));
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(distDir, 'index.html'));
+  });
+}
+
 app.listen(port, '127.0.0.1', () => {
-  console.log(`Life Planner API running at http://127.0.0.1:${port}`);
+  console.log(`Life Planner running at http://127.0.0.1:${port}`);
 });

@@ -330,6 +330,9 @@ function ApprovalRow({ item, refresh }) {
 
 function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice }) {
   const [draft, setDraft] = useState('');
+  const [repoFiles, setRepoFiles] = useState([]);
+  const [contextFiles, setContextFiles] = useState([]);
+  const [selectedFile, setSelectedFile] = useState('');
 
   async function send() {
     if (!draft.trim() || !selectedSession) return;
@@ -353,6 +356,45 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     setSessions((current) => current.map((session) => (session.id === id ? updated : session)).filter((session) => !session.deleted));
     if (body.deleted && selectedSession === id) setSelectedSession(sessions.find((session) => session.id !== id)?.id || null);
   }
+
+  async function loadContext(sessionId = selectedSession) {
+    if (!sessionId) return;
+    try {
+      setContextFiles(await api(`/api/chat/sessions/${sessionId}/context`));
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  async function addContextFile() {
+    if (!selectedSession || !selectedFile) return;
+    try {
+      setContextFiles(await api(`/api/chat/sessions/${selectedSession}/context`, {
+        method: 'POST',
+        body: JSON.stringify({ path: selectedFile })
+      }));
+      setSelectedFile('');
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  async function removeContextFile(contextId) {
+    if (!selectedSession) return;
+    try {
+      setContextFiles(await api(`/api/chat/sessions/${selectedSession}/context/${contextId}`, { method: 'DELETE' }));
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  useEffect(() => {
+    api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
+  }, []);
+
+  useEffect(() => {
+    loadContext();
+  }, [selectedSession]);
 
   return (
     <section className="chat-layout">
@@ -381,6 +423,24 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               <button className="icon-button danger" onClick={() => patchSession(activeSession.id, { deleted: 1 })}><Trash2 size={16} /></button>
             </div>
           )}
+        </div>
+        <div className="context-bar">
+          <div className="inline-form">
+            <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
+              <option value="">Attach repo file as context</option>
+              {repoFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}
+            </select>
+            <button onClick={addContextFile} disabled={!selectedFile}><Plus size={16} /> Add</button>
+          </div>
+          <div className="context-chips">
+            {contextFiles.length === 0 ? <span>No repo files attached.</span> : contextFiles.map((file) => (
+              <button key={file.id} onClick={() => removeContextFile(file.id)} title="Remove context file">
+                <FileText size={13} />
+                <span>{file.path}</span>
+                <X size={13} />
+              </button>
+            ))}
+          </div>
         </div>
         <div className="messages">
           {messages.map((message) => (
@@ -651,7 +711,7 @@ function Tooling({ setNotice }) {
       id: 'playwright',
       name: 'Playwright package',
       state: status?.playwright?.available,
-      detail: status?.playwright?.available ? 'Installed in local node_modules.' : 'Needed for controlled browser automation.',
+      detail: status?.playwright?.available ? 'Installed in local node_modules.' : 'Needed for external browser and tab control.',
       action: () => install('playwright')
     },
     {
@@ -661,13 +721,6 @@ function Tooling({ setNotice }) {
       detail: status?.playwright?.chromiumCheck ? 'Installed in the local Playwright browser cache.' : 'Downloads the browser runtime Playwright controls.',
       action: () => install('playwrightChromium'),
       disabled: !status?.playwright?.available
-    },
-    {
-      id: 'puppeteer',
-      name: 'Puppeteer',
-      state: status?.puppeteer?.available,
-      detail: status?.puppeteer?.available ? 'Installed in local node_modules.' : 'Optional alternate browser automation package.',
-      action: () => install('puppeteer')
     }
   ];
 
@@ -676,7 +729,7 @@ function Tooling({ setNotice }) {
       <div className="panel source-hero">
         <div>
           <h2>Local Tooling</h2>
-          <p>Bootstrap browser automation and repo helpers locally. Installs use this app folder, not global project state unless the tool requires it.</p>
+          <p>Bootstrap Playwright for external browser and tab control. Installs use this app folder, not global project state unless the tool requires it.</p>
         </div>
         <button onClick={refresh}><RefreshCcw size={16} /> Refresh</button>
       </div>
@@ -693,7 +746,7 @@ function Tooling({ setNotice }) {
 
       <div className="panel">
         <h2>Browser Automation</h2>
-        <p>Playwright is the preferred controlled-browser path. Puppeteer is available as a fallback for scripts that expect it.</p>
+        <p>Playwright is the app's browser-control stack for cloud consultation tabs and future desktop-app attachment where supported.</p>
         <div className="tool-list">
           {rows.map((row) => (
             <div className="tool-row" key={row.id}>
@@ -718,7 +771,6 @@ function Tooling({ setNotice }) {
 {`What the app can install locally:
 - npm install playwright
 - npx playwright install chromium
-- npm install puppeteer
 
 What needs an OS/user install:
 - GitHub CLI: ${status?.installHints?.githubCli || 'winget install --id GitHub.cli'}
@@ -973,12 +1025,57 @@ function SourceControl({ setNotice }) {
   );
 }
 
+const MODEL_SUGGESTIONS = [
+  {
+    repo: 'bartowski/Qwen2.5-3B-Instruct-GGUF',
+    name: 'Qwen2.5 3B Instruct',
+    size: '3B',
+    tier: 'small',
+    why: 'Fast baseline for low-memory laptops and quick planning.'
+  },
+  {
+    repo: 'bartowski/Phi-3.5-mini-instruct-GGUF',
+    name: 'Phi 3.5 Mini Instruct',
+    size: '3.8B',
+    tier: 'small',
+    why: 'Compact instruct model with modest RAM needs.'
+  },
+  {
+    repo: 'bartowski/gemma-2-9b-it-GGUF',
+    name: 'Gemma 2 9B IT',
+    size: '9B',
+    tier: 'large',
+    why: 'Good upper-end local assistant candidate when RAM/VRAM allows.'
+  },
+  {
+    repo: 'bartowski/Mistral-7B-Instruct-v0.3-GGUF',
+    name: 'Mistral 7B Instruct v0.3',
+    size: '7B',
+    tier: 'medium',
+    why: 'Reliable general instruct model for midrange machines.'
+  },
+  {
+    repo: 'bartowski/Llama-3.1-8B-Instruct-GGUF',
+    name: 'Llama 3.1 8B Instruct',
+    size: '8B',
+    tier: 'large',
+    why: 'Strong general assistant option if memory headroom is comfortable.'
+  }
+];
+
 function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [modelFolders, setModelFolders] = useState((settings.modelFolders || []).join('\n'));
   const [hfToken, setHfToken] = useState(settings.hfToken || '');
   const [repo, setRepo] = useState('');
+  const [modelSearch, setModelSearch] = useState('instruct gguf');
+  const [hardware, setHardware] = useState(null);
+  const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
+
+  useEffect(() => {
+    api('/api/hardware').then(setHardware).catch((err) => setNotice(err.message));
+  }, []);
 
   async function saveSettings() {
     const data = await api('/api/settings', {
@@ -1000,20 +1097,57 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
 
   async function assign(id) {
     setModels(await api(`/api/models/${id}/assign`, { method: 'POST', body: JSON.stringify({ role: 'Planner Assistant' }) }));
+    setNotice('Loaded model assignment for Planner Assistant.');
   }
 
   async function lookupHF() {
     setHfFiles(await api(`/api/hf/files?repo=${encodeURIComponent(repo)}`));
   }
 
+  async function searchHF() {
+    setHfSearchResults(await api(`/api/hf/search?q=${encodeURIComponent(modelSearch)}`));
+  }
+
+  async function useRepo(nextRepo) {
+    setRepo(nextRepo);
+    setHfFiles(await api(`/api/hf/files?repo=${encodeURIComponent(nextRepo)}`));
+  }
+
   async function download(file) {
     await saveSettings();
-    await api('/api/hf/download', { method: 'POST', body: JSON.stringify({ repo, file: file.path, folder: downloadFolder || undefined }) });
+    const result = await api('/api/hf/download', { method: 'POST', body: JSON.stringify({ repo, file: file.path, folder: downloadFolder || undefined }) });
     await scan();
+    setNotice(`Downloaded ${file.path} to ${result.target}. Use Load to assign it.`);
   }
 
   return (
     <section className="settings-grid">
+      <div className="panel">
+        <h2>Model Picker</h2>
+        <p>Hardware-aware suggestions for local GGUF instruct models.</p>
+        <div className="connection-grid">
+          <div><span>CPU</span><strong>{hardware?.cpu || 'Detecting...'}</strong><small>{hardware?.cores || 0} logical core(s)</small></div>
+          <div><span>System RAM</span><strong>{hardware ? `${hardware.totalRamGb} GB` : 'Detecting...'}</strong><small>{hardware?.recommendation || 'Checking local hardware.'}</small></div>
+          <div><span>GPU / VRAM</span><strong>{hardware?.gpus?.[0]?.name || 'No GPU detected'}</strong><small>{hardware?.maxVramGb ? `${hardware.maxVramGb} GB max reported VRAM` : 'CPU/RAM mode likely.'}</small></div>
+          <div><span>Suggested tier</span><Pill tone={hardware?.tier === 'large' ? 'good' : hardware?.tier === 'medium' ? 'info' : 'warn'}>{hardware?.tier || 'detecting'}</Pill><small>Start conservative; upgrade if responses are fast.</small></div>
+        </div>
+        <label>Filter suggestions</label>
+        <input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="7B instruct GGUF" />
+        <div className="model-suggestions">
+          {MODEL_SUGGESTIONS
+            .filter((item) => `${item.repo} ${item.name} ${item.size} ${item.tier}`.toLowerCase().includes(modelSearch.toLowerCase()) || item.tier === hardware?.tier)
+            .map((item) => (
+              <div className="suggestion-row" key={item.repo}>
+                <div>
+                  <strong>{item.name}</strong>
+                  <span>{item.size} - {item.tier} - {item.why}</span>
+                  <small>{item.repo}</small>
+                </div>
+                <button onClick={() => useRepo(item.repo)}>Use</button>
+              </div>
+            ))}
+        </div>
+      </div>
       <div className="panel">
         <h2>Local Model Registry</h2>
         <p>Scan folders for GGUF files and assign one model to Planner Assistant.</p>
@@ -1031,7 +1165,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
                 <span>{model.path}</span>
               </div>
               <button className={model.assigned_role ? 'primary' : ''} onClick={() => assign(model.id)}>
-                {model.assigned_role || 'Assign'}
+                {model.assigned_role || 'Load'}
               </button>
             </div>
           ))}
@@ -1048,6 +1182,21 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <div className="inline-form">
           <input value={repo} onChange={(event) => setRepo(event.target.value)} placeholder="bartowski/Qwen2.5-7B-Instruct-GGUF" />
           <button onClick={lookupHF}>Files</button>
+        </div>
+        <div className="inline-form">
+          <input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Search Hugging Face GGUF models" />
+          <button onClick={searchHF}><SearchCheck size={16} /> Search</button>
+        </div>
+        <div className="table-list">
+          {hfSearchResults.map((model) => (
+            <div className="model-row" key={model.id}>
+              <div>
+                <strong>{model.id}</strong>
+                <span>{model.downloads} downloads - {model.likes} likes</span>
+              </div>
+              <button onClick={() => useRepo(model.id)}>Files</button>
+            </div>
+          ))}
         </div>
         <div className="table-list">
           {hfFiles.map((file) => (
