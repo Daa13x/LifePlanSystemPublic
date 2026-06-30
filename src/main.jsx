@@ -340,19 +340,29 @@ function ApprovalRow({ item, refresh }) {
 
 function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice }) {
   const [draft, setDraft] = useState('');
+  const [chatBusy, setChatBusy] = useState(false);
+  const [runtimeMode, setRuntimeMode] = useState('');
   const [repoFiles, setRepoFiles] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
 
   async function send() {
-    if (!draft.trim() || !selectedSession) return;
-    const result = await api(`/api/chat/sessions/${selectedSession}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({ content: draft })
-    });
-    setMessages((current) => [...current, ...result.messages]);
-    setDraft('');
-    refreshAll();
+    if (!draft.trim() || !selectedSession || chatBusy) return;
+    setChatBusy(true);
+    try {
+      const result = await api(`/api/chat/sessions/${selectedSession}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ content: draft })
+      });
+      setMessages((current) => [...current, ...result.messages]);
+      setRuntimeMode(result.runtime || '');
+      setDraft('');
+      refreshAll();
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setChatBusy(false);
+    }
   }
 
   async function newSession() {
@@ -421,7 +431,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         <div className="chat-header">
           <div>
             <h2>{activeSession?.title || 'Chat'}</h2>
-            <p>Messages persist. Useful statements become reviewable memory candidates.</p>
+            <p>Messages persist. Useful statements become reviewable memory candidates.{runtimeMode ? ` Last runtime: ${runtimeMode}.` : ''}</p>
           </div>
           {activeSession && (
             <div className="row-actions">
@@ -461,8 +471,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           ))}
         </div>
         <div className="composer">
-          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." />
-          <button className="primary" onClick={send}><Bot size={16} /> Send</button>
+          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
+          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
       </div>
     </section>
@@ -1159,23 +1169,34 @@ const MODEL_SUGGESTIONS = [
 function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [modelFolders, setModelFolders] = useState((settings.modelFolders || []).join('\n'));
   const [hfToken, setHfToken] = useState(settings.hfToken || '');
+  const [localModelEndpoint, setLocalModelEndpoint] = useState(settings.localModelEndpoint || '');
+  const [llamaCliPath, setLlamaCliPath] = useState(settings.llamaCliPath || '');
   const [repo, setRepo] = useState('');
   const [modelSearch, setModelSearch] = useState('instruct gguf');
   const [hardware, setHardware] = useState(null);
+  const [runtime, setRuntime] = useState(null);
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
 
   useEffect(() => {
     api('/api/hardware').then(setHardware).catch((err) => setNotice(err.message));
+    api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
   }, []);
 
   async function saveSettings() {
     const data = await api('/api/settings', {
       method: 'POST',
-      body: JSON.stringify({ hfToken, modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean), modelDownloadFolder: downloadFolder })
+      body: JSON.stringify({
+        hfToken,
+        modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean),
+        modelDownloadFolder: downloadFolder,
+        localModelEndpoint,
+        llamaCliPath
+      })
     });
     setSettings(data);
+    setRuntime(await api('/api/models/runtime'));
     setNotice('Settings saved locally.');
   }
 
@@ -1190,6 +1211,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
 
   async function assign(id) {
     setModels(await api(`/api/models/${id}/assign`, { method: 'POST', body: JSON.stringify({ role: 'Planner Assistant' }) }));
+    setRuntime(await api('/api/models/runtime'));
     setNotice('Loaded model assignment for Planner Assistant.');
   }
 
@@ -1244,8 +1266,17 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
       <div className="panel">
         <h2>Local Model Registry</h2>
         <p>Scan folders for GGUF files and assign one model to Planner Assistant.</p>
+        <div className="runtime-card">
+          <Pill tone={runtime?.assigned ? 'good' : 'warn'}>{runtime?.assigned ? 'Model assigned' : 'No model assigned'}</Pill>
+          <strong>{runtime?.model?.name || 'Planner Assistant unavailable'}</strong>
+          <span>{runtime?.endpointConfigured ? `Endpoint: ${runtime.endpoint}` : runtime?.llamaCliConfigured ? `llama-cli: ${runtime.llamaCliExists ? 'found' : 'missing'}` : 'Configure a local endpoint or llama-cli to generate chat responses.'}</span>
+        </div>
         <label>Model folders</label>
         <textarea value={modelFolders} onChange={(event) => setModelFolders(event.target.value)} placeholder="C:\\Models&#10;D:\\LLMs" />
+        <label>OpenAI-compatible local endpoint</label>
+        <input value={localModelEndpoint} onChange={(event) => setLocalModelEndpoint(event.target.value)} placeholder="http://127.0.0.1:8080" />
+        <label>llama-cli path</label>
+        <input value={llamaCliPath} onChange={(event) => setLlamaCliPath(event.target.value)} placeholder="C:\\llama.cpp\\build\\bin\\llama-cli.exe" />
         <div className="decision-row">
           <button onClick={saveSettings}><Check size={16} /> Save</button>
           <button className="primary" onClick={scan}><RefreshCcw size={16} /> Scan GGUF</button>

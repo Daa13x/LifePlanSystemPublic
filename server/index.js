@@ -194,6 +194,148 @@ function createCandidateFromMessage(sessionId, messageId, content) {
   `).run(sessionId, messageId, type, title, trimmed, 'chat', `Chat session ${sessionId}, message ${messageId}`, 0.52).lastInsertRowid;
 }
 
+function assignedPlannerModel() {
+  return row("SELECT * FROM model_registry WHERE assigned_role = 'Planner Assistant' ORDER BY updated_at DESC LIMIT 1");
+}
+
+function readChatContextFiles(sessionId) {
+  const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
+  let remaining = 10000;
+  const files = [];
+  for (const item of contexts) {
+    if (remaining <= 0) break;
+    try {
+      const target = safeWorkspacePath(item.path);
+      if (!fs.existsSync(target.absolute) || !fs.statSync(target.absolute).isFile()) continue;
+      const text = fs.readFileSync(target.absolute, 'utf8').slice(0, remaining);
+      remaining -= text.length;
+      files.push({ path: target.normalized, text });
+    } catch {
+      // Ignore unreadable context files; they remain attached but do not block chat.
+    }
+  }
+  return files;
+}
+
+function buildAssistantPrompt(sessionId, userMessage) {
+  const memories = allRows(`
+    SELECT type, title, body, status, confidence, owner, next_action
+    FROM knowledge_items
+    WHERE status IN ('active', 'stable')
+    ORDER BY confidence DESC, updated_at DESC
+    LIMIT 12
+  `);
+  const pending = allRows('SELECT title, type, confidence FROM memory_candidates WHERE status IN (?, ?) ORDER BY created_at DESC LIMIT 8', ['candidate', 'deferred']);
+  const files = readChatContextFiles(sessionId);
+
+  const memoryBlock = memories.length
+    ? memories.map((item) => `- [${item.type}/${item.status}/${Math.round(Number(item.confidence || 0) * 100)}%] ${item.title}: ${item.body} Next: ${item.next_action || 'none'}`).join('\n')
+    : '- No approved memories yet.';
+  const pendingBlock = pending.length
+    ? pending.map((item) => `- [${item.type}/${Math.round(Number(item.confidence || 0) * 100)}%] ${item.title}`).join('\n')
+    : '- No pending memory candidates.';
+  const fileBlock = files.length
+    ? files.map((file) => `--- ${file.path} ---\n${file.text}`).join('\n\n')
+    : 'No attached source files.';
+
+  return [
+    'You are Life Planner, a local-first personal executive assistant.',
+    'Use the local database context below. Do not promote chat content to memory; mention candidate memories only as suggestions for user review.',
+    'Cloud agents are consultants only. If external critique is needed, recommend using the Browser consultation workflow.',
+    'Answer with a concise next step and any blockers or review items.',
+    '',
+    'Approved local knowledge:',
+    memoryBlock,
+    '',
+    'Pending memory candidates:',
+    pendingBlock,
+    '',
+    'Attached files:',
+    fileBlock,
+    '',
+    'User message:',
+    userMessage
+  ].join('\n');
+}
+
+async function localModelStatus() {
+  const model = assignedPlannerModel();
+  const endpoint = String(getSetting('localModelEndpoint', '') || '').trim();
+  const llamaCliPath = String(getSetting('llamaCliPath', '') || '').trim();
+  return {
+    assigned: Boolean(model),
+    model,
+    endpointConfigured: Boolean(endpoint),
+    endpoint,
+    llamaCliConfigured: Boolean(llamaCliPath),
+    llamaCliPath,
+    llamaCliExists: Boolean(llamaCliPath && fs.existsSync(llamaCliPath))
+  };
+}
+
+async function runEndpointModel(endpoint, prompt) {
+  const base = endpoint.replace(/\/+$/, '');
+  const url = base.endsWith('/v1/chat/completions') ? base : `${base}/v1/chat/completions`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'planner-assistant',
+      messages: [
+        { role: 'system', content: 'You are Life Planner. Keep answers concise, local-first, and governance-aware.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.3,
+      max_tokens: 700
+    })
+  });
+  if (!response.ok) throw new Error(`Local model endpoint failed: ${response.status} ${response.statusText}`);
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content?.trim() || data.choices?.[0]?.text?.trim() || '';
+}
+
+async function runLlamaCli(llamaCliPath, modelPath, prompt) {
+  const result = await execFileAsync(llamaCliPath, ['-m', modelPath, '-p', prompt, '-n', '700', '--temp', '0.3'], {
+    cwd: root,
+    timeout: 5 * 60 * 1000,
+    windowsHide: true,
+    maxBuffer: 4 * 1024 * 1024
+  });
+  return result.stdout.trim();
+}
+
+async function runPlannerAssistant(sessionId, userMessage) {
+  const status = await localModelStatus();
+  if (!status.assigned) {
+    return {
+      mode: 'unavailable',
+      content: 'Saved to chat. No Planner Assistant model is assigned yet; use Settings to scan/download a GGUF and load it as Planner Assistant.'
+    };
+  }
+
+  const prompt = buildAssistantPrompt(sessionId, userMessage);
+  try {
+    if (status.endpointConfigured) {
+      const content = await runEndpointModel(status.endpoint, prompt);
+      if (content) return { mode: 'local endpoint', content };
+    }
+    if (status.llamaCliConfigured && status.llamaCliExists) {
+      const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt);
+      if (content) return { mode: 'llama-cli', content };
+    }
+  } catch (error) {
+    return {
+      mode: 'runtime error',
+      content: `Saved to chat. Local model runtime failed: ${error.message}. The message remains available for memory review, and no memory was promoted automatically.`
+    };
+  }
+
+  return {
+    mode: 'unavailable',
+    content: 'Saved to chat. A Planner Assistant model is assigned, but no runnable local runtime is configured. Add an OpenAI-compatible local endpoint or llama-cli path in Settings.'
+  };
+}
+
 function plannerData() {
   const items = allRows(`
     SELECT k.*, p.name AS project_name
@@ -343,7 +485,7 @@ app.delete('/api/chat/sessions/:id/context/:contextId', (req, res) => {
   ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
 });
 
-app.post('/api/chat/sessions/:id/messages', (req, res) => {
+app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   const content = req.body.content?.trim();
   if (!content) return fail(res, 400, 'Message content is required.');
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
@@ -354,14 +496,17 @@ app.post('/api/chat/sessions/:id/messages', (req, res) => {
   const contextLine = contexts.length
     ? `\n\nFiles in context: ${contexts.map((item) => item.path).join(', ')}. Source files are context only; I am not treating inference as source-of-truth.`
     : '';
-  const response = (candidateId
-    ? 'Saved your note as a memory candidate for review. I will not promote it until you approve it.'
-    : 'Saved to the chat history. I did not extract a memory candidate from this short note.') + contextLine;
+  const assistant = await runPlannerAssistant(Number(req.params.id), content);
+  const governanceLine = candidateId
+    ? '\n\nMemory governance: I saved your note as a candidate for review and will not promote it until you approve it.'
+    : '\n\nMemory governance: I saved this to chat history and did not extract a memory candidate from this short note.';
+  const response = `${assistant.content}${governanceLine}${contextLine}\n\nRuntime: ${assistant.mode}.`;
   const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'assistant', response).lastInsertRowid;
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
   ok(res, {
     messages: allRows('SELECT * FROM chat_messages WHERE id IN (?, ?) ORDER BY id ASC', [messageId, assistantId]),
-    candidateId
+    candidateId,
+    runtime: assistant.mode
   });
 });
 
@@ -474,6 +619,10 @@ app.post('/api/projects', (req, res) => {
 });
 
 app.get('/api/models', (_req, res) => ok(res, allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')));
+
+app.get('/api/models/runtime', async (_req, res) => {
+  ok(res, await localModelStatus());
+});
 
 app.get('/api/hardware', async (_req, res) => {
   const cpu = os.cpus()?.[0]?.model || 'Unknown CPU';

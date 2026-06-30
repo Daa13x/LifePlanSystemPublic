@@ -704,6 +704,24 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.runtime-card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 12px;
+  margin: 10px 0 14px;
+}
+.runtime-card strong {
+  color: var(--text);
+  font-size: 13px;
+}
+.runtime-card span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
 .model-suggestions {
   display: grid;
   gap: 10px;
