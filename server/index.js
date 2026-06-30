@@ -51,6 +51,7 @@ function spawnCli(command, args) {
       shell: false,
       windowsHide: false
     });
+    child.on('error', () => {});
     child.unref();
     return { available: true, started: true };
   } catch (error) {
@@ -1004,13 +1005,17 @@ app.post('/api/source/remote', async (req, res) => {
   ok(res, { remotes: (await runCli('git', ['remote', '-v'])).stdout });
 });
 
-app.post('/api/source/login/github', (_req, res) => {
+app.post('/api/source/login/github', async (_req, res) => {
+  const cli = await runCli('gh', ['--version']);
+  if (!cli.available) return fail(res, 404, 'GitHub CLI is not installed or not on PATH.');
   const result = spawnCli('gh', ['auth', 'login', '-w']);
   if (!result.available) return fail(res, 404, 'GitHub CLI is not installed or not on PATH.');
   ok(res, { message: 'GitHub CLI login started. Complete the browser/device flow, then refresh source status.' });
 });
 
-app.post('/api/source/login/hf', (_req, res) => {
+app.post('/api/source/login/hf', async (_req, res) => {
+  const cli = await runCli('hf', ['--version']);
+  if (!cli.available) return fail(res, 404, 'Hugging Face CLI is not installed or not on PATH. Use the HF token field in Settings instead.');
   const result = spawnCli('hf', ['auth', 'login']);
   if (!result.available) return fail(res, 404, 'Hugging Face CLI is not installed or not on PATH. Use the HF token field in Settings instead.');
   ok(res, { message: 'Hugging Face CLI login started. Complete the prompt, then refresh source status.' });
@@ -1076,17 +1081,43 @@ app.post('/api/repo/proposals', (req, res) => {
   }
 });
 
-app.get('/api/export/json', (_req, res) => {
+function publicSettings(includeSecrets = false) {
+  const settings = Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)]));
+  if (!includeSecrets && Object.hasOwn(settings, 'hfToken')) settings.hfToken = settings.hfToken ? '[redacted]' : '';
+  return settings;
+}
+
+function importPreview(data = {}) {
+  const projects = Array.isArray(data.projects) ? data.projects : [];
+  const knowledgeItems = Array.isArray(data.knowledge_items) ? data.knowledge_items : [];
+  const projectDuplicates = projects.filter((project) => project?.name && row('SELECT id FROM projects WHERE name = ? LIMIT 1', [project.name])).length;
+  const knowledgeDuplicates = knowledgeItems.filter((item) => item?.title && row('SELECT id FROM knowledge_items WHERE title = ? LIMIT 1', [item.title])).length;
+  return {
+    projects: projects.length,
+    knowledge_items: knowledgeItems.length,
+    duplicate_projects: projectDuplicates,
+    duplicate_knowledge_items: knowledgeDuplicates,
+    ignored_sections: Object.keys(data).filter((key) => !['projects', 'knowledge_items'].includes(key))
+  };
+}
+
+app.get('/api/export/json', (req, res) => {
+  const mode = req.query.mode === 'backup' ? 'backup' : 'public';
+  const includeSecrets = req.query.includeSecrets === '1';
   const data = {
     exported_at: new Date().toISOString(),
+    mode,
     projects: allRows('SELECT * FROM projects'),
     knowledge_items: allRows('SELECT * FROM knowledge_items'),
-    memory_candidates: allRows('SELECT * FROM memory_candidates'),
-    chat_sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0'),
-    chat_messages: allRows('SELECT * FROM chat_messages'),
-    settings: Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)]))
+    memory_candidates: allRows('SELECT * FROM memory_candidates')
   };
-  res.setHeader('Content-Disposition', 'attachment; filename="life-planner-export.json"');
+  if (mode === 'backup') {
+    data.chat_sessions = allRows('SELECT * FROM chat_sessions WHERE deleted = 0');
+    data.chat_messages = allRows('SELECT * FROM chat_messages');
+    data.consultations = allRows('SELECT * FROM consultations');
+    data.settings = publicSettings(includeSecrets);
+  }
+  res.setHeader('Content-Disposition', `attachment; filename="life-planner-${mode}-export.json"`);
   res.json(data);
 });
 
@@ -1103,6 +1134,7 @@ app.get('/api/export/markdown', (_req, res) => {
 
 app.post('/api/import/json', (req, res) => {
   const data = req.body;
+  if (!Array.isArray(data.projects) && !Array.isArray(data.knowledge_items)) return fail(res, 400, 'Import must include projects or knowledge_items arrays.');
   const imported = { projects: 0, knowledge_items: 0 };
   const insertProject = db.prepare(`
     INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
@@ -1121,6 +1153,10 @@ app.post('/api/import/json', (req, res) => {
     imported.knowledge_items += 1;
   }
   ok(res, imported);
+});
+
+app.post('/api/import/json/preview', (req, res) => {
+  ok(res, importPreview(req.body || {}));
 });
 
 app.post('/api/import/markdown', (req, res) => {

@@ -761,6 +761,17 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .settings-grid label { display: block; margin: 12px 0 6px; color: var(--soft); }
 .import-export { display: grid; gap: 10px; }
 .import-export h2, .import-export p { margin: 0; }
+.import-preview {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 10px 12px;
+}
+.import-preview strong { color: var(--text); font-size: 13px; }
+.import-preview span,
+.import-preview small { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .link-button { width: 100%; }
 .loading { color: var(--muted); padding: 30px; }
 

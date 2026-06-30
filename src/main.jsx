@@ -1337,7 +1337,8 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
       <div className="panel import-export">
         <h2>Import / Export</h2>
         <p>Files are exchange formats. The SQLite database remains canonical.</p>
-        <a className="primary link-button" href="/api/export/json"><Download size={16} /> Export JSON</a>
+        <a className="primary link-button" href="/api/export/json?mode=public"><Download size={16} /> Export Public JSON</a>
+        <a className="link-button" href="/api/export/json?mode=backup"><Download size={16} /> Export Local Backup</a>
         <a className="link-button" href="/api/export/markdown"><Download size={16} /> Export Markdown</a>
         <JsonImport setNotice={setNotice} />
         <MarkdownImport setNotice={setNotice} />
@@ -1348,11 +1349,21 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
 
 function JsonImport({ setNotice }) {
   const [jsonText, setJsonText] = useState('');
+  const [preview, setPreview] = useState(null);
+  async function previewJson() {
+    try {
+      const parsed = JSON.parse(jsonText);
+      setPreview(await api('/api/import/json/preview', { method: 'POST', body: JSON.stringify(parsed) }));
+    } catch (err) {
+      setNotice(`JSON preview failed: ${err.message}`);
+    }
+  }
   async function importJson() {
     try {
       const parsed = JSON.parse(jsonText);
       const result = await api('/api/import/json', { method: 'POST', body: JSON.stringify(parsed) });
       setJsonText('');
+      setPreview(null);
       setNotice(`JSON imported: ${result.projects} project(s), ${result.knowledge_items} knowledge item(s).`);
     } catch (err) {
       setNotice(`JSON import failed: ${err.message}`);
@@ -1361,7 +1372,18 @@ function JsonImport({ setNotice }) {
   return (
     <>
       <textarea value={jsonText} onChange={(event) => setJsonText(event.target.value)} placeholder='{"projects":[],"knowledge_items":[]}' />
-      <button onClick={importJson}><Upload size={16} /> Import JSON</button>
+      {preview && (
+        <div className="import-preview">
+          <strong>Preview</strong>
+          <span>{preview.projects} project(s), {preview.knowledge_items} knowledge item(s)</span>
+          <small>{preview.duplicate_projects} duplicate project(s), {preview.duplicate_knowledge_items} duplicate knowledge item(s)</small>
+          {preview.ignored_sections?.length > 0 && <small>Ignored: {preview.ignored_sections.join(', ')}</small>}
+        </div>
+      )}
+      <div className="decision-row">
+        <button onClick={previewJson}><SearchCheck size={16} /> Preview JSON</button>
+        <button onClick={importJson} disabled={!preview}><Upload size={16} /> Import JSON</button>
+      </div>
     </>
   );
 }
