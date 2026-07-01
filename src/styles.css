@@ -794,6 +794,53 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   font-size: 12px;
   line-height: 1.45;
 }
+.browser-health-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+.browser-health-grid > div,
+.browser-stage-log {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 10px;
+}
+.browser-health-grid strong,
+.browser-health-grid small,
+.browser-stage-log strong,
+.browser-stage-log span,
+.browser-stage-log small {
+  display: block;
+}
+.browser-health-grid strong,
+.browser-stage-log strong,
+.browser-stage-log span {
+  color: var(--text);
+  font-size: 12px;
+  margin-top: 6px;
+}
+.browser-health-grid small,
+.browser-stage-log small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.browser-stage-log {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+.browser-stage-log > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 0.8fr) minmax(0, 1.4fr);
+  gap: 8px;
+  align-items: start;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
 .decision-row { margin-top: 12px; flex-wrap: wrap; }
 .inline-form { margin-bottom: 14px; }
 .inline-form input,

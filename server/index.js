@@ -24,6 +24,13 @@ app.use(express.json({ limit: '25mb' }));
 const ok = (res, data) => res.json({ ok: true, data });
 const fail = (res, status, message) => res.status(status).json({ ok: false, error: message });
 
+app.use((error, _req, res, next) => {
+  if (error instanceof SyntaxError && (error.status === 400 || error.statusCode === 400) && 'body' in error) {
+    return fail(res, 400, 'Invalid JSON body.');
+  }
+  return next(error);
+});
+
 async function runCli(command, args, options = {}) {
   try {
     const useShell = process.platform === 'win32' && /\.cmd$/i.test(command);
@@ -284,6 +291,10 @@ function buildCloudConsultationPrompt({ targetAgent = 'ChatGPT', localDraft = ''
   ].join('\n');
 }
 
+function browserStage(stage, ok, detail, extra = {}) {
+  return { stage, ok: Boolean(ok), detail, ...extra };
+}
+
 async function firstVisibleLocator(page, selectors, timeout = 1000) {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
@@ -361,13 +372,19 @@ async function waitForChatGptAnswer(page, previousAnswer = '') {
 }
 
 async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) {
+  const stages = [
+    browserStage('Backend route reached', true, 'POST /api/browser/consult started.'),
+    browserStage('Opening browser', true, 'Launching or reusing the persistent controlled browser profile.')
+  ];
   const { page, profile, mode, launchNote } = await controlledBrowserPage();
   await page.goto(normalizeBrowserUrl(url), { waitUntil: 'domcontentloaded', timeout: 60000 });
+  stages.push(browserStage('Opening ChatGPT', true, `Loaded ${page.url()}.`));
   const title = await page.title().catch(() => '');
   const currentUrl = page.url();
   const visibleText = await page.locator('body').innerText({ timeout: 8000 }).catch(() => '');
   const blocked = chatGptUnavailableResult({ url: currentUrl, title, text: visibleText });
   if (blocked.blocked) {
+    stages.push(browserStage('Waiting for ChatGPT page', false, blocked.reason, { blocked: true }));
     return {
       ok: false,
       blocked: true,
@@ -377,12 +394,14 @@ async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) 
       profile,
       mode,
       launchNote,
+      stages,
       excerpt: visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200)
     };
   }
 
   const composer = await chatGptComposer(page);
   if (!composer) {
+    stages.push(browserStage('Prompt box found', false, 'ChatGPT opened, but the message composer was not found.', { blocked: true }));
     return {
       ok: false,
       blocked: true,
@@ -392,15 +411,18 @@ async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) 
       profile,
       mode,
       launchNote,
+      stages,
       excerpt: visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200)
     };
   }
 
+  stages.push(browserStage('Prompt box found', true, 'ChatGPT composer was available.'));
   const previousAnswer = await extractChatGptAnswer(page);
   await composer.click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
   await page.keyboard.press('Backspace').catch(() => {});
   await page.keyboard.insertText(prompt);
+  stages.push(browserStage('Prompt pasted', true, 'Prepared prompt was inserted into ChatGPT.'));
 
   const sendButton = await firstVisibleLocator(page, [
     '[data-testid="send-button"]',
@@ -413,8 +435,11 @@ async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) 
   } else {
     await page.keyboard.press('Enter');
   }
+  stages.push(browserStage('Prompt submitted', true, sendButton ? 'Clicked ChatGPT send button.' : 'Submitted with Enter key.'));
 
+  stages.push(browserStage('Waiting for response', true, 'Waiting for ChatGPT response to finish.'));
   const answer = await waitForChatGptAnswer(page, previousAnswer);
+  stages.push(browserStage('Response captured', true, 'Assistant response text was detected and extracted.'));
   return {
     ok: true,
     answer,
@@ -422,7 +447,8 @@ async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) 
     title: await page.title().catch(() => ''),
     profile,
     mode,
-    launchNote
+    launchNote,
+    stages
   };
 }
 
@@ -1423,14 +1449,9 @@ app.post('/api/browser/consult', async (req, res) => {
   const targetAgent = String(req.body.target_agent || 'ChatGPT').trim();
   const localDraft = String(req.body.local_draft || '').trim();
   const url = req.body.url || 'https://chatgpt.com/';
-  const chatGptTarget = targetAgent === 'ChatGPT' || String(url).toLowerCase().includes('chatgpt.com');
+  const mockTarget = targetAgent.toLowerCase().includes('test/mock');
+  const chatGptTarget = !mockTarget && (targetAgent === 'ChatGPT' || String(url).toLowerCase().includes('chatgpt.com'));
   if (!localDraft) return fail(res, 400, 'Enter a message before running cloud consultation.');
-  if (!chatGptTarget) {
-    return fail(res, 400, 'Automatic round trip currently supports ChatGPT only. Use manual fallback for other cloud agents.');
-  }
-  if (req.body.temporary_chat_required !== false && req.body.temporary_chat_confirmed !== true) {
-    return fail(res, 400, 'Confirm ChatGPT Temporary Chat before sending the full consultation prompt. The app cannot verify this automatically.');
-  }
 
   try {
     const contexts = selectedContextFiles(req.body.context_paths || []);
@@ -1439,6 +1460,29 @@ app.post('/api/browser/consult', async (req, res) => {
       localDraft,
       contexts
     });
+    if (mockTarget) {
+      return ok(res, {
+        ok: true,
+        answer: 'Browser round trip test passed.',
+        prompt,
+        contexts: contexts.map((item) => ({ path: item.path, truncated: item.truncated })),
+        status: 'answered',
+        mode: 'test/mock provider',
+        message: 'Test/mock provider returned a deterministic answer. Nothing was saved or synced automatically.',
+        stages: [
+          browserStage('Backend route reached', true, 'POST /api/browser/consult received the request.'),
+          browserStage('Preparing prompt', true, 'Prompt was built with selected local context metadata.'),
+          browserStage('Provider running', true, 'Test/mock provider selected; no ChatGPT login or browser automation required.'),
+          browserStage('Response captured', true, 'Deterministic mock answer was returned to the frontend.')
+        ]
+      });
+    }
+    if (!chatGptTarget) {
+      return fail(res, 400, 'Automatic round trip currently supports ChatGPT only. Use manual fallback for other cloud agents.');
+    }
+    if (req.body.temporary_chat_required !== false && req.body.temporary_chat_confirmed !== true) {
+      return fail(res, 400, 'Confirm ChatGPT Temporary Chat before sending the full consultation prompt. The app cannot verify this automatically.');
+    }
     const result = await runChatGptConsultation({ prompt, url });
     if (result.blocked) {
       return ok(res, {
@@ -1984,6 +2028,19 @@ app.post('/api/import/markdown', (req, res) => {
     VALUES ('source document', ?, ?, 'markdown import', 'pending review', 0.5, 'Imported markdown text', 'user', 'Review and extract durable knowledge.')
   `).run(title, markdown).lastInsertRowid;
   ok(res, row('SELECT * FROM knowledge_items WHERE id = ?', [id]));
+});
+
+app.use('/api', (req, res) => {
+  fail(res, 404, `API route not found: ${req.method} ${req.originalUrl}`);
+});
+
+app.use((error, req, res, next) => {
+  if (req.path?.startsWith('/api/')) {
+    const status = Number(error.status || error.statusCode || 500);
+    const safeStatus = status >= 400 && status < 600 ? status : 500;
+    return fail(res, safeStatus, error.message || 'Unexpected API error.');
+  }
+  return next(error);
 });
 
 const distDir = path.join(root, 'dist');

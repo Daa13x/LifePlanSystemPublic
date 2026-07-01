@@ -52,7 +52,19 @@ async function api(path, options = {}) {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options
   });
-  const payload = await response.json();
+  const contentType = response.headers.get('content-type') || '';
+  const bodyText = await response.text();
+  if (!contentType.toLowerCase().includes('application/json')) {
+    const excerpt = bodyText.replace(/\s+/g, ' ').trim().slice(0, 240) || '(empty response)';
+    throw new Error(`Expected JSON from ${path}, but received ${response.status} ${contentType || 'unknown content type'}: ${excerpt}`);
+  }
+  let payload;
+  try {
+    payload = JSON.parse(bodyText);
+  } catch (error) {
+    const excerpt = bodyText.replace(/\s+/g, ' ').trim().slice(0, 240) || '(empty response)';
+    throw new Error(`Invalid JSON from ${path}: ${error.message}. Response started with: ${excerpt}`);
+  }
   if (!payload.ok) throw new Error(payload.error || 'Request failed');
   return payload.data;
 }
@@ -150,6 +162,10 @@ function isChatGptUrl(value) {
   } catch {
     return false;
   }
+}
+
+function isMockConsultant(value) {
+  return String(value || '').toLowerCase().includes('test/mock');
 }
 
 function temporaryChatSetupNote() {
@@ -935,12 +951,14 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const [chromeBusy, setChromeBusy] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
   const [consultPrompt, setConsultPrompt] = useState('');
+  const [consultStages, setConsultStages] = useState([]);
   const [activeConsultationId, setActiveConsultationId] = useState(null);
   const [temporaryChatRequired, setTemporaryChatRequired] = useState(true);
   const [temporaryChatConfirmed, setTemporaryChatConfirmed] = useState(false);
+  const mockTarget = isMockConsultant(targetAgent);
   const browserReady = Boolean(cap?.playwright && cap?.chromium);
   const controlledBrowserWarning = controlledBrowserWarningForUrl(browserUrl);
-  const chatGptTarget = targetAgent === 'ChatGPT' || isChatGptUrl(browserUrl);
+  const chatGptTarget = !mockTarget && (targetAgent === 'ChatGPT' || isChatGptUrl(browserUrl));
   const temporaryChatGateActive = temporaryChatRequired && chatGptTarget;
   const temporaryChatNeedsConfirmation = temporaryChatGateActive && !temporaryChatConfirmed;
   const temporaryChatFullPromptReason = temporaryChatNeedsConfirmation
@@ -989,11 +1007,13 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     ? 'Cloud consultant is already running.'
     : !draft.trim()
       ? 'Enter a message before running cloud consultation.'
-      : !chatGptTarget
+      : !chatGptTarget && !mockTarget
         ? 'Automatic round trip currently supports ChatGPT only. Use manual fallback for other cloud agents.'
         : temporaryChatNeedsConfirmation
           ? 'Turn on Temporary Chat in ChatGPT, then tick the confirmation box before sending the full prompt.'
-          : browserDisabledReason;
+          : mockTarget
+            ? ''
+            : browserDisabledReason;
   const waitingForExternalResponse = Boolean(activeConsultationId || browserResult || consultPrompt);
   const responseCaptureHint = external.trim()
     ? 'Automatic answer captured. Choose what to save below; nothing is saved or synced until you click a save option.'
@@ -1006,8 +1026,13 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           : 'Run automatic consultation to send the prompt, wait for ChatGPT, and fill this box automatically. Manual paste is only a fallback.';
 
   async function load() {
-    setCap(await api('/api/browser/capabilities'));
-    setConsultations(await api('/api/consultations'));
+    try {
+      setCap(await api('/api/browser/capabilities'));
+      setConsultations(await api('/api/consultations'));
+    } catch (error) {
+      setConsultStatus(error.message);
+      throw error;
+    }
   }
   useEffect(() => { load().catch((err) => setNotice(err.message)); }, [refreshSignal]);
   useEffect(() => {
@@ -1093,8 +1118,10 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     setExternal('');
     setBrowserResult(null);
     setActiveConsultationId(null);
+    setConsultStages([]);
     setConsultStatus('Preparing prompt and selected LifePlanSystem context...');
     try {
+      setConsultStatus('Calling backend route /api/browser/consult...');
       const result = await api('/api/browser/consult', {
         method: 'POST',
         body: JSON.stringify({
@@ -1107,6 +1134,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           temporary_chat_confirmed: temporaryChatConfirmed
         })
       });
+      setConsultStages(result.stages || []);
       setConsultPrompt(result.prompt || '');
       setBrowserResult({
         ...result,
@@ -1116,8 +1144,10 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
       });
       if (result.answer) {
         setExternal(result.answer);
-        setConsultStatus('Response captured automatically. Review it below, then choose what to save.');
-        setNotice('Cloud consultant response captured automatically. Nothing was saved or synced.');
+        setConsultStatus(result.message || 'Response captured automatically. Review it below, then choose what to save.');
+        setNotice(result.mode === 'test/mock provider'
+          ? 'Test provider round trip completed. Nothing was saved or synced.'
+          : 'Cloud consultant response captured automatically. Nothing was saved or synced.');
       } else {
         setConsultStatus(result.message || result.blockReason || 'Automatic consultation could not complete.');
         setNotice(result.message || result.blockReason || 'Automatic consultation could not complete.');
@@ -1276,7 +1306,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     <section className="two-column browser-flow">
       <div className="panel">
         <h2>Consultation Draft</h2>
-        <p>{browserReady ? 'Automatic ChatGPT consultation is available through a persistent controlled browser profile.' : 'Automatic consultation needs Playwright Chromium. Manual fallback remains available.'}</p>
+        <p>{browserReady ? 'Browser panel is connected. Playwright and Chromium are installed, but ChatGPT may block controlled browsers; use Test/mock or manual fallback when automation is blocked.' : 'Automatic consultation needs Playwright Chromium. Manual fallback remains available.'}</p>
         <div className="source-warning info">
           Primary flow: select context, type a message, then run automatic consultation. The app opens ChatGPT, sends the prepared prompt, waits for the answer, and fills the response box. It will not save, sync, or promote anything until you choose a save option.
         </div>
@@ -1324,6 +1354,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
             setTargetAgent(event.target.value);
             setTemporaryChatConfirmed(false);
           }}>
+            <option>Test/mock provider</option>
             <option>ChatGPT</option>
             <option>Gemini</option>
             <option>Grok</option>
@@ -1366,6 +1397,50 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           <div className={cx('source-warning', external.trim() ? 'info' : browserResult?.blocked ? 'warn' : 'info')}>
             <strong>Automation status</strong>
             <small>{consultStatus}</small>
+          </div>
+        )}
+        <div className="browser-health-grid">
+          <div>
+            <Pill tone="good">API/proxy</Pill>
+            <strong>Connected</strong>
+            <small>Frontend requests are reaching backend JSON routes through /api.</small>
+          </div>
+          <div>
+            <Pill tone={cap ? 'good' : 'warn'}>Backend</Pill>
+            <strong>{cap ? 'Reachable' : 'Checking'}</strong>
+            <small>{cap ? 'Browser capabilities route responded.' : 'Waiting for /api/browser/capabilities.'}</small>
+          </div>
+          <div>
+            <Pill tone={cap?.playwright ? 'good' : 'warn'}>Playwright</Pill>
+            <strong>{cap?.playwright ? 'Installed' : 'Unavailable'}</strong>
+            <small>{cap?.note || 'Capability status has not loaded yet.'}</small>
+          </div>
+          <div>
+            <Pill tone={cap?.chromium ? 'good' : 'warn'}>Chromium</Pill>
+            <strong>{cap?.chromium ? 'Installed' : 'Missing'}</strong>
+            <small>{cap?.chromium ? 'Playwright reported a Chromium executable.' : 'No browser executable reported yet.'}</small>
+          </div>
+          <div>
+            <Pill tone="warn">ChatGPT</Pill>
+            <strong>May block controlled browsers</strong>
+            <small>{controlledBrowserWarning || 'No controlled-browser warning for the current URL.'}</small>
+          </div>
+          <div>
+            <Pill tone="good">Fallbacks</Pill>
+            <strong>Mock/manual available</strong>
+            <small>Use Test/mock provider to prove app wiring, or paste a manual response when automation is blocked.</small>
+          </div>
+        </div>
+        {consultStages.length > 0 && (
+          <div className="browser-stage-log">
+            <strong>Run log</strong>
+            {consultStages.map((stage, index) => (
+              <div key={`${stage.stage}-${index}`}>
+                <Pill tone={stage.ok ? 'good' : stage.blocked ? 'warn' : 'bad'}>{stage.ok ? 'ok' : stage.blocked ? 'blocked' : 'failed'}</Pill>
+                <span>{stage.stage}</span>
+                <small>{stage.detail}</small>
+              </div>
+            ))}
           </div>
         )}
         <label>Controlled browser URL</label>
