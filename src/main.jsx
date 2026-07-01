@@ -1018,12 +1018,20 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const responseCaptureHint = external.trim()
     ? 'Automatic answer captured. Choose what to save below; nothing is saved or synced until you click a save option.'
     : browserResult?.blocked
-      ? 'Automatic capture was blocked. Finish login or verification in the persistent browser profile, then run it again. Manual paste is available as a fallback.'
+      ? 'Automation blocked or unavailable; use manual copy/paste fallback.'
       : browserResult?.mode === 'chrome' || browserResult?.mode === 'external'
-        ? 'Manual fallback is active. Copy the answer from that browser only if automatic capture is blocked.'
+        ? 'Manual fallback is active. Copy the answer from that browser and paste it into the final answer box.'
         : waitingForExternalResponse
           ? 'Waiting for the automatic cloud response. If the site blocks automation, use the manual fallback controls.'
           : 'Run automatic consultation to send the prompt, wait for ChatGPT, and fill this box automatically. Manual paste is only a fallback.';
+  const manualFallbackActive = Boolean(browserResult?.blocked || browserResult?.mode === 'chrome' || browserResult?.mode === 'external' || !browserReady);
+  const manualFallbackReason = browserResult?.blocked
+    ? 'Automation blocked or unavailable; use manual copy/paste fallback.'
+    : browserResult?.mode === 'chrome' || browserResult?.mode === 'external'
+      ? 'Manual fallback browser opened. Paste the copied prompt there, then paste the response back here.'
+      : !browserReady
+        ? 'Automation is unavailable; use manual copy/paste fallback.'
+        : '';
 
   async function load() {
     try {
@@ -1299,7 +1307,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   async function pasteExternalResponse() {
     const text = await navigator.clipboard.readText();
     setExternal(text);
-    setNotice(text ? 'AI response pasted into the review box. Save it to create a memory candidate for review.' : 'Clipboard is empty. Copy the AI response in ChatGPT first, then paste it here.');
+    setNotice(text ? 'AI response pasted into the final answer box. Save it only if you want a reviewable memory candidate.' : 'Clipboard is empty. Copy the AI response in ChatGPT first, then paste it here.');
   }
 
   return (
@@ -1509,7 +1517,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         )}
         {browserResult && (
           <div className="browser-result">
-            <Pill tone={browserResult.blocked ? 'warn' : 'good'}>{browserResult.blocked ? 'Human check' : 'Opened'}</Pill>
+            <Pill tone={browserResult.blocked ? 'warn' : 'good'}>{browserResult.blocked ? 'Blocked' : 'Opened'}</Pill>
             <strong>{browserResult.title || browserResult.url}</strong>
             <span>{browserResult.url}</span>
             {browserResult.excerpt && <small>{browserResult.excerpt}</small>}
@@ -1527,13 +1535,33 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         )}
         <input value={title} onChange={(event) => setTitle(event.target.value)} />
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Local draft to critique..." />
-        {consultPrompt && <textarea value={consultPrompt} onChange={(event) => setConsultPrompt(event.target.value)} placeholder="Generated consultation prompt..." />}
+        {consultPrompt && (
+          <>
+            <textarea value={consultPrompt} onChange={(event) => setConsultPrompt(event.target.value)} placeholder="Generated consultation prompt..." />
+            <div className="inline-form">
+              <button
+                onClick={() => copyConsultPrompt(consultPrompt)}
+                disabled={Boolean(copyDisabledReason)}
+                title={copyDisabledReason || (temporaryChatNeedsConfirmation ? 'Copy Temporary Chat setup note before copying the full prompt' : 'Copy this generated consultation prompt')}
+              >
+                <Clipboard size={16} /> {temporaryChatNeedsConfirmation ? 'Copy temp setup' : 'Copy generated prompt'}
+              </button>
+              <button onClick={pasteExternalResponse}><Clipboard size={16} /> Paste response into answer box</button>
+            </div>
+          </>
+        )}
+        {manualFallbackActive && manualFallbackReason && (
+          <div className="source-warning warn">
+            <strong>Manual fallback</strong>
+            <small>{manualFallbackReason}</small>
+          </div>
+        )}
         <div className={cx('source-warning', external.trim() ? 'info' : 'warn')}>
           <strong>{external.trim() ? 'AI response ready to save' : waitingForExternalResponse ? 'Waiting for AI response' : 'No AI response captured yet'}</strong>
           <small>{external.trim() ? 'Saving will create a reviewable memory candidate; nothing is promoted automatically.' : responseCaptureHint}</small>
         </div>
         <div className="inline-form">
-          <button onClick={pasteExternalResponse}><Clipboard size={16} /> Manual paste fallback</button>
+          <button onClick={pasteExternalResponse}><Clipboard size={16} /> Paste response into answer box</button>
           {activeConsultationId && <Pill tone="info">Consultation #{activeConsultationId}</Pill>}
         </div>
         <textarea value={external} onChange={(event) => setExternal(event.target.value)} placeholder="Automatic ChatGPT response will appear here. Manual paste is a fallback if automation is blocked." />

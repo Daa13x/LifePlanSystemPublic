@@ -166,3 +166,79 @@ This does not prove the real ChatGPT controlled-browser round trip. ChatGPT can 
 ### Next Safest Action
 
 Keep the mock/manual fallback path stable, then improve the real ChatGPT route only by surfacing clear blocker states and asking the user to complete login or verification in the visible browser when required.
+
+## Checkpoint Commit - 2026-07-01 19:02
+
+- Branch: `main`
+- Commit: `56c552b9fc22d608164f7f505bdcefdca31f84c3`
+- Commit message: `Checkpoint Browser mock provider and error logging`
+- Pushed: no
+- Files committed:
+  - `server/index.js`
+  - `src/main.jsx`
+  - `src/styles.css`
+  - `docs/todos/BROWSER_AUTOMATION_MISTAKES_AND_PROGRESS_2026-07-01.md`
+  - `docs/todos/browser_automation_error_log_2026-07-01.jsonl`
+- Safety review result: clean. No `source_of_truth/`, private memory files, private records, `.env`, tokens, cookies, profile files, local databases, raw chat logs, local private file paths, public/private sync payloads, zip files, or binary files were present in the committed diff.
+- Important caveat: this checkpoint proves Browser panel plumbing with `Test/mock provider`. It does not prove real ChatGPT controlled-browser automation.
+
+## Loop Update - 2026-07-01 19:07
+
+### Tests Run
+
+- `node --check server/index.js`
+- `npm run check`
+- `GET /api/browser/capabilities` through backend port `4177`
+- `GET /api/browser/capabilities` through frontend/proxy port `5173`
+- `POST /api/browser/consult` with `Test/mock provider` through frontend/proxy port `5173`
+- Malformed JSON sent to `POST /api/browser/consult` through frontend/proxy port `5173`
+- Unknown `/api` route through both ports
+- In-app Browser UI test with `Test/mock provider`
+- In-app manual fallback test:
+  - copied generated prompt
+  - pasted `manual fallback QA response` into the final answer box from clipboard
+  - confirmed explicit save choices appeared
+  - confirmed no automatic save
+- Browser console error check: no errors
+
+### Result
+
+Real ChatGPT automation still has not been proven. It should only be tested when the visible session is ready, and any login, verification, unsupported-session, timeout, or prompt-detection blocker should be logged and shown in the run log.
+
+The manual fallback path is clearer and works:
+
+- generated prompt is visible
+- copy generated prompt works
+- paste response into answer box works
+- save choices appear only after an answer exists
+- no auto-save occurred
+
+### Fixes Made In This Loop
+
+- Added backend stage reporting for real ChatGPT route failures:
+  - opening browser
+  - opening ChatGPT
+  - waiting for page
+  - prompt box found / not found
+  - prompt pasted / not pasted
+  - submit clicked / not clicked
+  - waiting for response
+  - response captured / not captured
+  - blocked by login
+  - blocked by human verification
+  - blocked by unsupported browser/session
+  - timed out
+  - failed with reason
+- Added JSON response data for staged automation failures when possible.
+- Improved manual fallback wording and controls.
+
+### Do Not Repeat
+
+- Do not claim full ChatGPT automation works from the mock provider, API checks, or manual fallback.
+- Do not retry controlled-browser ChatGPT automation blindly.
+- Do not bypass login, verification, CAPTCHA, human checks, or anti-bot systems.
+- Do not copy or reuse normal Chrome cookies.
+
+### Next Safest Action
+
+Perform one controlled real ChatGPT route test only when the visible session is ready. If it blocks, stop immediately, keep the run log visible, append the blocker to the JSONL log, and continue improving fallback/status rather than retrying.

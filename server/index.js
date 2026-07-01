@@ -295,6 +295,27 @@ function browserStage(stage, ok, detail, extra = {}) {
   return { stage, ok: Boolean(ok), detail, ...extra };
 }
 
+function chatGptBlockStage(reason = '') {
+  const lower = String(reason).toLowerCase();
+  if (lower.includes('auth') || lower.includes('sign in') || lower.includes('signed-in') || lower.includes('log in')) {
+    return browserStage('Blocked by login', false, reason, { blocked: true, blockType: 'login' });
+  }
+  if (lower.includes('human') || lower.includes('verification') || lower.includes('captcha') || lower.includes('secure')) {
+    return browserStage('Blocked by human verification', false, reason, { blocked: true, blockType: 'human_verification' });
+  }
+  if (lower.includes('insecure') || lower.includes('different browser') || lower.includes('rejected')) {
+    return browserStage('Blocked by unsupported browser/session', false, reason, { blocked: true, blockType: 'unsupported_browser' });
+  }
+  return browserStage('Failed with reason', false, reason || 'Browser automation failed.', { blocked: true, blockType: 'unknown' });
+}
+
+function attachBrowserStages(error, stages, stage, extra = {}) {
+  const detail = error?.message || 'Browser automation failed.';
+  stages.push(browserStage(stage, false, detail, extra));
+  error.stages = stages;
+  return error;
+}
+
 async function firstVisibleLocator(page, selectors, timeout = 1000) {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
@@ -368,23 +389,40 @@ async function waitForChatGptAnswer(page, previousAnswer = '') {
     if (hasNewAnswer && stableTicks >= 2 && !stopButton) return answer;
     await page.waitForTimeout(1800);
   }
-  throw new Error('Timed out waiting for ChatGPT to finish responding. If the answer is visible, use the manual fallback controls.');
+  const timeoutError = new Error('Timed out waiting for ChatGPT to finish responding. If the answer is visible, use the manual fallback controls.');
+  timeoutError.timedOut = true;
+  throw timeoutError;
 }
 
-async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) {
-  const stages = [
-    browserStage('Backend route reached', true, 'POST /api/browser/consult started.'),
-    browserStage('Opening browser', true, 'Launching or reusing the persistent controlled browser profile.')
-  ];
-  const { page, profile, mode, launchNote } = await controlledBrowserPage();
-  await page.goto(normalizeBrowserUrl(url), { waitUntil: 'domcontentloaded', timeout: 60000 });
+async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/', stages = [] }) {
+  let page;
+  let profile = '';
+  let mode = '';
+  let launchNote = '';
+  try {
+    const browser = await controlledBrowserPage();
+    page = browser.page;
+    profile = browser.profile;
+    mode = browser.mode;
+    launchNote = browser.launchNote;
+    stages.push(browserStage('Opening browser', true, 'Controlled browser profile opened.'));
+  } catch (error) {
+    throw attachBrowserStages(error, stages, 'Opening browser', { failed: true });
+  }
+
+  try {
+    await page.goto(normalizeBrowserUrl(url), { waitUntil: 'domcontentloaded', timeout: 60000 });
+  } catch (error) {
+    throw attachBrowserStages(error, stages, 'Opening ChatGPT', { failed: true });
+  }
   stages.push(browserStage('Opening ChatGPT', true, `Loaded ${page.url()}.`));
   const title = await page.title().catch(() => '');
   const currentUrl = page.url();
   const visibleText = await page.locator('body').innerText({ timeout: 8000 }).catch(() => '');
+  stages.push(browserStage('Waiting for page', true, 'Read the visible ChatGPT page state.'));
   const blocked = chatGptUnavailableResult({ url: currentUrl, title, text: visibleText });
   if (blocked.blocked) {
-    stages.push(browserStage('Waiting for ChatGPT page', false, blocked.reason, { blocked: true }));
+    stages.push(chatGptBlockStage(blocked.reason));
     return {
       ok: false,
       blocked: true,
@@ -401,7 +439,7 @@ async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) 
 
   const composer = await chatGptComposer(page);
   if (!composer) {
-    stages.push(browserStage('Prompt box found', false, 'ChatGPT opened, but the message composer was not found.', { blocked: true }));
+    stages.push(browserStage('Prompt box found', false, 'ChatGPT opened, but the message composer was not found.', { blocked: true, blockType: 'composer_not_found' }));
     return {
       ok: false,
       blocked: true,
@@ -418,10 +456,14 @@ async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) 
 
   stages.push(browserStage('Prompt box found', true, 'ChatGPT composer was available.'));
   const previousAnswer = await extractChatGptAnswer(page);
-  await composer.click();
-  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
-  await page.keyboard.press('Backspace').catch(() => {});
-  await page.keyboard.insertText(prompt);
+  try {
+    await composer.click();
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+    await page.keyboard.press('Backspace').catch(() => {});
+    await page.keyboard.insertText(prompt);
+  } catch (error) {
+    throw attachBrowserStages(error, stages, 'Prompt pasted', { failed: true });
+  }
   stages.push(browserStage('Prompt pasted', true, 'Prepared prompt was inserted into ChatGPT.'));
 
   const sendButton = await firstVisibleLocator(page, [
@@ -430,15 +472,38 @@ async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) 
     'button[aria-label="Send message"]',
     'button:has-text("Send")'
   ], 1200);
-  if (sendButton) {
-    await sendButton.click({ timeout: 10000 });
-  } else {
-    await page.keyboard.press('Enter');
+  try {
+    if (sendButton) {
+      await sendButton.click({ timeout: 10000 });
+    } else {
+      await page.keyboard.press('Enter');
+    }
+  } catch (error) {
+    throw attachBrowserStages(error, stages, 'Submit clicked', { failed: true });
   }
-  stages.push(browserStage('Prompt submitted', true, sendButton ? 'Clicked ChatGPT send button.' : 'Submitted with Enter key.'));
+  stages.push(browserStage('Submit clicked', true, sendButton ? 'Clicked ChatGPT send button.' : 'Submitted with Enter key.'));
 
   stages.push(browserStage('Waiting for response', true, 'Waiting for ChatGPT response to finish.'));
-  const answer = await waitForChatGptAnswer(page, previousAnswer);
+  let answer = '';
+  try {
+    answer = await waitForChatGptAnswer(page, previousAnswer);
+  } catch (error) {
+    stages.push(error.blocked
+      ? chatGptBlockStage(error.message)
+      : browserStage(error.timedOut ? 'Timed out' : 'Response not captured', false, error.message || 'Response was not detected.', { failed: true }));
+    return {
+      ok: false,
+      blocked: Boolean(error.blocked),
+      blockReason: error.message || 'Automatic cloud consultation failed.',
+      url: error.currentUrl || page.url(),
+      title: error.title || await page.title().catch(() => ''),
+      profile,
+      mode,
+      launchNote,
+      stages,
+      excerpt: error.excerpt || ''
+    };
+  }
   stages.push(browserStage('Response captured', true, 'Assistant response text was detected and extracted.'));
   return {
     ok: true,
@@ -1452,6 +1517,9 @@ app.post('/api/browser/consult', async (req, res) => {
   const mockTarget = targetAgent.toLowerCase().includes('test/mock');
   const chatGptTarget = !mockTarget && (targetAgent === 'ChatGPT' || String(url).toLowerCase().includes('chatgpt.com'));
   if (!localDraft) return fail(res, 400, 'Enter a message before running cloud consultation.');
+  const stages = [
+    browserStage('Backend route reached', true, 'POST /api/browser/consult received the request.')
+  ];
 
   try {
     const contexts = selectedContextFiles(req.body.context_paths || []);
@@ -1460,6 +1528,7 @@ app.post('/api/browser/consult', async (req, res) => {
       localDraft,
       contexts
     });
+    stages.push(browserStage('Preparing prompt', true, 'Prompt was built with selected local context metadata.'));
     if (mockTarget) {
       return ok(res, {
         ok: true,
@@ -1470,8 +1539,7 @@ app.post('/api/browser/consult', async (req, res) => {
         mode: 'test/mock provider',
         message: 'Test/mock provider returned a deterministic answer. Nothing was saved or synced automatically.',
         stages: [
-          browserStage('Backend route reached', true, 'POST /api/browser/consult received the request.'),
-          browserStage('Preparing prompt', true, 'Prompt was built with selected local context metadata.'),
+          ...stages,
           browserStage('Provider running', true, 'Test/mock provider selected; no ChatGPT login or browser automation required.'),
           browserStage('Response captured', true, 'Deterministic mock answer was returned to the frontend.')
         ]
@@ -1483,7 +1551,7 @@ app.post('/api/browser/consult', async (req, res) => {
     if (req.body.temporary_chat_required !== false && req.body.temporary_chat_confirmed !== true) {
       return fail(res, 400, 'Confirm ChatGPT Temporary Chat before sending the full consultation prompt. The app cannot verify this automatically.');
     }
-    const result = await runChatGptConsultation({ prompt, url });
+    const result = await runChatGptConsultation({ prompt, url, stages });
     if (result.blocked) {
       return ok(res, {
         ...result,
@@ -1501,6 +1569,17 @@ app.post('/api/browser/consult', async (req, res) => {
       message: 'Cloud consultant response captured automatically. Review it before saving; nothing was saved or synced automatically.'
     });
   } catch (error) {
+    if (error.stages) {
+      return ok(res, {
+        ok: false,
+        blocked: Boolean(error.blocked),
+        status: error.blocked ? 'blocked' : 'failed',
+        message: error.message || 'Automatic cloud consultation failed.',
+        blockReason: error.message || 'Automatic cloud consultation failed.',
+        stages: error.stages,
+        excerpt: error.excerpt || ''
+      });
+    }
     fail(res, error.blocked ? 409 : 500, error.message || 'Automatic cloud consultation failed.');
   }
 });
