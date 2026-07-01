@@ -288,3 +288,56 @@ Real ChatGPT automation was not attempted in this loop because the controlled br
 ### Next Safest Action
 
 Ask Alex to confirm that the controlled ChatGPT session is ready and Temporary Chat is enabled, then run one real-route test. If login or verification appears, stop immediately and log the blocker.
+
+## Loop Update - 2026-07-01 19:44
+
+### Issue Chosen
+
+Run exactly one real ChatGPT route test now that Alex confirmed the controlled ChatGPT window was open with Temporary Chat enabled.
+
+### Test Setup
+
+- Branch: `browser-consultant-checkpoint-2026-07-01`
+- Target/provider: `ChatGPT`
+- Context files selected: none
+- Local draft used: `LifePlanSystem Browser real-route test. Please reply exactly: REAL_ROUTE_TEST_OK`
+- Temporary Chat confirmation: checked in the UI
+- Final answer box was cleared by reloading the app before the test.
+
+### Test Result
+
+The real ChatGPT route was attempted once and stopped at human verification.
+
+Observed run-log stages:
+
+- ok: Backend route reached
+- ok: Preparing prompt
+- ok: Opening browser
+- ok: Opening ChatGPT
+- ok: Waiting for page
+- blocked: Blocked by human verification
+
+The controlled browser loaded a ChatGPT Cloudflare/human-verification challenge URL. The exact challenge token was not saved to this log. The UI showed: `The site opened a human-verification challenge in the controlled browser. Use External for ChatGPT/Google sign-in or complete the check manually if the site allows it.`
+
+### Outcome
+
+- `REAL_ROUTE_TEST_OK` did not reach the final answer box.
+- The prompt was not proven pasted into ChatGPT.
+- Submit was not clicked.
+- No ChatGPT response was captured.
+- The final answer box remained empty.
+- Save response stayed disabled.
+- Manual fallback controls remained visible.
+- No auto-save happened.
+- API/proxy status remained connected and JSON-backed.
+
+### Do Not Repeat
+
+- Do not retry the same controlled-browser ChatGPT route while the Cloudflare/human-verification challenge is visible.
+- Do not bypass login, CAPTCHA, verification, human checks, or anti-bot systems.
+- Do not log full Cloudflare challenge-token URLs.
+- Do not claim real ChatGPT automation works from this attempt.
+
+### Next Safest Action
+
+Keep the current manual fallback and mock provider as the reliable paths. If Alex completes the human-verification challenge in the controlled browser and the page reaches a normal temporary ChatGPT composer, run one fresh real-route test only after confirming the visible blocker is gone.
