@@ -2053,6 +2053,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [modelFolders, setModelFolders] = useState((settings.modelFolders || []).join('\n'));
   const [hfToken, setHfToken] = useState(settings.hfToken || '');
   const [localModelEndpoint, setLocalModelEndpoint] = useState(settings.localModelEndpoint || '');
+  const [localModelName, setLocalModelName] = useState(settings.localModelName || 'planner-assistant');
   const [llamaCliPath, setLlamaCliPath] = useState(settings.llamaCliPath || '');
   const [llamaServerPath, setLlamaServerPath] = useState(settings.llamaServerPath || '');
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
@@ -2078,6 +2079,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean),
         modelDownloadFolder: downloadFolder,
         localModelEndpoint,
+        localModelName,
         llamaCliPath,
         llamaServerPath,
         llamaServerPort: Number(llamaServerPort),
@@ -2180,14 +2182,16 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <h2>Local Model Registry</h2>
         <p>Scan folders for GGUF files and assign one model to Planner Assistant.</p>
         <div className="runtime-card">
-          <Pill tone={runtime?.assigned ? 'good' : 'warn'}>{runtime?.assigned ? 'Model assigned' : 'No model assigned'}</Pill>
-          <strong>{runtime?.model?.name || 'Planner Assistant unavailable'}</strong>
+          <Pill tone={runtime?.endpointConfigured || runtime?.assigned ? 'good' : 'warn'}>{runtime?.endpointConfigured ? 'Endpoint configured' : runtime?.assigned ? 'Model assigned' : 'No model assigned'}</Pill>
+          <strong>{runtime?.endpointConfigured ? runtime.endpointModelName : runtime?.model?.name || 'Planner Assistant unavailable'}</strong>
           <span>{runtime?.managedServerRunning ? `Managed llama-server running: ${runtime.managedEndpoint}` : runtime?.endpointConfigured ? `Endpoint: ${runtime.endpoint}` : runtime?.llamaCliConfigured ? `llama-cli: ${runtime.llamaCliExists ? 'found' : 'missing'}` : 'Configure a local endpoint, llama-server, or llama-cli to generate chat responses.'}</span>
         </div>
         <label>Model folders</label>
         <textarea value={modelFolders} onChange={(event) => setModelFolders(event.target.value)} placeholder="C:\\Models&#10;D:\\LLMs" />
         <label>OpenAI-compatible local endpoint</label>
         <input value={localModelEndpoint} onChange={(event) => setLocalModelEndpoint(event.target.value)} placeholder="http://127.0.0.1:8080" />
+        <label>Endpoint model name</label>
+        <input value={localModelName} onChange={(event) => setLocalModelName(event.target.value)} placeholder="qwen2.5:7b-instruct" />
         <label>llama-cli path</label>
         <input value={llamaCliPath} onChange={(event) => setLlamaCliPath(event.target.value)} placeholder="C:\\llama.cpp\\build\\bin\\llama-cli.exe" />
         <label>llama-server path</label>

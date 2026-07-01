@@ -650,6 +650,7 @@ function buildAssistantPrompt(sessionId, userMessage) {
 async function localModelStatus() {
   const model = assignedPlannerModel();
   const endpoint = String(getSetting('localModelEndpoint', '') || '').trim();
+  const endpointModelName = String(getSetting('localModelName', 'planner-assistant') || '').trim() || 'planner-assistant';
   const llamaCliPath = String(getSetting('llamaCliPath', '') || '').trim();
   const llamaServerPath = String(getSetting('llamaServerPath', '') || '').trim();
   const llamaServerPort = Number(getSetting('llamaServerPort', 8080) || 8080);
@@ -658,6 +659,7 @@ async function localModelStatus() {
     model,
     endpointConfigured: Boolean(endpoint),
     endpoint,
+    endpointModelName,
     llamaCliConfigured: Boolean(llamaCliPath),
     llamaCliPath,
     llamaCliExists: Boolean(llamaCliPath && fs.existsSync(llamaCliPath)),
@@ -670,14 +672,14 @@ async function localModelStatus() {
   };
 }
 
-async function runEndpointModel(endpoint, prompt) {
+async function runEndpointModel(endpoint, modelName, prompt) {
   const base = endpoint.replace(/\/+$/, '');
   const url = base.endsWith('/v1/chat/completions') ? base : `${base}/v1/chat/completions`;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: 'planner-assistant',
+      model: modelName || 'planner-assistant',
       messages: [
         { role: 'system', content: 'You are Life Planner. Keep answers concise, local-first, and governance-aware.' },
         { role: 'user', content: prompt }
@@ -703,22 +705,22 @@ async function runLlamaCli(llamaCliPath, modelPath, prompt) {
 
 async function runPlannerAssistant(sessionId, userMessage) {
   const status = await localModelStatus();
-  if (!status.assigned) {
+  if (!status.assigned && !status.endpointConfigured) {
     return {
       mode: 'unavailable',
-      content: 'Saved to chat. No Planner Assistant model is assigned yet; use Settings to scan/download a GGUF and load it as Planner Assistant.'
+      content: 'Saved to chat. No Planner Assistant model is assigned and no local endpoint is configured yet; use Settings to connect Ollama, LM Studio, or a GGUF runtime.'
     };
   }
 
   const prompt = buildAssistantPrompt(sessionId, userMessage);
   try {
     if (status.managedEndpoint) {
-      const content = await runEndpointModel(status.managedEndpoint, prompt);
+      const content = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt);
       if (content) return { mode: 'managed llama-server', content };
     }
     if (status.endpointConfigured) {
-      const content = await runEndpointModel(status.endpoint, prompt);
-      if (content) return { mode: 'local endpoint', content };
+      const content = await runEndpointModel(status.endpoint, status.endpointModelName, prompt);
+      if (content) return { mode: `local endpoint (${status.endpointModelName})`, content };
     }
     if (status.llamaCliConfigured && status.llamaCliExists) {
       const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt);
@@ -733,7 +735,7 @@ async function runPlannerAssistant(sessionId, userMessage) {
 
   return {
     mode: 'unavailable',
-    content: 'Saved to chat. A Planner Assistant model is assigned, but no runnable local runtime is configured. Add an OpenAI-compatible local endpoint or llama-cli path in Settings.'
+    content: 'Saved to chat. A Planner Assistant model is assigned or endpoint is configured, but no runnable local runtime answered. Check the endpoint URL, endpoint model name, or llama-cli path in Settings.'
   };
 }
 
@@ -1150,6 +1152,7 @@ app.post('/api/models/server/start', async (req, res) => {
   setSetting('llamaServerPort', port);
   setSetting('llamaContextSize', contextSize);
   setSetting('localModelEndpoint', `http://127.0.0.1:${port}`);
+  setSetting('localModelName', status.model.name || 'planner-assistant');
   ok(res, { message: `llama-server starting on 127.0.0.1:${port}`, runtime: await localModelStatus() });
 });
 
