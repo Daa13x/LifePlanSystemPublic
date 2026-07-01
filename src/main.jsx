@@ -122,6 +122,49 @@ function ThemeToggle({ theme, setTheme }) {
   );
 }
 
+function controlledBrowserWarningForUrl(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'chatgpt.com' || host.endsWith('.chatgpt.com') || host === 'auth.openai.com') {
+      return 'ChatGPT usually rejects Playwright-controlled browsers with a repeating human check. Use External to open it in your normal browser.';
+    }
+    if (host === 'accounts.google.com' || host === 'gemini.google.com') {
+      return 'Google sign-in rejects controlled or embedded browsers. Use External to open it in your normal browser.';
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function isChatGptUrl(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+    const host = parsed.hostname.toLowerCase();
+    return host === 'chatgpt.com' || host.endsWith('.chatgpt.com') || host === 'auth.openai.com';
+  } catch {
+    return false;
+  }
+}
+
+function temporaryChatSetupNote() {
+  return [
+    'Temporary Chat setup for Life Planner consultation:',
+    '',
+    '1. In ChatGPT, start a new chat.',
+    '2. Click the pill-shaped Temporary button in the top-right corner.',
+    '3. Confirm the chat shows Temporary Chat mode.',
+    '4. Return to Life Planner, tick "Temporary Chat is on", then click Copy to copy the full consultation prompt.',
+    '',
+    'Do not paste the Life Planner consultation prompt into a normal saved ChatGPT chat.'
+  ].join('\n');
+}
+
 function App() {
   const [view, setView] = useState('planner');
   const [theme, setTheme] = useState(() => localStorage.getItem('life-planner-theme') || 'dark');
@@ -135,6 +178,8 @@ function App() {
   const [selectedSession, setSelectedSession] = useState(null);
   const [messages, setMessages] = useState([]);
   const [notice, setNotice] = useState('');
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const [refreshSignal, setRefreshSignal] = useState(0);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -152,6 +197,24 @@ function App() {
     if (!selectedSession && data.sessions[0]) setSelectedSession(data.sessions[0].id);
     const mem = await api('/api/memory');
     setMemory(mem);
+  }
+
+  async function refreshCurrentView() {
+    if (refreshBusy) return;
+    setRefreshBusy(true);
+    setNotice('Refreshing current view...');
+    try {
+      await refreshAll();
+      if (selectedSession) {
+        setMessages(await api(`/api/chat/sessions/${selectedSession}/messages`));
+      }
+      setRefreshSignal((value) => value + 1);
+      setNotice('Refresh complete.');
+    } catch (err) {
+      setNotice(`Refresh failed: ${err.message}`);
+    } finally {
+      setRefreshBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -212,7 +275,9 @@ function App() {
           </div>
           <div className="top-actions">
             {notice && <span className="notice">{notice}</span>}
-            <button className="icon-button" onClick={() => refreshAll()} aria-label="Refresh"><RefreshCcw size={18} /></button>
+            <button className="icon-button" onClick={refreshCurrentView} disabled={refreshBusy} aria-label="Refresh" title={refreshBusy ? 'Refreshing current view...' : 'Refresh current view'}>
+              <RefreshCcw size={18} />
+            </button>
             <ThemeToggle theme={theme} setTheme={setTheme} />
           </div>
         </header>
@@ -234,11 +299,11 @@ function App() {
         {view === 'memory' && <Memory memory={memory} refresh={reloadPlanner} />}
         {view === 'approvals' && <ApprovalQueue setNotice={setNotice} refreshPlanner={reloadPlanner} />}
         {view === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
-        {view === 'repository' && <RepositoryExplorer setNotice={setNotice} />}
-        {view === 'calibration' && <Calibration setNotice={setNotice} />}
-        {view === 'source' && <SourceControl setNotice={setNotice} />}
-        {view === 'browser' && <BrowserConsult setNotice={setNotice} refresh={reloadPlanner} />}
-        {view === 'tooling' && <Tooling setNotice={setNotice} />}
+        {view === 'repository' && <RepositoryExplorer setNotice={setNotice} refreshSignal={refreshSignal} />}
+        {view === 'calibration' && <Calibration setNotice={setNotice} refreshSignal={refreshSignal} />}
+        {view === 'source' && <SourceControl setNotice={setNotice} refreshSignal={refreshSignal} />}
+        {view === 'browser' && <BrowserConsult setNotice={setNotice} refresh={reloadPlanner} refreshSignal={refreshSignal} />}
+        {view === 'tooling' && <Tooling setNotice={setNotice} refreshSignal={refreshSignal} />}
         {view === 'settings' && (
           <SettingsView
             settings={settings}
@@ -479,6 +544,79 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   );
 }
 
+function candidateDetails(candidate) {
+  const rawTitle = candidate.title || 'Untitled candidate';
+  const fromConsultation = candidate.source === 'cloud consultation' || rawTitle.startsWith('Consultation suggestion:');
+  const title = fromConsultation ? rawTitle.replace(/^Consultation suggestion:\s*/, '').trim() || 'Cloud consultation response' : rawTitle;
+  return {
+    title,
+    type: fromConsultation ? 'consultation' : candidate.type || 'candidate',
+    bodyLabel: fromConsultation ? 'Captured external response' : 'Candidate memory',
+    source: candidate.source || 'unknown',
+    evidence: candidate.evidence || 'No evidence recorded.',
+    confidence: Number(candidate.confidence || 0).toFixed(2),
+    status: candidate.status || 'candidate'
+  };
+}
+
+function CandidateReviewCard({ candidate, edits = {}, setEdits, onSave, onDecision }) {
+  const details = candidateDetails(candidate);
+  const edit = edits[candidate.id] || {};
+  const canEdit = Boolean(setEdits && onSave);
+  const update = (key, value) => {
+    if (!setEdits) return;
+    setEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), [key]: value } }));
+  };
+
+  return (
+    <div className="review-card" key={candidate.id}>
+      <div className="review-card-heading">
+        <Pill tone={details.type === 'consultation' ? 'info' : 'warn'}>{details.type}</Pill>
+        <Pill tone="warn">{details.status}</Pill>
+      </div>
+      <h3>{details.title}</h3>
+      <div className="candidate-response">
+        <span>{details.bodyLabel}</span>
+        <p>{candidate.body}</p>
+      </div>
+      <div className="candidate-meta">
+        <span>Source: {details.source}</span>
+        <span>Evidence: {details.evidence}</span>
+        <span>Confidence: {details.confidence}</span>
+      </div>
+      {canEdit && (
+        <details className="candidate-edit">
+          <summary>Edit metadata</summary>
+          <div className="memory-edit-grid">
+            <label>
+              Title
+              <input value={edit.title ?? details.title} onChange={(event) => update('title', event.target.value)} />
+            </label>
+            <label>
+              Type
+              <input value={edit.type ?? details.type} onChange={(event) => update('type', event.target.value)} />
+            </label>
+            <label>
+              Confidence
+              <input type="number" min="0" max="1" step="0.05" value={edit.confidence ?? candidate.confidence} onChange={(event) => update('confidence', event.target.value)} />
+            </label>
+            <label>
+              Evidence
+              <input value={edit.evidence ?? candidate.evidence ?? ''} onChange={(event) => update('evidence', event.target.value)} />
+            </label>
+          </div>
+        </details>
+      )}
+      <div className="decision-row">
+        {canEdit && <button onClick={() => onSave(candidate)}><Check size={16} /> Save metadata</button>}
+        <button className="primary" onClick={() => onDecision(candidate.id, 'approve')}><Check size={16} /> Approve</button>
+        <button onClick={() => onDecision(candidate.id, 'defer')}><Clock3 size={16} /> Defer</button>
+        <button className="danger" onClick={() => onDecision(candidate.id, 'deny')}><X size={16} /> Deny</button>
+      </div>
+    </div>
+  );
+}
+
 function Memory({ memory, refresh }) {
   const [candidateEdits, setCandidateEdits] = useState({});
 
@@ -519,26 +657,14 @@ function Memory({ memory, refresh }) {
         <h2>Candidate Review</h2>
         <p>Chat and cloud consultation outputs wait here before becoming active memory.</p>
         {memory.candidates.filter((c) => ['candidate', 'deferred'].includes(c.status)).map((candidate) => (
-          <div className="review-card" key={candidate.id}>
-            <div>
-              <Pill tone="warn">{candidate.type}</Pill>
-              <h3>{candidate.title}</h3>
-              <p>{candidate.body}</p>
-              <span>{candidate.evidence}</span>
-            </div>
-            <div className="memory-edit-grid">
-              <input value={candidateEdits[candidate.id]?.title ?? candidate.title} onChange={(event) => setCandidateEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), title: event.target.value } }))} />
-              <input value={candidateEdits[candidate.id]?.type ?? candidate.type} onChange={(event) => setCandidateEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), type: event.target.value } }))} />
-              <input type="number" min="0" max="1" step="0.05" value={candidateEdits[candidate.id]?.confidence ?? candidate.confidence} onChange={(event) => setCandidateEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), confidence: event.target.value } }))} />
-              <input value={candidateEdits[candidate.id]?.evidence ?? candidate.evidence} onChange={(event) => setCandidateEdits((current) => ({ ...current, [candidate.id]: { ...(current[candidate.id] || {}), evidence: event.target.value } }))} />
-            </div>
-            <div className="decision-row">
-              <button onClick={() => saveCandidate(candidate)}><Check size={16} /> Save metadata</button>
-              <button onClick={() => decide(candidate.id, 'approve')}><Check size={16} /> Approve</button>
-              <button onClick={() => decide(candidate.id, 'defer')}><Clock3 size={16} /> Defer</button>
-              <button className="danger" onClick={() => decide(candidate.id, 'deny')}><X size={16} /> Deny</button>
-            </div>
-          </div>
+          <CandidateReviewCard
+            key={candidate.id}
+            candidate={candidate}
+            edits={candidateEdits}
+            setEdits={setCandidateEdits}
+            onSave={saveCandidate}
+            onDecision={decide}
+          />
         ))}
       </div>
       <div className="panel">
@@ -563,11 +689,14 @@ function Memory({ memory, refresh }) {
 
 function ApprovalQueue({ setNotice, refreshPlanner }) {
   const [items, setItems] = useState([]);
+  const [candidates, setCandidates] = useState([]);
   const [checks, setChecks] = useState({});
 
-  async function load() {
+  async function load(announce = false) {
     const data = await api('/api/planner');
     setItems(data.approvals);
+    setCandidates(data.candidates || []);
+    if (announce) setNotice('Approval queue refreshed.');
   }
 
   useEffect(() => { load().catch((err) => setNotice(err.message)); }, []);
@@ -583,6 +712,17 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
     }
   }
 
+  async function decideCandidate(id, decision) {
+    try {
+      await api(`/api/memory/candidates/${id}/${decision}`, { method: 'POST' });
+      setNotice(`Memory candidate ${decision} recorded.`);
+      await load();
+      await refreshPlanner();
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
   return (
     <section className="panel">
       <div className="panel-heading">
@@ -590,12 +730,13 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
           <h2>Approval Queue</h2>
           <p>Meaningful changes wait here before memory, plans, repo files, or priorities change.</p>
         </div>
-        <button onClick={load}><RefreshCcw size={16} /> Refresh</button>
+        <button onClick={() => load(true)}><RefreshCcw size={16} /> Refresh</button>
       </div>
-      {items.length === 0 ? (
-        <Empty title="No pending approvals" body="Staged changes will appear here with risk, source, and target details." />
+      {items.length === 0 && candidates.length === 0 ? (
+        <Empty title="No pending approvals" body="Staged changes and memory candidates will appear here for explicit review." />
       ) : (
         <div className="approval-list">
+          {items.length > 0 && <h3>Governed Changes</h3>}
           {items.map((item) => {
             const payload = JSON.parse(item.payload || '{}');
             const check = checks[item.id];
@@ -636,6 +777,10 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
               </div>
             );
           })}
+          {candidates.length > 0 && <h3>Memory Candidates</h3>}
+          {candidates.map((candidate) => (
+            <CandidateReviewCard key={candidate.id} candidate={candidate} onDecision={decideCandidate} />
+          ))}
         </div>
       )}
     </section>
@@ -771,24 +916,113 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
   );
 }
 
-function BrowserConsult({ setNotice, refresh }) {
+function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const [cap, setCap] = useState(null);
   const [title, setTitle] = useState('Cloud critique request');
   const [draft, setDraft] = useState('');
   const [external, setExternal] = useState('');
   const [consultations, setConsultations] = useState([]);
+  const [repoFiles, setRepoFiles] = useState([]);
+  const [selectedContextFile, setSelectedContextFile] = useState('');
+  const [contextPaths, setContextPaths] = useState([]);
   const [targetAgent, setTargetAgent] = useState('ChatGPT');
   const [browserUrl, setBrowserUrl] = useState('https://chatgpt.com/');
   const [browserResult, setBrowserResult] = useState(null);
+  const [consultBusy, setConsultBusy] = useState(false);
+  const [consultStatus, setConsultStatus] = useState('');
   const [browserBusy, setBrowserBusy] = useState(false);
+  const [externalBusy, setExternalBusy] = useState(false);
+  const [chromeBusy, setChromeBusy] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
   const [consultPrompt, setConsultPrompt] = useState('');
   const [activeConsultationId, setActiveConsultationId] = useState(null);
+  const [temporaryChatRequired, setTemporaryChatRequired] = useState(true);
+  const [temporaryChatConfirmed, setTemporaryChatConfirmed] = useState(false);
+  const browserReady = Boolean(cap?.playwright && cap?.chromium);
+  const controlledBrowserWarning = controlledBrowserWarningForUrl(browserUrl);
+  const chatGptTarget = targetAgent === 'ChatGPT' || isChatGptUrl(browserUrl);
+  const temporaryChatGateActive = temporaryChatRequired && chatGptTarget;
+  const temporaryChatNeedsConfirmation = temporaryChatGateActive && !temporaryChatConfirmed;
+  const temporaryChatFullPromptReason = temporaryChatNeedsConfirmation
+    ? 'Turn on Temporary Chat in ChatGPT, then tick the confirmation box before copying or opening the full prompt.'
+    : '';
+  const browserDisabledReason = browserBusy
+    ? 'Browser automation is already opening a page.'
+    : !cap
+      ? 'Checking browser automation status.'
+      : !cap.playwright
+        ? 'Playwright package is not available. Install Playwright from Tooling.'
+        : !cap.chromium
+          ? 'Playwright Chromium is not installed. Use Tooling > Install Playwright Chromium or run npx playwright install chromium.'
+          : !browserUrl.trim()
+            ? 'Enter a URL before opening the controlled browser.'
+            : '';
+  const normalBrowserDisabledReason = !browserUrl.trim()
+    ? 'Enter a URL before opening a normal browser tab.'
+    : '';
+  const externalBrowserDisabledReason = externalBusy
+    ? 'External browser is already opening a page.'
+    : !browserUrl.trim()
+      ? 'Enter a URL before opening your external browser.'
+      : '';
+  const chromeDisabledReason = chromeBusy
+    ? 'Chrome is already opening a page.'
+    : !browserUrl.trim()
+      ? 'Enter a URL before opening Chrome.'
+      : '';
+  const copyOpenDisabledReason = !draft.trim()
+    ? 'Enter a local draft before using Copy + Open.'
+    : temporaryChatFullPromptReason || browserDisabledReason;
+  const copyNormalDisabledReason = !draft.trim()
+    ? 'Enter a local draft before using Copy + Normal.'
+    : temporaryChatFullPromptReason || normalBrowserDisabledReason;
+  const copyExternalDisabledReason = !draft.trim()
+    ? 'Enter a local draft before using Copy + External.'
+    : externalBrowserDisabledReason;
+  const copyChromeDisabledReason = !draft.trim()
+    ? 'Enter a local draft before using Copy + Chrome.'
+    : chromeDisabledReason;
+  const copyDisabledReason = !draft.trim() && !consultPrompt
+    ? 'Enter a local draft or build a consultation prompt before copying.'
+    : '';
+  const automaticDisabledReason = consultBusy
+    ? 'Cloud consultant is already running.'
+    : !draft.trim()
+      ? 'Enter a message before running cloud consultation.'
+      : !chatGptTarget
+        ? 'Automatic round trip currently supports ChatGPT only. Use manual fallback for other cloud agents.'
+        : temporaryChatNeedsConfirmation
+          ? 'Turn on Temporary Chat in ChatGPT, then tick the confirmation box before sending the full prompt.'
+          : browserDisabledReason;
+  const waitingForExternalResponse = Boolean(activeConsultationId || browserResult || consultPrompt);
+  const responseCaptureHint = external.trim()
+    ? 'Automatic answer captured. Choose what to save below; nothing is saved or synced until you click a save option.'
+    : browserResult?.blocked
+      ? 'Automatic capture was blocked. Finish login or verification in the persistent browser profile, then run it again. Manual paste is available as a fallback.'
+      : browserResult?.mode === 'chrome' || browserResult?.mode === 'external'
+        ? 'Manual fallback is active. Copy the answer from that browser only if automatic capture is blocked.'
+        : waitingForExternalResponse
+          ? 'Waiting for the automatic cloud response. If the site blocks automation, use the manual fallback controls.'
+          : 'Run automatic consultation to send the prompt, wait for ChatGPT, and fill this box automatically. Manual paste is only a fallback.';
 
   async function load() {
     setCap(await api('/api/browser/capabilities'));
     setConsultations(await api('/api/consultations'));
   }
-  useEffect(() => { load().catch((err) => setNotice(err.message)); }, []);
+  useEffect(() => { load().catch((err) => setNotice(err.message)); }, [refreshSignal]);
+  useEffect(() => {
+    api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
+  }, []);
+
+  function addContextFile() {
+    if (!selectedContextFile || contextPaths.includes(selectedContextFile)) return;
+    setContextPaths((current) => [...current, selectedContextFile]);
+    setSelectedContextFile('');
+  }
+
+  function removeContextFile(path) {
+    setContextPaths((current) => current.filter((item) => item !== path));
+  }
 
   async function ensureConsultation(promptOverride = '') {
     if (activeConsultationId) return activeConsultationId;
@@ -812,6 +1046,7 @@ function BrowserConsult({ setNotice, refresh }) {
   async function saveConsultation() {
     const prompt = consultPrompt || buildConsultPrompt();
     const consultationId = await ensureConsultation(prompt);
+    const hadExternalResponse = Boolean(external.trim());
     if (external.trim()) {
       await api(`/api/consultations/${consultationId}`, { method: 'PATCH', body: JSON.stringify({ external_response: external, status: 'captured' }) });
     }
@@ -822,15 +1057,28 @@ function BrowserConsult({ setNotice, refresh }) {
     setBrowserResult(null);
     await load();
     await refresh();
+    setNotice(hadExternalResponse
+      ? 'Consultation saved. External response became a memory candidate for review; nothing was promoted automatically.'
+      : 'Consultation draft saved. Add an external response to create a memory candidate.');
   }
 
   function buildConsultPrompt() {
+    const contextLines = contextPaths.length
+      ? [
+        `Selected LifePlanSystem context files:`,
+        ...contextPaths.map((path, index) => `${index + 1}. ${path}`),
+        ``,
+        `The automatic backend request will read and include the selected file contents.`
+      ]
+      : ['Selected LifePlanSystem context files: none.'];
     const prompt = [
       `You are acting as an external consultant for Life Planner, a local-first personal executive assistant.`,
       `Target: ${targetAgent}.`,
       ``,
       `Review the local draft below. Critique it, call out missing context or risky assumptions, and suggest concrete improvements.`,
       `Do not claim authority over memory, priorities, or plans. Your response will be pasted back into Life Planner as a reviewable suggestion only.`,
+      ``,
+      ...contextLines,
       ``,
       `Local draft:`,
       draft.trim() || '(No local draft supplied yet.)'
@@ -839,10 +1087,59 @@ function BrowserConsult({ setNotice, refresh }) {
     return prompt;
   }
 
+  async function runAutomaticConsultation() {
+    if (automaticDisabledReason) return;
+    setConsultBusy(true);
+    setExternal('');
+    setBrowserResult(null);
+    setActiveConsultationId(null);
+    setConsultStatus('Preparing prompt and selected LifePlanSystem context...');
+    try {
+      const result = await api('/api/browser/consult', {
+        method: 'POST',
+        body: JSON.stringify({
+          title,
+          local_draft: draft,
+          target_agent: targetAgent,
+          url: browserUrl,
+          context_paths: contextPaths,
+          temporary_chat_required: temporaryChatRequired,
+          temporary_chat_confirmed: temporaryChatConfirmed
+        })
+      });
+      setConsultPrompt(result.prompt || '');
+      setBrowserResult({
+        ...result,
+        mode: result.mode || 'automatic',
+        blocked: Boolean(result.blocked),
+        blockReason: result.blockReason || result.message
+      });
+      if (result.answer) {
+        setExternal(result.answer);
+        setConsultStatus('Response captured automatically. Review it below, then choose what to save.');
+        setNotice('Cloud consultant response captured automatically. Nothing was saved or synced.');
+      } else {
+        setConsultStatus(result.message || result.blockReason || 'Automatic consultation could not complete.');
+        setNotice(result.message || result.blockReason || 'Automatic consultation could not complete.');
+      }
+    } catch (err) {
+      setConsultStatus(err.message);
+      setNotice(err.message);
+    } finally {
+      setConsultBusy(false);
+    }
+  }
+
   async function copyConsultPrompt(promptOverride = '') {
+    if (temporaryChatNeedsConfirmation) {
+      await navigator.clipboard.writeText(temporaryChatSetupNote());
+      setNotice('Temporary Chat setup note copied. Turn on Temporary Chat in ChatGPT, tick "Temporary Chat is on", then copy the full prompt.');
+      return false;
+    }
     const prompt = promptOverride || consultPrompt || buildConsultPrompt();
     await navigator.clipboard.writeText(prompt);
     setNotice('Consultation prompt copied. Paste it into the cloud agent after login.');
+    return true;
   }
 
   async function openWithPrompt() {
@@ -850,6 +1147,42 @@ function BrowserConsult({ setNotice, refresh }) {
     const consultationId = await ensureConsultation(prompt);
     await copyConsultPrompt(prompt);
     await openControlledBrowser(consultationId);
+  }
+
+  async function openExternalBrowser(consultationId = activeConsultationId) {
+    setExternalBusy(true);
+    try {
+      const result = await api('/api/browser/open-external', {
+        method: 'POST',
+        body: JSON.stringify({ url: browserUrl, consultation_id: consultationId })
+      });
+      setBrowserResult(result);
+      setNotice('Opened your external browser outside the Codex app. It may appear behind this window; use this for Google sign-in or human checks that reject controlled browsers.');
+      return true;
+    } catch (err) {
+      setNotice(err.message);
+      return false;
+    } finally {
+      setExternalBusy(false);
+    }
+  }
+
+  async function openChromeBrowser(consultationId = activeConsultationId) {
+    setChromeBusy(true);
+    try {
+      const result = await api('/api/browser/open-chrome', {
+        method: 'POST',
+        body: JSON.stringify({ url: browserUrl, consultation_id: consultationId })
+      });
+      setBrowserResult(result);
+      setNotice('Opened your installed Chrome profile. The app did not read or copy Chrome cookies.');
+      return true;
+    } catch (err) {
+      setNotice(err.message);
+      return false;
+    } finally {
+      setChromeBusy(false);
+    }
   }
 
   async function openControlledBrowser(consultationId = activeConsultationId) {
@@ -860,7 +1193,9 @@ function BrowserConsult({ setNotice, refresh }) {
         body: JSON.stringify({ url: browserUrl, consultation_id: consultationId })
       });
       setBrowserResult(result);
-      setNotice(`Opened browser: ${result.title || result.url}`);
+      setNotice(result.blocked
+        ? result.blockReason
+        : `Opened controlled browser window: ${result.title || result.url}. It may appear outside the Codex in-app browser or behind this window.`);
     } catch (err) {
       setNotice(err.message);
     } finally {
@@ -868,20 +1203,127 @@ function BrowserConsult({ setNotice, refresh }) {
     }
   }
 
+  async function resetControlledBrowserData() {
+    setResetBusy(true);
+    try {
+      const result = await api('/api/browser/reset-profile', { method: 'POST', body: JSON.stringify({}) });
+      setBrowserResult(null);
+      setNotice(result.message || 'Controlled browser data reset.');
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
+  function openNormalBrowser() {
+    const url = browserUrl.trim();
+    if (!url) {
+      setNotice('Enter a URL before opening a normal browser tab.');
+      return false;
+    }
+    const opened = window.open(url, '_blank');
+    if (!opened) {
+      setNotice('Normal browser tab was blocked. Allow popups or copy the URL manually.');
+      return false;
+    }
+    try {
+      opened.opener = null;
+    } catch {
+      // Some browser surfaces prevent changing opener; the fallback still opened.
+    }
+    setNotice('Opened a normal browser tab. Use this if the controlled browser gets stuck on a human check.');
+    return true;
+  }
+
+  async function copyAndOpenNormal() {
+    const opened = openNormalBrowser();
+    const prompt = buildConsultPrompt();
+    const consultationId = await ensureConsultation(prompt);
+    const copiedPrompt = await copyConsultPrompt(prompt);
+    setNotice(opened
+      ? `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'} and opened a normal browser tab. Consultation #${consultationId} is ready for pasted response.`
+      : `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'}. Normal browser tab was blocked; open ${browserUrl.trim()} manually.`);
+  }
+
+  async function copyAndOpenExternal() {
+    const prompt = buildConsultPrompt();
+    const consultationId = await ensureConsultation(prompt);
+    const copiedPrompt = await copyConsultPrompt(prompt);
+    const opened = await openExternalBrowser(consultationId);
+    setNotice(opened
+      ? `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'} and opened your external browser. Consultation #${consultationId} is ready for pasted response.`
+      : `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'}. External browser did not open; open ${browserUrl.trim()} manually.`);
+  }
+
+  async function copyAndOpenChrome() {
+    const prompt = buildConsultPrompt();
+    const consultationId = await ensureConsultation(prompt);
+    const copiedPrompt = await copyConsultPrompt(prompt);
+    const opened = await openChromeBrowser(consultationId);
+    setNotice(opened
+      ? `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'} and opened Chrome. ${copiedPrompt ? `Consultation #${consultationId} is ready for pasted response.` : 'Turn on Temporary Chat in ChatGPT, tick "Temporary Chat is on", then click Copy.'}`
+      : `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'}. Chrome did not open; use External or open ${browserUrl.trim()} manually.`);
+  }
+
   async function pasteExternalResponse() {
     const text = await navigator.clipboard.readText();
     setExternal(text);
-    setNotice(text ? 'Clipboard response pasted into consultation.' : 'Clipboard is empty.');
+    setNotice(text ? 'AI response pasted into the review box. Save it to create a memory candidate for review.' : 'Clipboard is empty. Copy the AI response in ChatGPT first, then paste it here.');
   }
 
   return (
     <section className="two-column browser-flow">
       <div className="panel">
         <h2>Consultation Draft</h2>
-        <p>{cap?.playwright ? 'Playwright is available for browser automation. Local models run as-is; this app writes the context prompt.' : 'Manual browser stub is active. Paste external responses here for review.'}</p>
+        <p>{browserReady ? 'Automatic ChatGPT consultation is available through a persistent controlled browser profile.' : 'Automatic consultation needs Playwright Chromium. Manual fallback remains available.'}</p>
+        <div className="source-warning info">
+          Primary flow: select context, type a message, then run automatic consultation. The app opens ChatGPT, sends the prepared prompt, waits for the answer, and fills the response box. It will not save, sync, or promote anything until you choose a save option.
+        </div>
+        {!browserReady && (
+          <div className="source-warning warn">
+            Browser automation disabled: {browserDisabledReason || cap?.note || 'Browser automation is not ready.'}
+          </div>
+        )}
+        {browserReady && controlledBrowserWarning && (
+          <div className="source-warning warn">
+            Controlled browser blocked for this URL: {controlledBrowserWarning}
+          </div>
+        )}
+        {chatGptTarget && (
+          <div className={cx('source-warning', temporaryChatNeedsConfirmation ? 'warn' : 'info')}>
+            <label className="temporary-chat-option">
+              <input
+                type="checkbox"
+                checked={temporaryChatRequired}
+                onChange={(event) => {
+                  setTemporaryChatRequired(event.target.checked);
+                  if (!event.target.checked) setTemporaryChatConfirmed(false);
+                }}
+              />
+              Require ChatGPT Temporary Chat before copying the full prompt
+            </label>
+            {temporaryChatRequired && (
+              <label className="temporary-chat-option">
+                <input
+                  type="checkbox"
+                  checked={temporaryChatConfirmed}
+                  onChange={(event) => setTemporaryChatConfirmed(event.target.checked)}
+                />
+                Temporary Chat is on in ChatGPT
+              </label>
+            )}
+            <small>
+              The app cannot verify ChatGPT Temporary Chat mode. Until you tick this, automatic consultation and full prompt copy stay blocked.
+            </small>
+          </div>
+        )}
         <label>Cloud consultant</label>
         <div className="inline-form">
-          <select value={targetAgent} onChange={(event) => setTargetAgent(event.target.value)}>
+          <select value={targetAgent} onChange={(event) => {
+            setTargetAgent(event.target.value);
+            setTemporaryChatConfirmed(false);
+          }}>
             <option>ChatGPT</option>
             <option>Gemini</option>
             <option>Grok</option>
@@ -889,35 +1331,155 @@ function BrowserConsult({ setNotice, refresh }) {
             <option>Other web agent</option>
           </select>
           <button onClick={buildConsultPrompt}><Sparkles size={16} /> Build prompt</button>
-          <button onClick={copyConsultPrompt} disabled={!draft.trim() && !consultPrompt}><Clipboard size={16} /> Copy</button>
+          <button
+            onClick={() => copyConsultPrompt()}
+            disabled={Boolean(copyDisabledReason)}
+            title={copyDisabledReason || (temporaryChatNeedsConfirmation ? 'Copy Temporary Chat setup note before copying the full prompt' : 'Copy the generated consultation prompt')}
+          >
+            <Clipboard size={16} /> {temporaryChatNeedsConfirmation ? 'Copy temp setup' : 'Copy'}
+          </button>
         </div>
+        <label>LifePlanSystem context to include</label>
+        <div className="inline-form">
+          <select value={selectedContextFile} onChange={(event) => setSelectedContextFile(event.target.value)}>
+            <option value="">Select repo context file</option>
+            {repoFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}
+          </select>
+          <button onClick={addContextFile} disabled={!selectedContextFile || contextPaths.includes(selectedContextFile)}><Plus size={16} /> Include</button>
+        </div>
+        <div className="context-chips cloud-context">
+          {contextPaths.length === 0 ? <span>No context selected. Only the typed message will be sent.</span> : contextPaths.map((path) => (
+            <button key={path} onClick={() => removeContextFile(path)} title="Remove context file">
+              <FileText size={13} />
+              <span>{path}</span>
+              <X size={13} />
+            </button>
+          ))}
+        </div>
+        <div className="decision-row">
+          <button className="primary" onClick={runAutomaticConsultation} disabled={Boolean(automaticDisabledReason)} title={automaticDisabledReason || 'Open ChatGPT, send the prompt, wait for the response, and fill the answer box'}>
+            <Sparkles size={16} /> {consultBusy ? 'Consulting...' : 'Run automatic consultation'}
+          </button>
+          {automaticDisabledReason && <span className="inline-hint">{automaticDisabledReason}</span>}
+        </div>
+        {consultStatus && (
+          <div className={cx('source-warning', external.trim() ? 'info' : browserResult?.blocked ? 'warn' : 'info')}>
+            <strong>Automation status</strong>
+            <small>{consultStatus}</small>
+          </div>
+        )}
         <label>Controlled browser URL</label>
         <div className="inline-form">
-          <input value={browserUrl} onChange={(event) => setBrowserUrl(event.target.value)} placeholder="https://chatgpt.com/" />
-          <button onClick={openControlledBrowser} disabled={browserBusy || !cap?.playwright}>
+          <input value={browserUrl} onChange={(event) => {
+            setBrowserUrl(event.target.value);
+            setTemporaryChatConfirmed(false);
+          }} placeholder="https://chatgpt.com/" />
+          <button onClick={() => openControlledBrowser()} disabled={Boolean(browserDisabledReason)} title={browserDisabledReason || 'Open the URL in a Playwright-controlled browser'}>
             <Globe2 size={16} /> {browserBusy ? 'Opening...' : 'Open'}
           </button>
-          <button className="primary" onClick={openWithPrompt} disabled={browserBusy || !cap?.playwright || !draft.trim()}>
+          <button className="primary" onClick={openWithPrompt} disabled={Boolean(copyOpenDisabledReason)} title={copyOpenDisabledReason || 'Copy the prompt and open the controlled browser'}>
             <Globe2 size={16} /> Copy + Open
           </button>
+          <button onClick={openNormalBrowser} disabled={Boolean(normalBrowserDisabledReason)} title={normalBrowserDisabledReason || 'Open the URL in a normal browser tab'}>
+            <Globe2 size={16} /> Normal tab
+          </button>
+          <button onClick={copyAndOpenNormal} disabled={Boolean(copyNormalDisabledReason)} title={copyNormalDisabledReason || 'Copy the prompt and open a normal browser tab'}>
+            <Clipboard size={16} /> Copy + Normal
+          </button>
+          <a
+            className="source-link"
+            href={browserUrl.trim() || '#'}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => {
+              if (!browserUrl.trim()) {
+                event.preventDefault();
+                setNotice('Enter a URL before opening an app tab.');
+              }
+            }}
+            title="Open the URL as a visible in-app browser tab"
+          >
+            <Globe2 size={16} /> App tab
+          </a>
+          <button onClick={() => openExternalBrowser()} disabled={Boolean(externalBrowserDisabledReason)} title={externalBrowserDisabledReason || 'Open the URL in your default external browser'}>
+            <Globe2 size={16} /> {externalBusy ? 'Opening...' : 'External'}
+          </button>
+          <button
+            onClick={copyAndOpenExternal}
+            disabled={Boolean(copyExternalDisabledReason)}
+            title={copyExternalDisabledReason || (temporaryChatNeedsConfirmation ? 'Copy Temporary Chat setup note and open your default external browser' : 'Copy the prompt and open your default external browser')}
+          >
+            <Clipboard size={16} /> {temporaryChatNeedsConfirmation ? 'Temp + External' : 'Copy + External'}
+          </button>
+          <button onClick={() => openChromeBrowser()} disabled={Boolean(chromeDisabledReason)} title={chromeDisabledReason || 'Open the URL in your installed Chrome profile'}>
+            <Globe2 size={16} /> {chromeBusy ? 'Opening...' : 'Chrome'}
+          </button>
+          <button
+            onClick={copyAndOpenChrome}
+            disabled={Boolean(copyChromeDisabledReason)}
+            title={copyChromeDisabledReason || (temporaryChatNeedsConfirmation ? 'Copy Temporary Chat setup note and open your installed Chrome profile' : 'Copy the prompt and open your installed Chrome profile')}
+          >
+            <Clipboard size={16} /> {temporaryChatNeedsConfirmation ? 'Temp + Chrome' : 'Copy + Chrome'}
+          </button>
+          <button onClick={resetControlledBrowserData} disabled={resetBusy || browserBusy} title="Close the Playwright browser and clear this app's controlled browser profile">
+            <RefreshCcw size={16} /> {resetBusy ? 'Resetting...' : 'Reset data'}
+          </button>
         </div>
+        {(browserDisabledReason || copyOpenDisabledReason) && (
+          <p>
+            {browserDisabledReason && `Open disabled: ${browserDisabledReason}`}
+            {browserDisabledReason && copyOpenDisabledReason && copyOpenDisabledReason !== browserDisabledReason ? ' ' : ''}
+            {copyOpenDisabledReason && copyOpenDisabledReason !== browserDisabledReason ? `Copy + Open disabled: ${copyOpenDisabledReason}` : ''}
+          </p>
+        )}
         {browserResult && (
           <div className="browser-result">
-            <Pill tone="good">Opened</Pill>
+            <Pill tone={browserResult.blocked ? 'warn' : 'good'}>{browserResult.blocked ? 'Human check' : 'Opened'}</Pill>
             <strong>{browserResult.title || browserResult.url}</strong>
             <span>{browserResult.url}</span>
             {browserResult.excerpt && <small>{browserResult.excerpt}</small>}
+            {browserResult.blocked && <small>{browserResult.blockReason}</small>}
+            <small>
+              {browserResult.mode === 'chrome'
+                ? 'Opened in your installed Chrome profile. The app did not read or copy cookies.'
+                : browserResult.mode === 'external'
+                  ? 'Opened outside the Codex app in your default browser.'
+                  : browserResult.mode?.includes?.('persistent')
+                    ? `${browserResult.mode}. ${browserResult.launchNote || 'Using the app controlled browser profile.'}`
+                    : 'Opened in a separate Playwright-controlled browser window, not as a Codex in-app tab.'}
+            </small>
           </div>
         )}
         <input value={title} onChange={(event) => setTitle(event.target.value)} />
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Local draft to critique..." />
         {consultPrompt && <textarea value={consultPrompt} onChange={(event) => setConsultPrompt(event.target.value)} placeholder="Generated consultation prompt..." />}
+        <div className={cx('source-warning', external.trim() ? 'info' : 'warn')}>
+          <strong>{external.trim() ? 'AI response ready to save' : waitingForExternalResponse ? 'Waiting for AI response' : 'No AI response captured yet'}</strong>
+          <small>{external.trim() ? 'Saving will create a reviewable memory candidate; nothing is promoted automatically.' : responseCaptureHint}</small>
+        </div>
         <div className="inline-form">
-          <button onClick={pasteExternalResponse}><Clipboard size={16} /> Paste from clipboard</button>
+          <button onClick={pasteExternalResponse}><Clipboard size={16} /> Manual paste fallback</button>
           {activeConsultationId && <Pill tone="info">Consultation #{activeConsultationId}</Pill>}
         </div>
-        <textarea value={external} onChange={(event) => setExternal(event.target.value)} placeholder="Captured cloud response or manual paste..." />
-        <button className="primary" onClick={saveConsultation}><Globe2 size={16} /> Save as reviewable suggestion</button>
+        <textarea value={external} onChange={(event) => setExternal(event.target.value)} placeholder="Automatic ChatGPT response will appear here. Manual paste is a fallback if automation is blocked." />
+        {external.trim() && (
+          <div className="save-choice">
+            <strong>What do you want to keep?</strong>
+            <small>Nothing has been saved yet. Choose one explicit action after reviewing the answer.</small>
+            <div className="decision-row">
+              <button className="primary" onClick={saveConsultation} title="Save this response as a reviewable memory candidate"><Globe2 size={16} /> Save response candidate</button>
+              <button disabled title="Future option: save the browser/chat transcript without creating memory">Save chat log later</button>
+              <button disabled title="Future option: create a governed sync proposal after review">Sync everything later</button>
+              <button onClick={() => {
+                setExternal('');
+                setConsultStatus('Captured response cleared. Nothing was saved.');
+              }}><X size={16} /> Save nothing</button>
+            </div>
+          </div>
+        )}
+        {!external.trim() && (
+          <button className="primary" onClick={saveConsultation} disabled title="Run automatic consultation or use manual fallback before saving"><Globe2 size={16} /> Save response as reviewable suggestion</button>
+        )}
       </div>
       <div className="panel">
         <h2>Consultation History</h2>
@@ -936,13 +1498,14 @@ function BrowserConsult({ setNotice, refresh }) {
   );
 }
 
-function Tooling({ setNotice }) {
+function Tooling({ setNotice, refreshSignal = 0 }) {
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState('');
 
-  async function refresh() {
+  async function refresh(announce = false) {
     try {
       setStatus(await api('/api/tooling/status'));
+      if (announce) setNotice('Tooling status refreshed.');
     } catch (err) {
       setNotice(err.message);
     }
@@ -961,7 +1524,19 @@ function Tooling({ setNotice }) {
     }
   }
 
-  useEffect(() => { refresh(); }, []);
+  async function openExternal(url, label) {
+    setBusy(label);
+    try {
+      await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url }) });
+      setNotice(`Opened ${label} in your external browser.`);
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  useEffect(() => { refresh(); }, [refreshSignal]);
 
   const rows = [
     {
@@ -988,7 +1563,7 @@ function Tooling({ setNotice }) {
           <h2>Local Tooling</h2>
           <p>Bootstrap Playwright for external browser and tab control. Installs use this app folder, not global project state unless the tool requires it.</p>
         </div>
-        <button onClick={refresh}><RefreshCcw size={16} /> Refresh</button>
+        <button onClick={() => refresh(true)}><RefreshCcw size={16} /> Refresh</button>
       </div>
 
       <div className="panel">
@@ -999,6 +1574,23 @@ function Tooling({ setNotice }) {
           <div><span>GitHub CLI</span><Pill tone={status?.githubCli?.authenticated ? 'good' : 'warn'}>{status?.githubCli?.available ? status?.githubCli?.authenticated ? 'Logged in' : 'Available' : 'Missing'}</Pill><small>{status?.installHints?.githubCli}</small></div>
           <div><span>HF CLI</span><Pill tone={status?.huggingFaceCli?.authenticated ? 'good' : 'warn'}>{status?.huggingFaceCli?.available ? status?.huggingFaceCli?.authenticated ? 'Logged in' : 'Available' : 'Missing'}</Pill><small>{status?.installHints?.huggingFaceCli}</small></div>
         </div>
+        {status && !status.winget?.available && (
+          <div className="source-warning warn">winget is not on PATH, so this app cannot run the GitHub CLI winget install command for you.</div>
+        )}
+        {status && (!status.githubCli?.available || !status.huggingFaceCli?.available) && (
+          <div className="decision-row">
+            {!status.githubCli?.available && (
+              <button onClick={() => openExternal(status.installUrls?.githubCli || 'https://cli.github.com/', 'GitHub CLI download')} disabled={Boolean(busy)}>
+                <Github size={16} /> Open GitHub CLI download
+              </button>
+            )}
+            {!status.huggingFaceCli?.available && (
+              <button onClick={() => openExternal(status.installUrls?.huggingFaceCli || 'https://huggingface.co/docs/huggingface_hub/guides/cli', 'Hugging Face CLI docs')} disabled={Boolean(busy)}>
+                <Globe2 size={16} /> Open HF CLI docs
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="panel">
@@ -1040,7 +1632,7 @@ After installing CLI tools, use the Source tab login buttons and refresh status.
   );
 }
 
-function RepositoryExplorer({ setNotice }) {
+function RepositoryExplorer({ setNotice, refreshSignal = 0 }) {
   const [query, setQuery] = useState('');
   const [files, setFiles] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -1049,9 +1641,11 @@ function RepositoryExplorer({ setNotice }) {
   const [newPath, setNewPath] = useState('');
   const [renamePath, setRenamePath] = useState('');
 
-  async function loadFiles(nextQuery = query) {
+  async function loadFiles(nextQuery = query, announce = false) {
     try {
-      setFiles(await api(`/api/repo/files?q=${encodeURIComponent(nextQuery)}`));
+      const nextFiles = await api(`/api/repo/files?q=${encodeURIComponent(nextQuery)}`);
+      setFiles(nextFiles);
+      if (announce) setNotice(`Repository file list refreshed: ${nextFiles.length} file(s).`);
     } catch (err) {
       setNotice(err.message);
     }
@@ -1093,14 +1687,14 @@ function RepositoryExplorer({ setNotice }) {
     }
   }
 
-  useEffect(() => { loadFiles(); }, []);
+  useEffect(() => { loadFiles(); }, [refreshSignal]);
 
   return (
     <section className="repo-layout">
       <div className="panel repo-list">
         <div className="inline-form">
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search repo files" />
-          <button onClick={() => loadFiles()}><RefreshCcw size={16} /></button>
+          <button onClick={() => loadFiles(query, true)} title="Refresh repository file list"><RefreshCcw size={16} /></button>
         </div>
         <label>New file proposal</label>
         <div className="inline-form">
@@ -1149,7 +1743,7 @@ function RepositoryExplorer({ setNotice }) {
   );
 }
 
-function Calibration({ setNotice }) {
+function Calibration({ setNotice, refreshSignal = 0 }) {
   const [docs, setDocs] = useState([]);
   const calibrationFiles = [
     'LifePlanSystem_Sanitised_UI_Scaffold_2026-06-29/source_of_truth/open_questions.md',
@@ -1161,7 +1755,7 @@ function Calibration({ setNotice }) {
     Promise.all(calibrationFiles.map((file) => api(`/api/repo/file?path=${encodeURIComponent(file)}`).catch((err) => ({ path: file, content: `Unavailable: ${err.message}` }))))
       .then(setDocs)
       .catch((err) => setNotice(err.message));
-  }, []);
+  }, [refreshSignal]);
 
   return (
     <section className="calibration-grid">
@@ -1185,7 +1779,7 @@ function Calibration({ setNotice }) {
   );
 }
 
-function SourceControl({ setNotice }) {
+function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [source, setSource] = useState(null);
   const [diff, setDiff] = useState(null);
   const [commitMessage, setCommitMessage] = useState('');
@@ -1199,19 +1793,20 @@ function SourceControl({ setNotice }) {
   const [sourceBusy, setSourceBusy] = useState(false);
   const [operationOutput, setOperationOutput] = useState('');
 
-  async function refresh() {
+  async function refresh(announce = false) {
     try {
       setSource(await api('/api/source/status'));
       setDiff(await api('/api/source/diff'));
       const branchData = await api('/api/source/branches');
       setBranches(branchData);
       setBranchToSwitch((current) => current || branchData.current || '');
+      if (announce) setNotice('Source status refreshed.');
     } catch (err) {
       setNotice(err.message);
     }
   }
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refresh(); }, [refreshSignal]);
 
   async function action(path, body, success) {
     if (sourceBusy) return;
@@ -1230,12 +1825,40 @@ function SourceControl({ setNotice }) {
     }
   }
 
+  async function openExternal(url, label) {
+    if (sourceBusy) return;
+    setSourceBusy(true);
+    try {
+      await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url }) });
+      setNotice(`Opened ${label} in your external browser.`);
+    } catch (err) {
+      setNotice(err.message);
+      setOperationOutput(err.message);
+    } finally {
+      setSourceBusy(false);
+    }
+  }
+
   const changedFiles = source?.changedFiles || [];
   const localBranches = (branches.branches || []).filter((branch) => !branch.remote);
   const hasChanges = changedFiles.length > 0;
   const protectedFiles = changedFiles.filter((file) => file.protected);
   const canStageAll = hasChanges && !sourceBusy && !source?.hasConflicts && protectedFiles.length === 0;
   const canCommit = !sourceBusy && Boolean(commitMessage.trim()) && changedFiles.some((file) => file.staged) && !source?.hasConflicts;
+  const githubLoginDisabledReason = sourceBusy
+    ? 'A source control operation is already running.'
+    : !source
+      ? 'Checking source status.'
+      : !source.github?.cliAvailable
+        ? `GitHub CLI is missing. ${source.installHints?.githubCli || 'Install GitHub CLI first.'}`
+        : '';
+  const hfLoginDisabledReason = sourceBusy
+    ? 'A source control operation is already running.'
+    : !source
+      ? 'Checking source status.'
+      : !source.huggingface?.cliAvailable
+        ? `Hugging Face CLI is missing. ${source.installHints?.huggingFaceCli || 'Install Hugging Face CLI first or use Settings.'}`
+        : '';
 
   return (
     <section className="source-layout">
@@ -1245,11 +1868,13 @@ function SourceControl({ setNotice }) {
           <p>{source?.repoPath || 'Reading repository state...'}</p>
         </div>
         <div className="source-actions">
-          <button onClick={refresh} disabled={sourceBusy}><RefreshCcw size={16} /> Refresh</button>
-          <button onClick={() => action('/api/source/login/github')} disabled={sourceBusy}><Github size={16} /> Login with Git</button>
-          <a className="source-link" href="https://github.com/neuro-1977/lps" target="_blank" rel="noreferrer"><Github size={16} /> Open push repo</a>
-          <a className="source-link" href="https://github.com/Daa13x/LifePlanSystemPublic" target="_blank" rel="noreferrer"><Github size={16} /> Upstream merge target</a>
-          <button onClick={() => action('/api/source/login/hf')} disabled={sourceBusy}>Login with HF</button>
+          <button onClick={() => refresh(true)} disabled={sourceBusy}><RefreshCcw size={16} /> Refresh</button>
+          <button onClick={() => action('/api/source/login/github')} disabled={Boolean(githubLoginDisabledReason)} title={githubLoginDisabledReason || 'Start GitHub CLI browser login'}><Github size={16} /> Login with Git</button>
+          <button onClick={() => openExternal(source?.installUrls?.githubCli || 'https://cli.github.com/', 'GitHub CLI download')} disabled={sourceBusy}><Download size={16} /> GitHub CLI</button>
+          <button onClick={() => openExternal('https://github.com/neuro-1977/lps', 'push repo')} disabled={sourceBusy}><Github size={16} /> Open push repo</button>
+          <button onClick={() => openExternal('https://github.com/Daa13x/LifePlanSystemPublic', 'upstream merge target')} disabled={sourceBusy}><Github size={16} /> Upstream merge target</button>
+          <button onClick={() => action('/api/source/login/hf')} disabled={Boolean(hfLoginDisabledReason)} title={hfLoginDisabledReason || 'Start Hugging Face CLI login'}>Login with HF</button>
+          <button onClick={() => openExternal(source?.installUrls?.huggingFaceCli || 'https://huggingface.co/docs/huggingface_hub/guides/cli', 'Hugging Face CLI docs')} disabled={sourceBusy}>HF CLI docs</button>
         </div>
       </div>
 
@@ -1272,12 +1897,14 @@ function SourceControl({ setNotice }) {
             <Pill tone={source?.github?.authenticated ? 'good' : 'warn'}>
               {source?.github?.authenticated ? 'Logged in' : source?.github?.cliAvailable ? 'Login needed' : 'Unavailable'}
             </Pill>
+            <small>{source?.github?.cliAvailable ? source?.github?.detail : source?.installHints?.githubCli}</small>
           </div>
           <div>
             <span>Hugging Face CLI</span>
             <Pill tone={source?.huggingface?.authenticated ? 'good' : 'warn'}>
               {source?.huggingface?.authenticated ? 'Logged in' : source?.huggingface?.cliAvailable ? 'Login needed' : 'Unavailable'}
             </Pill>
+            <small>{source?.huggingface?.cliAvailable ? source?.huggingface?.detail : source?.installHints?.huggingFaceCli}</small>
           </div>
           <div>
             <span>Working tree</span>
@@ -1291,6 +1918,9 @@ function SourceControl({ setNotice }) {
         <h2>Write</h2>
         <p>These buttons run local Git commands in this workspace. Protected runtime files are blocked from staging and commits.</p>
         {sourceBusy && <div className="source-warning info">Running source control operation...</div>}
+        {source && !source.github?.cliAvailable && <div className="source-warning warn">GitHub CLI login is unavailable because <code>gh</code> is not installed or not on PATH. Use GitHub CLI above to open the official download page, install it, restart the app terminal, then refresh.</div>}
+        {source && !source.huggingface?.cliAvailable && <div className="source-warning warn">Hugging Face CLI login is unavailable because <code>hf</code> is not installed or not on PATH. Use HF CLI docs above, or add an HF token in Settings.</div>}
+        {source && !source.winget?.available && <div className="source-warning warn">winget is not on PATH, so the app cannot run <code>winget install --id GitHub.cli</code> for you.</div>}
         {source?.hasConflicts && <div className="source-warning bad">Resolve conflicts before staging or committing: {source.conflictFiles.join(', ')}</div>}
         {protectedFiles.length > 0 && <div className="source-warning warn">Protected files present: {protectedFiles.map((file) => file.path).join(', ')}</div>}
         <label>Create branch</label>
@@ -1316,7 +1946,7 @@ function SourceControl({ setNotice }) {
         <div className="inline-form">
           <input value={githubRepo} onChange={(event) => setGithubRepo(event.target.value)} disabled={sourceBusy} placeholder="owner/repo" />
           <button onClick={() => action('/api/source/create/github', { repo: githubRepo, visibility: 'public' })} disabled={sourceBusy || !githubRepo.trim()}><Github size={16} /> Create public</button>
-          <button onClick={() => window.open('https://github.com/new', '_blank', 'noopener,noreferrer')} disabled={sourceBusy}>Open GitHub New</button>
+          <button onClick={() => openExternal('https://github.com/new', 'GitHub new repository page')} disabled={sourceBusy}>Open GitHub New</button>
         </div>
         <label>Create Hugging Face repo</label>
         <div className="inline-form">
@@ -1327,7 +1957,7 @@ function SourceControl({ setNotice }) {
             <option value="space">space</option>
           </select>
           <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'public' })} disabled={sourceBusy || !hfRepo.trim()}>Create public</button>
-          <button onClick={() => window.open('https://huggingface.co/new', '_blank', 'noopener,noreferrer')} disabled={sourceBusy}>Open HF New</button>
+          <button onClick={() => openExternal('https://huggingface.co/new', 'Hugging Face new repository page')} disabled={sourceBusy}>Open HF New</button>
         </div>
         <label>Commit message</label>
         <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change..." disabled={sourceBusy} />

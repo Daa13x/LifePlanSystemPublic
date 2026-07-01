@@ -16,6 +16,8 @@ const root = process.cwd();
 let managedLlamaServer = null;
 let browserContext = null;
 let browserPage = null;
+let browserMode = '';
+let browserLaunchNote = '';
 
 app.use(express.json({ limit: '25mb' }));
 
@@ -70,6 +72,127 @@ function normalizeBrowserUrl(value) {
   throw new Error('Enter a full http(s) URL or a domain such as chatgpt.com.');
 }
 
+function consultationCandidate(candidate = {}) {
+  return candidate.source === 'cloud consultation'
+    || String(candidate.title || '').startsWith('Consultation suggestion:');
+}
+
+function normalizedMemoryCandidate(candidate = {}) {
+  const consultation = consultationCandidate(candidate);
+  const title = consultation
+    ? String(candidate.title || '').replace(/^Consultation suggestion:\s*/, '').trim() || 'Cloud consultation response'
+    : candidate.title;
+  return {
+    ...candidate,
+    type: consultation ? 'consultation' : candidate.type,
+    title
+  };
+}
+
+function browserChallengeResult({ url = '', title = '', text = '' }) {
+  const haystack = `${url}\n${title}\n${text}`.toLowerCase();
+  if (haystack.includes('chatgpt.com/api/auth/error')) {
+    return {
+      blocked: true,
+      reason: 'ChatGPT returned an auth error in the controlled browser profile. Reset controlled browser data, then open ChatGPT again.'
+    };
+  }
+  const challengeTerms = [
+    '__cf_chl_',
+    'verify you are human',
+    'checking if the site connection is secure',
+    'this browser or app may not be secure',
+    'try using a different browser',
+    'unusual traffic',
+    'captcha'
+  ];
+  const blocked = challengeTerms.some((term) => haystack.includes(term));
+  if (!blocked) return { blocked: false, reason: '' };
+  if (haystack.includes('this browser or app may not be secure')) {
+    return {
+      blocked: true,
+      reason: 'The site rejected this controlled browser as insecure. Use External to sign in through your normal browser.'
+    };
+  }
+  return {
+    blocked: true,
+    reason: 'The site opened a human-verification challenge in the controlled browser. Use External for ChatGPT/Google sign-in or complete the check manually if the site allows it.'
+  };
+}
+
+function chatGptUnavailableResult({ url = '', title = '', text = '' }) {
+  const challenge = browserChallengeResult({ url, title, text });
+  if (challenge.blocked) return challenge;
+  const haystack = `${url}\n${title}\n${text}`.toLowerCase();
+  if (haystack.includes('log in') && haystack.includes('sign up') && !haystack.includes('message chatgpt')) {
+    return {
+      blocked: true,
+      reason: 'ChatGPT opened, but the signed-in composer was not available. Sign in or finish verification in the controlled browser profile, then run the consultation again.'
+    };
+  }
+  return { blocked: false, reason: '' };
+}
+
+function browserProfileDir() {
+  return path.join(root, 'data', 'browser-profile');
+}
+
+async function controlledBrowserPage() {
+  const automation = await browserAutomationStatus();
+  if (!automation.playwright) throw new Error(automation.note);
+  if (!automation.chromium) {
+    throw new Error(`${automation.note} Expected executable: ${automation.executablePath || 'unknown'}`);
+  }
+
+  const { chromium } = await import('playwright');
+  const userDataDir = browserProfileDir();
+  fs.mkdirSync(userDataDir, { recursive: true });
+  if (!browserContext) {
+    const launchOptions = {
+      headless: false,
+      viewport: null,
+      args: ['--start-maximized']
+    };
+    try {
+      browserContext = await chromium.launchPersistentContext(userDataDir, {
+        ...launchOptions,
+        channel: 'chrome'
+      });
+      browserMode = 'persistent Chrome';
+      browserLaunchNote = 'Using a dedicated persistent Chrome profile for Life Planner automation.';
+    } catch (error) {
+      browserContext = await chromium.launchPersistentContext(userDataDir, launchOptions);
+      browserMode = 'persistent Playwright Chromium';
+      browserLaunchNote = `Chrome channel was unavailable, so Playwright Chromium is using the same persistent app profile. ${error.message}`;
+    }
+    browserContext.on('close', () => {
+      browserContext = null;
+      browserPage = null;
+      browserMode = '';
+      browserLaunchNote = '';
+    });
+  }
+  const pages = browserContext.pages();
+  browserPage = browserPage && !browserPage.isClosed() ? browserPage : pages[0] || await browserContext.newPage();
+  return { page: browserPage, profile: userDataDir, mode: browserMode || 'persistent browser', launchNote: browserLaunchNote };
+}
+
+async function resetBrowserProfile() {
+  if (browserContext) {
+    await browserContext.close().catch(() => {});
+    browserContext = null;
+    browserPage = null;
+  }
+  const dataRoot = path.resolve(root, 'data');
+  const userDataDir = path.resolve(dataRoot, 'browser-profile');
+  if (!userDataDir.startsWith(`${dataRoot}${path.sep}`)) {
+    throw new Error('Refusing to reset a browser profile outside the app data folder.');
+  }
+  fs.rmSync(userDataDir, { recursive: true, force: true });
+  fs.mkdirSync(userDataDir, { recursive: true });
+  return userDataDir;
+}
+
 async function packageAvailable(packageName) {
   try {
     await import(packageName);
@@ -77,6 +200,268 @@ async function packageAvailable(packageName) {
   } catch {
     return false;
   }
+}
+
+async function browserAutomationStatus() {
+  try {
+    const { chromium } = await import('playwright');
+    const executablePath = chromium.executablePath();
+    const chromiumInstalled = Boolean(executablePath && fs.existsSync(executablePath));
+    return {
+      playwright: true,
+      chromium: chromiumInstalled,
+      executablePath,
+      mode: chromiumInstalled ? 'available' : 'chromium missing',
+      note: chromiumInstalled
+        ? 'Playwright Chromium is installed and browser automation can run.'
+        : 'Playwright is installed, but Chromium is missing. Run npx playwright install chromium or use Tooling > Install Playwright Chromium.'
+    };
+  } catch {
+    return {
+      playwright: false,
+      chromium: false,
+      executablePath: '',
+      mode: 'manual consultation stub',
+      note: 'Install Playwright to enable controlled browser consultation.'
+    };
+  }
+}
+
+function selectedContextFiles(paths = []) {
+  const normalizedPaths = [...new Set((Array.isArray(paths) ? paths : [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean))]
+    .slice(0, 8);
+  const contexts = [];
+  let totalChars = 0;
+  for (const contextPath of normalizedPaths) {
+    const target = safeWorkspacePath(contextPath);
+    if (isProtectedWorkspacePath(target.normalized)) {
+      throw new Error(`Protected/private file cannot be sent to a cloud consultant: ${target.normalized}`);
+    }
+    if (!fs.existsSync(target.absolute) || !fs.statSync(target.absolute).isFile()) {
+      throw new Error(`Context file not found: ${target.normalized}`);
+    }
+    const raw = fs.readFileSync(target.absolute, 'utf8');
+    const remaining = Math.max(0, 24000 - totalChars);
+    if (!remaining) break;
+    const content = raw.slice(0, Math.min(raw.length, remaining, 8000));
+    totalChars += content.length;
+    contexts.push({
+      path: target.normalized,
+      truncated: content.length < raw.length,
+      content
+    });
+  }
+  return contexts;
+}
+
+function buildCloudConsultationPrompt({ targetAgent = 'ChatGPT', localDraft = '', contexts = [] }) {
+  const contextBlock = contexts.length
+    ? [
+      'Selected LifePlanSystem context:',
+      ...contexts.map((item, index) => [
+        `Context ${index + 1}: ${item.path}${item.truncated ? ' (truncated)' : ''}`,
+        '```text',
+        item.content,
+        '```'
+      ].join('\n'))
+    ].join('\n\n')
+    : 'Selected LifePlanSystem context: none supplied.';
+
+  return [
+    'You are acting as an external consultant for Life Planner, a local-first personal executive assistant.',
+    `Target: ${targetAgent}.`,
+    '',
+    'Review the local draft below. Critique it, call out missing context or risky assumptions, and suggest concrete improvements.',
+    'Treat the selected LifePlanSystem context as background only. Do not claim authority over memory, priorities, or plans.',
+    'Your response will be returned to Life Planner as a reviewable suggestion only; it will not become memory or source-of-truth unless the user explicitly saves/reviews it later.',
+    '',
+    contextBlock,
+    '',
+    'Local draft:',
+    localDraft.trim() || '(No local draft supplied yet.)'
+  ].join('\n');
+}
+
+async function firstVisibleLocator(page, selectors, timeout = 1000) {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    try {
+      if (await locator.count() && await locator.isVisible({ timeout })) return locator;
+    } catch {
+      // Try the next selector.
+    }
+  }
+  return null;
+}
+
+async function chatGptComposer(page) {
+  return firstVisibleLocator(page, [
+    '[data-testid="prompt-textarea"]',
+    '#prompt-textarea',
+    'textarea[placeholder*="Message"]',
+    'textarea[aria-label*="Message"]',
+    'div[contenteditable="true"][role="textbox"]',
+    'div[contenteditable="true"]'
+  ], 1500);
+}
+
+async function extractChatGptAnswer(page) {
+  const selectors = [
+    '[data-message-author-role="assistant"]',
+    'article:has([data-message-author-role="assistant"])',
+    '[data-testid^="conversation-turn-"] .markdown',
+    '.markdown'
+  ];
+  for (const selector of selectors) {
+    try {
+      const items = await page.locator(selector).allTextContents();
+      const cleaned = items.map((item) => item.replace(/\s+\n/g, '\n').trim()).filter(Boolean);
+      if (cleaned.length) return cleaned[cleaned.length - 1];
+    } catch {
+      // Try the next selector.
+    }
+  }
+  return '';
+}
+
+async function waitForChatGptAnswer(page, previousAnswer = '') {
+  let last = '';
+  let stableTicks = 0;
+  const started = Date.now();
+  while (Date.now() - started < 180000) {
+    const currentUrl = page.url();
+    const title = await page.title().catch(() => '');
+    const visibleText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    const blocked = chatGptUnavailableResult({ url: currentUrl, title, text: visibleText });
+    if (blocked.blocked) {
+      const error = new Error(blocked.reason);
+      error.blocked = true;
+      error.currentUrl = currentUrl;
+      error.title = title;
+      error.excerpt = visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200);
+      throw error;
+    }
+
+    const answer = await extractChatGptAnswer(page);
+    const hasNewAnswer = answer && answer !== previousAnswer && answer.length > 20;
+    if (hasNewAnswer && answer === last) {
+      stableTicks += 1;
+    } else if (hasNewAnswer) {
+      stableTicks = 0;
+      last = answer;
+    }
+
+    const stopButton = await firstVisibleLocator(page, ['button[aria-label*="Stop"]', '[data-testid="stop-button"]'], 400);
+    if (hasNewAnswer && stableTicks >= 2 && !stopButton) return answer;
+    await page.waitForTimeout(1800);
+  }
+  throw new Error('Timed out waiting for ChatGPT to finish responding. If the answer is visible, use the manual fallback controls.');
+}
+
+async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) {
+  const { page, profile, mode, launchNote } = await controlledBrowserPage();
+  await page.goto(normalizeBrowserUrl(url), { waitUntil: 'domcontentloaded', timeout: 60000 });
+  const title = await page.title().catch(() => '');
+  const currentUrl = page.url();
+  const visibleText = await page.locator('body').innerText({ timeout: 8000 }).catch(() => '');
+  const blocked = chatGptUnavailableResult({ url: currentUrl, title, text: visibleText });
+  if (blocked.blocked) {
+    return {
+      ok: false,
+      blocked: true,
+      blockReason: blocked.reason,
+      url: currentUrl,
+      title,
+      profile,
+      mode,
+      launchNote,
+      excerpt: visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200)
+    };
+  }
+
+  const composer = await chatGptComposer(page);
+  if (!composer) {
+    return {
+      ok: false,
+      blocked: true,
+      blockReason: 'ChatGPT opened, but the message composer was not found. Sign in, finish any verification, or start a new chat in the persistent browser profile, then try again.',
+      url: page.url(),
+      title: await page.title().catch(() => ''),
+      profile,
+      mode,
+      launchNote,
+      excerpt: visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200)
+    };
+  }
+
+  const previousAnswer = await extractChatGptAnswer(page);
+  await composer.click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
+  await page.keyboard.press('Backspace').catch(() => {});
+  await page.keyboard.insertText(prompt);
+
+  const sendButton = await firstVisibleLocator(page, [
+    '[data-testid="send-button"]',
+    'button[aria-label="Send prompt"]',
+    'button[aria-label="Send message"]',
+    'button:has-text("Send")'
+  ], 1200);
+  if (sendButton) {
+    await sendButton.click({ timeout: 10000 });
+  } else {
+    await page.keyboard.press('Enter');
+  }
+
+  const answer = await waitForChatGptAnswer(page, previousAnswer);
+  return {
+    ok: true,
+    answer,
+    url: page.url(),
+    title: await page.title().catch(() => ''),
+    profile,
+    mode,
+    launchNote
+  };
+}
+
+async function openExternalBrowser(url) {
+  const options = { cwd: root, timeout: 10000, windowsHide: true };
+  if (process.platform === 'win32') {
+    await execFileAsync('rundll32.exe', ['url.dll,FileProtocolHandler', url], options);
+    return;
+  }
+  if (process.platform === 'darwin') {
+    await execFileAsync('open', [url], options);
+    return;
+  }
+  await execFileAsync('xdg-open', [url], options);
+}
+
+async function openChromeBrowser(url) {
+  if (process.platform === 'win32') {
+    const candidates = [
+      process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Google', 'Chrome', 'Application', 'chrome.exe')
+    ].filter(Boolean);
+    const chromePath = candidates.find((candidate) => fs.existsSync(candidate));
+    if (chromePath) {
+      const launched = spawnCli(chromePath, [url]);
+      if (!launched.started) throw new Error(launched.error || 'Chrome launch failed.');
+      return { launcher: chromePath };
+    }
+    await execFileAsync('cmd.exe', ['/c', 'start', '', 'chrome', url], { cwd: root, timeout: 10000, windowsHide: false });
+    return { launcher: 'chrome app registration' };
+  }
+  if (process.platform === 'darwin') {
+    await execFileAsync('open', ['-a', 'Google Chrome', url], { cwd: root, timeout: 10000, windowsHide: false });
+    return { launcher: 'Google Chrome app' };
+  }
+  const launched = spawnCli('google-chrome', [url]);
+  if (!launched.started) throw new Error(launched.error || 'Chrome launch failed. Install Chrome or use External.');
+  return { launcher: 'google-chrome' };
 }
 
 async function npmInstall(args) {
@@ -396,13 +781,13 @@ function plannerData() {
 
 async function refreshPlannerState() {
   const changes = [];
-  const playwrightReady = await packageAvailable('playwright');
+  const browserReady = await browserAutomationStatus();
   const browserBlocker = row(
     "SELECT * FROM knowledge_items WHERE title = ? AND status NOT IN ('archived', 'deprecated', 'superseded')",
     ['Cloud browser automation is not configured yet']
   );
 
-  if (playwrightReady && browserBlocker) {
+  if (browserReady.playwright && browserReady.chromium && browserBlocker) {
     const existing = row(
       "SELECT * FROM approvals WHERE action_type = 'update_memory' AND title = ? AND status = 'pending'",
       ['Retire resolved Playwright blocker']
@@ -544,11 +929,12 @@ app.post('/api/memory/candidates/:id/:decision', (req, res) => {
   const decision = req.params.decision;
   if (!['approve', 'deny', 'defer'].includes(decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
   if (decision === 'approve') {
+    const approved = normalizedMemoryCandidate(candidate);
     db.prepare(`
       INSERT INTO knowledge_items
       (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action)
       VALUES (?, ?, ?, ?, 'active', ?, date('now'), ?, 'user', ?)
-    `).run(candidate.type, candidate.title, candidate.body, candidate.source, Math.max(candidate.confidence, 0.7), candidate.evidence, 'Review during next planner pass.');
+    `).run(approved.type, approved.title, approved.body, approved.source, Math.max(approved.confidence, 0.7), approved.evidence, 'Review during next planner pass.');
     db.prepare('UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run('approved', candidate.id);
   } else {
     db.prepare('UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run(decision === 'deny' ? 'denied' : 'deferred', candidate.id);
@@ -971,21 +1357,26 @@ app.patch('/api/consultations/:id', (req, res) => {
   );
   if (req.body.external_response && !before.external_response) {
     const consultation = row('SELECT * FROM consultations WHERE id = ?', [req.params.id]);
+    const evidence = [
+      `Consultation ${consultation.id}`,
+      consultation.target_agent && `target ${consultation.target_agent}`,
+      consultation.opened_url && `opened ${consultation.opened_url}`,
+      'requires user review'
+    ].filter(Boolean).join('; ');
     db.prepare(`
       INSERT INTO memory_candidates (type, title, body, source, evidence, confidence)
-      VALUES ('decision', ?, ?, 'cloud consultation', ?, 0.45)
-    `).run(`Consultation suggestion: ${consultation.title}`, consultation.external_response, `Consultation ${consultation.id}; requires user review.`);
+      VALUES ('consultation', ?, ?, 'cloud consultation', ?, 0.45)
+    `).run(consultation.title || 'Cloud consultation response', consultation.external_response, evidence);
   }
   ok(res, row('SELECT * FROM consultations WHERE id = ?', [req.params.id]));
 });
 
 app.get('/api/browser/capabilities', async (_req, res) => {
-  try {
-    await import('playwright');
-    ok(res, { playwright: true, mode: 'available' });
-  } catch {
-    ok(res, { playwright: false, mode: 'manual consultation stub', note: 'Install Playwright to enable controlled browser consultation.' });
-  }
+  ok(res, {
+    ...(await browserAutomationStatus()),
+    externalBrowser: true,
+    externalBrowserNote: 'The app can open your default external browser for sign-in or human-check pages.'
+  });
 });
 
 app.post('/api/browser/open', async (req, res) => {
@@ -997,27 +1388,12 @@ app.post('/api/browser/open', async (req, res) => {
   }
 
   try {
-    const { chromium } = await import('playwright');
-    const userDataDir = path.join(root, 'data', 'browser-profile');
-    fs.mkdirSync(userDataDir, { recursive: true });
-    if (!browserContext) {
-      browserContext = await chromium.launchPersistentContext(userDataDir, {
-        headless: false,
-        viewport: null,
-        args: ['--start-maximized']
-      });
-      browserContext.on('close', () => {
-        browserContext = null;
-        browserPage = null;
-      });
-    }
-    const pages = browserContext.pages();
-    browserPage = browserPage && !browserPage.isClosed() ? browserPage : pages[0] || await browserContext.newPage();
-    const page = browserPage;
+    const { page, profile, mode, launchNote } = await controlledBrowserPage();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     const title = await page.title().catch(() => '');
     const currentUrl = page.url();
     const visibleText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    const challenge = browserChallengeResult({ url: currentUrl, title, text: visibleText });
     if (req.body.consultation_id) {
       db.prepare(`
         UPDATE consultations
@@ -1028,34 +1404,148 @@ app.post('/api/browser/open', async (req, res) => {
     ok(res, {
       url: currentUrl,
       title,
-      profile: userDataDir,
+      profile,
+      mode,
       excerpt: visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200),
-      note: 'Browser opened with a persistent local Playwright profile. Cloud responses remain advisory and must be reviewed before promotion.'
+      blocked: challenge.blocked,
+      blockReason: challenge.reason,
+      note: `${launchNote || 'Browser opened with a persistent local profile.'} Cloud responses remain advisory and must be reviewed before promotion.`
     });
   } catch (error) {
     fail(res, 500, error.message || 'Browser automation failed.');
   }
 });
 
+app.post('/api/browser/consult', async (req, res) => {
+  const targetAgent = String(req.body.target_agent || 'ChatGPT').trim();
+  const localDraft = String(req.body.local_draft || '').trim();
+  const url = req.body.url || 'https://chatgpt.com/';
+  const chatGptTarget = targetAgent === 'ChatGPT' || String(url).toLowerCase().includes('chatgpt.com');
+  if (!localDraft) return fail(res, 400, 'Enter a message before running cloud consultation.');
+  if (!chatGptTarget) {
+    return fail(res, 400, 'Automatic round trip currently supports ChatGPT only. Use manual fallback for other cloud agents.');
+  }
+  if (req.body.temporary_chat_required !== false && req.body.temporary_chat_confirmed !== true) {
+    return fail(res, 400, 'Confirm ChatGPT Temporary Chat before sending the full consultation prompt. The app cannot verify this automatically.');
+  }
+
+  try {
+    const contexts = selectedContextFiles(req.body.context_paths || []);
+    const prompt = req.body.prompt?.trim() || buildCloudConsultationPrompt({
+      targetAgent,
+      localDraft,
+      contexts
+    });
+    const result = await runChatGptConsultation({ prompt, url });
+    if (result.blocked) {
+      return ok(res, {
+        ...result,
+        prompt,
+        contexts: contexts.map((item) => ({ path: item.path, truncated: item.truncated })),
+        status: 'blocked',
+        message: result.blockReason
+      });
+    }
+    ok(res, {
+      ...result,
+      prompt,
+      contexts: contexts.map((item) => ({ path: item.path, truncated: item.truncated })),
+      status: 'answered',
+      message: 'Cloud consultant response captured automatically. Review it before saving; nothing was saved or synced automatically.'
+    });
+  } catch (error) {
+    fail(res, error.blocked ? 409 : 500, error.message || 'Automatic cloud consultation failed.');
+  }
+});
+
+app.post('/api/browser/reset-profile', async (_req, res) => {
+  try {
+    const profile = await resetBrowserProfile();
+    ok(res, {
+      profile,
+      message: 'Controlled browser data reset. Open ChatGPT again and sign in from a fresh profile.'
+    });
+  } catch (error) {
+    fail(res, 500, error.message || 'Controlled browser profile reset failed.');
+  }
+});
+
+app.post('/api/browser/open-external', async (req, res) => {
+  let url;
+  try {
+    url = normalizeBrowserUrl(req.body.url);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+
+  try {
+    await openExternalBrowser(url);
+    if (req.body.consultation_id) {
+      db.prepare(`
+        UPDATE consultations
+        SET opened_url = ?, opened_title = ?, sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP), status = 'sent', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(url, 'External browser', req.body.consultation_id);
+    }
+    ok(res, {
+      url,
+      title: 'External browser',
+      mode: 'external',
+      note: 'Opened in your default external browser. Use this for Google sign-in or human checks that reject controlled browsers.'
+    });
+  } catch (error) {
+    fail(res, 500, error.message || 'External browser open failed.');
+  }
+});
+
+app.post('/api/browser/open-chrome', async (req, res) => {
+  let url;
+  try {
+    url = normalizeBrowserUrl(req.body.url);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+
+  try {
+    const launch = await openChromeBrowser(url);
+    if (req.body.consultation_id) {
+      db.prepare(`
+        UPDATE consultations
+        SET opened_url = ?, opened_title = ?, sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP), status = 'sent', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(url, 'Chrome', req.body.consultation_id);
+    }
+    ok(res, {
+      url,
+      title: 'Chrome',
+      mode: 'chrome',
+      launcher: launch.launcher,
+      note: 'Opened in your installed Chrome profile. The app did not read or copy Chrome cookies.'
+    });
+  } catch (error) {
+    fail(res, 500, error.message || 'Chrome open failed. Install Chrome or use External.');
+  }
+});
+
 app.get('/api/tooling/status', async (_req, res) => {
-  const [nodeVersion, npmVersion, ghStatus, hfStatus] = await Promise.all([
+  const [nodeVersion, npmVersion, ghStatus, hfStatus, wingetStatus] = await Promise.all([
     runCli('node', ['--version']),
     runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['--version']),
     runCli('gh', ['auth', 'status']),
-    runCli('hf', ['auth', 'whoami'])
+    runCli('hf', ['auth', 'whoami']),
+    runCli('winget', ['--version'])
   ]);
-  const playwright = await packageAvailable('playwright');
-  const playwrightChromium = playwright
-    ? await npxRun(['playwright', 'install', '--dry-run', 'chromium'])
-    : { ok: false, available: false, stderr: 'Playwright package is not installed.' };
+  const browserAutomation = await browserAutomationStatus();
 
   ok(res, {
     node: { available: nodeVersion.ok, version: nodeVersion.stdout || nodeVersion.stderr },
     npm: { available: npmVersion.ok, version: npmVersion.stdout || npmVersion.stderr },
     playwright: {
-      available: playwright,
-      chromiumCheck: playwrightChromium.ok,
-      detail: playwrightChromium.stdout || playwrightChromium.stderr
+      available: browserAutomation.playwright,
+      chromiumCheck: browserAutomation.chromium,
+      detail: browserAutomation.chromium
+        ? `Chromium executable found: ${browserAutomation.executablePath}`
+        : `${browserAutomation.note}${browserAutomation.executablePath ? ` Expected executable: ${browserAutomation.executablePath}` : ''}`
     },
     githubCli: {
       available: ghStatus.available,
@@ -1067,9 +1557,17 @@ app.get('/api/tooling/status', async (_req, res) => {
       authenticated: hfStatus.ok,
       detail: hfStatus.stdout || hfStatus.stderr
     },
+    winget: {
+      available: wingetStatus.available,
+      version: wingetStatus.stdout || wingetStatus.stderr
+    },
     installHints: {
-      githubCli: 'winget install --id GitHub.cli',
+      githubCli: wingetStatus.available ? 'winget install --id GitHub.cli' : 'Install GitHub CLI from cli.github.com because winget is not on PATH.',
       huggingFaceCli: 'pip install -U huggingface_hub[cli]'
+    },
+    installUrls: {
+      githubCli: 'https://cli.github.com/',
+      huggingFaceCli: 'https://huggingface.co/docs/huggingface_hub/guides/cli'
     }
   });
 });
@@ -1087,7 +1585,7 @@ app.post('/api/tooling/install', async (req, res) => {
 });
 
 app.get('/api/source/status', async (_req, res) => {
-  const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami] = await Promise.all([
+  const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami, wingetStatus] = await Promise.all([
     runCli('git', ['rev-parse', '--is-inside-work-tree']),
     gitStatusSnapshot(),
     runCli('git', ['remote', '-v']),
@@ -1095,7 +1593,8 @@ app.get('/api/source/status', async (_req, res) => {
     runCli('git', ['config', 'user.name']),
     runCli('git', ['config', 'user.email']),
     runCli('gh', ['auth', 'status']),
-    runCli('hf', ['auth', 'whoami'])
+    runCli('hf', ['auth', 'whoami']),
+    runCli('winget', ['--version'])
   ]);
 
   if (!inside.ok) return fail(res, 400, 'This folder is not a Git repository.');
@@ -1126,6 +1625,20 @@ app.get('/api/source/status', async (_req, res) => {
       cliAvailable: hfWhoami.available,
       authenticated: hfWhoami.ok,
       detail: hfWhoami.ok ? hfWhoami.stdout : hfWhoami.stderr
+    },
+    winget: {
+      available: wingetStatus.available,
+      detail: wingetStatus.stdout || wingetStatus.stderr
+    },
+    installHints: {
+      githubCli: wingetStatus.available ? 'winget install --id GitHub.cli' : 'Install GitHub CLI from cli.github.com because winget is not on PATH.',
+      huggingFaceCli: 'pip install -U huggingface_hub[cli]'
+    },
+    installUrls: {
+      githubCli: 'https://cli.github.com/',
+      huggingFaceCli: 'https://huggingface.co/docs/huggingface_hub/guides/cli',
+      github: 'https://github.com/login',
+      huggingFace: 'https://huggingface.co/login'
     }
   });
 });

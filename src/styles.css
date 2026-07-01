@@ -593,6 +593,23 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .source-warning.info { border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); color: var(--blue); }
 .source-warning.warn { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); color: var(--amber); }
 .source-warning.bad { border-color: color-mix(in srgb, var(--red) 55%, var(--line)); color: var(--red); }
+.temporary-chat-option {
+  margin: 0 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--soft);
+  font-size: 12px;
+}
+.temporary-chat-option input {
+  width: auto;
+}
+.source-warning small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
 
 .source-file-list {
   display: grid;
@@ -658,7 +675,12 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   gap: 8px;
   margin-top: 10px;
 }
-.memory-edit-grid input:last-child { grid-column: 1 / -1; }
+.memory-edit-grid label {
+  margin: 0;
+  display: grid;
+  gap: 5px;
+}
+.memory-edit-grid label:last-child { grid-column: 1 / -1; }
 .memory-row {
   border-bottom: 1px solid var(--line);
   padding-bottom: 10px;
@@ -672,6 +694,16 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cloud-context {
+  margin: -4px 0 14px;
+}
+
+.inline-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .two-column, .settings-grid, .projects-layout {
@@ -711,6 +743,43 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 }
 .review-card h3 { margin: 10px 0 6px; }
 .review-card p { color: var(--soft); font-size: 13px; }
+.review-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.candidate-response {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+.candidate-response span,
+.candidate-meta span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.candidate-response p {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  white-space: pre-wrap;
+}
+.candidate-meta {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+}
+.candidate-edit {
+  margin-top: 10px;
+}
+.candidate-edit summary {
+  cursor: pointer;
+  color: var(--soft);
+  font-size: 12px;
+}
 .browser-result {
   display: grid;
   gap: 6px;
@@ -731,6 +800,25 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .inline-form select { min-width: 0; }
 
 .browser-flow textarea { margin-top: 10px; min-height: 130px; }
+
+.save-choice {
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  padding: 12px;
+  margin-top: 10px;
+}
+
+.save-choice strong,
+.save-choice small {
+  display: block;
+}
+
+.save-choice small {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
 .model-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
