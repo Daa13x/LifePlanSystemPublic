@@ -1024,9 +1024,12 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         : waitingForExternalResponse
           ? 'Waiting for the automatic cloud response. If the site blocks automation, use the manual fallback controls.'
           : 'Run automatic consultation to send the prompt, wait for ChatGPT, and fill this box automatically. Manual paste is only a fallback.';
-  const manualFallbackActive = Boolean(browserResult?.blocked || browserResult?.mode === 'chrome' || browserResult?.mode === 'external' || !browserReady);
+  const browserResultFailed = Boolean(browserResult && browserResult.ok === false && !browserResult.answer);
+  const manualFallbackActive = Boolean(browserResult?.blocked || browserResultFailed || browserResult?.mode === 'chrome' || browserResult?.mode === 'external' || !browserReady);
   const manualFallbackReason = browserResult?.blocked
     ? 'Automation blocked or unavailable; use manual copy/paste fallback.'
+    : browserResultFailed
+      ? 'Automation failed before a response was captured; use manual copy/paste fallback.'
     : browserResult?.mode === 'chrome' || browserResult?.mode === 'external'
       ? 'Manual fallback browser opened. Paste the copied prompt there, then paste the response back here.'
       : !browserReady
@@ -1517,7 +1520,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         )}
         {browserResult && (
           <div className="browser-result">
-            <Pill tone={browserResult.blocked ? 'warn' : 'good'}>{browserResult.blocked ? 'Blocked' : 'Opened'}</Pill>
+            <Pill tone={browserResult.blocked || browserResultFailed ? 'warn' : 'good'}>{browserResult.blocked ? 'Blocked' : browserResultFailed ? 'Failed' : 'Opened'}</Pill>
             <strong>{browserResult.title || browserResult.url}</strong>
             <span>{browserResult.url}</span>
             {browserResult.excerpt && <small>{browserResult.excerpt}</small>}

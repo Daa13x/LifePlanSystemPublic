@@ -242,3 +242,49 @@ The manual fallback path is clearer and works:
 ### Next Safest Action
 
 Perform one controlled real ChatGPT route test only when the visible session is ready. If it blocks, stop immediately, keep the run log visible, append the blocker to the JSONL log, and continue improving fallback/status rather than retrying.
+
+## Loop Update - 2026-07-01 19:25
+
+### Issue Chosen
+
+Fix a real ChatGPT reporting bug before any live retry: a timeout or no-response result could be `ok:false` without being a login/verification blocker, but the route could still fall through to the answered-success branch.
+
+### Fix Made
+
+- `server/index.js` now returns a JSON `status: failed` result when real ChatGPT automation returns `ok:false` without a captured answer.
+- `src/main.jsx` now labels those results as `Failed` and activates manual fallback instead of showing them as opened/successful.
+
+### Tests Run
+
+- `node --check server/index.js`
+- `npm run check`
+- Restarted the dev server from the active checkpoint branch
+- `GET /api/browser/capabilities` through frontend/proxy port `5173`
+- `POST /api/browser/consult` with `Test/mock provider` through frontend/proxy port `5173`
+- Malformed JSON sent to `POST /api/browser/consult` through frontend/proxy port `5173`
+- Unknown `/api` route through frontend/proxy port `5173`
+- In-app Browser UI mock provider test after reload
+- In-app manual fallback test after reload
+
+### Result
+
+Known-good behavior still works:
+
+- mock provider filled the final answer box
+- mock run log showed four ok stages
+- manual fallback copied the generated prompt
+- pasted fallback response filled the answer box
+- save choices appeared only after an answer existed
+- history row count stayed unchanged
+
+Real ChatGPT automation was not attempted in this loop because the controlled browser session was not confirmed ready with Temporary Chat enabled. This avoids repeating the blind Playwright retry mistake.
+
+### Do Not Repeat
+
+- Do not label timeout/no-response results as answered.
+- Do not run real ChatGPT automation unless the controlled session is visibly ready and no login or verification bypass is needed.
+- Do not claim real ChatGPT works from mock/manual/API regression success.
+
+### Next Safest Action
+
+Ask Alex to confirm that the controlled ChatGPT session is ready and Temporary Chat is enabled, then run one real-route test. If login or verification appears, stop immediately and log the blocker.

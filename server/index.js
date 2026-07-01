@@ -1561,6 +1561,15 @@ app.post('/api/browser/consult', async (req, res) => {
         message: result.blockReason
       });
     }
+    if (result.ok === false) {
+      return ok(res, {
+        ...result,
+        prompt,
+        contexts: contexts.map((item) => ({ path: item.path, truncated: item.truncated })),
+        status: 'failed',
+        message: result.blockReason || 'Automatic cloud consultation failed before a response was captured.'
+      });
+    }
     ok(res, {
       ...result,
       prompt,
