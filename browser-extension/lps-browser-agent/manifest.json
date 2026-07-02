@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Life Planner Browser Agent",
+  "version": "0.1.0",
+  "description": "Lets local Life Planner send browser-agent questions through the user's Chrome tabs.",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": [
+    "http://127.0.0.1:4177/*",
+    "https://chatgpt.com/*",
+    "https://*.chatgpt.com/*",
+    "https://auth.openai.com/*",
+    "https://gemini.google.com/*",
+    "https://accounts.google.com/*",
+    "https://grok.com/*",
+    "https://x.com/*",
+    "https://claude.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

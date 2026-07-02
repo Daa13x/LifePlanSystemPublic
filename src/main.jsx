@@ -1416,9 +1416,9 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     <section className="two-column browser-flow">
       <div className="panel">
         <h2>Browser Agent Question</h2>
-        <p>{browserReady ? 'Automatic ChatGPT consultation is available through a persistent controlled browser profile.' : 'Automatic consultation needs Playwright Chromium. Manual fallback remains available.'}</p>
+        <p>Automatic browser-agent sending uses the Chrome connector in the user's normal Chrome profile.</p>
         <div className="source-warning info">
-          Primary flow: select context, type the browser-agent question, use local assist if helpful, then send to the browser agent. The app opens ChatGPT, sends the prepared prompt, waits for the answer, and fills the response box. It will not save, sync, or promote anything until you choose a save option.
+          Primary flow: select context, type the browser-agent question, use local assist if helpful, then send to the browser agent in the user's Chrome tab. It will not save, sync, or promote anything until you choose a save option.
         </div>
         {!browserReady && (
           <div className="source-warning warn">
@@ -2241,6 +2241,8 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [llamaServerPath, setLlamaServerPath] = useState(settings.llamaServerPath || '');
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
   const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 4096);
+  const [browserAgentMode, setBrowserAgentMode] = useState(settings.browserAgentMode || 'myChromeConnector');
+  const [browserAgentPort, setBrowserAgentPort] = useState(settings.browserAgentPort || 4177);
   const [repo, setRepo] = useState('unsloth/Qwen3.5-4B-GGUF');
   const [repoTouched, setRepoTouched] = useState(false);
   const [modelSearch, setModelSearch] = useState('Qwen GGUF');
@@ -2273,7 +2275,9 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         llamaCliPath,
         llamaServerPath,
         llamaServerPort: Number(llamaServerPort),
-        llamaContextSize: Number(llamaContextSize)
+        llamaContextSize: Number(llamaContextSize),
+        browserAgentMode,
+        browserAgentPort: Number(browserAgentPort)
       })
     });
     setSettings(data);
@@ -2418,6 +2422,21 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
               </button>
             </div>
           ))}
+        </div>
+      </div>
+      <div className="panel">
+        <h2>Browser Agent</h2>
+        <p>Use the Chrome connector so browser-agent prompts run in the user's normal Chrome tabs.</p>
+        <label>Automation mode</label>
+        <select value={browserAgentMode} onChange={(event) => setBrowserAgentMode(event.target.value)}>
+          <option value="myChromeConnector">My Chrome connector</option>
+          <option value="debugChrome">Dedicated debug Chrome profile</option>
+        </select>
+        <label>Local connector port</label>
+        <input type="number" value={browserAgentPort} onChange={(event) => setBrowserAgentPort(event.target.value)} placeholder="4177" />
+        <div className="source-warning info">
+          <strong>Chrome connector</strong>
+          <small>Load the unpacked extension from browser-extension/lps-browser-agent in the same Chrome profile where the user is logged into ChatGPT, Gemini, Grok, or Claude. It talks only to 127.0.0.1:{browserAgentPort}; no public firewall rule is needed for localhost-only use.</small>
         </div>
       </div>
       <div className="panel">

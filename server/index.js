@@ -19,11 +19,21 @@ let browserPage = null;
 let browserMode = '';
 let browserLaunchNote = '';
 let cdpBrowser = null;
+let browserAgentJobSeq = 1;
+const browserAgentJobs = new Map();
+const browserExtensionState = {
+  lastSeen: 0,
+  tabs: []
+};
 
 app.use(express.json({ limit: '25mb' }));
 
 const ok = (res, data) => res.json({ ok: true, data });
 const fail = (res, status, message) => res.status(status).json({ ok: false, error: message });
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function runCli(command, args, options = {}) {
   try {
@@ -192,6 +202,25 @@ function tabMatchesAgent(url = '', hosts = []) {
   } catch {
     return false;
   }
+}
+
+function emptyAgentTabMap() {
+  return Object.fromEntries(Object.keys(cloudAgentHosts).map((agent) => [agent, { open: false, count: 0, tabs: [] }]));
+}
+
+function agentTabsFromUrls(tabs = []) {
+  const agents = emptyAgentTabMap();
+  for (const [agent, hosts] of Object.entries(cloudAgentHosts)) {
+    const matches = tabs
+      .filter((tab) => tabMatchesAgent(tab.url, hosts))
+      .map((tab) => ({ id: tab.id, title: tab.title || '', url: tab.url || '' }));
+    agents[agent] = {
+      open: matches.length > 0,
+      count: matches.length,
+      tabs: matches
+    };
+  }
+  return agents;
 }
 
 function chatGptUnavailableResult({ url = '', title = '', text = '' }) {
@@ -1685,6 +1714,47 @@ app.post('/api/browser/consult', async (req, res) => {
       localDraft,
       contexts
     });
+    if (getSetting('browserAgentMode', 'myChromeConnector') === 'myChromeConnector') {
+      const connectorFresh = Date.now() - browserExtensionState.lastSeen < 15000;
+      if (!connectorFresh) {
+        return fail(res, 409, 'Chrome connector is not connected. Install or reload the unpacked extension in browser-extension/lps-browser-agent, then keep LPS open in your normal Chrome.');
+      }
+      const id = browserAgentJobSeq++;
+      const job = {
+        id,
+        status: 'pending',
+        targetAgent,
+        url,
+        prompt,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        result: null,
+        error: ''
+      };
+      browserAgentJobs.set(id, job);
+      const started = Date.now();
+      while (Date.now() - started < 240000) {
+        if (job.status === 'answered' || job.status === 'sent' || job.status === 'blocked' || job.status === 'error') {
+          break;
+        }
+        await sleep(1000);
+      }
+      const status = job.status === 'pending' ? 'pending' : job.status;
+      return ok(res, {
+        ok: status === 'answered' || status === 'sent',
+        blocked: status === 'blocked' || status === 'error',
+        status,
+        prompt,
+        answer: job.result?.answer || '',
+        url: job.result?.url || url,
+        title: job.result?.title || targetAgent,
+        mode: 'my Chrome connector',
+        message: job.result?.message || job.error || (status === 'pending'
+          ? 'Chrome connector has the request queued. Check the cloud-agent tab in your Chrome.'
+          : 'Chrome connector sent the browser-agent question.'),
+        contexts: contexts.map((item) => ({ path: item.path, truncated: item.truncated }))
+      });
+    }
     const result = await runChatGptConsultation({ prompt, url });
     if (result.blocked) {
       return ok(res, {
@@ -1708,10 +1778,19 @@ app.post('/api/browser/consult', async (req, res) => {
 });
 
 app.get('/api/browser/agent-tabs', async (_req, res) => {
+  const connectorFresh = Date.now() - browserExtensionState.lastSeen < 15000;
+  if (connectorFresh) {
+    return ok(res, {
+      cdpAvailable: false,
+      connectorAvailable: true,
+      agents: agentTabsFromUrls(browserExtensionState.tabs)
+    });
+  }
   if (!(await chromeDebugEndpointAvailable())) {
     return ok(res, {
       cdpAvailable: false,
-      agents: Object.fromEntries(Object.keys(cloudAgentHosts).map((agent) => [agent, { open: false, count: 0, tabs: [] }]))
+      connectorAvailable: false,
+      agents: emptyAgentTabMap()
     });
   }
   try {
@@ -1729,10 +1808,58 @@ app.get('/api/browser/agent-tabs', async (_req, res) => {
         tabs: matches
       };
     }
-    ok(res, { cdpAvailable: true, agents });
+    ok(res, { cdpAvailable: true, connectorAvailable: false, agents });
   } catch (error) {
     fail(res, 500, error.message || 'Chrome tab lookup failed.');
   }
+});
+
+app.post('/api/browser/extension/heartbeat', (req, res) => {
+  const tabs = Array.isArray(req.body.tabs) ? req.body.tabs : [];
+  browserExtensionState.lastSeen = Date.now();
+  browserExtensionState.tabs = tabs
+    .filter((tab) => tab && typeof tab.url === 'string')
+    .map((tab) => ({ id: tab.id, title: tab.title || '', url: tab.url || '' }))
+    .slice(0, 100);
+  ok(res, {
+    connected: true,
+    agents: agentTabsFromUrls(browserExtensionState.tabs)
+  });
+});
+
+app.get('/api/browser/extension/next', (_req, res) => {
+  const job = [...browserAgentJobs.values()]
+    .filter((item) => item.status === 'pending')
+    .sort((a, b) => a.createdAt - b.createdAt)[0];
+  if (!job) return ok(res, { job: null });
+  job.status = 'claimed';
+  job.updatedAt = Date.now();
+  ok(res, {
+    job: {
+      id: job.id,
+      targetAgent: job.targetAgent,
+      url: job.url,
+      prompt: job.prompt
+    }
+  });
+});
+
+app.post('/api/browser/extension/jobs/:id', (req, res) => {
+  const job = browserAgentJobs.get(Number(req.params.id));
+  if (!job) return fail(res, 404, 'Browser-agent job not found.');
+  const status = ['pending', 'claimed', 'sent', 'answered', 'blocked', 'error'].includes(req.body.status)
+    ? req.body.status
+    : 'error';
+  job.status = status;
+  job.updatedAt = Date.now();
+  job.error = req.body.error || '';
+  job.result = {
+    url: req.body.url || job.url,
+    title: req.body.title || job.targetAgent,
+    answer: req.body.answer || '',
+    message: req.body.message || ''
+  };
+  ok(res, { job });
 });
 
 app.post('/api/browser/assist-prompt', async (req, res) => {
