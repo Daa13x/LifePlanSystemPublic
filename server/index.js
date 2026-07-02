@@ -206,12 +206,12 @@ async function controlledBrowserPage() {
         ...launchOptions,
         channel: 'chrome'
       });
-      browserMode = 'persistent Chrome';
-      browserLaunchNote = 'Using a dedicated persistent Chrome profile for Life Planner automation.';
+      browserMode = 'app-controlled Chrome profile';
+      browserLaunchNote = 'Using an app-owned Chrome profile for automation, not your personal signed-in Chrome profile.';
     } catch (error) {
       browserContext = await chromium.launchPersistentContext(userDataDir, launchOptions);
-      browserMode = 'persistent Playwright Chromium';
-      browserLaunchNote = `Chrome channel was unavailable, so Playwright Chromium is using the same persistent app profile. ${error.message}`;
+      browserMode = 'app-controlled Playwright Chromium profile';
+      browserLaunchNote = `Chrome channel was unavailable, so Playwright Chromium is using the same app-owned profile. ${error.message}`;
     }
     browserContext.on('close', () => {
       browserContext = null;
@@ -330,6 +330,66 @@ function buildCloudConsultationPrompt({ targetAgent = 'ChatGPT', localDraft = ''
     'Local draft:',
     localDraft.trim() || '(No local draft supplied yet.)'
   ].join('\n');
+}
+
+function buildBrowserAgentAssistPrompt({ targetAgent = 'ChatGPT', localDraft = '', contexts = [] }) {
+  const contextList = contexts.length
+    ? contexts.map((item, index) => `${index + 1}. ${item.path}${item.truncated ? ' (truncated)' : ''}\n${item.content.slice(0, 2200)}`).join('\n\n')
+    : 'No selected context files.';
+
+  return [
+    'You are the local Life Planner model helping the user prepare a browser-agent question.',
+    'Rewrite the user draft into a concise, well-scoped prompt for the selected external browser agent.',
+    'Keep the user intent intact. Do not answer the prompt yourself. Do not add authority over memory, priorities, or plans.',
+    'Return only the final browser-agent prompt text.',
+    '',
+    `Selected browser agent: ${targetAgent}`,
+    '',
+    'Selected local context:',
+    contextList,
+    '',
+    'User draft:',
+    localDraft.trim() || '(No draft supplied.)'
+  ].join('\n');
+}
+
+async function runBrowserPromptAssistant({ targetAgent = 'ChatGPT', localDraft = '', contexts = [] }) {
+  const status = await localModelStatus();
+  if (!status.assigned && !status.endpointConfigured) {
+    return {
+      available: false,
+      mode: 'unavailable',
+      message: 'No local Planner Assistant model is assigned and no local endpoint is configured. The typed draft is still ready to send manually or through browser automation.'
+    };
+  }
+
+  const prompt = buildBrowserAgentAssistPrompt({ targetAgent, localDraft, contexts });
+  try {
+    if (status.managedEndpoint) {
+      const content = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt);
+      if (content) return { available: true, mode: 'managed llama-server', prompt: content };
+    }
+    if (status.endpointConfigured) {
+      const content = await runEndpointModel(status.endpoint, status.endpointModelName, prompt);
+      if (content) return { available: true, mode: `local endpoint (${status.endpointModelName})`, prompt: content };
+    }
+    if (status.llamaCliConfigured && status.llamaCliExists && status.model?.path) {
+      const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt);
+      if (content) return { available: true, mode: 'llama-cli', prompt: content };
+    }
+  } catch (error) {
+    return {
+      available: false,
+      mode: 'runtime error',
+      message: `Local Planner Assistant failed: ${error.message}. The typed draft is still ready to send manually or through browser automation.`
+    };
+  }
+
+  return {
+    available: false,
+    mode: 'unavailable',
+    message: 'A local model is configured, but no runnable local runtime answered. Check Settings, or send the typed draft without local assistance.'
+  };
 }
 
 async function firstVisibleLocator(page, selectors, timeout = 1000) {
@@ -1317,7 +1377,23 @@ app.get('/api/hf/files', async (req, res) => {
     headers: token ? { Authorization: `Bearer ${token}` } : {}
   });
   if (!response.ok) return fail(res, response.status, `Hugging Face lookup failed: ${response.statusText}`);
-  const files = (await response.json()).filter((f) => f.type === 'file' && f.path.toLowerCase().endsWith('.gguf'));
+  const quantRank = (filePath = '') => {
+    const lower = filePath.toLowerCase();
+    if (lower.includes('q4_k_m')) return 0;
+    if (lower.includes('q4_k_s')) return 1;
+    if (lower.includes('iq4')) return 2;
+    if (lower.includes('q5_k_m')) return 3;
+    if (lower.includes('q5_k_s')) return 4;
+    if (lower.includes('q6_k')) return 5;
+    if (lower.includes('q3_k_m')) return 6;
+    if (lower.includes('q3')) return 7;
+    if (lower.includes('q8_0')) return 8;
+    if (lower.includes('bf16') || lower.includes('f16')) return 20;
+    return 10;
+  };
+  const files = (await response.json())
+    .filter((f) => f.type === 'file' && f.path.toLowerCase().endsWith('.gguf'))
+    .sort((a, b) => quantRank(a.path) - quantRank(b.path) || (a.size || 0) - (b.size || 0) || a.path.localeCompare(b.path));
   ok(res, files);
 });
 
@@ -1513,6 +1589,27 @@ app.post('/api/browser/consult', async (req, res) => {
     });
   } catch (error) {
     fail(res, error.blocked ? 409 : 500, error.message || 'Automatic cloud consultation failed.');
+  }
+});
+
+app.post('/api/browser/assist-prompt', async (req, res) => {
+  const targetAgent = String(req.body.target_agent || 'ChatGPT').trim();
+  const localDraft = String(req.body.local_draft || '').trim();
+  if (!localDraft) return fail(res, 400, 'Enter a browser-agent question before asking the local model to assist.');
+
+  try {
+    const contexts = selectedContextFiles(req.body.context_paths || []);
+    const result = await runBrowserPromptAssistant({
+      targetAgent,
+      localDraft,
+      contexts
+    });
+    ok(res, {
+      ...result,
+      contexts: contexts.map((item) => ({ path: item.path, truncated: item.truncated }))
+    });
+  } catch (error) {
+    fail(res, 500, error.message || 'Local browser-agent prompt assistance failed.');
   }
 });
 

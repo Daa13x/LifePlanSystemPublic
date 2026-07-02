@@ -129,7 +129,7 @@ function controlledBrowserWarningForUrl(value) {
     const parsed = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
     const host = parsed.hostname.toLowerCase();
     if (host === 'chatgpt.com' || host.endsWith('.chatgpt.com') || host === 'auth.openai.com') {
-      return 'ChatGPT usually rejects Playwright-controlled browsers with a repeating human check. Use External to open it in your normal browser.';
+      return 'ChatGPT usually rejects the app-controlled browser profile with a repeating human check. This is not your signed-in Chrome profile; use Copy + Chrome for your normal logged-in Chrome.';
     }
     if (host === 'accounts.google.com' || host === 'gemini.google.com') {
       return 'Google sign-in rejects controlled or embedded browsers. Use External to open it in your normal browser.';
@@ -929,6 +929,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const [browserUrl, setBrowserUrl] = useState('https://chatgpt.com/');
   const [browserResult, setBrowserResult] = useState(null);
   const [consultBusy, setConsultBusy] = useState(false);
+  const [assistBusy, setAssistBusy] = useState(false);
   const [consultStatus, setConsultStatus] = useState('');
   const [browserBusy, setBrowserBusy] = useState(false);
   const [externalBusy, setExternalBusy] = useState(false);
@@ -960,6 +961,9 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const normalBrowserDisabledReason = !browserUrl.trim()
     ? 'Enter a URL before opening a normal browser tab.'
     : '';
+  const appTabDisabledReason = !browserUrl.trim()
+    ? 'Enter a URL before opening an app tab.'
+    : '';
   const externalBrowserDisabledReason = externalBusy
     ? 'External browser is already opening a page.'
     : !browserUrl.trim()
@@ -976,6 +980,9 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const copyNormalDisabledReason = !draft.trim()
     ? 'Enter a local draft before using Copy + Normal.'
     : temporaryChatFullPromptReason || normalBrowserDisabledReason;
+  const copyAppTabDisabledReason = !draft.trim()
+    ? 'Enter a local draft before using Copy + App tab.'
+    : temporaryChatFullPromptReason || appTabDisabledReason;
   const copyExternalDisabledReason = !draft.trim()
     ? 'Enter a local draft before using Copy + External.'
     : externalBrowserDisabledReason;
@@ -985,6 +992,11 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const copyDisabledReason = !draft.trim() && !consultPrompt
     ? 'Enter a local draft or build a consultation prompt before copying.'
     : '';
+  const assistDisabledReason = assistBusy
+    ? 'Local model assistance is already running.'
+    : !draft.trim()
+      ? 'Enter a browser-agent question before asking the local model to assist.'
+      : '';
   const automaticDisabledReason = consultBusy
     ? 'Cloud consultant is already running.'
     : !draft.trim()
@@ -999,7 +1011,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     ? 'Automatic answer captured. Choose what to save below; nothing is saved or synced until you click a save option.'
     : browserResult?.blocked
       ? 'Automatic capture was blocked. Finish login or verification in the persistent browser profile, then run it again. Manual paste is available as a fallback.'
-      : browserResult?.mode === 'chrome' || browserResult?.mode === 'external'
+      : ['chrome', 'external', 'normal-tab', 'app-tab'].includes(browserResult?.mode)
         ? 'Manual fallback is active. Copy the answer from that browser only if automatic capture is blocked.'
         : waitingForExternalResponse
           ? 'Waiting for the automatic cloud response. If the site blocks automation, use the manual fallback controls.'
@@ -1087,6 +1099,37 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     return prompt;
   }
 
+  async function assistConsultPrompt() {
+    if (assistDisabledReason) return;
+    setAssistBusy(true);
+    setConsultStatus('Asking the local model to shape the browser-agent question...');
+    try {
+      const result = await api('/api/browser/assist-prompt', {
+        method: 'POST',
+        body: JSON.stringify({
+          local_draft: draft,
+          target_agent: targetAgent,
+          context_paths: contextPaths
+        })
+      });
+      if (result.available && result.prompt) {
+        setConsultPrompt(result.prompt);
+        setConsultStatus(`Local model prepared the browser-agent question. Runtime: ${result.mode}.`);
+        setNotice('Local model prepared the browser-agent question. Review it, then send it to the browser agent.');
+      } else {
+        const fallback = buildConsultPrompt();
+        setConsultPrompt(fallback);
+        setConsultStatus(result.message || 'Local model assistance is unavailable; generated the standard browser-agent prompt instead.');
+        setNotice(result.message || 'Local model assistance is unavailable; generated the standard browser-agent prompt instead.');
+      }
+    } catch (err) {
+      setConsultStatus(err.message);
+      setNotice(err.message);
+    } finally {
+      setAssistBusy(false);
+    }
+  }
+
   async function runAutomaticConsultation() {
     if (automaticDisabledReason) return;
     setConsultBusy(true);
@@ -1095,6 +1138,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     setActiveConsultationId(null);
     setConsultStatus('Preparing prompt and selected LifePlanSystem context...');
     try {
+      const prompt = consultPrompt || buildConsultPrompt();
       const result = await api('/api/browser/consult', {
         method: 'POST',
         body: JSON.stringify({
@@ -1102,6 +1146,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           local_draft: draft,
           target_agent: targetAgent,
           url: browserUrl,
+          prompt,
           context_paths: contextPaths,
           temporary_chat_required: temporaryChatRequired,
           temporary_chat_confirmed: temporaryChatConfirmed
@@ -1226,15 +1271,15 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     }
   }
 
-  function openNormalBrowser() {
+  function openWindowTab(mode = 'normal-tab') {
     const url = browserUrl.trim();
     if (!url) {
-      setNotice('Enter a URL before opening a normal browser tab.');
+      setNotice(mode === 'app-tab' ? 'Enter a URL before opening an app tab.' : 'Enter a URL before opening a normal browser tab.');
       return false;
     }
     const opened = window.open(url, '_blank');
     if (!opened) {
-      setNotice('Normal browser tab was blocked. Allow popups or copy the URL manually.');
+      setNotice(`${mode === 'app-tab' ? 'App tab' : 'Normal browser tab'} was blocked. Allow popups or copy the URL manually.`);
       return false;
     }
     try {
@@ -1242,8 +1287,22 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     } catch {
       // Some browser surfaces prevent changing opener; the fallback still opened.
     }
-    setNotice('Opened a normal browser tab. Use this if the controlled browser gets stuck on a human check.');
+    setBrowserResult({
+      url,
+      title: mode === 'app-tab' ? 'App tab' : 'Normal browser tab',
+      mode,
+      blocked: false
+    });
+    setNotice(`${mode === 'app-tab' ? 'Opened an app tab' : 'Opened a normal browser tab'}. Paste the copied prompt if this is a manual consultation.`);
     return true;
+  }
+
+  function openNormalBrowser() {
+    return openWindowTab('normal-tab');
+  }
+
+  function openAppTab() {
+    return openWindowTab('app-tab');
   }
 
   async function copyAndOpenNormal() {
@@ -1261,6 +1320,23 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     setNotice(opened
       ? `${copyLabel} and opened a normal browser tab. Consultation #${consultationId} is ready for pasted response.`
       : `${copyLabel}. Normal browser tab was blocked; open ${browserUrl.trim()} manually.`);
+  }
+
+  async function copyAndOpenAppTab() {
+    const prompt = buildConsultPrompt();
+    const consultationId = await ensureConsultation(prompt);
+    let copiedPrompt = false;
+    try {
+      copiedPrompt = await copyConsultPrompt(prompt);
+    } catch (err) {
+      setNotice(err.message);
+      return;
+    }
+    const opened = openAppTab();
+    const copyLabel = copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note';
+    setNotice(opened
+      ? `${copyLabel} and opened an app tab. Consultation #${consultationId} is ready for pasted response.`
+      : `${copyLabel}. App tab was blocked; open ${browserUrl.trim()} manually.`);
   }
 
   async function copyAndOpenExternal() {
@@ -1330,10 +1406,10 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   return (
     <section className="two-column browser-flow">
       <div className="panel">
-        <h2>Consultation Draft</h2>
+        <h2>Browser Agent Question</h2>
         <p>{browserReady ? 'Automatic ChatGPT consultation is available through a persistent controlled browser profile.' : 'Automatic consultation needs Playwright Chromium. Manual fallback remains available.'}</p>
         <div className="source-warning info">
-          Primary flow: select context, type a message, then run automatic consultation. The app opens ChatGPT, sends the prepared prompt, waits for the answer, and fills the response box. It will not save, sync, or promote anything until you choose a save option.
+          Primary flow: select context, type the browser-agent question, use local assist if helpful, then send to the browser agent. The app opens ChatGPT, sends the prepared prompt, waits for the answer, and fills the response box. It will not save, sync, or promote anything until you choose a save option.
         </div>
         {!browserReady && (
           <div className="source-warning warn">
@@ -1386,6 +1462,9 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
             <option>Other web agent</option>
           </select>
           <button onClick={buildConsultPrompt}><Sparkles size={16} /> Build prompt</button>
+          <button onClick={assistConsultPrompt} disabled={Boolean(assistDisabledReason)} title={assistDisabledReason || 'Ask the local model to shape the browser-agent question'}>
+            <Bot size={16} /> {assistBusy ? 'Assisting...' : 'Local assist'}
+          </button>
           <button
             onClick={() => copyConsultPrompt()}
             disabled={Boolean(copyDisabledReason)}
@@ -1412,8 +1491,8 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           ))}
         </div>
         <div className="decision-row">
-          <button className="primary" onClick={runAutomaticConsultation} disabled={Boolean(automaticDisabledReason)} title={automaticDisabledReason || 'Open ChatGPT, send the prompt, wait for the response, and fill the answer box'}>
-            <Sparkles size={16} /> {consultBusy ? 'Consulting...' : 'Run automatic consultation'}
+          <button className="primary" onClick={runAutomaticConsultation} disabled={Boolean(automaticDisabledReason)} title={automaticDisabledReason || 'Open ChatGPT, send the browser-agent question, wait for the response, and fill the answer box'}>
+            <Sparkles size={16} /> {consultBusy ? 'Sending...' : 'Send to browser agent'}
           </button>
           {automaticDisabledReason && <span className="inline-hint">{automaticDisabledReason}</span>}
         </div>
@@ -1441,21 +1520,12 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           <button onClick={copyAndOpenNormal} disabled={Boolean(copyNormalDisabledReason)} title={copyNormalDisabledReason || 'Copy the prompt and open a normal browser tab'}>
             <Clipboard size={16} /> Copy + Normal
           </button>
-          <a
-            className="source-link"
-            href={browserUrl.trim() || '#'}
-            target="_blank"
-            rel="noreferrer"
-            onClick={(event) => {
-              if (!browserUrl.trim()) {
-                event.preventDefault();
-                setNotice('Enter a URL before opening an app tab.');
-              }
-            }}
-            title="Open the URL as a visible in-app browser tab"
-          >
+          <button onClick={openAppTab} disabled={Boolean(appTabDisabledReason)} title={appTabDisabledReason || 'Open the URL as a visible app browser tab'}>
             <Globe2 size={16} /> App tab
-          </a>
+          </button>
+          <button onClick={copyAndOpenAppTab} disabled={Boolean(copyAppTabDisabledReason)} title={copyAppTabDisabledReason || 'Copy the prompt and open a visible app browser tab'}>
+            <Clipboard size={16} /> Copy + App tab
+          </button>
           <button onClick={() => openExternalBrowser()} disabled={Boolean(externalBrowserDisabledReason)} title={externalBrowserDisabledReason || 'Open the URL in your default external browser'}>
             <Globe2 size={16} /> {externalBusy ? 'Opening...' : 'External'}
           </button>
@@ -1489,7 +1559,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         )}
         {browserResult && (
           <div className="browser-result">
-            <Pill tone={browserResult.blocked ? 'warn' : 'good'}>{browserResult.blocked ? 'Human check' : 'Opened'}</Pill>
+            <Pill tone={browserResult.blocked ? 'warn' : 'good'}>{browserResult.blocked ? 'Blocked' : 'Opened'}</Pill>
             <strong>{browserResult.title || browserResult.url}</strong>
             <span>{browserResult.url}</span>
             {browserResult.excerpt && <small>{browserResult.excerpt}</small>}
@@ -1499,15 +1569,19 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
                 ? 'Opened in your installed Chrome profile. The app did not read or copy cookies.'
                 : browserResult.mode === 'external'
                   ? 'Opened outside the Codex app in your default browser.'
-                  : browserResult.mode?.includes?.('persistent')
+                  : browserResult.mode === 'app-tab'
+                    ? 'Opened as a browser tab from the app. The prompt was copied separately for manual paste.'
+                    : browserResult.mode === 'normal-tab'
+                      ? 'Opened as a normal browser tab. The prompt was copied separately for manual paste.'
+                  : browserResult.mode?.includes?.('app-controlled')
                     ? `${browserResult.mode}. ${browserResult.launchNote || 'Using the app controlled browser profile.'}`
-                    : 'Opened in a separate Playwright-controlled browser window, not as a Codex in-app tab.'}
+                    : 'Opened in a separate Playwright-controlled browser window.'}
             </small>
           </div>
         )}
         <input value={title} onChange={(event) => setTitle(event.target.value)} />
-        <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Local draft to critique..." />
-        {consultPrompt && <textarea value={consultPrompt} onChange={(event) => setConsultPrompt(event.target.value)} placeholder="Generated consultation prompt..." />}
+        <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Browser-agent question or draft..." />
+        {consultPrompt && <textarea value={consultPrompt} onChange={(event) => setConsultPrompt(event.target.value)} placeholder="Prepared browser-agent prompt..." />}
         <div className={cx('source-warning', external.trim() ? 'info' : 'warn')}>
           <strong>{external.trim() ? 'AI response ready to save' : waitingForExternalResponse ? 'Waiting for AI response' : 'No AI response captured yet'}</strong>
           <small>{external.trim() ? 'Saving will create a reviewable memory candidate; nothing is promoted automatically.' : responseCaptureHint}</small>
@@ -2068,11 +2142,32 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
 
 const MODEL_SUGGESTIONS = [
   {
-    repo: 'bartowski/Qwen2.5-3B-Instruct-GGUF',
-    name: 'Qwen2.5 3B Instruct',
-    size: '3B',
+    repo: 'unsloth/Qwen3.5-4B-GGUF',
+    name: 'Qwen3.5 4B GGUF',
+    size: '4B',
     tier: 'small',
-    why: 'Fast baseline for low-memory laptops and quick planning.'
+    why: 'Public Qwen starter for modest hardware; Q4_K_M is the default file to try first.'
+  },
+  {
+    repo: 'unsloth/Qwen3.5-9B-GGUF',
+    name: 'Qwen3.5 9B GGUF',
+    size: '9B',
+    tier: 'medium',
+    why: 'Public Qwen upgrade when RAM or VRAM has more headroom.'
+  },
+  {
+    repo: 'unsloth/Qwen3.6-27B-GGUF',
+    name: 'Qwen3.6 27B GGUF',
+    size: '27B',
+    tier: 'large',
+    why: 'Public Qwen3.6 option for stronger local hardware.'
+  },
+  {
+    repo: 'unsloth/Qwen3.6-35B-A3B-GGUF',
+    name: 'Qwen3.6 35B-A3B GGUF',
+    size: '35B-A3B',
+    tier: 'large',
+    why: 'Public Qwen3.6 MoE option for high-memory systems.'
   },
   {
     repo: 'bartowski/Phi-3.5-mini-instruct-GGUF',
@@ -2104,6 +2199,22 @@ const MODEL_SUGGESTIONS = [
   }
 ];
 
+function recommendedQwenForHardware(hardware) {
+  if (!hardware) {
+    return MODEL_SUGGESTIONS[0];
+  }
+  if (hardware.maxVramGb >= 24 || hardware.totalRamGb >= 96) {
+    return MODEL_SUGGESTIONS.find((item) => item.repo === 'unsloth/Qwen3.6-35B-A3B-GGUF');
+  }
+  if (hardware.maxVramGb >= 16 || hardware.totalRamGb >= 64 || hardware.tier === 'large') {
+    return MODEL_SUGGESTIONS.find((item) => item.repo === 'unsloth/Qwen3.6-27B-GGUF');
+  }
+  if (hardware.maxVramGb >= 8 || hardware.totalRamGb >= 24 || hardware.tier === 'medium') {
+    return MODEL_SUGGESTIONS.find((item) => item.repo === 'unsloth/Qwen3.5-9B-GGUF');
+  }
+  return MODEL_SUGGESTIONS[0];
+}
+
 function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [modelFolders, setModelFolders] = useState((settings.modelFolders || []).join('\n'));
   const [hfToken, setHfToken] = useState(settings.hfToken || '');
@@ -2113,18 +2224,25 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [llamaServerPath, setLlamaServerPath] = useState(settings.llamaServerPath || '');
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
   const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 4096);
-  const [repo, setRepo] = useState('');
-  const [modelSearch, setModelSearch] = useState('instruct gguf');
+  const [repo, setRepo] = useState('unsloth/Qwen3.5-4B-GGUF');
+  const [repoTouched, setRepoTouched] = useState(false);
+  const [modelSearch, setModelSearch] = useState('Qwen GGUF');
   const [hardware, setHardware] = useState(null);
   const [runtime, setRuntime] = useState(null);
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
+  const recommendedQwen = useMemo(() => recommendedQwenForHardware(hardware), [hardware]);
 
   useEffect(() => {
     api('/api/hardware').then(setHardware).catch((err) => setNotice(err.message));
     api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
   }, []);
+
+  useEffect(() => {
+    if (!hardware || !recommendedQwen || repoTouched) return;
+    setRepo(recommendedQwen.repo);
+  }, [hardware, recommendedQwen, repoTouched]);
 
   async function saveSettings() {
     const data = await api('/api/settings', {
@@ -2186,6 +2304,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   }
 
   async function useRepo(nextRepo) {
+    setRepoTouched(true);
     setRepo(nextRepo);
     setHfFiles(await api(`/api/hf/files?repo=${encodeURIComponent(nextRepo)}`));
   }
@@ -2218,6 +2337,15 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         </div>
         <label>Filter suggestions</label>
         <input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="7B instruct GGUF" />
+        {recommendedQwen && (
+          <div className="runtime-card">
+            <Pill tone="good">Public default</Pill>
+            <strong>{recommendedQwen.name}</strong>
+            <span>{recommendedQwen.why}</span>
+            <small>{recommendedQwen.repo}. Public file lookup and download do not need an HF token unless Hugging Face marks a repo gated/private.</small>
+            <button onClick={() => useRepo(recommendedQwen.repo)}>Use recommended Qwen</button>
+          </div>
+        )}
         <div className="model-suggestions">
           {MODEL_SUGGESTIONS
             .filter((item) => `${item.repo} ${item.name} ${item.size} ${item.tier}`.toLowerCase().includes(modelSearch.toLowerCase()) || item.tier === hardware?.tier)
@@ -2277,14 +2405,17 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
       </div>
       <div className="panel">
         <h2>Hugging Face Download</h2>
-        <p>Token is optional and stored only in local settings.</p>
+        <p>Public GGUF repos can be listed and downloaded without a token. Add a token only for private or gated models.</p>
         <label>HF token</label>
         <input value={hfToken} onChange={(event) => setHfToken(event.target.value)} type="password" placeholder="Optional" />
         <label>Download folder</label>
         <input value={downloadFolder} onChange={(event) => setDownloadFolder(event.target.value)} placeholder="models" />
         <label>Repo</label>
         <div className="inline-form">
-          <input value={repo} onChange={(event) => setRepo(event.target.value)} placeholder="bartowski/Qwen2.5-7B-Instruct-GGUF" />
+          <input value={repo} onChange={(event) => {
+            setRepoTouched(true);
+            setRepo(event.target.value);
+          }} placeholder="unsloth/Qwen3.5-4B-GGUF" />
           <button onClick={lookupHF}>Files</button>
         </div>
         <div className="inline-form">
