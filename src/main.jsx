@@ -1131,15 +1131,25 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   }
 
   async function copyConsultPrompt(promptOverride = '') {
+    const prompt = promptOverride || consultPrompt || buildConsultPrompt();
     if (temporaryChatNeedsConfirmation) {
-      await navigator.clipboard.writeText(temporaryChatSetupNote());
+      await api('/api/browser/copy-prompt', {
+        method: 'POST',
+        body: JSON.stringify({ prompt: temporaryChatSetupNote() })
+      });
       setNotice('Temporary Chat setup note copied. Turn on Temporary Chat in ChatGPT, tick "Temporary Chat is on", then copy the full prompt.');
       return false;
     }
-    const prompt = promptOverride || consultPrompt || buildConsultPrompt();
-    await navigator.clipboard.writeText(prompt);
+    await api('/api/browser/copy-prompt', {
+      method: 'POST',
+      body: JSON.stringify({ prompt })
+    });
     setNotice('Consultation prompt copied. Paste it into the cloud agent after login.');
     return true;
+  }
+
+  function manualPromptText(prompt) {
+    return temporaryChatNeedsConfirmation ? temporaryChatSetupNote() : prompt;
   }
 
   async function openWithPrompt() {
@@ -1237,20 +1247,46 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   }
 
   async function copyAndOpenNormal() {
-    const opened = openNormalBrowser();
     const prompt = buildConsultPrompt();
     const consultationId = await ensureConsultation(prompt);
-    const copiedPrompt = await copyConsultPrompt(prompt);
+    let copiedPrompt = false;
+    try {
+      copiedPrompt = await copyConsultPrompt(prompt);
+    } catch (err) {
+      setNotice(err.message);
+      return;
+    }
+    const opened = openNormalBrowser();
+    const copyLabel = copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note';
     setNotice(opened
-      ? `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'} and opened a normal browser tab. Consultation #${consultationId} is ready for pasted response.`
-      : `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'}. Normal browser tab was blocked; open ${browserUrl.trim()} manually.`);
+      ? `${copyLabel} and opened a normal browser tab. Consultation #${consultationId} is ready for pasted response.`
+      : `${copyLabel}. Normal browser tab was blocked; open ${browserUrl.trim()} manually.`);
   }
 
   async function copyAndOpenExternal() {
     const prompt = buildConsultPrompt();
     const consultationId = await ensureConsultation(prompt);
-    const copiedPrompt = await copyConsultPrompt(prompt);
-    const opened = await openExternalBrowser(consultationId);
+    setExternalBusy(true);
+    let opened = false;
+    let copiedPrompt = !temporaryChatNeedsConfirmation;
+    try {
+      const result = await api('/api/browser/open-external', {
+        method: 'POST',
+        body: JSON.stringify({
+          url: browserUrl,
+          consultation_id: consultationId,
+          prompt: manualPromptText(prompt)
+        })
+      });
+      setBrowserResult(result);
+      opened = true;
+      copiedPrompt = !temporaryChatNeedsConfirmation;
+    } catch (err) {
+      setNotice(err.message);
+      return;
+    } finally {
+      setExternalBusy(false);
+    }
     setNotice(opened
       ? `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'} and opened your external browser. Consultation #${consultationId} is ready for pasted response.`
       : `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'}. External browser did not open; open ${browserUrl.trim()} manually.`);
@@ -1259,8 +1295,27 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   async function copyAndOpenChrome() {
     const prompt = buildConsultPrompt();
     const consultationId = await ensureConsultation(prompt);
-    const copiedPrompt = await copyConsultPrompt(prompt);
-    const opened = await openChromeBrowser(consultationId);
+    setChromeBusy(true);
+    let opened = false;
+    let copiedPrompt = !temporaryChatNeedsConfirmation;
+    try {
+      const result = await api('/api/browser/open-chrome', {
+        method: 'POST',
+        body: JSON.stringify({
+          url: browserUrl,
+          consultation_id: consultationId,
+          prompt: manualPromptText(prompt)
+        })
+      });
+      setBrowserResult(result);
+      opened = true;
+      copiedPrompt = !temporaryChatNeedsConfirmation;
+    } catch (err) {
+      setNotice(err.message);
+      return;
+    } finally {
+      setChromeBusy(false);
+    }
     setNotice(opened
       ? `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'} and opened Chrome. ${copiedPrompt ? `Consultation #${consultationId} is ready for pasted response.` : 'Turn on Temporary Chat in ChatGPT, tick "Temporary Chat is on", then click Copy.'}`
       : `${copiedPrompt ? 'Copied prompt' : 'Copied Temporary Chat setup note'}. Chrome did not open; use External or open ${browserUrl.trim()} manually.`);

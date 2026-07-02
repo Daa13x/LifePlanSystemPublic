@@ -64,6 +64,54 @@ function spawnCli(command, args) {
   }
 }
 
+function copyTextToSystemClipboard(text) {
+  const value = String(text || '');
+  if (!value.trim()) throw new Error('Prompt text is required before copying.');
+  const candidates = process.platform === 'win32'
+    ? [{ command: 'clip.exe', args: [] }]
+    : process.platform === 'darwin'
+      ? [{ command: 'pbcopy', args: [] }]
+      : [
+        { command: 'wl-copy', args: [] },
+        { command: 'xclip', args: ['-selection', 'clipboard'] },
+        { command: 'xsel', args: ['--clipboard', '--input'] }
+      ];
+
+  return new Promise((resolve, reject) => {
+    let index = 0;
+    const tryNext = () => {
+      const candidate = candidates[index++];
+      if (!candidate) {
+        reject(new Error('No system clipboard command was available.'));
+        return;
+      }
+      const child = spawn(candidate.command, candidate.args, {
+        cwd: root,
+        windowsHide: true,
+        stdio: ['pipe', 'ignore', 'pipe']
+      });
+      let handled = false;
+      const next = () => {
+        if (handled) return;
+        handled = true;
+        tryNext();
+      };
+      child.on('error', next);
+      child.on('close', (code) => {
+        if (handled) return;
+        handled = true;
+        if (code === 0) {
+          resolve({ command: candidate.command });
+        } else {
+          tryNext();
+        }
+      });
+      child.stdin.end(value);
+    };
+    tryNext();
+  });
+}
+
 function normalizeBrowserUrl(value) {
   const trimmed = String(value || '').trim();
   if (!trimmed) throw new Error('URL is required.');
@@ -400,14 +448,21 @@ async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) 
   await composer.click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A').catch(() => {});
   await page.keyboard.press('Backspace').catch(() => {});
-  await page.keyboard.insertText(prompt);
+  await composer.fill(prompt).catch(async () => {
+    await page.keyboard.insertText(prompt);
+  });
+  await composer.evaluate((node) => {
+    node.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+  }).catch(() => {});
 
   const sendButton = await firstVisibleLocator(page, [
     '[data-testid="send-button"]',
+    '[data-testid="composer-submit-button"]',
+    'button[aria-label*="Send"]',
     'button[aria-label="Send prompt"]',
     'button[aria-label="Send message"]',
     'button:has-text("Send")'
-  ], 1200);
+  ], 2500);
   if (sendButton) {
     await sendButton.click({ timeout: 10000 });
   } else {
@@ -1473,6 +1528,20 @@ app.post('/api/browser/reset-profile', async (_req, res) => {
   }
 });
 
+app.post('/api/browser/copy-prompt', async (req, res) => {
+  const text = String(req.body.prompt || '');
+  try {
+    const copied = await copyTextToSystemClipboard(text);
+    ok(res, {
+      copied: true,
+      clipboard: copied.command,
+      note: 'Prompt copied to the system clipboard.'
+    });
+  } catch (error) {
+    fail(res, 500, error.message || 'Prompt copy failed.');
+  }
+});
+
 app.post('/api/browser/open-external', async (req, res) => {
   let url;
   try {
@@ -1482,6 +1551,9 @@ app.post('/api/browser/open-external', async (req, res) => {
   }
 
   try {
+    const copied = req.body.prompt
+      ? await copyTextToSystemClipboard(req.body.prompt)
+      : null;
     await openExternalBrowser(url);
     if (req.body.consultation_id) {
       db.prepare(`
@@ -1494,7 +1566,11 @@ app.post('/api/browser/open-external', async (req, res) => {
       url,
       title: 'External browser',
       mode: 'external',
-      note: 'Opened in your default external browser. Use this for Google sign-in or human checks that reject controlled browsers.'
+      copied: Boolean(copied),
+      clipboard: copied?.command || '',
+      note: copied
+        ? 'Prompt copied to the system clipboard, then opened in your default external browser. Paste it into the cloud agent after sign-in.'
+        : 'Opened in your default external browser. Use this for Google sign-in or human checks that reject controlled browsers.'
     });
   } catch (error) {
     fail(res, 500, error.message || 'External browser open failed.');
@@ -1510,6 +1586,9 @@ app.post('/api/browser/open-chrome', async (req, res) => {
   }
 
   try {
+    const copied = req.body.prompt
+      ? await copyTextToSystemClipboard(req.body.prompt)
+      : null;
     const launch = await openChromeBrowser(url);
     if (req.body.consultation_id) {
       db.prepare(`
@@ -1523,7 +1602,11 @@ app.post('/api/browser/open-chrome', async (req, res) => {
       title: 'Chrome',
       mode: 'chrome',
       launcher: launch.launcher,
-      note: 'Opened in your installed Chrome profile. The app did not read or copy Chrome cookies.'
+      copied: Boolean(copied),
+      clipboard: copied?.command || '',
+      note: copied
+        ? 'Prompt copied to the system clipboard, then opened Chrome. Paste it into the cloud agent after sign-in.'
+        : 'Opened in your installed Chrome profile. The app did not read or copy Chrome cookies.'
     });
   } catch (error) {
     fail(res, 500, error.message || 'Chrome open failed. Install Chrome or use External.');
