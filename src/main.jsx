@@ -1646,11 +1646,17 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
 
 function Tooling({ setNotice, refreshSignal = 0 }) {
   const [status, setStatus] = useState(null);
+  const [connector, setConnector] = useState(null);
   const [busy, setBusy] = useState('');
 
   async function refresh(announce = false) {
     try {
-      setStatus(await api('/api/tooling/status'));
+      const [nextStatus, nextConnector] = await Promise.all([
+        api('/api/tooling/status'),
+        api('/api/browser/extension/install-info')
+      ]);
+      setStatus(nextStatus);
+      setConnector(nextConnector);
       if (announce) setNotice('Tooling status refreshed.');
     } catch (err) {
       setNotice(err.message);
@@ -1675,6 +1681,19 @@ function Tooling({ setNotice, refreshSignal = 0 }) {
     try {
       await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url }) });
       setNotice(`Opened ${label} in your external browser.`);
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function installBrowserAgent() {
+    setBusy('browserAgent');
+    try {
+      const result = await api('/api/browser/extension/install-helper', { method: 'POST', body: JSON.stringify({}) });
+      setNotice(result.message);
+      await refresh();
     } catch (err) {
       setNotice(err.message);
     } finally {
@@ -1741,7 +1760,20 @@ function Tooling({ setNotice, refreshSignal = 0 }) {
 
       <div className="panel">
         <h2>Browser Automation</h2>
-        <p>Playwright is the app's browser-control stack for cloud consultation tabs and future desktop-app attachment where supported.</p>
+        <p>Browser-agent sending uses the Chrome connector in the user's normal Chrome. Playwright remains available for fallback tooling.</p>
+        <div className="tool-row">
+          <div>
+            <strong>Chrome connector</strong>
+            <span>{connector?.installed ? 'Connected to this LPS session.' : 'Load the unpacked extension in the Chrome profile that runs LPS.'}</span>
+            <small>{connector?.extensionPath || 'browser-extension/lps-browser-agent'}</small>
+          </div>
+          <div className="tool-actions">
+            <Pill tone={connector?.installed ? 'good' : 'warn'}>{connector?.installed ? 'Connected' : 'Not loaded'}</Pill>
+            <button disabled={Boolean(busy)} onClick={installBrowserAgent}>
+              {busy === 'browserAgent' ? 'Opening...' : 'Install connector'}
+            </button>
+          </div>
+        </div>
         <div className="tool-list">
           {rows.map((row) => (
             <div className="tool-row" key={row.id}>
@@ -1766,6 +1798,11 @@ function Tooling({ setNotice, refreshSignal = 0 }) {
 {`What the app can install locally:
 - npm install playwright
 - npx playwright install chromium
+
+Browser agent connector:
+- Tooling > Install connector opens chrome://extensions and copies the unpacked extension folder.
+- Extension folder: ${connector?.extensionPath || 'browser-extension/lps-browser-agent'}
+- It talks to 127.0.0.1:4177 only; no public firewall rule is needed for local use.
 
 What needs an OS/user install:
 - GitHub CLI: ${status?.installHints?.githubCli || 'winget install --id GitHub.cli'}

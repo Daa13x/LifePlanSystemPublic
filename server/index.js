@@ -244,6 +244,10 @@ function chromeDebugProfileDir() {
   return path.join(root, 'data', 'chrome-debug-profile');
 }
 
+function browserAgentExtensionDir() {
+  return path.join(root, 'browser-extension', 'lps-browser-agent');
+}
+
 function chromeExecutablePath() {
   if (process.platform !== 'win32') return '';
   const candidates = [
@@ -1811,6 +1815,38 @@ app.get('/api/browser/agent-tabs', async (_req, res) => {
     ok(res, { cdpAvailable: true, connectorAvailable: false, agents });
   } catch (error) {
     fail(res, 500, error.message || 'Chrome tab lookup failed.');
+  }
+});
+
+app.get('/api/browser/extension/install-info', (_req, res) => {
+  const extensionPath = browserAgentExtensionDir();
+  ok(res, {
+    extensionPath,
+    manifestPath: path.join(extensionPath, 'manifest.json'),
+    installed: Date.now() - browserExtensionState.lastSeen < 15000,
+    chromeExtensionsUrl: 'chrome://extensions',
+    instructions: [
+      'Open chrome://extensions in the Chrome profile that runs LPS.',
+      'Enable Developer mode.',
+      'Click Load unpacked.',
+      `Select ${extensionPath}.`
+    ]
+  });
+});
+
+app.post('/api/browser/extension/install-helper', async (_req, res) => {
+  const extensionPath = browserAgentExtensionDir();
+  try {
+    await copyTextToSystemClipboard(extensionPath);
+    await openChromeBrowser('chrome://extensions');
+    ok(res, {
+      extensionPath,
+      copied: true,
+      opened: true,
+      message: 'Extension folder copied and Chrome extensions page opened. Enable Developer mode, click Load unpacked, then paste/select the copied folder.'
+    });
+  } catch (error) {
+    fail(res, 500, error.message || 'Browser-agent install helper failed.');
   }
 });
 
