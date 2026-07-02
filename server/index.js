@@ -415,6 +415,36 @@ async function chatGptComposer(page) {
   ], 1500);
 }
 
+async function waitForChatGptComposerAfterManualClearance(page, timeout = 240000) {
+  const started = Date.now();
+  let lastState = {
+    url: page.url(),
+    title: '',
+    text: '',
+    blocked: { blocked: false, reason: '' }
+  };
+
+  while (Date.now() - started < timeout) {
+    const composer = await chatGptComposer(page);
+    if (composer) return { composer, state: lastState };
+
+    const currentUrl = page.url();
+    const title = await page.title().catch(() => '');
+    const visibleText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    const blocked = chatGptUnavailableResult({ url: currentUrl, title, text: visibleText });
+    lastState = {
+      url: currentUrl,
+      title,
+      text: visibleText,
+      blocked
+    };
+
+    await page.waitForTimeout(blocked.blocked ? 2500 : 1200);
+  }
+
+  return { composer: null, state: lastState };
+}
+
 async function extractChatGptAnswer(page) {
   const selectors = [
     '[data-message-author-role="assistant"]',
@@ -471,36 +501,22 @@ async function waitForChatGptAnswer(page, previousAnswer = '') {
 async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) {
   const { page, profile, mode, launchNote } = await controlledBrowserPage();
   await page.goto(normalizeBrowserUrl(url), { waitUntil: 'domcontentloaded', timeout: 60000 });
-  const title = await page.title().catch(() => '');
-  const currentUrl = page.url();
-  const visibleText = await page.locator('body').innerText({ timeout: 8000 }).catch(() => '');
-  const blocked = chatGptUnavailableResult({ url: currentUrl, title, text: visibleText });
-  if (blocked.blocked) {
+  const ready = await waitForChatGptComposerAfterManualClearance(page);
+  const composer = ready.composer;
+  if (!composer) {
+    const { url: currentUrl, title, text, blocked } = ready.state;
     return {
       ok: false,
       blocked: true,
-      blockReason: blocked.reason,
+      blockReason: blocked.blocked
+        ? `${blocked.reason} The app waited for manual clearance in the controlled browser profile before giving up.`
+        : 'ChatGPT opened, but the message composer was not found after waiting for manual login or verification.',
       url: currentUrl,
       title,
       profile,
       mode,
       launchNote,
-      excerpt: visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200)
-    };
-  }
-
-  const composer = await chatGptComposer(page);
-  if (!composer) {
-    return {
-      ok: false,
-      blocked: true,
-      blockReason: 'ChatGPT opened, but the message composer was not found. Sign in, finish any verification, or start a new chat in the persistent browser profile, then try again.',
-      url: page.url(),
-      title: await page.title().catch(() => ''),
-      profile,
-      mode,
-      launchNote,
-      excerpt: visibleText.replace(/\s+/g, ' ').trim().slice(0, 1200)
+      excerpt: text.replace(/\s+/g, ' ').trim().slice(0, 1200)
     };
   }
 
