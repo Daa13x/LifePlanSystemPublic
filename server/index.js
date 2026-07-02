@@ -18,6 +18,7 @@ let browserContext = null;
 let browserPage = null;
 let browserMode = '';
 let browserLaunchNote = '';
+let cdpBrowser = null;
 
 app.use(express.json({ limit: '25mb' }));
 
@@ -168,6 +169,31 @@ function browserChallengeResult({ url = '', title = '', text = '' }) {
   };
 }
 
+function defaultCloudAgentUrl(targetAgent = '', fallbackUrl = '') {
+  const agent = String(targetAgent || '').trim().toLowerCase();
+  if (fallbackUrl) return fallbackUrl;
+  if (agent === 'gemini') return 'https://gemini.google.com/app';
+  if (agent === 'grok') return 'https://grok.com/';
+  if (agent === 'claude') return 'https://claude.ai/new';
+  return 'https://chatgpt.com/';
+}
+
+const cloudAgentHosts = {
+  ChatGPT: ['chatgpt.com', 'auth.openai.com'],
+  Gemini: ['gemini.google.com', 'accounts.google.com'],
+  Grok: ['grok.com', 'x.com'],
+  Claude: ['claude.ai']
+};
+
+function tabMatchesAgent(url = '', hosts = []) {
+  try {
+    const parsed = new URL(url);
+    return hosts.some((host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`));
+  } catch {
+    return false;
+  }
+}
+
 function chatGptUnavailableResult({ url = '', title = '', text = '' }) {
   const challenge = browserChallengeResult({ url, title, text });
   if (challenge.blocked) return challenge;
@@ -185,6 +211,82 @@ function browserProfileDir() {
   return path.join(root, 'data', 'browser-profile');
 }
 
+function chromeDebugProfileDir() {
+  return path.join(root, 'data', 'chrome-debug-profile');
+}
+
+function chromeExecutablePath() {
+  if (process.platform !== 'win32') return '';
+  const candidates = [
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Google', 'Chrome', 'Application', 'chrome.exe')
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || '';
+}
+
+async function chromeDebugEndpointAvailable(endpoint = 'http://127.0.0.1:9222') {
+  try {
+    const response = await fetch(`${endpoint.replace(/\/+$/, '')}/json/version`, { signal: AbortSignal.timeout(1500) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function launchChromeDebugging(url = 'https://chatgpt.com/') {
+  if (await chromeDebugEndpointAvailable()) return true;
+  const chromePath = chromeExecutablePath();
+  if (!chromePath) return false;
+  const userDataDir = chromeDebugProfileDir();
+  fs.mkdirSync(userDataDir, { recursive: true });
+  const launched = spawnCli(chromePath, [
+    '--remote-debugging-port=9222',
+    '--remote-allow-origins=http://127.0.0.1:9222',
+    `--user-data-dir=${userDataDir}`,
+    '--start-maximized'
+  ]);
+  if (!launched.started) return false;
+  const started = Date.now();
+  while (Date.now() - started < 8000) {
+    if (await chromeDebugEndpointAvailable()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+function pageMatchesHost(page, host) {
+  try {
+    const current = new URL(page.url());
+    return current.hostname === host || current.hostname.endsWith(`.${host}`);
+  } catch {
+    return false;
+  }
+}
+
+async function realChromePage(url = 'https://chatgpt.com/') {
+  const ready = await launchChromeDebugging(url);
+  if (!ready) return null;
+  const { chromium } = await import('playwright');
+  if (!cdpBrowser || !cdpBrowser.isConnected?.()) {
+    cdpBrowser = await chromium.connectOverCDP('http://127.0.0.1:9222');
+    cdpBrowser.on('disconnected', () => {
+      cdpBrowser = null;
+    });
+  }
+  const context = cdpBrowser.contexts()[0] || await cdpBrowser.newContext();
+  const pages = context.pages();
+  const target = new URL(normalizeBrowserUrl(url));
+  const page = pages.find((candidate) => !candidate.isClosed() && pageMatchesHost(candidate, target.hostname))
+    || await context.newPage();
+  return {
+    page,
+    profile: chromeDebugProfileDir(),
+    mode: 'real Chrome debug profile',
+    launchNote: 'Using a dedicated real Chrome profile with DevTools enabled. Chrome 136+ does not allow DevTools automation against the default personal Chrome profile, but this profile saves its own cookies after login.'
+  };
+}
+
 async function controlledBrowserPage() {
   const automation = await browserAutomationStatus();
   if (!automation.playwright) throw new Error(automation.note);
@@ -199,6 +301,7 @@ async function controlledBrowserPage() {
     const launchOptions = {
       headless: false,
       viewport: null,
+      chromiumSandbox: true,
       args: ['--start-maximized']
     };
     try {
@@ -415,7 +518,7 @@ async function chatGptComposer(page) {
   ], 1500);
 }
 
-async function waitForChatGptComposerAfterManualClearance(page, timeout = 240000) {
+async function waitForChatGptComposerAfterManualClearance(page, timeout = 600000) {
   const started = Date.now();
   let lastState = {
     url: page.url(),
@@ -499,7 +602,11 @@ async function waitForChatGptAnswer(page, previousAnswer = '') {
 }
 
 async function runChatGptConsultation({ prompt, url = 'https://chatgpt.com/' }) {
-  const { page, profile, mode, launchNote } = await controlledBrowserPage();
+  const browser = await realChromePage(url);
+  if (!browser) {
+    throw new Error('Could not attach to real Chrome through DevTools on 127.0.0.1:9222. Life Planner tried to launch a dedicated real Chrome debug profile under data/chrome-debug-profile. The app-controlled Playwright profile is intentionally not used for ChatGPT because Cloudflare keeps rejecting it.');
+  }
+  const { page, profile, mode, launchNote } = browser;
   await page.goto(normalizeBrowserUrl(url), { waitUntil: 'domcontentloaded', timeout: 60000 });
   const ready = await waitForChatGptComposerAfterManualClearance(page);
   const composer = ready.composer;
@@ -572,12 +679,7 @@ async function openExternalBrowser(url) {
 
 async function openChromeBrowser(url) {
   if (process.platform === 'win32') {
-    const candidates = [
-      process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Google', 'Chrome', 'Application', 'chrome.exe')
-    ].filter(Boolean);
-    const chromePath = candidates.find((candidate) => fs.existsSync(candidate));
+    const chromePath = chromeExecutablePath();
     if (chromePath) {
       const launched = spawnCli(chromePath, [url]);
       if (!launched.started) throw new Error(launched.error || 'Chrome launch failed.');
@@ -1538,7 +1640,7 @@ app.post('/api/browser/open', async (req, res) => {
   }
 
   try {
-    const { page, profile, mode, launchNote } = await controlledBrowserPage();
+    const { page, profile, mode, launchNote } = await realChromePage(url) || await controlledBrowserPage();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     const title = await page.title().catch(() => '');
     const currentUrl = page.url();
@@ -1569,13 +1671,10 @@ app.post('/api/browser/open', async (req, res) => {
 app.post('/api/browser/consult', async (req, res) => {
   const targetAgent = String(req.body.target_agent || 'ChatGPT').trim();
   const localDraft = String(req.body.local_draft || '').trim();
-  const url = req.body.url || 'https://chatgpt.com/';
+  const url = defaultCloudAgentUrl(targetAgent, req.body.url);
   const chatGptTarget = targetAgent === 'ChatGPT' || String(url).toLowerCase().includes('chatgpt.com');
   if (!localDraft) return fail(res, 400, 'Enter a message before running cloud consultation.');
-  if (!chatGptTarget) {
-    return fail(res, 400, 'Automatic round trip currently supports ChatGPT only. Use manual fallback for other cloud agents.');
-  }
-  if (req.body.temporary_chat_required !== false && req.body.temporary_chat_confirmed !== true) {
+  if (chatGptTarget && req.body.temporary_chat_required !== false && req.body.temporary_chat_confirmed !== true) {
     return fail(res, 400, 'Confirm ChatGPT Temporary Chat before sending the full consultation prompt. The app cannot verify this automatically.');
   }
 
@@ -1605,6 +1704,34 @@ app.post('/api/browser/consult', async (req, res) => {
     });
   } catch (error) {
     fail(res, error.blocked ? 409 : 500, error.message || 'Automatic cloud consultation failed.');
+  }
+});
+
+app.get('/api/browser/agent-tabs', async (_req, res) => {
+  if (!(await chromeDebugEndpointAvailable())) {
+    return ok(res, {
+      cdpAvailable: false,
+      agents: Object.fromEntries(Object.keys(cloudAgentHosts).map((agent) => [agent, { open: false, count: 0, tabs: [] }]))
+    });
+  }
+  try {
+    const response = await fetch('http://127.0.0.1:9222/json/list');
+    if (!response.ok) throw new Error(`Chrome tab lookup failed: ${response.statusText}`);
+    const tabs = await response.json();
+    const agents = {};
+    for (const [agent, hosts] of Object.entries(cloudAgentHosts)) {
+      const matches = tabs
+        .filter((tab) => tab.type === 'page' && tabMatchesAgent(tab.url, hosts))
+        .map((tab) => ({ id: tab.id, title: tab.title, url: tab.url }));
+      agents[agent] = {
+        open: matches.length > 0,
+        count: matches.length,
+        tabs: matches
+      };
+    }
+    ok(res, { cdpAvailable: true, agents });
+  } catch (error) {
+    fail(res, 500, error.message || 'Chrome tab lookup failed.');
   }
 });
 

@@ -165,6 +165,14 @@ function temporaryChatSetupNote() {
   ].join('\n');
 }
 
+const CLOUD_AGENTS = [
+  { name: 'ChatGPT', url: 'https://chatgpt.com/' },
+  { name: 'Gemini', url: 'https://gemini.google.com/app' },
+  { name: 'Grok', url: 'https://grok.com/' },
+  { name: 'Claude', url: 'https://claude.ai/new' },
+  { name: 'Other web agent', url: '' }
+];
+
 function App() {
   const [view, setView] = useState('planner');
   const [theme, setTheme] = useState(() => localStorage.getItem('life-planner-theme') || 'dark');
@@ -922,6 +930,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const [draft, setDraft] = useState('');
   const [external, setExternal] = useState('');
   const [consultations, setConsultations] = useState([]);
+  const [agentTabs, setAgentTabs] = useState({ cdpAvailable: false, agents: {} });
   const [repoFiles, setRepoFiles] = useState([]);
   const [selectedContextFile, setSelectedContextFile] = useState('');
   const [contextPaths, setContextPaths] = useState([]);
@@ -1001,9 +1010,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     ? 'Cloud consultant is already running.'
     : !draft.trim()
       ? 'Enter a message before running cloud consultation.'
-      : !chatGptTarget
-        ? 'Automatic round trip currently supports ChatGPT only. Use manual fallback for other cloud agents.'
-        : temporaryChatNeedsConfirmation
+      : temporaryChatNeedsConfirmation
           ? 'Turn on Temporary Chat in ChatGPT, then tick the confirmation box before sending the full prompt.'
           : browserDisabledReason;
   const waitingForExternalResponse = Boolean(activeConsultationId || browserResult || consultPrompt);
@@ -1019,6 +1026,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
 
   async function load() {
     setCap(await api('/api/browser/capabilities'));
+    setAgentTabs(await api('/api/browser/agent-tabs').catch(() => ({ cdpAvailable: false, agents: {} })));
     setConsultations(await api('/api/consultations'));
   }
   useEffect(() => { load().catch((err) => setNotice(err.message)); }, [refreshSignal]);
@@ -1167,6 +1175,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         setConsultStatus(result.message || result.blockReason || 'Automatic consultation could not complete.');
         setNotice(result.message || result.blockReason || 'Automatic consultation could not complete.');
       }
+      setAgentTabs(await api('/api/browser/agent-tabs').catch(() => agentTabs));
     } catch (err) {
       setConsultStatus(err.message);
       setNotice(err.message);
@@ -1452,14 +1461,15 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         <label>Cloud consultant</label>
         <div className="inline-form">
           <select value={targetAgent} onChange={(event) => {
-            setTargetAgent(event.target.value);
+            const nextAgent = event.target.value;
+            const nextConfig = CLOUD_AGENTS.find((agent) => agent.name === nextAgent);
+            setTargetAgent(nextAgent);
+            if (nextConfig?.url) setBrowserUrl(nextConfig.url);
             setTemporaryChatConfirmed(false);
           }}>
-            <option>ChatGPT</option>
-            <option>Gemini</option>
-            <option>Grok</option>
-            <option>Claude</option>
-            <option>Other web agent</option>
+            {CLOUD_AGENTS.map((agent) => (
+              <option value={agent.name} key={agent.name}>{agent.name}{agentTabs.agents?.[agent.name]?.open ? ' (open tab)' : ''}</option>
+            ))}
           </select>
           <button onClick={buildConsultPrompt}><Sparkles size={16} /> Build prompt</button>
           <button onClick={assistConsultPrompt} disabled={Boolean(assistDisabledReason)} title={assistDisabledReason || 'Ask the local model to shape the browser-agent question'}>
@@ -1472,6 +1482,13 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           >
             <Clipboard size={16} /> {temporaryChatNeedsConfirmation ? 'Copy temp setup' : 'Copy'}
           </button>
+        </div>
+        <div className="context-chips cloud-context">
+          {CLOUD_AGENTS.filter((agent) => agent.name !== 'Other web agent').map((agent) => (
+            <span className="pill pill-muted" key={agent.name}>
+              {agent.name}: {agentTabs.agents?.[agent.name]?.open ? `${agentTabs.agents[agent.name].count} open` : agentTabs.cdpAvailable ? 'not open' : 'tabs unread'}
+            </span>
+          ))}
         </div>
         <label>LifePlanSystem context to include</label>
         <div className="inline-form">
