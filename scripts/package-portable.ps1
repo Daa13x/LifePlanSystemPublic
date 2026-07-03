@@ -20,7 +20,7 @@ Write-Host "Repo: $repoRoot"
 
 Push-Location $repoRoot
 try {
-  npm.cmd install
+  npm.cmd install --no-save --package-lock=false
   if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
   $env:PLAYWRIGHT_BROWSERS_PATH = "0"
   npx.cmd playwright install chromium
@@ -52,6 +52,7 @@ Copy-Item -Path (Join-Path $nodeExtract "*") -Destination $nodeRoot -Recurse -Fo
 
 $itemsToCopy = @(
   "dist",
+  "browser-extension",
   "server",
   "node_modules",
   "package.json",
@@ -78,7 +79,9 @@ $blockedPatterns = @(
   "*.gguf",
   "*.safetensors",
   "*.onnx",
-  "*.log"
+  "*.log",
+  ".win32-*",
+  ".rollup-*"
 )
 
 foreach ($pattern in $blockedPatterns) {
@@ -111,7 +114,7 @@ cd /d "%~dp0app"
 "%~dp0node\node.exe" server\index.js
 "@ | Set-Content -Path (Join-Path $portableRoot "Run Server Console.cmd") -Encoding ASCII
 
-@"
+@'
 # Life Planner Portable
 
 Run `Start Life Planner.cmd`.
@@ -122,12 +125,16 @@ http://127.0.0.1:4177/
 
 Playwright Chromium is installed into the bundled app dependencies, so Browser consultation can run without a separate browser-cache setup.
 
+The browser connector extension is bundled at:
+
+app\browser-extension\lps-browser-agent
+
 Local runtime data is created under:
 
 app\data\
 
 Do not sync or publish `app\data` unless you intentionally want to move local private state.
-"@ | Set-Content -Path (Join-Path $portableRoot "PORTABLE_README.md") -Encoding UTF8
+'@ | Set-Content -Path (Join-Path $portableRoot "PORTABLE_README.md") -Encoding UTF8
 
 Write-Host "Portable bundle ready:"
 Write-Host $portableRoot
