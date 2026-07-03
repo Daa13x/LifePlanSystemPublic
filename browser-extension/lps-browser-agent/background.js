@@ -1,4 +1,4 @@
-const LPS = 'http://127.0.0.1:4177';
+﻿const LPS = 'http://127.0.0.1:4177';
 
 const AGENT_URLS = {
   ChatGPT: 'https://chatgpt.com/',
@@ -87,9 +87,11 @@ async function runContentSend(prompt) {
     'main'
   ];
   const promptText = String(prompt || '').replace(/\s+/g, ' ').trim();
-  // ChatGPT's reasoning UI renders status labels ("Thinking", "Thought for a couple
-  // of seconds") inside the assistant turn. They hold still long enough to pass the
-  // stability check, so they must never count as answer text.
+  // TEMPORARY SMOKE-TEST PATCH (2026-07-03, release copy only — NOT the permanent
+  // source fix): ChatGPT's reasoning UI renders status labels ("Thinking",
+  // "Thought for a couple of seconds") inside the assistant turn. They hold still
+  // long enough to pass the 3-tick stability check and get captured as the answer.
+  // Strip leading status labels and treat status-only text as "no response yet".
   const stripStatusPrefix = (value) =>
     value
       .replace(/^thinking[\s.…]+/i, '')
@@ -100,6 +102,12 @@ async function runContentSend(prompt) {
     /^thinking[\s.…]*$/i.test(value) ||
     /^thought for [^]{0,60}$/i.test(value) ||
     /^(reasoning|analyzing|searching|working)[\s.…]*$/i.test(value);
+  // TEMPORARY SMOKE-TEST PATCH (2026-07-03, part 3): scope capture to assistant
+  // turns created after the prompt was sent. Previously, when the newest turn was
+  // still a filtered status label ("Thinking"), the scan fell through to OLDER
+  // assistant turns and returned a stale answer, which the part-2 turn-count
+  // escape then accepted. On ChatGPT pages, only nodes at index >= minTurnIndex
+  // are readable and there is no fallback to generic containers.
   const isVisibleNode = (node) => {
     const rect = node.getBoundingClientRect();
     return rect.width > 20 && rect.height > 10;
@@ -114,10 +122,6 @@ async function runContentSend(prompt) {
     }
     return text.slice(0, 12000);
   };
-  // On ChatGPT pages capture is scoped to assistant turns at index >= minTurnIndex
-  // (turns created after the prompt was sent), with no fallback to older turns or
-  // generic containers — falling back returned stale answers from earlier turns.
-  const assistantTurnCount = () => document.querySelectorAll('[data-message-author-role="assistant"]').length;
   const readLatestResponse = (minTurnIndex = 0) => {
     const assistantNodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
     if (assistantNodes.length) {
@@ -137,6 +141,12 @@ async function runContentSend(prompt) {
     }
     return '';
   };
+
+  // TEMPORARY SMOKE-TEST PATCH (2026-07-03, part 2): if the new answer is identical
+  // to the previous turn's answer (e.g. rerunning "Reply with exactly: PING-OK" in
+  // the same conversation), text === beforeText rejected it forever and timed out.
+  // A grown assistant-turn count means a new reply exists even if the text repeats.
+  const assistantTurnCount = () => document.querySelectorAll('[data-message-author-role="assistant"]').length;
 
   let box = null;
   for (let i = 0; i < 240 && !box; i += 1) {
@@ -161,7 +171,7 @@ async function runContentSend(prompt) {
   box.dispatchEvent(new Event('change', { bubbles: true }));
   await sleep(300);
 
-  // Snapshot immediately before send (page fully loaded) so late-rendering
+  // Snapshot taken here (page fully loaded, immediately before send) so late-rendering
   // conversation history cannot be mistaken for a new reply.
   const beforeTurnCount = assistantTurnCount();
   const beforeText = readLatestResponse();
@@ -182,8 +192,6 @@ async function runContentSend(prompt) {
   for (let tick = 0; tick < 90; tick += 1) {
     await sleep(1000);
     const text = readLatestResponse(beforeTurnCount);
-    // A repeated identical answer (text === beforeText) still counts when it comes
-    // from a genuinely new assistant turn (turn count grew past the send snapshot).
     if (!text || (text === beforeText && assistantTurnCount() <= beforeTurnCount)) {
       stableTicks = 0;
       lastText = text;
@@ -249,3 +257,4 @@ async function poll() {
 setInterval(poll, 1500);
 chrome.runtime.onInstalled.addListener(poll);
 chrome.runtime.onStartup.addListener(poll);
+
