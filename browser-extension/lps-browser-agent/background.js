@@ -79,6 +79,36 @@ async function runContentSend(prompt) {
     'button[aria-label*="Send"]',
     'button[type="submit"]'
   ];
+  const responseSelectors = [
+    '[data-message-author-role="assistant"]',
+    'message-content',
+    '[data-testid="conversation-turn"]',
+    '.model-response-text',
+    'main'
+  ];
+  const promptText = String(prompt || '').replace(/\s+/g, ' ').trim();
+  const readLatestResponse = () => {
+    for (const selector of responseSelectors) {
+      const nodes = [...document.querySelectorAll(selector)]
+        .filter((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 20 && rect.height > 10;
+        });
+      for (const node of nodes.reverse()) {
+        const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        if (promptText && text.includes(promptText)) {
+          const afterPrompt = text.slice(text.lastIndexOf(promptText) + promptText.length).trim();
+          if (afterPrompt) return afterPrompt.slice(0, 12000);
+          continue;
+        }
+        return text.slice(0, 12000);
+      }
+    }
+    return '';
+  };
+
+  const beforeText = readLatestResponse();
 
   let box = null;
   for (let i = 0; i < 240 && !box; i += 1) {
@@ -113,7 +143,40 @@ async function runContentSend(prompt) {
   } else {
     box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
   }
-  return { status: 'sent', url: location.href, title: document.title, message: 'Prompt sent from the Life Planner Chrome connector.' };
+
+  let lastText = '';
+  let stableTicks = 0;
+  for (let tick = 0; tick < 90; tick += 1) {
+    await sleep(1000);
+    const text = readLatestResponse();
+    if (!text || text === beforeText) {
+      stableTicks = 0;
+      lastText = text;
+      continue;
+    }
+    if (text === lastText) {
+      stableTicks += 1;
+    } else {
+      lastText = text;
+      stableTicks = 1;
+    }
+    if (stableTicks >= 3) {
+      return {
+        status: 'answered',
+        url: location.href,
+        title: document.title,
+        answer: text,
+        message: 'Prompt sent and response captured from the Life Planner Chrome connector.'
+      };
+    }
+  }
+
+  return {
+    status: 'blocked',
+    url: location.href,
+    title: document.title,
+    error: 'Prompt was sent, but no completed browser-agent response was captured within 90 seconds.'
+  };
 }
 
 async function handleJob(job) {

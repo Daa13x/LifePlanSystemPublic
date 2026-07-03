@@ -1738,15 +1738,18 @@ app.post('/api/browser/consult', async (req, res) => {
       browserAgentJobs.set(id, job);
       const started = Date.now();
       while (Date.now() - started < 240000) {
-        if (job.status === 'answered' || job.status === 'sent' || job.status === 'blocked' || job.status === 'error') {
+        if (job.status === 'answered' || job.status === 'blocked' || job.status === 'error') {
           break;
         }
         await sleep(1000);
       }
-      const status = job.status === 'pending' ? 'pending' : job.status;
+      const terminal = job.status === 'answered' || job.status === 'blocked' || job.status === 'error';
+      const status = terminal
+        ? job.status
+        : 'timeout';
       return ok(res, {
-        ok: status === 'answered' || status === 'sent',
-        blocked: status === 'blocked' || status === 'error',
+        ok: status === 'answered',
+        blocked: status === 'blocked' || status === 'error' || status === 'timeout',
         status,
         prompt,
         answer: job.result?.answer || '',
@@ -1755,7 +1758,9 @@ app.post('/api/browser/consult', async (req, res) => {
         mode: 'my Chrome connector',
         message: job.result?.message || job.error || (status === 'pending'
           ? 'Chrome connector has the request queued. Check the cloud-agent tab in your Chrome.'
-          : 'Chrome connector sent the browser-agent question.'),
+          : status === 'timeout'
+            ? 'Chrome connector did not return a completed browser-agent reply before the timeout. Check the cloud-agent tab, then run it again.'
+            : 'Chrome connector sent the browser-agent question.'),
         contexts: contexts.map((item) => ({ path: item.path, truncated: item.truncated }))
       });
     }
