@@ -87,28 +87,56 @@ async function runContentSend(prompt) {
     'main'
   ];
   const promptText = String(prompt || '').replace(/\s+/g, ' ').trim();
-  const readLatestResponse = () => {
-    for (const selector of responseSelectors) {
-      const nodes = [...document.querySelectorAll(selector)]
-        .filter((node) => {
-          const rect = node.getBoundingClientRect();
-          return rect.width > 20 && rect.height > 10;
-        });
+  // ChatGPT's reasoning UI renders status labels ("Thinking", "Thought for a couple
+  // of seconds") inside the assistant turn. They hold still long enough to pass the
+  // stability check, so they must never count as answer text.
+  const stripStatusPrefix = (value) =>
+    value
+      .replace(/^thinking[\s.…]+/i, '')
+      .replace(/^thought for [\w ]{1,40}(seconds?|minutes?|s\b|m\b)[\s.…:]*/i, '')
+      .trim();
+  const isStatusText = (value) =>
+    !value ||
+    /^thinking[\s.…]*$/i.test(value) ||
+    /^thought for [^]{0,60}$/i.test(value) ||
+    /^(reasoning|analyzing|searching|working)[\s.…]*$/i.test(value);
+  const isVisibleNode = (node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.width > 20 && rect.height > 10;
+  };
+  const extractResponseText = (node) => {
+    const raw = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+    const text = stripStatusPrefix(raw);
+    if (isStatusText(text)) return '';
+    if (promptText && text.includes(promptText)) {
+      const afterPrompt = stripStatusPrefix(text.slice(text.lastIndexOf(promptText) + promptText.length).trim());
+      return isStatusText(afterPrompt) ? '' : afterPrompt.slice(0, 12000);
+    }
+    return text.slice(0, 12000);
+  };
+  // On ChatGPT pages capture is scoped to assistant turns at index >= minTurnIndex
+  // (turns created after the prompt was sent), with no fallback to older turns or
+  // generic containers — falling back returned stale answers from earlier turns.
+  const assistantTurnCount = () => document.querySelectorAll('[data-message-author-role="assistant"]').length;
+  const readLatestResponse = (minTurnIndex = 0) => {
+    const assistantNodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+    if (assistantNodes.length) {
+      const candidates = assistantNodes.slice(minTurnIndex).filter(isVisibleNode);
+      for (const node of candidates.reverse()) {
+        const text = extractResponseText(node);
+        if (text) return text;
+      }
+      return '';
+    }
+    for (const selector of responseSelectors.slice(1)) {
+      const nodes = [...document.querySelectorAll(selector)].filter(isVisibleNode);
       for (const node of nodes.reverse()) {
-        const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!text) continue;
-        if (promptText && text.includes(promptText)) {
-          const afterPrompt = text.slice(text.lastIndexOf(promptText) + promptText.length).trim();
-          if (afterPrompt) return afterPrompt.slice(0, 12000);
-          continue;
-        }
-        return text.slice(0, 12000);
+        const text = extractResponseText(node);
+        if (text) return text;
       }
     }
     return '';
   };
-
-  const beforeText = readLatestResponse();
 
   let box = null;
   for (let i = 0; i < 240 && !box; i += 1) {
@@ -133,6 +161,11 @@ async function runContentSend(prompt) {
   box.dispatchEvent(new Event('change', { bubbles: true }));
   await sleep(300);
 
+  // Snapshot immediately before send (page fully loaded) so late-rendering
+  // conversation history cannot be mistaken for a new reply.
+  const beforeTurnCount = assistantTurnCount();
+  const beforeText = readLatestResponse();
+
   const button = sendSelectors.map((selector) => document.querySelector(selector)).find((node) => {
     if (!node) return false;
     const rect = node.getBoundingClientRect();
@@ -148,8 +181,10 @@ async function runContentSend(prompt) {
   let stableTicks = 0;
   for (let tick = 0; tick < 90; tick += 1) {
     await sleep(1000);
-    const text = readLatestResponse();
-    if (!text || text === beforeText) {
+    const text = readLatestResponse(beforeTurnCount);
+    // A repeated identical answer (text === beforeText) still counts when it comes
+    // from a genuinely new assistant turn (turn count grew past the send snapshot).
+    if (!text || (text === beforeText && assistantTurnCount() <= beforeTurnCount)) {
       stableTicks = 0;
       lastText = text;
       continue;
