@@ -1017,7 +1017,9 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const responseCaptureHint = external.trim()
     ? 'Automatic answer captured. Choose what to save below; nothing is saved or synced until you click a save option.'
     : browserResult?.blocked
-      ? 'Automatic capture was blocked. Finish login or verification in the persistent browser profile, then run it again. Manual paste is available as a fallback.'
+      ? browserResult?.mode === 'my Chrome connector'
+        ? 'Automatic capture was blocked. Check the cloud-agent tab in your normal Chrome (finish any login or verification there), then run it again. Manual paste is available as a fallback.'
+        : 'Automatic capture was blocked. Finish login or verification in the persistent browser profile, then run it again. Manual paste is available as a fallback.'
       : ['chrome', 'external', 'normal-tab', 'app-tab'].includes(browserResult?.mode)
         ? 'Manual fallback is active. Copy the answer from that browser only if automatic capture is blocked.'
         : waitingForExternalResponse
@@ -1450,11 +1452,11 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
                   checked={temporaryChatConfirmed}
                   onChange={(event) => setTemporaryChatConfirmed(event.target.checked)}
                 />
-                Temporary Chat is on in ChatGPT
+                I manually confirm Temporary Chat is on in ChatGPT; Life Planner cannot verify this.
               </label>
             )}
             <small>
-              The app cannot verify ChatGPT Temporary Chat mode. Until you tick this, automatic consultation and full prompt copy stay blocked.
+              This checkbox is a manual confirmation only — the app has no way to check ChatGPT Temporary Chat mode. Until you tick it, automatic consultation and full prompt copy stay blocked.
             </small>
           </div>
         )}
@@ -1582,17 +1584,19 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
             {browserResult.excerpt && <small>{browserResult.excerpt}</small>}
             {browserResult.blocked && <small>{browserResult.blockReason}</small>}
             <small>
-              {browserResult.mode === 'chrome'
-                ? 'Opened in your installed Chrome profile. The app did not read or copy cookies.'
-                : browserResult.mode === 'external'
-                  ? 'Opened outside the Codex app in your default browser.'
-                  : browserResult.mode === 'app-tab'
-                    ? 'Opened as a browser tab from the app. The prompt was copied separately for manual paste.'
-                    : browserResult.mode === 'normal-tab'
-                      ? 'Opened as a normal browser tab. The prompt was copied separately for manual paste.'
-                  : browserResult.mode?.includes?.('app-controlled')
-                    ? `${browserResult.mode}. ${browserResult.launchNote || 'Using the app controlled browser profile.'}`
-                    : 'Opened in a separate Playwright-controlled browser window.'}
+              {browserResult.mode === 'my Chrome connector'
+                ? 'Sent through the Life Planner extension in your normal Chrome. No separate automation window was opened.'
+                : browserResult.mode === 'chrome'
+                  ? 'Opened in your installed Chrome profile. The app did not read or copy cookies.'
+                  : browserResult.mode === 'external'
+                    ? 'Opened outside the Codex app in your default browser.'
+                    : browserResult.mode === 'app-tab'
+                      ? 'Opened as a browser tab from the app. The prompt was copied separately for manual paste.'
+                      : browserResult.mode === 'normal-tab'
+                        ? 'Opened as a normal browser tab. The prompt was copied separately for manual paste.'
+                    : browserResult.mode?.includes?.('app-controlled')
+                      ? `${browserResult.mode}. ${browserResult.launchNote || 'Using the app controlled browser profile.'}`
+                      : 'Opened in a separate Playwright-controlled browser window.'}
             </small>
           </div>
         )}
