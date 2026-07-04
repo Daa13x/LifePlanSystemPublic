@@ -1,0 +1,94 @@
+# Chat provider registry (design/config of record).
+#
+# NOTE: the server does not parse YAML yet (no new dependencies allowed).
+# server/index.js mirrors the enabled providers in code. Keep in sync.
+#
+# can_receive_private_context meanings:
+#   full     - unrestricted local context (local processes only)
+#   safe     - allowlisted, size-capped brain excerpts only
+#   none     - no private context may be sent
+
+providers:
+  chatgpt_browser:
+    label: ChatGPT (browser connector)
+    type: browser_cloud
+    route: browser_connector
+    enabled: true
+    default: true            # first in auto mode
+    can_receive_private_context: safe
+    required_status_signals:
+      - connector_heartbeat_fresh   # extension heartbeat within 15s
+      - temporary_chat_confirmed    # manual attestation, app cannot verify
+    default_memory_status: candidate_only   # answers may become candidates, never memory
+
+  local_planner_assistant:
+    label: Local model (Planner Assistant)
+    type: local_model
+    route: local_runtime
+    enabled: true
+    default: true            # fallback in auto, only provider in private mode
+    can_receive_private_context: full
+    required_status_signals:
+      - model_assigned_or_endpoint_configured
+      - runtime_reachable
+    default_memory_status: candidate_only
+
+  local_context_drafter:
+    label: Local context drafter
+    type: local_model
+    route: local_runtime
+    enabled: false           # future: deep/distill modes
+    can_receive_private_context: full
+    required_status_signals:
+      - model_assigned_or_endpoint_configured
+    default_memory_status: chat_only
+
+  local_governance_checker:
+    label: Local governance checker
+    type: local_model
+    route: local_runtime
+    enabled: false           # future: deep mode verification pass
+    can_receive_private_context: full
+    required_status_signals:
+      - model_assigned_or_endpoint_configured
+    default_memory_status: chat_only
+
+  claude_browser:
+    label: Claude (browser connector)
+    type: browser_cloud
+    route: browser_connector
+    enabled: false           # future
+    can_receive_private_context: safe
+    required_status_signals:
+      - connector_heartbeat_fresh
+    default_memory_status: candidate_only
+
+  gemini:
+    label: Gemini (browser connector)
+    type: browser_cloud
+    route: browser_connector
+    enabled: false           # future
+    can_receive_private_context: safe
+    required_status_signals:
+      - connector_heartbeat_fresh
+    default_memory_status: candidate_only
+
+  grok:
+    label: Grok (browser connector)
+    type: browser_cloud
+    route: browser_connector
+    enabled: false           # future
+    can_receive_private_context: safe
+    required_status_signals:
+      - connector_heartbeat_fresh
+    default_memory_status: candidate_only
+
+  openrouter:
+    label: OpenRouter (API)
+    type: cloud_api
+    route: none               # no route implemented
+    enabled: false            # future; requires API key handling design first
+    can_receive_private_context: none
+    required_status_signals:
+      - api_key_configured
+    default_memory_status: candidate_only

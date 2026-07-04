@@ -145,6 +145,25 @@ export function migrate() {
     }
   }
 
+  try {
+    db.exec('ALTER TABLE chat_messages ADD COLUMN metadata TEXT');
+  } catch {
+    // Column already exists.
+  }
+
+  for (const column of [
+    ['speaker_label', 'TEXT'],
+    ['provider', 'TEXT'],
+    ['suggested_destination', 'TEXT'],
+    ['sensitivity', 'TEXT']
+  ]) {
+    try {
+      db.exec(`ALTER TABLE memory_candidates ADD COLUMN ${column[0]} ${column[1]}`);
+    } catch {
+      // Column already exists.
+    }
+  }
+
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
   if (projectCount === 0) {
     const insertProject = db.prepare(`

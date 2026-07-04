@@ -6,6 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { db, getSetting, migrate, setSetting } from './db.js';
+import { BRAIN_ALLOWLIST, brainStatus, loadBrainContext } from './brain.js';
 
 migrate();
 
@@ -33,6 +34,62 @@ const fail = (res, status, message) => res.status(status).json({ ok: false, erro
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// User-facing chat failure messages. Mirrors config/chat/failure-messages.yaml
+// (the config file is the design record; keep both in sync).
+const CHAT_FAILURES = {
+  chatgptConnectorUnavailable: 'ChatGPT is unavailable: the Chrome connector is not connected. Load the unpacked extension from browser-extension/lps-browser-agent in the Chrome profile where you are signed into ChatGPT (Tooling tab has an install helper), then keep that Chrome open.',
+  chatgptTemporaryChatUnconfirmed: 'ChatGPT was skipped because Temporary Chat is not confirmed. Turn on Temporary Chat in ChatGPT, tick the confirmation box above the composer, and send again. This protects brain context from being stored in ChatGPT history.',
+  chatgptCaptureBlocked: 'ChatGPT received the message but the answer could not be captured automatically. Check the ChatGPT tab in Chrome; if the answer is visible you can copy it via the Browser tab\'s manual paste fallback.',
+  localModelNotAssigned: 'No local model is configured. Assign a Planner Assistant model or set a local endpoint (Ollama, LM Studio, llama-server) in Settings.',
+  localRuntimeUnavailable: 'A local model is configured but its runtime did not answer. Check the endpoint URL, endpoint model name, or llama-cli/llama-server path in Settings, and make sure the runtime is running.',
+  noProviderAvailable: 'No provider is available. ChatGPT\'s Chrome connector is not connected and no local model is configured. Your message was saved to this chat. Connect the Chrome connector (Tooling tab) or configure a local model (Settings tab).',
+  providerTimeout: 'The provider did not answer before the timeout. Your message was saved. Check the ChatGPT tab in Chrome or your local runtime, then try again.'
+};
+
+function connectorFresh() {
+  return Date.now() - browserExtensionState.lastSeen < 15000;
+}
+
+// Queues a job for the Chrome connector extension and waits for a terminal
+// status. Shared by the Browser consultation route and the Chat provider
+// router.
+async function runConnectorJob({ targetAgent = 'ChatGPT', url, prompt, timeoutMs = 240000 }) {
+  const id = browserAgentJobSeq++;
+  const job = {
+    id,
+    status: 'pending',
+    targetAgent,
+    url,
+    prompt,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + timeoutMs,
+    updatedAt: Date.now(),
+    result: null,
+    error: ''
+  };
+  browserAgentJobs.set(id, job);
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (job.status === 'answered' || job.status === 'blocked' || job.status === 'error') {
+      break;
+    }
+    await sleep(1000);
+  }
+  const terminal = job.status === 'answered' || job.status === 'blocked' || job.status === 'error';
+  if (terminal || job.status === 'pending') {
+    // Consumed, or never claimed before the requester stopped waiting. Either
+    // way the prompt must not sit in the queue where the extension could send
+    // it later with nobody reading the answer.
+    browserAgentJobs.delete(id);
+  } else {
+    // Claimed/sent but no result in time: the extension already has the
+    // prompt, so just refuse late answers.
+    job.status = 'expired';
+    job.updatedAt = Date.now();
+  }
+  return { job, status: terminal ? job.status : 'timeout' };
 }
 
 async function runCli(command, args, options = {}) {
@@ -837,16 +894,93 @@ function classifyCandidate(text) {
   return 'current state';
 }
 
-function createCandidateFromMessage(sessionId, messageId, content) {
+// Suggestion only: where an approved candidate of this type would live in the
+// brain. Nothing is written there; the destination renders on approval cards.
+function suggestedDestinationForType(type) {
+  if (type === 'rule' || type === 'decision') return 'source_of_truth/decision_rules.md';
+  if (type === 'open question') return 'source_of_truth/open_questions.md';
+  if (type === 'todo' || type === 'reminder') return 'docs/ACTIVE_TODO.md';
+  return 'source_of_truth/memory/INBOX.md';
+}
+
+function candidateSensitivity(text) {
+  const lower = String(text || '').toLowerCase();
+  const sensitiveTerms = ['health', 'medical', 'doctor', 'therapy', 'medication', 'money', 'debt', 'salary', 'income', 'password', 'diagnosis'];
+  return sensitiveTerms.some((term) => lower.includes(term)) ? 'sensitive' : 'normal';
+}
+
+function insertCandidate({ sessionId = null, messageId = null, type, title, body, source, evidence, confidence, speakerLabel = null, provider = null }) {
+  return db.prepare(`
+    INSERT INTO memory_candidates
+    (session_id, source_message_id, type, title, body, source, evidence, confidence, speaker_label, provider, suggested_destination, sensitivity)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    sessionId,
+    messageId,
+    type,
+    title,
+    body,
+    source,
+    evidence,
+    confidence,
+    speakerLabel,
+    provider,
+    suggestedDestinationForType(type),
+    candidateSensitivity(`${title}\n${body}`)
+  ).lastInsertRowid;
+}
+
+function createCandidateFromMessage(sessionId, messageId, content, { speakerLabel = null, provider = null } = {}) {
   const trimmed = content.trim();
   if (trimmed.length < 24) return null;
   const type = classifyCandidate(trimmed);
   const title = trimmed.split(/[.!?\n]/)[0].slice(0, 96) || 'Chat memory candidate';
-  return db.prepare(`
-    INSERT INTO memory_candidates
-    (session_id, source_message_id, type, title, body, source, evidence, confidence)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(sessionId, messageId, type, title, trimmed, 'chat', `Chat session ${sessionId}, message ${messageId}`, 0.52).lastInsertRowid;
+  return insertCandidate({
+    sessionId,
+    messageId,
+    type,
+    title,
+    body: trimmed,
+    source: 'chat',
+    evidence: `Chat session ${sessionId}, message ${messageId}`,
+    confidence: 0.52,
+    speakerLabel,
+    provider
+  });
+}
+
+// Pulls save-worthy lines out of a cloud/local answer and stores them as
+// reviewable candidates. Heuristic on purpose: it finds, Alex decides.
+function extractApprovalCandidates({ sessionId, messageId, text, provider, speakerLabel }) {
+  const created = [];
+  const lines = String(text || '').split('\n').map((line) => line.replace(/^[\s*\-•\d.)]+/, '').trim()).filter(Boolean);
+  const markers = [
+    { pattern: /\b(you should|i recommend|recommendation:|next step|action item)\b/i, type: 'todo' },
+    { pattern: /\b(rule of thumb|always|never|as a rule|principle)\b/i, type: 'rule' },
+    { pattern: /\b(decide|decision|decided|choose between)\b/i, type: 'decision' },
+    { pattern: /\b(risk|danger|failure mode|watch out|caution)\b/i, type: 'blocker' },
+    { pattern: /\?\s*$/, type: 'open question' }
+  ];
+  for (const line of lines) {
+    if (created.length >= 3) break;
+    if (line.length < 40 || line.length > 400) continue;
+    const marker = markers.find((item) => item.pattern.test(line));
+    if (!marker) continue;
+    const title = line.split(/[.!?\n]/)[0].slice(0, 96) || 'Chat answer candidate';
+    created.push(insertCandidate({
+      sessionId,
+      messageId,
+      type: marker.type,
+      title,
+      body: line,
+      source: provider === 'chatgpt_browser' ? 'cloud consultation' : 'chat',
+      evidence: `Extracted from ${provider || 'assistant'} answer in chat session ${sessionId}; requires user review.`,
+      confidence: 0.4,
+      speakerLabel,
+      provider
+    }));
+  }
+  return created;
 }
 
 function assignedPlannerModel() {
@@ -909,6 +1043,42 @@ function buildAssistantPrompt(sessionId, userMessage) {
     fileBlock,
     '',
     'User message:',
+    userMessage
+  ].join('\n');
+}
+
+// Prompt sent to ChatGPT through the browser connector for normal Chat.
+// Brain excerpts are labelled context, never authority, and status
+// distinctions (source-of-truth vs candidate vs todo) are preserved.
+function buildChatCloudPrompt({ userMessage, brain, recentMessages = [] }) {
+  const contextBlock = brain.files.length
+    ? brain.files.map((file) => [
+      `[${file.label}] ${file.path}${file.truncated ? ' (excerpt)' : ''}`,
+      '```text',
+      file.excerpt,
+      '```'
+    ].join('\n')).join('\n\n')
+    : 'No brain context was available for this message.';
+  const historyBlock = recentMessages.length
+    ? recentMessages.map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${String(message.content || '').slice(0, 500)}`).join('\n')
+    : '(No earlier user messages in this session.)';
+
+  return [
+    'You are ChatGPT, answering inside Life Planner, a local-first personal executive assistant.',
+    'The user is chatting in Life Planner; your answer is shown there directly.',
+    '',
+    'Rules:',
+    '- The LifePlanSystem context below is background context, not unquestioned truth. Each block is labelled with its status: source-of-truth, memory candidate, todo, open question, or handoff/rules. Treat candidates and open questions as unconfirmed.',
+    '- Do not promote anything to memory and do not claim authority over the user\'s memory, priorities, or plans. Anything worth saving will be reviewed and approved by the user inside Life Planner.',
+    '- Answer the current user message directly and concisely.',
+    '',
+    'LifePlanSystem context:',
+    contextBlock,
+    '',
+    'Recent user messages in this session:',
+    historyBlock,
+    '',
+    'Current user message:',
     userMessage
   ].join('\n');
 }
@@ -1159,24 +1329,174 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   if (!content) return fail(res, 400, 'Message content is required.');
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
-  const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]);
-  const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'user', content).lastInsertRowid;
-  const candidateId = createCandidateFromMessage(Number(req.params.id), messageId, content);
-  const contextLine = contexts.length
+  const sessionId = Number(req.params.id);
+  const chatMode = req.body.mode === 'private' ? 'private' : 'auto';
+  const temporaryChatConfirmed = req.body.temporary_chat_confirmed === true;
+  // No real speaker identification yet: the session default is Alex.
+  const speakerLabel = String(getSetting('defaultSpeakerLabel', 'Alex') || 'Alex').trim() || 'Unknown';
+
+  // Cloud history is user messages only: prior local-model answers may embed
+  // full private database context that must not reach a cloud provider.
+  const recentMessages = allRows("SELECT role, content FROM chat_messages WHERE session_id = ? AND role = 'user' ORDER BY id DESC LIMIT 6", [sessionId]).reverse();
+  const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
+
+  const userMetadata = {
+    speaker_id: speakerLabel === 'Alex' ? 'alex-default' : 'unknown',
+    speaker_label: speakerLabel,
+    speaker_confidence: speakerLabel === 'Alex' ? 'session-default' : 'unknown',
+    source: 'chat_ui',
+    created_at: new Date().toISOString()
+  };
+  const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)')
+    .run(sessionId, 'user', content, JSON.stringify(userMetadata)).lastInsertRowid;
+  const candidateId = createCandidateFromMessage(sessionId, messageId, content, { speakerLabel, provider: 'chat' });
+
+  const brain = loadBrainContext();
+  const brainAvailable = brain.files.length > 0;
+  const connectorAvailableAtSend = connectorFresh();
+
+  let answer = '';
+  let providerMeta = { answered_by: 'System fallback', provider_type: 'system', route: 'none', model_or_provider: 'none' };
+  let fallbackReason = '';
+  let runtimeLabel = 'none';
+
+  if (chatMode === 'auto') {
+    if (!connectorAvailableAtSend) {
+      fallbackReason = CHAT_FAILURES.chatgptConnectorUnavailable;
+    } else if (!temporaryChatConfirmed) {
+      fallbackReason = CHAT_FAILURES.chatgptTemporaryChatUnconfirmed;
+    } else {
+      const prompt = buildChatCloudPrompt({ userMessage: content, brain, recentMessages });
+      try {
+        // temporary-chat=true only affects newly opened tabs; the connector
+        // reuses an existing ChatGPT tab, which is why the attestation exists.
+        const { job, status } = await runConnectorJob({ targetAgent: 'ChatGPT', url: 'https://chatgpt.com/?temporary-chat=true', prompt, timeoutMs: 180000 });
+        if (status === 'answered' && job.result?.answer) {
+          answer = job.result.answer;
+          providerMeta = { answered_by: 'ChatGPT', provider_type: 'browser_cloud', route: 'browser_connector', model_or_provider: 'chatgpt_browser' };
+          runtimeLabel = 'chatgpt_browser';
+        } else if (status === 'timeout') {
+          fallbackReason = CHAT_FAILURES.providerTimeout;
+        } else {
+          fallbackReason = job.result?.message || job.error || CHAT_FAILURES.chatgptCaptureBlocked;
+        }
+      } catch (error) {
+        fallbackReason = `ChatGPT send failed: ${error.message}`;
+      }
+    }
+  }
+
+  if (!answer) {
+    const localStatus = await localModelStatus();
+    if (!localStatus.assigned && !localStatus.endpointConfigured) {
+      const bothUnavailable = chatMode === 'auto' && !connectorAvailableAtSend;
+      answer = bothUnavailable
+        ? CHAT_FAILURES.noProviderAvailable
+        : [chatMode === 'auto' ? fallbackReason : '', CHAT_FAILURES.localModelNotAssigned].filter(Boolean).join('\n\n');
+    } else {
+      const assistant = await runPlannerAssistant(sessionId, content);
+      runtimeLabel = assistant.mode;
+      if (assistant.mode === 'unavailable' || assistant.mode === 'runtime error') {
+        answer = [
+          chatMode === 'auto' ? fallbackReason : '',
+          assistant.mode === 'runtime error' ? assistant.content : CHAT_FAILURES.localRuntimeUnavailable
+        ].filter(Boolean).join('\n\n');
+      } else {
+        answer = assistant.content;
+        providerMeta = { answered_by: 'Local model', provider_type: 'local_model', route: 'local_runtime', model_or_provider: assistant.mode };
+      }
+    }
+  }
+
+  const fallbackUsed = chatMode === 'auto'
+    ? providerMeta.answered_by !== 'ChatGPT'
+    : providerMeta.answered_by === 'System fallback';
+
+  const contextLine = contexts.length && providerMeta.provider_type === 'local_model'
     ? `\n\nFiles in context: ${contexts.map((item) => item.path).join(', ')}. Source files are context only; I am not treating inference as source-of-truth.`
     : '';
-  const assistant = await runPlannerAssistant(Number(req.params.id), content);
   const governanceLine = candidateId
     ? '\n\nMemory governance: I saved your note as a candidate for review and will not promote it until you approve it.'
     : '\n\nMemory governance: I saved this to chat history and did not extract a memory candidate from this short note.';
-  const response = `${assistant.content}${governanceLine}${contextLine}\n\nRuntime: ${assistant.mode}.`;
-  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'assistant', response).lastInsertRowid;
-  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
+  const response = `${answer}${governanceLine}${contextLine}`;
+
+  const assistantMetadata = {
+    ...providerMeta,
+    checked_by: null,
+    fallback_used: fallbackUsed,
+    fallback_reason: fallbackUsed ? fallbackReason : '',
+    mode: chatMode,
+    memory_status: candidateId ? 'candidate_only' : 'chat_only',
+    // "Used" means the answering provider's prompt embedded brain excerpts.
+    // Today only the ChatGPT cloud prompt does; the local prompt does not yet.
+    brain_context_used: providerMeta.answered_by === 'ChatGPT' && brainAvailable,
+    brain_context_available: brainAvailable,
+    brain_configured: brain.configured,
+    brain_files: providerMeta.answered_by === 'ChatGPT' ? brain.files.map((file) => file.path) : [],
+    brain_missing: brain.missing,
+    approval_candidates_created: candidateId ? 1 : 0,
+    speaker_label: speakerLabel
+  };
+  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)')
+    .run(sessionId, 'assistant', response, JSON.stringify(assistantMetadata)).lastInsertRowid;
+
+  if (providerMeta.answered_by === 'ChatGPT' || providerMeta.answered_by === 'Local model') {
+    const extracted = extractApprovalCandidates({
+      sessionId,
+      messageId: assistantId,
+      text: answer,
+      provider: providerMeta.model_or_provider,
+      speakerLabel
+    });
+    if (extracted.length) {
+      assistantMetadata.approval_candidates_created += extracted.length;
+      assistantMetadata.memory_status = 'candidate_only';
+      db.prepare('UPDATE chat_messages SET metadata = ? WHERE id = ?').run(JSON.stringify(assistantMetadata), assistantId);
+    }
+  }
+
+  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
   ok(res, {
     messages: allRows('SELECT * FROM chat_messages WHERE id IN (?, ?) ORDER BY id ASC', [messageId, assistantId]),
     candidateId,
-    runtime: assistant.mode
+    runtime: runtimeLabel,
+    metadata: assistantMetadata
   });
+});
+
+// Provider/brain status for the Chat page labels. Read-only.
+app.get('/api/chat/providers', async (_req, res) => {
+  const local = await localModelStatus();
+  ok(res, {
+    connector: {
+      available: connectorFresh(),
+      lastSeenMsAgo: browserExtensionState.lastSeen ? Date.now() - browserExtensionState.lastSeen : null,
+      agents: agentTabsFromUrls(browserExtensionState.tabs)
+    },
+    local: {
+      configured: local.assigned || local.endpointConfigured,
+      assigned: local.assigned,
+      endpointConfigured: local.endpointConfigured,
+      managedServerRunning: local.managedServerRunning
+    },
+    brain: brainStatus(),
+    defaultMode: 'auto'
+  });
+});
+
+app.get('/api/brain/status', (_req, res) => ok(res, brainStatus()));
+
+// Read-only preview of what Chat would send as brain context.
+app.get('/api/brain/context', (_req, res) => {
+  try {
+    const context = loadBrainContext();
+    ok(res, {
+      ...context,
+      allowlist: BRAIN_ALLOWLIST.map((entry) => ({ path: entry.path, label: entry.label }))
+    });
+  } catch (error) {
+    fail(res, 500, error.message || 'Brain context read failed.');
+  }
 });
 
 app.get('/api/memory', (_req, res) => {
@@ -1719,34 +2039,10 @@ app.post('/api/browser/consult', async (req, res) => {
       contexts
     });
     if (getSetting('browserAgentMode', 'myChromeConnector') === 'myChromeConnector') {
-      const connectorFresh = Date.now() - browserExtensionState.lastSeen < 15000;
-      if (!connectorFresh) {
+      if (!connectorFresh()) {
         return fail(res, 409, 'Chrome connector is not connected. Install or reload the unpacked extension in browser-extension/lps-browser-agent, then keep LPS open in your normal Chrome.');
       }
-      const id = browserAgentJobSeq++;
-      const job = {
-        id,
-        status: 'pending',
-        targetAgent,
-        url,
-        prompt,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        result: null,
-        error: ''
-      };
-      browserAgentJobs.set(id, job);
-      const started = Date.now();
-      while (Date.now() - started < 240000) {
-        if (job.status === 'answered' || job.status === 'blocked' || job.status === 'error') {
-          break;
-        }
-        await sleep(1000);
-      }
-      const terminal = job.status === 'answered' || job.status === 'blocked' || job.status === 'error';
-      const status = terminal
-        ? job.status
-        : 'timeout';
+      const { job, status } = await runConnectorJob({ targetAgent, url, prompt });
       return ok(res, {
         ok: status === 'answered',
         blocked: status === 'blocked' || status === 'error' || status === 'timeout',
@@ -1869,6 +2165,12 @@ app.post('/api/browser/extension/heartbeat', (req, res) => {
 });
 
 app.get('/api/browser/extension/next', (_req, res) => {
+  const now = Date.now();
+  for (const [id, item] of browserAgentJobs) {
+    if (item.status === 'pending' && item.expiresAt && now >= item.expiresAt) {
+      browserAgentJobs.delete(id);
+    }
+  }
   const job = [...browserAgentJobs.values()]
     .filter((item) => item.status === 'pending')
     .sort((a, b) => a.createdAt - b.createdAt)[0];
@@ -1888,6 +2190,11 @@ app.get('/api/browser/extension/next', (_req, res) => {
 app.post('/api/browser/extension/jobs/:id', (req, res) => {
   const job = browserAgentJobs.get(Number(req.params.id));
   if (!job) return fail(res, 404, 'Browser-agent job not found.');
+  if (job.status === 'expired') {
+    // The requester stopped waiting; drop the late answer instead of storing it.
+    browserAgentJobs.delete(job.id);
+    return ok(res, { job: null, message: 'Job expired before the answer arrived; the result was discarded.' });
+  }
   const status = ['pending', 'claimed', 'sent', 'answered', 'blocked', 'error'].includes(req.body.status)
     ? req.body.status
     : 'error';

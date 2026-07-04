@@ -48,13 +48,28 @@ const nav = [
 ];
 
 async function api(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options
-  });
-  const payload = await response.json();
+  let response;
+  try {
+    response = await fetch(`${API}${path}`, {
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      ...options
+    });
+  } catch {
+    throw new Error('Life Planner\'s local server is not reachable. Start the app (npm run dev or the packaged launcher) and reload this page.');
+  }
+  const payload = await response.json().catch(() => null);
+  if (!payload) throw new Error(`The Life Planner server returned an unreadable response (HTTP ${response.status}).`);
   if (!payload.ok) throw new Error(payload.error || 'Request failed');
   return payload.data;
+}
+
+function parseMessageMetadata(message) {
+  if (!message?.metadata) return null;
+  try {
+    return JSON.parse(message.metadata);
+  } catch {
+    return null;
+  }
 }
 
 function cx(...parts) {
@@ -411,6 +426,50 @@ function ApprovalRow({ item, refresh }) {
   );
 }
 
+function chatProviderPills(providers) {
+  if (!providers) return [];
+  const pills = [];
+  const brain = providers.brain || {};
+  if (!brain.configured) {
+    pills.push({ tone: 'warn', text: 'Brain context: not configured (set Private brain folder in Settings)' });
+  } else if (!brain.rootExists) {
+    pills.push({ tone: 'bad', text: 'Brain context: folder not found' });
+  } else {
+    const found = (brain.files || []).filter((file) => file.found).length;
+    const total = (brain.files || []).length;
+    pills.push({ tone: found ? 'good' : 'warn', text: `Brain context loaded: ${found}/${total} files` });
+  }
+  pills.push(providers.connector?.available
+    ? { tone: 'good', text: 'ChatGPT connector: connected' }
+    : { tone: 'warn', text: 'ChatGPT connector: not connected' });
+  pills.push(providers.local?.configured
+    ? { tone: 'good', text: 'Local model: configured' }
+    : { tone: 'warn', text: 'Local model: not configured' });
+  return pills;
+}
+
+function AssistantMessageLabels({ metadata }) {
+  if (!metadata || !metadata.answered_by) return null;
+  const tone = metadata.answered_by === 'ChatGPT' ? 'info' : metadata.answered_by === 'Local model' ? 'good' : 'warn';
+  return (
+    <div className="context-chips">
+      <Pill tone={tone}>
+        {metadata.answered_by === 'ChatGPT'
+          ? 'Answered by ChatGPT'
+          : metadata.answered_by === 'Local model'
+            ? `Answered by local model${metadata.model_or_provider && metadata.model_or_provider !== 'none' ? ` (${metadata.model_or_provider})` : ''}`
+            : 'No provider answered'}
+      </Pill>
+      {metadata.brain_context_used && <Pill tone="good">Brain context included</Pill>}
+      {metadata.brain_configured && metadata.brain_context_available && !metadata.brain_context_used && <Pill tone="muted">Brain context not sent to this provider</Pill>}
+      {metadata.brain_configured && !metadata.brain_context_available && <Pill tone="warn">Brain context unavailable</Pill>}
+      {metadata.fallback_used && metadata.answered_by === 'Local model' && <Pill tone="warn">ChatGPT not used — local model answered</Pill>}
+      {metadata.approval_candidates_created > 0 && <Pill tone="info">{metadata.approval_candidates_created} candidate(s) for review</Pill>}
+      {metadata.fallback_used && metadata.fallback_reason && <small className="fallback-reason">{metadata.fallback_reason}</small>}
+    </div>
+  );
+}
+
 function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice }) {
   const [draft, setDraft] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
@@ -418,6 +477,30 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [repoFiles, setRepoFiles] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
+  const [providers, setProviders] = useState(null);
+  const [chatMode, setChatMode] = useState('auto');
+  const [tempChatConfirmed, setTempChatConfirmed] = useState(false);
+
+  async function loadProviders() {
+    try {
+      setProviders(await api('/api/chat/providers'));
+    } catch {
+      setProviders(null);
+    }
+  }
+
+  useEffect(() => {
+    loadProviders();
+    const timer = setInterval(loadProviders, 10000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const chatGptEligible = chatMode === 'auto' && Boolean(providers?.connector?.available);
+  const sendHint = chatBusy
+    ? 'Waiting for the provider to answer...'
+    : chatGptEligible && !tempChatConfirmed
+      ? 'ChatGPT will be skipped until you confirm Temporary Chat; the local model will be tried instead.'
+      : '';
 
   async function send() {
     if (!draft.trim() || !selectedSession || chatBusy) return;
@@ -425,12 +508,18 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     try {
       const result = await api(`/api/chat/sessions/${selectedSession}/messages`, {
         method: 'POST',
-        body: JSON.stringify({ content: draft })
+        body: JSON.stringify({
+          content: draft,
+          mode: chatMode,
+          temporary_chat_confirmed: tempChatConfirmed
+        })
       });
       setMessages((current) => [...current, ...result.messages]);
       setRuntimeMode(result.runtime || '');
       setDraft('');
+      setTempChatConfirmed(false);
       refreshAll();
+      loadProviders();
     } catch (err) {
       setNotice(err.message);
     } finally {
@@ -518,7 +607,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
+          <div className="context-chips">
+            {chatProviderPills(providers).map((pill) => <Pill tone={pill.tone} key={pill.text}>{pill.text}</Pill>)}
+          </div>
           <div className="inline-form">
+            <select value={chatMode} onChange={(event) => setChatMode(event.target.value)} title="Where this chat is allowed to send your message">
+              <option value="auto">Auto: ChatGPT first, local fallback</option>
+              <option value="private">Private: local model only</option>
+            </select>
             <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
               <option value="">Attach repo file as context</option>
               {repoFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}
@@ -526,7 +622,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             <button onClick={addContextFile} disabled={!selectedFile}><Plus size={16} /> Add</button>
           </div>
           <div className="context-chips">
-            {contextFiles.length === 0 ? <span>No repo files attached.</span> : contextFiles.map((file) => (
+            {contextFiles.length === 0 ? <span>No repo files attached (repo attachments go to the local model only).</span> : contextFiles.map((file) => (
               <button key={file.id} onClick={() => removeContextFile(file.id)} title="Remove context file">
                 <FileText size={13} />
                 <span>{file.path}</span>
@@ -534,19 +630,39 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               </button>
             ))}
           </div>
+          {chatMode === 'auto' && (
+            <div className={cx('source-warning', tempChatConfirmed ? 'info' : 'warn')}>
+              <label className="temporary-chat-option">
+                <input
+                  type="checkbox"
+                  checked={tempChatConfirmed}
+                  onChange={(event) => setTempChatConfirmed(event.target.checked)}
+                />
+                I manually confirm ChatGPT Temporary Chat is on; Life Planner cannot verify this.
+              </label>
+              <small>
+                Until ticked, Chat skips ChatGPT (so brain context never lands in ChatGPT history) and uses the local model instead. The connector reuses your open ChatGPT tab, so make sure that tab itself is in Temporary Chat mode. The confirmation resets after every send. Use Private mode to never contact ChatGPT.
+              </small>
+            </div>
+          )}
         </div>
         <div className="messages">
-          {messages.map((message) => (
-            <div className={cx('message', message.role)} key={message.id}>
-              <span>{message.role}</span>
-              <p>{message.content}</p>
-            </div>
-          ))}
+          {messages.map((message) => {
+            const metadata = parseMessageMetadata(message);
+            return (
+              <div className={cx('message', message.role)} key={message.id}>
+                <span>{message.role === 'user' ? (metadata?.speaker_label || 'user') : message.role}</span>
+                <p>{message.content}</p>
+                {message.role === 'assistant' && <AssistantMessageLabels metadata={metadata} />}
+              </div>
+            );
+          })}
         </div>
         <div className="composer">
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
           <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
+        {sendHint && <small className="inline-hint">{sendHint}</small>}
       </div>
     </section>
   );
@@ -591,7 +707,15 @@ function CandidateReviewCard({ candidate, edits = {}, setEdits, onSave, onDecisi
         <span>Source: {details.source}</span>
         <span>Evidence: {details.evidence}</span>
         <span>Confidence: {details.confidence}</span>
+        <span>Speaker: {candidate.speaker_label || 'Unknown'}</span>
+        {candidate.provider && <span>Provider: {candidate.provider}</span>}
+        {candidate.sensitivity && <span>Sensitivity: {candidate.sensitivity}</span>}
       </div>
+      {candidate.suggested_destination && (
+        <div className="candidate-meta">
+          <span>Suggested destination (no write happens): {candidate.suggested_destination}</span>
+        </div>
+      )}
       {canEdit && (
         <details className="candidate-edit">
           <summary>Edit metadata</summary>
@@ -2284,6 +2408,8 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 4096);
   const [browserAgentMode, setBrowserAgentMode] = useState(settings.browserAgentMode || 'myChromeConnector');
   const [browserAgentPort, setBrowserAgentPort] = useState(settings.browserAgentPort || 4177);
+  const [brainRootPath, setBrainRootPath] = useState(settings.brainRootPath || '');
+  const [brainState, setBrainState] = useState(null);
   const [repo, setRepo] = useState('unsloth/Qwen3.5-4B-GGUF');
   const [repoTouched, setRepoTouched] = useState(false);
   const [modelSearch, setModelSearch] = useState('Qwen GGUF');
@@ -2318,12 +2444,22 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         llamaServerPort: Number(llamaServerPort),
         llamaContextSize: Number(llamaContextSize),
         browserAgentMode,
-        browserAgentPort: Number(browserAgentPort)
+        browserAgentPort: Number(browserAgentPort),
+        brainRootPath: brainRootPath.trim()
       })
     });
     setSettings(data);
     setRuntime(await api('/api/models/runtime'));
+    setBrainState(await api('/api/brain/status').catch(() => null));
     setNotice('Settings saved locally.');
+  }
+
+  async function checkBrain() {
+    try {
+      setBrainState(await api('/api/brain/status'));
+    } catch (err) {
+      setNotice(err.message);
+    }
   }
 
   async function scan() {
@@ -2479,6 +2615,28 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           <strong>Chrome connector</strong>
           <small>Load the unpacked extension from browser-extension/lps-browser-agent in the same Chrome profile where the user is logged into ChatGPT, Gemini, Grok, or Claude. It talks only to 127.0.0.1:{browserAgentPort}; no public firewall rule is needed for localhost-only use.</small>
         </div>
+      </div>
+      <div className="panel">
+        <h2>Private Brain Folder</h2>
+        <p>Chat reads a small allowlist of LifePlanSystem files from this folder as context. Read-only: the app never writes there.</p>
+        <label>Brain folder path</label>
+        <input value={brainRootPath} onChange={(event) => setBrainRootPath(event.target.value)} placeholder="Folder containing your LifePlanSystem brain" />
+        <div className="source-warning info">
+          <small>Stored only in the local database (data/), which is commit-protected — the path never enters the public repo. The LIFE_PLANNER_BRAIN_ROOT environment variable overrides this setting. Only these files are read, with size caps: rules/LIS_RULES.md, Life_Intelligence_System_Handoff-CURRENT.md, source_of_truth/decision_rules.md, source_of_truth/open_questions.md, source_of_truth/memory/INBOX.md, docs/ACTIVE_TODO.md, docs/ACTIVE_SESSION_STATE.md.</small>
+        </div>
+        <div className="decision-row">
+          <button onClick={saveSettings}><Check size={16} /> Save</button>
+          <button onClick={checkBrain}><SearchCheck size={16} /> Check brain files</button>
+        </div>
+        {brainState && (
+          <div className="context-chips">
+            {!brainState.configured && <Pill tone="warn">Not configured</Pill>}
+            {brainState.configured && !brainState.rootExists && <Pill tone="bad">Folder not found</Pill>}
+            {brainState.configured && brainState.rootExists && brainState.files.map((file) => (
+              <Pill tone={file.found ? 'good' : 'warn'} key={file.path}>{file.path}: {file.found ? 'found' : 'missing'}</Pill>
+            ))}
+          </div>
+        )}
       </div>
       <div className="panel">
         <h2>Hugging Face Download</h2>

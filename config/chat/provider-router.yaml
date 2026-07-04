@@ -1,0 +1,83 @@
+# Chat provider router configuration (design/config of record).
+#
+# NOTE: the server does not parse YAML yet (no new dependencies allowed).
+# server/index.js mirrors the "auto" and "private" sequences and the failure
+# handling below in code. Keep this file and the code in sync when either
+# changes. Modes marked future are documented here first, implemented later.
+
+default_mode: auto
+
+modes:
+  auto:
+    description: >
+      Default. Try the cloud answerer first when the browser connector is
+      available and ChatGPT Temporary Chat is confirmed; otherwise fall back to
+      the local Planner Assistant; otherwise return a clear setup message.
+    providers:
+      - chatgpt_browser
+      - local_planner_assistant
+    implemented: true
+
+  private:
+    description: >
+      Local only. Never contacts a cloud provider, regardless of connector
+      status. Full private context allowed.
+    providers:
+      - local_planner_assistant
+    implemented: true
+
+  fallback:
+    description: >
+      Explicit fallback ordering, same as auto today. Exists as a named mode so
+      the UI can label a forced-fallback state distinctly later.
+    providers:
+      - chatgpt_browser
+      - local_planner_assistant
+    implemented: false   # auto covers this today
+
+  deep:
+    description: >
+      Local drafts context, cloud answers, local governance-checks the result.
+    providers:
+      - local_context_drafter
+      - chatgpt_browser
+      - local_governance_checker
+    implemented: false
+
+  debate:
+    description: >
+      Two or more providers answer independently; disagreements are surfaced as
+      open questions rather than resolved silently.
+    providers:
+      - chatgpt_browser
+      - local_planner_assistant
+    implemented: false
+
+  distill:
+    description: >
+      Cloud answer is distilled by the local model into a short, source-labelled
+      summary before display/candidate creation.
+    providers:
+      - chatgpt_browser
+      - local_context_drafter
+    implemented: false
+
+fallback_rules:
+  - if: connector_not_fresh
+    then: skip chatgpt_browser, record fallback_reason, try next provider
+  - if: temporary_chat_not_confirmed
+    then: skip chatgpt_browser (do not send private context), record reason
+  - if: provider_timeout
+    then: record timeout as fallback_reason, try next provider
+  - if: provider_blocked   # login / verification / capture blocked
+    then: never bypass; record reason, try next provider
+  - if: no_provider_available
+    then: save the user message, return a plain-English setup message
+
+failure_handling:
+  vague_errors_forbidden: true   # no bare "Failed to fetch" for known cases
+  messages_file: config/chat/failure-messages.yaml
+
+metadata_requirements:
+  schema_file: docs/chat/CHAT_METADATA_SCHEMA.md
+  required_on_every_assistant_message: true

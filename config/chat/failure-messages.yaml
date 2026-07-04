@@ -1,0 +1,64 @@
+# User-facing failure messages for Chat provider routing.
+#
+# NOTE: the server does not parse YAML yet (no new dependencies allowed).
+# server/index.js mirrors these strings in the CHAT_FAILURES constant.
+# Keep this file and the code in sync when either changes.
+#
+# Rule: no vague "Failed to fetch" for known cases. Every known failure gets a
+# plain-English message that says what happened and what to do next.
+
+chatgpt_connector_unavailable: >
+  ChatGPT is unavailable: the Chrome connector is not connected. Load the
+  unpacked extension from browser-extension/lps-browser-agent in the Chrome
+  profile where you are signed into ChatGPT (Tooling tab has an install
+  helper), then keep that Chrome open.
+
+chatgpt_tab_not_open: >
+  ChatGPT is unavailable: no ChatGPT tab is open in the connected Chrome.
+  Open chatgpt.com in that Chrome profile, then send your message again.
+
+chatgpt_login_required: >
+  ChatGPT needs login or verification in your Chrome tab. Finish signing in or
+  complete the check there — Life Planner will not bypass it — then send your
+  message again.
+
+chatgpt_capture_blocked: >
+  ChatGPT received the message but the answer could not be captured
+  automatically. Check the ChatGPT tab in Chrome; if the answer is visible you
+  can copy it via the Browser tab's manual paste fallback.
+
+chatgpt_temporary_chat_unconfirmed: >
+  ChatGPT was skipped because Temporary Chat is not confirmed. Turn on
+  Temporary Chat in ChatGPT, tick the confirmation box above the composer, and
+  send again. This protects brain context from being stored in ChatGPT history.
+
+local_model_not_assigned: >
+  No local model is configured. Assign a Planner Assistant model or set a local
+  endpoint (Ollama, LM Studio, llama-server) in Settings.
+
+local_runtime_unavailable: >
+  A local model is configured but its runtime did not answer. Check the
+  endpoint URL, endpoint model name, or llama-cli/llama-server path in
+  Settings, and make sure the runtime is running.
+
+brain_path_not_configured: >
+  Brain context is off: no private brain folder is configured. Set "Private
+  brain folder" in Settings (stored locally only, never committed) to let Chat
+  read safe LifePlanSystem context.
+
+brain_file_missing: >
+  Some brain files were not found under the configured brain folder. Chat
+  continued with the files that were available.
+
+no_provider_available: >
+  No provider is available. ChatGPT's Chrome connector is not connected and no
+  local model is configured. Your message was saved to this chat. Connect the
+  Chrome connector (Tooling tab) or configure a local model (Settings tab).
+
+provider_timeout: >
+  The provider did not answer before the timeout. Your message was saved.
+  Check the ChatGPT tab in Chrome or your local runtime, then try again.
+
+server_unreachable: >
+  Life Planner's local server is not reachable. Start the app (npm run dev or
+  the packaged launcher) and reload this page.
