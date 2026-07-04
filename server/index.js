@@ -764,6 +764,24 @@ function isProtectedWorkspacePath(filePath = '') {
     || protectedExts.some((ext) => normalized.endsWith(ext));
 }
 
+function parseRemotes(remoteText = '') {
+  const map = new Map();
+  for (const line of remoteText.split('\n')) {
+    const match = line.match(/^(\S+)\s+(\S+)\s+\((fetch|push)\)$/);
+    if (!match) continue;
+    const [, name, url, kind] = match;
+    const existing = map.get(name) || { name, fetchUrl: '', pushUrl: '' };
+    if (kind === 'fetch') existing.fetchUrl = url;
+    else existing.pushUrl = url;
+    map.set(name, existing);
+  }
+  return [...map.values()].map((remote) => ({
+    name: remote.name,
+    url: remote.fetchUrl || remote.pushUrl,
+    pushUrl: remote.pushUrl || remote.fetchUrl
+  }));
+}
+
 function parseGitStatus(statusText = '') {
   return statusText.split('\n')
     .map((line) => line.trimEnd())
@@ -2105,6 +2123,7 @@ app.get('/api/source/status', async (_req, res) => {
     upstream: snapshot.upstream,
     counts: snapshot.counts,
     remotes: remotes.stdout,
+    remoteList: parseRemotes(remotes.stdout),
     log: log.stdout,
     user: {
       name: userName.stdout,
@@ -2141,6 +2160,58 @@ app.get('/api/source/diff', async (_req, res) => {
   const diff = await runCli('git', ['diff', '--stat']);
   const detail = await runCli('git', ['diff', '--', '.'], { maxBuffer: 4 * 1024 * 1024 });
   ok(res, { stat: diff.stdout, detail: detail.stdout.slice(0, 50000), truncated: detail.stdout.length > 50000 });
+});
+
+// Per-file side-by-side diff: committed (HEAD) content vs current working-tree
+// content, so the UI can render two columns. Read-only, workspace-confined, and
+// protected/private files are refused rather than leaked.
+const FILE_DIFF_MAX_BYTES = 400000;
+
+function looksBinary(text) {
+  return text.includes('\0');
+}
+
+app.get('/api/source/file-diff', async (req, res) => {
+  try {
+    const target = safeWorkspacePath(req.query.path);
+    if (isProtectedWorkspacePath(target.normalized)) {
+      return fail(res, 403, `Protected/private file cannot be diffed here: ${target.normalized}`);
+    }
+
+    // OLD side: content at HEAD. Missing (new/untracked file) -> empty.
+    const head = await runCli('git', ['show', `HEAD:${target.normalized}`], { maxBuffer: 8 * 1024 * 1024 });
+    const oldContent = head.ok ? head.stdout : '';
+    const inHead = head.ok;
+
+    // NEW side: current working-tree file. Missing (deleted) -> empty.
+    let newContent = '';
+    let existsNow = false;
+    if (fs.existsSync(target.absolute) && fs.statSync(target.absolute).isFile()) {
+      existsNow = true;
+      newContent = fs.readFileSync(target.absolute, 'utf8');
+    }
+
+    const binary = looksBinary(oldContent) || looksBinary(newContent);
+    const oldTooLarge = oldContent.length > FILE_DIFF_MAX_BYTES;
+    const newTooLarge = newContent.length > FILE_DIFF_MAX_BYTES;
+    const changeType = !inHead ? 'added' : !existsNow ? 'deleted' : 'modified';
+
+    ok(res, {
+      path: target.normalized,
+      changeType,
+      binary,
+      tooLarge: oldTooLarge || newTooLarge,
+      oldContent: binary || oldTooLarge ? '' : oldContent,
+      newContent: binary || newTooLarge ? '' : newContent,
+      note: binary
+        ? 'Binary file: side-by-side text diff is not shown.'
+        : (oldTooLarge || newTooLarge)
+          ? 'File is large; side-by-side text diff was skipped to stay responsive.'
+          : ''
+    });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
 });
 
 app.post('/api/source/stage-all', async (_req, res) => {
