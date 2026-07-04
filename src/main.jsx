@@ -2035,6 +2035,77 @@ function Calibration({ setNotice, refreshSignal = 0 }) {
   );
 }
 
+// LPS-native line diff. LCS alignment for normal files; a positional fallback
+// above a line cap keeps very large files responsive (avoids O(n*m) work).
+function computeLineDiff(oldText, newText) {
+  // Normalize line endings so CRLF-vs-LF (e.g. git's LF blob vs a CRLF working
+  // file on Windows) does not render every line as a change.
+  const normalize = (text) => (text ? text.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n') : []);
+  const a = normalize(oldText);
+  const b = normalize(newText);
+  const rows = [];
+  const CAP = 1500;
+  if (a.length > CAP || b.length > CAP) {
+    const max = Math.max(a.length, b.length);
+    for (let k = 0; k < max; k++) {
+      const left = k < a.length ? a[k] : null;
+      const right = k < b.length ? b[k] : null;
+      rows.push({ type: left === right ? 'context' : 'change', left, right, ln: left === null ? null : k + 1, rn: right === null ? null : k + 1 });
+    }
+    return { rows, approximate: true };
+  }
+  const n = a.length;
+  const m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { rows.push({ type: 'context', left: a[i], right: b[j], ln: i + 1, rn: j + 1 }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ type: 'del', left: a[i], right: null, ln: i + 1, rn: null }); i++; }
+    else { rows.push({ type: 'add', left: null, right: b[j], ln: null, rn: j + 1 }); j++; }
+  }
+  while (i < n) { rows.push({ type: 'del', left: a[i], right: null, ln: i + 1, rn: null }); i++; }
+  while (j < m) { rows.push({ type: 'add', left: null, right: b[j], ln: null, rn: j + 1 }); j++; }
+  return { rows, approximate: false };
+}
+
+function SideBySideDiff({ data }) {
+  const { rows, approximate } = useMemo(
+    () => computeLineDiff(data.oldContent || '', data.newContent || ''),
+    [data.oldContent, data.newContent]
+  );
+  if (data.binary || data.tooLarge) return <div className="sbs-note">{data.note}</div>;
+  const changed = rows.some((row) => row.type !== 'context');
+  return (
+    <div className="sbs-diff">
+      <div className="sbs-head">
+        <span>{data.path}</span>
+        <span>{data.changeType}{approximate ? ' · approx (large file)' : ''}</span>
+      </div>
+      {!changed && <div className="sbs-note">No differences versus the last commit.</div>}
+      <div className="sbs-grid">
+        {rows.map((row, idx) => {
+          const leftDel = row.type === 'del' || row.type === 'change';
+          const rightAdd = row.type === 'add' || row.type === 'change';
+          return (
+            <React.Fragment key={idx}>
+              <div className="sbs-lnum">{row.ln ?? ''}</div>
+              <div className={cx('sbs-cell', leftDel && 'sbs-del')}>{row.left ?? ' '}</div>
+              <div className="sbs-lnum">{row.rn ?? ''}</div>
+              <div className={cx('sbs-cell', rightAdd && 'sbs-add')}>{row.right ?? ' '}</div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [source, setSource] = useState(null);
   const [diff, setDiff] = useState(null);
@@ -2048,6 +2119,9 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [hfRepoType, setHfRepoType] = useState('model');
   const [sourceBusy, setSourceBusy] = useState(false);
   const [operationOutput, setOperationOutput] = useState('');
+  const [diffPath, setDiffPath] = useState('');
+  const [fileDiff, setFileDiff] = useState(null);
+  const [diffBusy, setDiffBusy] = useState(false);
 
   async function refresh(announce = false) {
     try {
@@ -2062,6 +2136,19 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
     }
   }
 
+  async function openFileDiff(path) {
+    setDiffPath(path);
+    setDiffBusy(true);
+    try {
+      setFileDiff(await api(`/api/source/file-diff?path=${encodeURIComponent(path)}`));
+    } catch (err) {
+      setFileDiff(null);
+      setNotice(err.message);
+    } finally {
+      setDiffBusy(false);
+    }
+  }
+
   useEffect(() => { refresh(); }, [refreshSignal]);
 
   async function action(path, body, success) {
@@ -2073,6 +2160,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       setOperationOutput(output);
       setNotice(success || result.message || result.output || 'Source control action complete.');
       await refresh();
+      if (diffPath) await openFileDiff(diffPath);
     } catch (err) {
       setNotice(err.message);
       setOperationOutput(err.message);
@@ -2096,6 +2184,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   }
 
   const changedFiles = source?.changedFiles || [];
+  const stagedFiles = changedFiles.filter((file) => file.staged);
   const localBranches = (branches.branches || []).filter((branch) => !branch.remote);
   const hasChanges = changedFiles.length > 0;
   const protectedFiles = changedFiles.filter((file) => file.protected);
@@ -2215,8 +2304,21 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'public' })} disabled={sourceBusy || !hfRepo.trim()}>Create public</button>
           <button onClick={() => openExternal('https://huggingface.co/new', 'Hugging Face new repository page')} disabled={sourceBusy}>Open HF New</button>
         </div>
+        <label>Files to be committed ({stagedFiles.length})</label>
+        {stagedFiles.length ? (
+          <div className="commit-file-list">
+            {stagedFiles.map((file) => (
+              <div className="commit-file-row" key={file.path}>
+                <span>{file.status}</span>
+                <strong>{file.path}</strong>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="source-warning info">Nothing staged. Stage at least one file to commit.</div>
+        )}
         <label>Commit message</label>
-        <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change..." disabled={sourceBusy} />
+        <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change... (required)" disabled={sourceBusy} />
         <div className="decision-row">
           <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!canStageAll}><Check size={16} /> Stage all</button>
           <button onClick={() => action('/api/source/unstage-all', {}, 'Unstaged all files.')} disabled={sourceBusy || !changedFiles.some((file) => file.staged)}><X size={16} /> Unstage all</button>
@@ -2236,29 +2338,60 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           {changedFiles.length === 0 ? (
             <Empty title="Clean" body="No changed files." />
           ) : changedFiles.map((file) => (
-            <div className="source-file-row" key={`${file.status}-${file.path}`}>
+            <div className={cx('source-file-row', diffPath === file.path && 'selected')} key={`${file.status}-${file.path}`}>
               <div>
                 <strong>{file.path}</strong>
                 <span>{file.status}{file.staged ? ' staged' : ' unstaged'}</span>
               </div>
-              {file.protected ? (
-                <Pill tone="bad">Protected</Pill>
-              ) : file.staged ? (
-                <button onClick={() => action('/api/source/unstage-file', { path: file.path }, `Unstaged ${file.path}`)} disabled={sourceBusy}><X size={14} /> Unstage</button>
-              ) : (
-                <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>
-              )}
+              <div className="mini-actions">
+                {!file.protected && (
+                  <button onClick={() => openFileDiff(file.path)} disabled={diffBusy} title="Show side-by-side diff"><FileText size={14} /> Diff</button>
+                )}
+                {file.protected ? (
+                  <Pill tone="bad">Protected</Pill>
+                ) : file.staged ? (
+                  <button onClick={() => action('/api/source/unstage-file', { path: file.path }, `Unstaged ${file.path}`)} disabled={sourceBusy}><X size={14} /> Unstage</button>
+                ) : (
+                  <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>
+                )}
+              </div>
             </div>
           ))}
         </div>
         <h2>Remotes</h2>
-        <pre className="code-block">{source?.remotes || 'No Git remotes configured yet.'}</pre>
+        {source?.remoteList?.length ? (
+          <div className="remote-list">
+            {source.remoteList.map((remote) => (
+              <div className="remote-row" key={remote.name}>
+                <strong>{remote.name}</strong>
+                <span>{remote.url}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <pre className="code-block">{source?.remotes || 'No Git remotes configured yet.'}</pre>
+        )}
       </div>
 
       <div className="panel wide-panel">
+        <div className="panel-heading">
+          <h2>Side-by-side Diff{diffPath ? `: ${diffPath}` : ''}</h2>
+          {diffPath && <button onClick={() => { setDiffPath(''); setFileDiff(null); }} disabled={diffBusy}><X size={14} /> Close</button>}
+        </div>
+        {diffPath ? (
+          diffBusy ? (
+            <div className="loading">Loading diff...</div>
+          ) : fileDiff ? (
+            <SideBySideDiff data={fileDiff} />
+          ) : (
+            <Empty title="No diff" body="Could not load a diff for this file." />
+          )
+        ) : (
+          <Empty title="No file selected" body="Click Diff on a changed file to compare committed vs current side by side." />
+        )}
         <h2>Recent Log</h2>
         <pre className="code-block">{source?.log || 'No commits yet.'}</pre>
-        <h2>Diff</h2>
+        <h2>Aggregate Diff</h2>
         <pre className="code-block">{diff?.stat || 'No diff stat.'}</pre>
         <pre className="code-block diff-detail">{diff?.detail || 'No unstaged diff.'}</pre>
         {diff?.truncated && <Pill tone="warn">Diff truncated</Pill>}
