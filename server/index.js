@@ -1387,6 +1387,61 @@ app.post('/api/projects', (req, res) => {
   ok(res, row('SELECT * FROM projects WHERE id = ?', [id]));
 });
 
+// ── Knowledge items: direct CRUD ─────────────────────────────────────────────
+// The planner was read-only over seed rows — every list rendered governance
+// output with no way to put a real life item in. Direct user edits do not need
+// the approval flow: approvals govern AGENT-proposed changes, the user is the
+// authority the approvals defer to.
+const ITEM_TYPES = ['goal', 'project', 'decision', 'reminder', 'current state', 'blocker', 'waiting', 'rule', 'note'];
+const ITEM_STATUSES = ['active', 'stable', 'blocked', 'stale', 'pending review', 'done', 'archived', 'deprecated', 'superseded'];
+
+app.get('/api/items', (req, res) => {
+  const includeArchived = req.query.all === '1';
+  const rows = includeArchived
+    ? allRows('SELECT * FROM knowledge_items ORDER BY updated_at DESC')
+    : allRows("SELECT * FROM knowledge_items WHERE status NOT IN ('archived', 'deprecated', 'superseded') ORDER BY COALESCE(due_at, updated_at) ASC");
+  ok(res, rows);
+});
+
+app.post('/api/items', (req, res) => {
+  const title = req.body.title?.trim();
+  if (!title) return fail(res, 400, 'Item title is required.');
+  const type = ITEM_TYPES.includes(req.body.type) ? req.body.type : 'note';
+  const status = ITEM_STATUSES.includes(req.body.status) ? req.body.status : 'active';
+  const id = db.prepare(`
+    INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, owner, next_action, project_id, due_at)
+    VALUES (?, ?, ?, 'manual', ?, ?, date('now'), ?, ?, ?, ?)
+  `).run(
+    type, title, req.body.body?.trim() || title, status,
+    Number(req.body.confidence ?? 0.9),
+    req.body.owner === 'app' ? 'app' : 'user',
+    req.body.next_action?.trim() || null,
+    req.body.project_id ? Number(req.body.project_id) : null,
+    req.body.due_at || null
+  ).lastInsertRowid;
+  ok(res, row('SELECT * FROM knowledge_items WHERE id = ?', [id]));
+});
+
+app.patch('/api/items/:id', (req, res) => {
+  const existing = row('SELECT * FROM knowledge_items WHERE id = ?', [req.params.id]);
+  if (!existing) return fail(res, 404, 'Item not found.');
+  const fields = {};
+  if (req.body.title?.trim()) fields.title = req.body.title.trim();
+  if (req.body.body !== undefined) fields.body = String(req.body.body);
+  if (ITEM_TYPES.includes(req.body.type)) fields.type = req.body.type;
+  if (ITEM_STATUSES.includes(req.body.status)) fields.status = req.body.status;
+  if (req.body.next_action !== undefined) fields.next_action = req.body.next_action || null;
+  if (req.body.due_at !== undefined) fields.due_at = req.body.due_at || null;
+  if (req.body.project_id !== undefined) fields.project_id = req.body.project_id ? Number(req.body.project_id) : null;
+  if (req.body.confidence !== undefined) fields.confidence = Number(req.body.confidence);
+  if (req.body.reviewed) fields.last_reviewed = new Date().toISOString().slice(0, 10);
+  if (!Object.keys(fields).length) return fail(res, 400, 'No recognised fields to update.');
+  fields.updated_at = new Date().toISOString();
+  const sets = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE knowledge_items SET ${sets} WHERE id = ?`).run(...Object.values(fields), req.params.id);
+  ok(res, row('SELECT * FROM knowledge_items WHERE id = ?', [req.params.id]));
+});
+
 app.get('/api/models', (_req, res) => ok(res, allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')));
 
 app.get('/api/models/runtime', async (_req, res) => {

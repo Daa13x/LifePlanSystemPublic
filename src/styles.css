@@ -910,3 +910,29 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   .bucket-grid, .settings-grid, .source-layout, .repo-layout, .tooling-grid, .calibration-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
+
+/* Quick-add planner item + per-item actions (planner functional pass 2026-07-04) */
+.quick-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+}
+.quick-add-row { display: flex; gap: 8px; }
+.quick-add-row > input, .quick-add-row > select { flex: 1; min-width: 0; }
+.quick-add textarea { width: 100%; resize: vertical; }
+.item-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.item-actions button {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.item-actions button:hover { color: var(--text); border-color: var(--accent); }

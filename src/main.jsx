@@ -290,7 +290,7 @@ function App() {
           </div>
         </header>
 
-        {view === 'planner' && <Planner planner={planner} refresh={reloadPlanner} runRefresh={runPlannerRefresh} />}
+        {view === 'planner' && <Planner planner={planner} refresh={reloadPlanner} runRefresh={runPlannerRefresh} setNotice={setNotice} />}
         {view === 'chat' && (
           <Chat
             sessions={sessions}
@@ -326,7 +326,71 @@ function App() {
   );
 }
 
-function Planner({ planner, refresh, runRefresh }) {
+function QuickAddItem({ refresh, setNotice }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ type: 'goal', title: '', body: '', due_at: '', next_action: '' });
+  const set = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }));
+
+  async function save() {
+    if (!form.title.trim()) return;
+    setBusy(true);
+    try {
+      await api('/api/items', { method: 'POST', body: JSON.stringify({ ...form, status: form.type === 'blocker' ? 'blocked' : 'active' }) });
+      setForm({ type: 'goal', title: '', body: '', due_at: '', next_action: '' });
+      setOpen(false);
+      setNotice?.('Item added to the planner.');
+      refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return <button className="primary subtle" onClick={() => setOpen(true)}>+ Add planner item</button>;
+  }
+  return (
+    <div className="quick-add">
+      <div className="quick-add-row">
+        <select value={form.type} onChange={set('type')} disabled={busy}>
+          {['goal', 'project', 'decision', 'reminder', 'blocker', 'waiting', 'rule', 'note'].map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+        <input value={form.title} onChange={set('title')} placeholder="What needs tracking?" disabled={busy} autoFocus />
+      </div>
+      <textarea value={form.body} onChange={set('body')} placeholder="Detail (optional)" disabled={busy} rows={2} />
+      <div className="quick-add-row">
+        <input type="date" value={form.due_at} onChange={set('due_at')} disabled={busy} />
+        <input value={form.next_action} onChange={set('next_action')} placeholder="Next action (optional)" disabled={busy} />
+      </div>
+      <div className="quick-add-row">
+        <button className="primary" onClick={save} disabled={busy || !form.title.trim()}>{busy ? 'Saving...' : 'Save item'}</button>
+        <button className="primary subtle" onClick={() => setOpen(false)} disabled={busy}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function PlannerItemActions({ item, refresh }) {
+  const [busy, setBusy] = useState(false);
+  async function patch(body) {
+    setBusy(true);
+    try { await api(`/api/items/${item.id}`, { method: 'PATCH', body: JSON.stringify(body) }); refresh(); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="item-actions">
+      {item.status !== 'done' && (
+        <button title="Mark done" disabled={busy} onClick={() => patch({ status: 'done', reviewed: true })}>Done</button>
+      )}
+      <button title="Mark reviewed (clears stale)" disabled={busy} onClick={() => patch({ reviewed: true, status: item.status === 'stale' ? 'active' : item.status })}>Seen</button>
+      <button title="Archive" disabled={busy} onClick={() => patch({ status: 'archived' })}>Drop</button>
+    </div>
+  );
+}
+
+function Planner({ planner, refresh, runRefresh, setNotice }) {
   if (!planner) return <div className="loading">Loading planner context...</div>;
   const nextBestBody = planner.nextBest?.body
     || (planner.nextBest?.action_type ? 'Review and approve, deny, or defer this proposed change.' : 'Add goals, projects, or memory candidates to feed the planner.');
@@ -376,6 +440,7 @@ function Planner({ planner, refresh, runRefresh }) {
             {planner.candidates.map((item) => <ItemRow key={`candidate-${item.id}`} item={item} compact />)}
           </>
         )}
+        <QuickAddItem refresh={refresh} setNotice={setNotice} />
         <button className="primary subtle" onClick={runRefresh}>Run planner refresh</button>
       </div>
 
@@ -386,7 +451,11 @@ function Planner({ planner, refresh, runRefresh }) {
               <h3>{title}</h3>
               <Pill tone={tone}>{items.length}</Pill>
             </div>
-            {items.length ? items.map((item) => <ItemRow key={`${title}-${item.id}`} item={item} />) : <Empty title="Nothing here" body="The database has no matching active items." />}
+            {items.length ? items.map((item) => (
+              <ItemRow key={`${title}-${item.id}`} item={item}>
+                <PlannerItemActions item={item} refresh={refresh} />
+              </ItemRow>
+            )) : <Empty title="Nothing here" body="The database has no matching active items. Use “+ Add planner item” to put real life in here." />}
           </div>
         ))}
       </div>
