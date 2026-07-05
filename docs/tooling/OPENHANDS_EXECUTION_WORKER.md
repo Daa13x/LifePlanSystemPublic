@@ -67,3 +67,12 @@ protected-path scan result, max-files-changed result, and human next steps.
 - Running post-change validation on real changes.
 - Any commit/push/PR — those remain manual, human-reviewed steps via the
   Source Control panel.
+
+## Relationship to Agent Mode
+
+- The OpenHands worker is an *implementation mechanism, not the brain*.
+- Agent Mode proposals (see `docs/agent_mode/AGENT_MODE_STANDARD.md`) must still
+  pass the OpenHands approval gates — they do not get a shortcut.
+- Request approval, second execution confirmation, protected-path checks,
+  allowlisted validation, the report, and human review all remain mandatory.
+- Agent Mode does not bypass the Source Control panel gates for commit/push/PR.
