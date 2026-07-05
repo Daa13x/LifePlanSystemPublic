@@ -2693,6 +2693,208 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
   });
 });
 
+// ── OpenHands Worktree Executor harness (gated; real invocation OFF) ──────────
+// FIRST real-executor slice. It proves the isolated-worktree + gate + post-
+// change-enforcement + validation + report flow, but the actual OpenHands
+// invocation is DISABLED behind this server-side constant. Nothing here edits
+// the user's working tree, main/master, or the user's current branch: all work
+// happens in a throwaway git worktree on a dedicated openhands/exec-<id> branch.
+const OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false;
+const OPENHANDS_WORKTREE_DIR = path.join(LPS_TOOLING_DIR, 'worktrees');
+
+// Normalise a repo-relative changed path from `git status --porcelain` output.
+function parsePorcelainPaths(stdout) {
+  return (stdout || '').split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const body = line.slice(2).trim();
+    const arrow = body.split(' -> ');
+    return (arrow[1] || body).replace(/^"(.*)"$/, '$1');
+  });
+}
+
+// Enforce every path rule against the FILES ACTUALLY CHANGED in the worktree,
+// not against the request's declared intent. Returns structured violations.
+function enforceChangedFiles(changedFiles, request) {
+  const allowedPaths = (Array.isArray(request.allowedPaths) ? request.allowedPaths : []).map((p) => normalizeRequestPath(p));
+  const forbiddenPaths = (Array.isArray(request.forbiddenPaths) ? request.forbiddenPaths : []).map((p) => normalizeRequestPath(p)).filter(Boolean);
+  const maxFiles = Number(request.maxFilesChanged) || 0;
+  const violations = [];
+  for (const file of changedFiles) {
+    const norm = normalizeRequestPath(file);
+    if (violatesMandatoryForbidden(norm)) violations.push(`${file}: touches a protected path`);
+    else if (forbiddenPaths.some((f) => norm === f || norm.startsWith(f))) violations.push(`${file}: matches a forbidden path`);
+    else if (allowedPaths.length && !allowedPaths.some((a) => norm === a || norm.startsWith(a.endsWith('/') ? a : `${a}/`) || norm.startsWith(a))) {
+      violations.push(`${file}: outside allowedPaths`);
+    }
+  }
+  const overMax = maxFiles > 0 && changedFiles.length > maxFiles;
+  if (overMax) violations.push(`changed ${changedFiles.length} file(s) > maxFilesChanged ${maxFiles}`);
+  return { ok: violations.length === 0, violations, changedCount: changedFiles.length, maxFiles };
+}
+
+// Real OpenHands call lives here in the future. Disabled by the constant above,
+// so this slice never contacts the model endpoint and never edits code.
+async function invokeOpenHandsExecutor() {
+  if (!OPENHANDS_EXECUTOR_INVOCATION_ENABLED) {
+    return { invoked: false, reason: 'Real OpenHands invocation is intentionally DISABLED (server-side constant OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false). No code was generated or edited.' };
+  }
+  // Future, separately-approved slice would call the OpenHands agent-server here
+  // with OPENHANDS_EXEC_CONFIG (fixed model/endpoint/key) and constrain edits to
+  // allowedPaths. Intentionally not reachable in this build.
+  return { invoked: false, reason: 'not implemented' };
+}
+
+app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
+  let loaded;
+  try {
+    loaded = loadOpenHandsRequest(req.params.id);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  if (!loaded) return fail(res, 404, 'Request not found.');
+  const { file, request } = loaded;
+
+  // Gate 1: every dry-run gate must pass (approval, second confirmation,
+  // allowedPaths, protected scan, branch-not-main/master, branch-free,
+  // maxFiles, allowlisted validation).
+  const evaluation = await evaluateExecutionPlan(request);
+  if (!evaluation.eligible) {
+    return fail(res, 403, `Executor refused: not eligible. Blocked gates: ${evaluation.gates.filter((g) => !g.ok).map((g) => g.gate).join(', ')}. Approve, confirm execution, and fix paths first.`);
+  }
+
+  const execBranch = proposedExecutionBranch(request.id);
+  // Gate 2: never main/master, never the user's current branch, never an
+  // existing branch.
+  const currentBranch = (await runCli('git', ['branch', '--show-current'])).stdout.trim();
+  if (PROTECTED_EXEC_BRANCHES.includes(execBranch.toLowerCase())) return fail(res, 403, 'Executor refused: execution branch resolves to main/master.');
+  if (execBranch === currentBranch) return fail(res, 403, 'Executor refused: execution branch equals the current working branch.');
+  if (await branchExists(execBranch)) return fail(res, 409, `Executor refused: branch ${execBranch} already exists. Review or remove it first (never auto-deleted).`);
+
+  const worktreePath = path.join(OPENHANDS_WORKTREE_DIR, String(request.id).replace(/[^A-Za-z0-9._-]/g, ''));
+  const worktreeRel = path.relative(root, worktreePath).replaceAll('\\', '/');
+  let worktreeCreated = false;
+  const refusedActions = ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'delete branch', 'force-push', 'push to main/master', 'arbitrary request shell', 'edit outside allowedPaths'];
+
+  try {
+    // Isolated worktree on a fresh dedicated branch (never touches main tree).
+    fs.mkdirSync(OPENHANDS_WORKTREE_DIR, { recursive: true });
+    const add = await runCli('git', ['worktree', 'add', '-b', execBranch, worktreePath, 'HEAD'], { timeout: 120000 });
+    if (!add.ok) return fail(res, 500, `Executor could not create the isolated worktree: ${add.stderr || add.stdout}`);
+    worktreeCreated = true;
+
+    // Invocation (disabled by constant → no edits made).
+    const invocation = await invokeOpenHandsExecutor();
+
+    // Post-run enforcement against ACTUAL changed files in the worktree.
+    const wtStatus = await runCli('git', ['-C', worktreePath, 'status', '--porcelain']);
+    const changedFiles = parsePorcelainPaths(wtStatus.stdout);
+    const enforcement = enforceChangedFiles(changedFiles, request);
+    const wtDiff = await runCli('git', ['-C', worktreePath, 'diff'], { maxBuffer: 4 * 1024 * 1024 });
+
+    // Allowlisted validation only, run inside the worktree.
+    const validationKey = String(request.testCommand || '').trim() || RUNNER_DEFAULT_VALIDATION;
+    const validation = RUNNER_VALIDATION_ALLOWLIST[validationKey];
+    let validationResult = { command: validationKey, ran: false, ok: null, output: 'not run' };
+    if (validation) {
+      const vr = await runCli(validation.command, validation.args, { cwd: worktreePath, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+      validationResult = { command: validationKey, ran: true, ok: vr.ok, output: (vr.stdout || vr.stderr || '').slice(0, 3000) };
+    }
+
+    const reportLines = [
+      `# OpenHands Worktree Executor Report — ${request.id}`,
+      '',
+      `- Title: ${request.title}`,
+      `- Objective: ${request.objective}`,
+      `- Requested by: ${request.requestedBy}`,
+      `- Approved by: ${request.approvedBy || 'unknown'} / Execution confirmed by: ${request.executionConfirmedBy || 'unknown'}`,
+      `- Run at: ${new Date().toISOString()}`,
+      '',
+      '## Execution isolation',
+      `- Execution branch: ${execBranch}`,
+      `- Worktree path: ${worktreeRel}`,
+      `- Touched main working tree: no`,
+      `- Ran on main/master: no`,
+      '',
+      '## OpenHands invocation',
+      `- Invoked: ${invocation.invoked ? 'yes' : 'NO'}`,
+      `- Reason: ${invocation.reason}`,
+      `- Model config (fixed; request cannot override): ${OPENHANDS_EXEC_CONFIG.model} @ ${OPENHANDS_EXEC_CONFIG.baseUrl}, key ${OPENHANDS_EXEC_CONFIG.apiKeyRef}`,
+      '',
+      '## Changed files (actual, in worktree)',
+      changedFiles.length ? changedFiles.map((f) => `- ${f}`).join('\n') : '- none',
+      '',
+      '## Path enforcement against actual changes',
+      `- allowedPaths / forbiddenPaths / protected-path scan: ${enforcement.ok ? 'PASS' : 'BLOCKED'}`,
+      enforcement.violations.length ? enforcement.violations.map((v) => `  - ${v}`).join('\n') : '  - no violations',
+      `- maxFilesChanged: ${enforcement.changedCount}/${enforcement.maxFiles}`,
+      '',
+      '## Diff summary',
+      changedFiles.length ? `- ${changedFiles.length} file(s) changed` : '- no diff (no edits were made)',
+      '',
+      '## Full diff',
+      '```diff',
+      (wtDiff.stdout || '(empty)').slice(0, 4000),
+      '```',
+      '',
+      '## Validation output (allowlisted; run in worktree)',
+      `- Command: ${validationResult.command} — ${validationResult.ran ? (validationResult.ok ? 'ok' : 'failed') : 'not run'}`,
+      '```',
+      validationResult.output,
+      '```',
+      '',
+      '## Refused / blocked actions',
+      refusedActions.map((a) => `- ${a}`).join('\n'),
+      '',
+      '## Human next steps',
+      '- Real OpenHands invocation is OFF, so no code was edited and there is nothing to review yet.',
+      '- When invocation is later enabled, review the diff above, then use the gated Source Control panel to commit/push/PR. The executor never commits, pushes, or merges.',
+      ''
+    ];
+    fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+    const reportFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.md`);
+    fs.writeFileSync(reportFile, reportLines.join('\n'), 'utf8');
+
+    request.status = 'executor-ran';
+    request.executorRanAt = new Date().toISOString();
+    request.openHandsInvoked = invocation.invoked;
+    request.executorEnforcementOk = enforcement.ok;
+    request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
+    fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+
+    // Teardown BEFORE responding (not in post-response async): with invocation
+    // OFF there is nothing in the worktree to preserve, so remove it now so the
+    // success response reflects an already-clean state. The branch is never
+    // deleted. (A future invocation-ON slice must instead PRESERVE the worktree
+    // for human review.)
+    const removed = await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: 60000 });
+    await runCli('git', ['worktree', 'prune']);
+    worktreeCreated = false;
+
+    ok(res, {
+      worktreeRemoved: removed.ok,
+      request,
+      invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
+      openHandsInvoked: invocation.invoked,
+      executionBranch: execBranch,
+      worktreePath: worktreeRel,
+      changedFiles,
+      enforcement,
+      validation: validationResult,
+      reportPath: request.reportPath,
+      refusedActions,
+      message: `Executor harness ran in an isolated worktree. Real OpenHands invocation is DISABLED, so no code was edited. Worktree removed after the run; branch ${execBranch} left in place (never auto-deleted). Nothing was committed, pushed, or merged.`
+    });
+  } catch (error) {
+    fail(res, 500, `Executor harness error: ${error.message}`);
+  } finally {
+    // Error-path safety net: if teardown did not already run (an error was
+    // thrown before it), remove the throwaway worktree. Never deletes a branch.
+    if (worktreeCreated) {
+      await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: 60000 });
+      await runCli('git', ['worktree', 'prune']);
+    }
+  }
+});
+
 app.get('/api/source/status', async (_req, res) => {
   const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami, wingetStatus] = await Promise.all([
     runCli('git', ['rev-parse', '--is-inside-work-tree']),

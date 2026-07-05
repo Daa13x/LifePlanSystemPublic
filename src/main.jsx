@@ -1712,6 +1712,12 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
     setRequests(await api('/api/tooling/openhands/requests'));
   });
 
+  const runExecutor = (id) => run(`exec-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/execute`, { method: 'POST', body: JSON.stringify({}) });
+    setNotice(result.message);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
   useEffect(() => {
     checkOpenHands();
     checkOllama();
@@ -1851,6 +1857,18 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
         </small>
       </div>
 
+      <h3>Worktree Executor (high risk — real invocation OFF)</h3>
+      <div className="source-warning bad">
+        <small>
+          <strong>Gated local coding worker — high risk.</strong> The executor runs all work inside an <strong>isolated git worktree</strong> on a
+          dedicated <code>openhands/exec-&lt;id&gt;</code> branch — never on main/master and never in your working tree. It requires approval
+          <strong>and</strong> the second execution confirmation. <strong>Real OpenHands invocation is currently DISABLED</strong> by a server-side flag, so
+          this proves the worktree/gate/report flow without editing any code. It enforces allowed/forbidden/protected paths and max-files against the
+          <em>actual</em> diff, runs only allowlisted validation, and writes a report. It never commits, pushes, merges, resets, deletes branches, or
+          force-pushes. <strong>A human must review the diff and use the Source Control panel for any commit/push/PR.</strong>
+        </small>
+      </div>
+
       <h3>Requests</h3>
       {requests.length === 0 ? (
         <Empty title="No requests yet" body="Stored OpenHands task requests will appear here for review." />
@@ -1903,6 +1921,14 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
                   onClick={() => runExecutionPlan(request.id)}
                 >
                   <SearchCheck size={16} /> {busy === `plan-${request.id}` ? 'Planning...' : 'Run execution plan (dry run)'}
+                </button>
+                <button
+                  className="danger"
+                  disabled={Boolean(busy) || !request.executionConfirmed || !['approved', 'execution-planned', 'executor-ran'].includes(request.status)}
+                  title={!request.executionConfirmed ? 'Requires a second execution confirmation first' : 'Runs the harness in an isolated worktree. Real OpenHands invocation is OFF; no code is edited.'}
+                  onClick={() => runExecutor(request.id)}
+                >
+                  <Bot size={16} /> {busy === `exec-${request.id}` ? 'Running harness...' : 'Run worktree executor (invocation OFF)'}
                 </button>
                 {request.reportPath && (
                   <button disabled={Boolean(busy)} onClick={() => viewReport(request.id)}>
