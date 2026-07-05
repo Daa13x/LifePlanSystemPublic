@@ -5,3 +5,4 @@ data/
 *.log
 release/
 .cache/
+.lps/
