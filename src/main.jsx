@@ -1648,6 +1648,188 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   );
 }
 
+function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
+  const [status, setStatus] = useState(null);
+  const [ollama, setOllama] = useState(null);
+  const [model, setModel] = useState(null);
+  const [requests, setRequests] = useState([]);
+  const [busy, setBusy] = useState('');
+  const [form, setForm] = useState({
+    title: '',
+    objective: '',
+    targetRepoPath: '',
+    baseBranch: 'main',
+    allowedPaths: '',
+    forbiddenPaths: '',
+    testCommand: 'npm run build',
+    maxFilesChanged: 3,
+    requestedBy: 'Alex'
+  });
+  const set = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }));
+
+  async function run(label, fn) {
+    setBusy(label);
+    try {
+      await fn();
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const checkOpenHands = () => run('oh-status', async () => setStatus(await api('/api/tooling/openhands/status')));
+  const checkOllama = () => run('ollama', async () => setOllama(await api('/api/tooling/ollama/status')));
+  const checkModel = () => run('model', async () => setModel(await api('/api/tooling/ollama/model-status')));
+  const loadRequests = () => run('requests', async () => setRequests(await api('/api/tooling/openhands/requests')));
+
+  useEffect(() => {
+    checkOpenHands();
+    checkOllama();
+    checkModel();
+    loadRequests();
+  }, [refreshSignal]);
+
+  async function startOpenHands() {
+    await run('start', async () => {
+      const result = await api('/api/tooling/openhands/start', { method: 'POST', body: JSON.stringify({}) });
+      setNotice(result.message);
+      setStatus(await api('/api/tooling/openhands/status'));
+    });
+  }
+
+  async function stopOpenHands() {
+    await run('stop', async () => {
+      const result = await api('/api/tooling/openhands/stop', { method: 'POST', body: JSON.stringify({}) });
+      setNotice(result.message);
+      setStatus(await api('/api/tooling/openhands/status'));
+    });
+  }
+
+  async function openUi() {
+    await run('open', async () => {
+      await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: status?.url || 'http://localhost:3000' }) });
+      setNotice('Opened the OpenHands UI in your external browser.');
+    });
+  }
+
+  async function submitRequest() {
+    if (!form.title.trim() || !form.objective.trim()) return;
+    await run('submit', async () => {
+      const result = await api('/api/tooling/openhands/requests', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...form,
+          maxFilesChanged: Number(form.maxFilesChanged)
+        })
+      });
+      setNotice(`Request stored at ${result.storedAt}. Nothing runs until approved.`);
+      setForm((prev) => ({ ...prev, title: '', objective: '' }));
+      setRequests(await api('/api/tooling/openhands/requests'));
+    });
+  }
+
+  const installedTone = status?.installed === 'installed' ? 'good' : status?.installed === 'missing' ? 'bad' : 'warn';
+
+  return (
+    <div className="panel wide-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>OpenHands Worker</h2>
+          <p>Local coding worker for minor tasks. LPS is the brain and approval gate: requests are stored for review; nothing executes automatically.</p>
+        </div>
+        <Pill tone="info">local worker</Pill>
+      </div>
+
+      <div className="connection-grid">
+        <div>
+          <span>OpenHands</span>
+          <Pill tone={installedTone}>{status?.installed || 'unknown'}</Pill>
+          <small>{status?.container?.exists ? `${status.container.image}` : 'container not found'}</small>
+        </div>
+        <div>
+          <span>Container</span>
+          <Pill tone={status?.container?.running ? 'good' : 'warn'}>{status?.container?.running ? 'running' : status?.container?.exists ? 'stopped' : 'absent'}</Pill>
+          <small>{status?.container?.status || 'no status'}</small>
+        </div>
+        <div>
+          <span>UI</span>
+          <Pill tone={status?.http?.reachable ? 'good' : 'warn'}>{status?.http?.reachable ? `HTTP ${status.http.code}` : 'unreachable'}</Pill>
+          <small>{status?.url || 'http://localhost:3000'}</small>
+        </div>
+        <div>
+          <span>Ollama</span>
+          <Pill tone={ollama?.running ? 'good' : 'bad'}>{ollama?.running ? `running ${ollama.version}` : 'unreachable'}</Pill>
+          <small>{model ? `${model.model}: ${model.present ? 'present' : 'missing'}` : 'model unchecked'}</small>
+        </div>
+      </div>
+      {status?.note && <div className="source-warning warn"><small>{status.note}</small></div>}
+      {model && !model.present && <div className="source-warning warn"><small>{model.note} Installed coder models: {model.coderModels.join(', ') || 'none'}</small></div>}
+
+      <div className="decision-row">
+        <button onClick={checkOpenHands} disabled={Boolean(busy)}><RefreshCcw size={16} /> {busy === 'oh-status' ? 'Checking...' : 'Check OpenHands'}</button>
+        <button onClick={startOpenHands} disabled={Boolean(busy) || !status?.container?.exists || status?.container?.running}><Bot size={16} /> {busy === 'start' ? 'Starting...' : 'Start OpenHands'}</button>
+        <button onClick={stopOpenHands} disabled={Boolean(busy) || !status?.container?.running}><X size={16} /> {busy === 'stop' ? 'Stopping...' : 'Stop OpenHands'}</button>
+        <button onClick={openUi} disabled={Boolean(busy)}><Globe2 size={16} /> Open OpenHands UI</button>
+        <button onClick={checkOllama} disabled={Boolean(busy)}><RefreshCcw size={16} /> Check Ollama</button>
+        <button onClick={checkModel} disabled={Boolean(busy)}><SearchCheck size={16} /> Check coding model</button>
+      </div>
+
+      <h3>Request minor work</h3>
+      <p>One focused objective, max 5 files. Requests are stored under .lps/tooling/openhands/requests for review — never committed, never auto-run.</p>
+      <div className="inline-form">
+        <input value={form.title} onChange={set('title')} placeholder="Task title (required)" />
+        <input value={form.requestedBy} onChange={set('requestedBy')} placeholder="Requested by" />
+      </div>
+      <textarea value={form.objective} onChange={set('objective')} placeholder="Objective — one focused change (required)" rows={3} />
+      <div className="inline-form">
+        <input value={form.targetRepoPath} onChange={set('targetRepoPath')} placeholder="Target repo path (blank = this workspace)" />
+        <input value={form.baseBranch} onChange={set('baseBranch')} placeholder="Base branch" />
+        <input type="number" min="1" max="5" value={form.maxFilesChanged} onChange={set('maxFilesChanged')} title="Max files changed (1-5)" />
+      </div>
+      <div className="inline-form">
+        <textarea value={form.allowedPaths} onChange={set('allowedPaths')} placeholder="Allowed paths (one per line, optional)" rows={2} />
+        <textarea value={form.forbiddenPaths} onChange={set('forbiddenPaths')} placeholder="Extra forbidden paths (one per line)" rows={2} />
+      </div>
+      <input value={form.testCommand} onChange={set('testCommand')} placeholder="Test command (stored, never auto-run)" />
+      <label className="toggle-row" title="Always on in this version">
+        <input type="checkbox" checked readOnly disabled />
+        Approval required before run, commit, and push (always on)
+      </label>
+      <div className="decision-row">
+        <button className="primary" onClick={submitRequest} disabled={Boolean(busy) || !form.title.trim() || !form.objective.trim()}>
+          <Check size={16} /> {busy === 'submit' ? 'Storing...' : 'Store request for review'}
+        </button>
+        <button onClick={loadRequests} disabled={Boolean(busy)}><RefreshCcw size={16} /> Refresh list</button>
+      </div>
+
+      <h3>Requests</h3>
+      {requests.length === 0 ? (
+        <Empty title="No requests yet" body="Stored OpenHands task requests will appear here for review." />
+      ) : (
+        <div className="table-list">
+          {requests.map((request) => (
+            <div className="review-card" key={request.id}>
+              <div className="review-card-heading">
+                <Pill tone={request.status === 'pending' ? 'warn' : request.status === 'complete' ? 'good' : 'muted'}>{request.status}</Pill>
+                <Pill tone={request.riskLevel === 'low' ? 'good' : 'warn'}>{request.riskLevel || 'unrated'} risk</Pill>
+              </div>
+              <h3>{request.title}</h3>
+              <div className="candidate-meta">
+                <span>By: {request.requestedBy}</span>
+                <span>Created: {request.createdAt ? new Date(request.createdAt).toLocaleString() : 'unknown'}</span>
+                <span>Repo: {request.targetRepoPath}</span>
+                <span>Max files: {request.maxFilesChanged}</span>
+                {request.reportPath && <span>Report: {request.reportPath}</span>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Tooling({ setNotice, refreshSignal = 0 }) {
   const [status, setStatus] = useState(null);
   const [connector, setConnector] = useState(null);
@@ -1795,6 +1977,8 @@ function Tooling({ setNotice, refreshSignal = 0 }) {
           ))}
         </div>
       </div>
+
+      <OpenHandsPanel setNotice={setNotice} refreshSignal={refreshSignal} />
 
       <div className="panel wide-panel">
         <h2>Notes</h2>

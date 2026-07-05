@@ -756,7 +756,7 @@ function safeWorkspacePath(relativePath = '') {
 
 function isProtectedWorkspacePath(filePath = '') {
   const normalized = String(filePath).replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase();
-  const protectedRoots = ['.git/', 'data/', 'dist/', 'node_modules/', 'release/', '.cache/'];
+  const protectedRoots = ['.git/', 'data/', 'dist/', 'node_modules/', 'release/', '.cache/', '.lps/'];
   const protectedNames = ['.env', '.env.local', '.env.production'];
   const protectedExts = ['.sqlite', '.sqlite3', '.db', '.gguf', '.safetensors', '.onnx', '.log'];
   return protectedRoots.some((rootName) => normalized.startsWith(rootName))
@@ -2094,6 +2094,237 @@ app.post('/api/tooling/install', async (req, res) => {
   const result = await installers[tool]();
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || `Failed to install ${tool}.`);
   ok(res, { tool, output: result.stdout || result.stderr || `${tool} installed locally.` });
+});
+
+// ── OpenHands local worker tooling ──────────────────────────────────────────
+// OpenHands is a local worker, never the brain: LPS only checks status, starts/
+// stops the one known container, and stores reviewable task-request files.
+// No arbitrary commands, no automatic execution, no writes to brain locations.
+const OPENHANDS_CONTAINER = 'openhands-app';
+const OPENHANDS_URL = 'http://localhost:3000';
+const OLLAMA_URL = 'http://127.0.0.1:11434';
+const OPENHANDS_MODEL = 'qwen2.5-coder:14b-gpu';
+const LPS_TOOLING_DIR = path.join(root, '.lps', 'tooling', 'openhands');
+const OPENHANDS_REQUEST_DIR = path.join(LPS_TOOLING_DIR, 'requests');
+const OPENHANDS_REPORT_DIR = path.join(LPS_TOOLING_DIR, 'reports');
+
+// Paths an OpenHands request may never touch, matched as prefixes against the
+// request's own allowed/forbidden lists. Requests violating this are rejected
+// outright rather than stored.
+const OPENHANDS_MANDATORY_FORBIDDEN = [
+  'source_of_truth/',
+  'memory/',
+  '.env',
+  'secrets/',
+  'data/',
+  '.git/',
+  '.lps/',
+  'credentials',
+  'rules/'
+];
+
+function normalizeRequestPath(value) {
+  return String(value || '').trim().replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase();
+}
+
+function violatesMandatoryForbidden(candidatePath) {
+  const normalized = normalizeRequestPath(candidatePath);
+  if (!normalized) return false;
+  return OPENHANDS_MANDATORY_FORBIDDEN.some((blocked) =>
+    normalized === blocked || normalized.startsWith(blocked) || normalized.includes(`/${blocked}`));
+}
+
+async function probeHttp(url, timeoutMs = 3000) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    return { reachable: true, code: response.status };
+  } catch {
+    return { reachable: false, code: 0 };
+  }
+}
+
+// Docker may be missing from PATH depending on how the server was launched;
+// fall back to Docker Desktop's standard CLI location on Windows.
+let dockerCommand = 'docker';
+
+async function runDocker(args, options = {}) {
+  const attempted = dockerCommand;
+  let result = await runCli(attempted, args, options);
+  if (!result.available) {
+    const fallback = process.platform === 'win32' && process.env.ProgramFiles
+      ? path.join(process.env.ProgramFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe')
+      : '';
+    // Concurrent callers may race the shared dockerCommand switch, so retry
+    // whenever THIS call's attempt failed and the fallback is a different path.
+    if (fallback && attempted !== fallback && fs.existsSync(fallback)) {
+      dockerCommand = fallback;
+      result = await runCli(fallback, args, options);
+    }
+  }
+  return result;
+}
+
+app.get('/api/tooling/openhands/status', async (_req, res) => {
+  const [docker, container, http] = await Promise.all([
+    runDocker(['--version'], { timeout: 10000 }),
+    runDocker(['ps', '-a', '--filter', `name=${OPENHANDS_CONTAINER}`, '--format', '{{.Names}}|{{.State}}|{{.Status}}|{{.Image}}'], { timeout: 15000 }),
+    probeHttp(OPENHANDS_URL)
+  ]);
+  const line = (container.stdout || '').split('\n').find((item) => item.startsWith(`${OPENHANDS_CONTAINER}|`)) || '';
+  const [, state = '', statusText = '', image = ''] = line.split('|');
+  const installed = docker.ok ? (line ? 'installed' : 'missing') : 'unknown';
+  ok(res, {
+    url: OPENHANDS_URL,
+    docker: { available: docker.ok, version: docker.stdout || docker.stderr },
+    installed,
+    container: {
+      name: OPENHANDS_CONTAINER,
+      exists: Boolean(line),
+      running: state === 'running',
+      state,
+      status: statusText,
+      image
+    },
+    http,
+    note: !docker.ok
+      ? 'Docker CLI is unavailable, so container state is unknown. Start Docker Desktop first.'
+      : !line
+        ? 'OpenHands container not found. Install it once with the official docker run command from docs.openhands.dev; LPS does not install it automatically.'
+        : ''
+  });
+});
+
+app.post('/api/tooling/openhands/start', async (_req, res) => {
+  // Fixed, known-safe command: start the one named container. Never docker run.
+  const result = await runDocker(['start', OPENHANDS_CONTAINER], { timeout: 60000 });
+  if (!result.ok) {
+    return fail(res, 500, result.stderr || result.stdout || `docker start ${OPENHANDS_CONTAINER} failed. If the container does not exist, install OpenHands once per docs.openhands.dev.`);
+  }
+  const http = await probeHttp(OPENHANDS_URL, 5000);
+  ok(res, { started: true, container: OPENHANDS_CONTAINER, http, message: `Started ${OPENHANDS_CONTAINER}. The UI can take ~30s to answer on ${OPENHANDS_URL}.` });
+});
+
+app.post('/api/tooling/openhands/stop', async (_req, res) => {
+  const result = await runDocker(['stop', OPENHANDS_CONTAINER], { timeout: 90000 });
+  if (!result.ok) {
+    return fail(res, 500, result.stderr || result.stdout || `docker stop ${OPENHANDS_CONTAINER} failed.`);
+  }
+  ok(res, { stopped: true, container: OPENHANDS_CONTAINER, message: `Stopped ${OPENHANDS_CONTAINER}.` });
+});
+
+app.get('/api/tooling/ollama/status', async (_req, res) => {
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/version`, { signal: AbortSignal.timeout(3000) });
+    if (!response.ok) return ok(res, { running: false, url: OLLAMA_URL, error: `Ollama answered HTTP ${response.status}.` });
+    const data = await response.json();
+    ok(res, { running: true, url: OLLAMA_URL, version: data.version || 'unknown' });
+  } catch {
+    ok(res, { running: false, url: OLLAMA_URL, error: 'Ollama is not reachable on 127.0.0.1:11434. Start the Ollama app first.' });
+  }
+});
+
+app.get('/api/tooling/ollama/model-status', async (_req, res) => {
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return fail(res, 502, `Ollama tag listing failed: HTTP ${response.status}.`);
+    const data = await response.json();
+    const models = (data.models || []).map((model) => model.name);
+    const present = models.includes(OPENHANDS_MODEL);
+    ok(res, {
+      model: OPENHANDS_MODEL,
+      present,
+      openHandsSettings: {
+        model: `openai/${OPENHANDS_MODEL}`,
+        baseUrl: 'http://host.docker.internal:11434/v1',
+        apiKey: 'dummy'
+      },
+      coderModels: models.filter((name) => name.includes('coder')),
+      note: present ? '' : `Model ${OPENHANDS_MODEL} is not in the local Ollama library. Pull it or pick an installed coder model.`
+    });
+  } catch {
+    fail(res, 502, 'Ollama is not reachable, so model status is unknown. Start the Ollama app first.');
+  }
+});
+
+function readOpenHandsRequests() {
+  if (!fs.existsSync(OPENHANDS_REQUEST_DIR)) return [];
+  const requests = [];
+  for (const entry of fs.readdirSync(OPENHANDS_REQUEST_DIR)) {
+    if (!entry.endsWith('.json')) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(OPENHANDS_REQUEST_DIR, entry), 'utf8'));
+      const reportMd = path.join(OPENHANDS_REPORT_DIR, `${parsed.id}.md`);
+      const reportJson = path.join(OPENHANDS_REPORT_DIR, `${parsed.id}.json`);
+      parsed.reportPath = fs.existsSync(reportMd)
+        ? path.relative(root, reportMd).replaceAll('\\', '/')
+        : fs.existsSync(reportJson)
+          ? path.relative(root, reportJson).replaceAll('\\', '/')
+          : '';
+      requests.push(parsed);
+    } catch {
+      requests.push({ id: entry, title: `Unreadable request file: ${entry}`, status: 'invalid', createdAt: '', requestedBy: 'unknown' });
+    }
+  }
+  return requests.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
+app.get('/api/tooling/openhands/requests', (_req, res) => {
+  ok(res, readOpenHandsRequests());
+});
+
+let openHandsRequestSeq = 1;
+
+app.post('/api/tooling/openhands/requests', (req, res) => {
+  const title = String(req.body.title || '').trim();
+  const objective = String(req.body.objective || '').trim();
+  if (!title) return fail(res, 400, 'Request title is required.');
+  if (!objective) return fail(res, 400, 'Request objective is required.');
+
+  const targetRepoPath = String(req.body.targetRepoPath || '').trim() || root;
+  const baseBranch = String(req.body.baseBranch || 'main').trim();
+  const allowedPaths = (Array.isArray(req.body.allowedPaths) ? req.body.allowedPaths : String(req.body.allowedPaths || '').split('\n'))
+    .map((item) => String(item).trim()).filter(Boolean);
+  const forbiddenPaths = (Array.isArray(req.body.forbiddenPaths) ? req.body.forbiddenPaths : String(req.body.forbiddenPaths || '').split('\n'))
+    .map((item) => String(item).trim()).filter(Boolean);
+
+  const blockedAllowed = allowedPaths.filter((item) => violatesMandatoryForbidden(item));
+  if (blockedAllowed.length) {
+    return fail(res, 400, `Request rejected: allowed paths overlap protected locations (${blockedAllowed.join(', ')}). source_of_truth, memory, secrets, .env, data, rules, .git and .lps are never workable.`);
+  }
+  const secretHints = /api[\s_-]?key|token|password|secret|credential/i;
+  if (secretHints.test(title) || secretHints.test(objective)) {
+    return fail(res, 400, 'Request rejected: it appears to reference credentials/secrets. OpenHands requests must not involve keys, tokens, or passwords.');
+  }
+
+  const maxFilesRaw = Number(req.body.maxFilesChanged);
+  const maxFilesChanged = Math.min(5, Math.max(1, Number.isFinite(maxFilesRaw) && maxFilesRaw > 0 ? Math.floor(maxFilesRaw) : 5));
+
+  const id = `oh-req-${new Date().toISOString().replace(/[:.]/g, '-')}-${openHandsRequestSeq++}`;
+  const request = {
+    id,
+    title: title.slice(0, 160),
+    objective: objective.slice(0, 4000),
+    requestedBy: String(req.body.requestedBy || 'unknown').trim().slice(0, 80) || 'unknown',
+    targetRepoPath,
+    baseBranch,
+    allowedPaths,
+    forbiddenPaths: [...new Set([...forbiddenPaths, ...OPENHANDS_MANDATORY_FORBIDDEN])],
+    testCommand: String(req.body.testCommand || '').trim().slice(0, 300),
+    maxFilesChanged,
+    // First version: every gate is always on, regardless of what the caller sent.
+    requiresApprovalBeforeRun: true,
+    requiresApprovalBeforeCommit: true,
+    requiresApprovalBeforePush: true,
+    riskLevel: maxFilesChanged <= 3 && String(req.body.testCommand || '').trim() ? 'low' : 'medium',
+    createdAt: new Date().toISOString(),
+    status: 'pending',
+    reportPath: ''
+  };
+
+  fs.mkdirSync(OPENHANDS_REQUEST_DIR, { recursive: true });
+  fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+  fs.writeFileSync(path.join(OPENHANDS_REQUEST_DIR, `${id}.json`), JSON.stringify(request, null, 2), 'utf8');
+  ok(res, { request, storedAt: path.relative(root, path.join(OPENHANDS_REQUEST_DIR, `${id}.json`)).replaceAll('\\', '/'), note: 'Request stored for review. Nothing runs until it is approved; execution is not automated in this version.' });
 });
 
 app.get('/api/source/status', async (_req, res) => {
