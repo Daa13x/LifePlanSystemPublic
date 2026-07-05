@@ -2053,6 +2053,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [diffPath, setDiffPath] = useState('');
   const [fileDiff, setFileDiff] = useState(null);
   const [diffBusy, setDiffBusy] = useState(false);
+  const [pushArmed, setPushArmed] = useState(false);
 
   async function refresh(announce = false) {
     try {
@@ -2117,6 +2118,15 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const changedFiles = source?.changedFiles || [];
   const stagedFiles = changedFiles.filter((file) => file.staged);
   const localBranches = (branches.branches || []).filter((branch) => !branch.remote);
+  const currentBranch = source?.branch || '';
+  const pushProtectedBranch = ['main', 'master'].includes(currentBranch.toLowerCase());
+  const pushDisabledReason = sourceBusy
+    ? 'A source control operation is already running.'
+    : source?.hasConflicts
+      ? 'Resolve conflicts before pushing.'
+      : pushProtectedBranch
+        ? `Pushing ${currentBranch} from Life Planner is blocked. Push a review branch instead.`
+        : '';
   const hasChanges = changedFiles.length > 0;
   const protectedFiles = changedFiles.filter((file) => file.protected);
   const canStageAll = hasChanges && !sourceBusy && !source?.hasConflicts && protectedFiles.length === 0;
@@ -2256,8 +2266,36 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')} disabled={!canCommit}><Check size={16} /> Commit</button>
           <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch</button>
           <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull</button>
-          <button onClick={() => action('/api/source/push', {}, 'Pushed current branch.')} disabled={sourceBusy || source?.hasConflicts}><Upload size={16} /> Push</button>
+          <button
+            onClick={() => setPushArmed(true)}
+            disabled={Boolean(pushDisabledReason) || pushArmed}
+            title={pushDisabledReason || 'Review the push target before confirming'}
+          >
+            <Upload size={16} /> Push...
+          </button>
         </div>
+        {pushArmed && (
+          <div className="source-warning warn">
+            <strong>Confirm push</strong>
+            <small>
+              This will run <code>git push -u origin {currentBranch}</code> — the current review branch to remote <code>origin</code> only.
+              No force flags. Life Planner refuses to push main/master.
+            </small>
+            <div className="decision-row">
+              <button
+                className="primary"
+                disabled={sourceBusy}
+                onClick={async () => {
+                  await action('/api/source/push', { confirm: true }, `Pushed ${currentBranch} to origin.`);
+                  setPushArmed(false);
+                }}
+              >
+                <Upload size={16} /> Confirm push to origin
+              </button>
+              <button disabled={sourceBusy} onClick={() => setPushArmed(false)}><X size={16} /> Cancel</button>
+            </div>
+          </div>
+        )}
         {operationOutput && <pre className="code-block compact-code">{operationOutput}</pre>}
       </div>
 

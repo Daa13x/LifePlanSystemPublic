@@ -2317,12 +2317,26 @@ app.post('/api/source/checkout', async (req, res) => {
   ok(res, { branch, output: result.stdout || result.stderr, status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
 });
 
-app.post('/api/source/push', async (_req, res) => {
+// Push is deliberately narrow: current branch -> origin only, never forced,
+// never main/master, and never without explicit confirmation from the UI.
+const PROTECTED_PUSH_BRANCHES = ['main', 'master'];
+
+app.post('/api/source/push', async (req, res) => {
   const branch = await runCli('git', ['branch', '--show-current']);
-  if (!branch.stdout) return fail(res, 400, 'Cannot push from detached HEAD.');
-  const result = await runCli('git', ['push', '-u', 'origin', branch.stdout], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  const branchName = (branch.stdout || '').trim();
+  if (!branchName) return fail(res, 400, 'Cannot push from detached HEAD.');
+  if (PROTECTED_PUSH_BRANCHES.includes(branchName.toLowerCase())) {
+    return fail(res, 403, `Refusing to push protected branch "${branchName}" from Life Planner. Push a review branch instead; updating ${branchName} stays a manual, reviewed step.`);
+  }
+  if (req.body?.force) {
+    return fail(res, 403, 'Force push is not supported from Life Planner.');
+  }
+  if (req.body?.confirm !== true) {
+    return fail(res, 428, `Push needs explicit confirmation. Confirm to run: git push -u origin ${branchName} (no force flags).`);
+  }
+  const result = await runCli('git', ['push', '-u', 'origin', branchName], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git push failed');
-  ok(res, { output: result.stdout || result.stderr });
+  ok(res, { remote: 'origin', branch: branchName, output: result.stdout || result.stderr });
 });
 
 app.post('/api/source/remote', async (req, res) => {
