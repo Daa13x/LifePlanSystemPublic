@@ -2327,6 +2327,170 @@ app.post('/api/tooling/openhands/requests', (req, res) => {
   ok(res, { request, storedAt: path.relative(root, path.join(OPENHANDS_REQUEST_DIR, `${id}.json`)).replaceAll('\\', '/'), note: 'Request stored for review. Nothing runs until it is approved; execution is not automated in this version.' });
 });
 
+// ── OpenHands Approved Request Runner (first safe layer) ─────────────────────
+// This is a GATED runner, not an autonomous agent. It acts only on a request a
+// human has explicitly approved, and its only "execution" is running a command
+// from a fixed allowlist (validation/build). It never invokes OpenHands to edit
+// code, and never commits, pushes, merges, resets, deletes, or force-pushes.
+// The request's own `testCommand` is honoured only if it exactly matches an
+// allowlist entry; arbitrary commands are refused.
+const RUNNER_VALIDATION_ALLOWLIST = {
+  'node --check server/index.js': { command: 'node', args: ['--check', 'server/index.js'] },
+  'npm run build': { command: process.platform === 'win32' ? 'npm.cmd' : 'npm', args: ['run', 'build'] }
+};
+const RUNNER_DEFAULT_VALIDATION = 'node --check server/index.js';
+
+// Resolve a request id to its file, refusing anything that could escape the
+// requests directory (the id is server-generated, but never trust the URL).
+function openHandsRequestFile(id) {
+  const raw = String(id || '').trim();
+  if (!/^oh-req-[A-Za-z0-9._-]+$/.test(raw)) throw new Error('Invalid request id.');
+  const absolute = path.resolve(OPENHANDS_REQUEST_DIR, `${raw}.json`);
+  const dirWithSep = OPENHANDS_REQUEST_DIR.endsWith(path.sep) ? OPENHANDS_REQUEST_DIR : `${OPENHANDS_REQUEST_DIR}${path.sep}`;
+  if (!absolute.startsWith(dirWithSep)) throw new Error('Request id must stay inside the requests directory.');
+  return absolute;
+}
+
+function loadOpenHandsRequest(id) {
+  const file = openHandsRequestFile(id);
+  if (!fs.existsSync(file)) return null;
+  return { file, request: JSON.parse(fs.readFileSync(file, 'utf8')) };
+}
+
+async function changedTrackedFiles() {
+  const status = await runCli('git', ['status', '--porcelain']);
+  return new Set((status.stdout || '').split('\n').map((line) => line.trim()).filter(Boolean));
+}
+
+app.post('/api/tooling/openhands/requests/:id/approve', (req, res) => {
+  try {
+    const loaded = loadOpenHandsRequest(req.params.id);
+    if (!loaded) return fail(res, 404, 'Request not found.');
+    const { file, request } = loaded;
+    if (request.status === 'validated' || request.status === 'validation-failed') {
+      return fail(res, 409, `Request already ran (status: ${request.status}). Approval cannot be re-applied after a run.`);
+    }
+    request.status = 'approved';
+    request.approvedAt = new Date().toISOString();
+    request.approvedBy = String(req.body.approvedBy || 'user').trim().slice(0, 80) || 'user';
+    fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+    ok(res, { request, note: 'Human approval recorded. The gated runner may now run allowlisted validation only.' });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.post('/api/tooling/openhands/requests/:id/run', async (req, res) => {
+  let loaded;
+  try {
+    loaded = loadOpenHandsRequest(req.params.id);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  if (!loaded) return fail(res, 404, 'Request not found.');
+  const { file, request } = loaded;
+
+  // Gate 1: explicit human approval must be recorded.
+  if (request.status !== 'approved') {
+    return fail(res, 403, `Runner refused: request is "${request.status}", not "approved". A human must approve it before it can run.`);
+  }
+  // Gate 2: protected-path re-check (defence in depth vs. a hand-edited file).
+  const blocked = (request.allowedPaths || []).filter((item) => violatesMandatoryForbidden(item));
+  if (blocked.length) {
+    return fail(res, 403, `Runner refused: request allows protected paths (${blocked.join(', ')}).`);
+  }
+  // Gate 3: only an allowlisted validation command may run. A supplied
+  // testCommand is honoured solely if it matches the allowlist exactly.
+  const requested = String(request.testCommand || '').trim();
+  const commandKey = requested || RUNNER_DEFAULT_VALIDATION;
+  const validation = RUNNER_VALIDATION_ALLOWLIST[commandKey];
+  if (!validation) {
+    return fail(res, 400, `Runner refused: "${requested}" is not in the validation allowlist. Allowed: ${Object.keys(RUNNER_VALIDATION_ALLOWLIST).join(', ')}. Arbitrary commands are never executed.`);
+  }
+
+  // Snapshot before/after so we measure files the RUN changed (not pre-existing
+  // edits), and enforce maxFilesChanged against real filesystem effect.
+  const before = await changedTrackedFiles();
+  const result = await runCli(validation.command, validation.args, { timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+  const after = await changedTrackedFiles();
+  const runChanged = [...after].filter((line) => !before.has(line));
+  const maxFiles = Number(request.maxFilesChanged) || 5;
+  const withinMax = runChanged.length <= maxFiles;
+  const validationOk = result.ok && withinMax;
+  const status = validationOk ? 'validated' : 'validation-failed';
+
+  const reportLines = [
+    `# OpenHands Runner Report — ${request.id}`,
+    '',
+    `- Title: ${request.title}`,
+    `- Objective: ${request.objective}`,
+    `- Requested by: ${request.requestedBy}`,
+    `- Approved by: ${request.approvedBy || 'unknown'} at ${request.approvedAt || 'unknown'}`,
+    `- Run at: ${new Date().toISOString()}`,
+    `- Working directory: ${root}`,
+    '',
+    '## Validation (allowlisted command only)',
+    `- Command: \`${commandKey}\``,
+    `- Exit ok: ${result.ok}`,
+    `- Files changed by this run: ${runChanged.length} (limit ${maxFiles}) ${withinMax ? 'within limit' : 'OVER LIMIT'}`,
+    runChanged.length ? runChanged.map((line) => `  - ${line}`).join('\n') : '  - none',
+    '',
+    '### stdout',
+    '```',
+    (result.stdout || '(empty)').slice(0, 4000),
+    '```',
+    '### stderr',
+    '```',
+    (result.stderr || '(empty)').slice(0, 4000),
+    '```',
+    '',
+    '## Safety',
+    'This gated runner ran an allowlisted validation command only. It did NOT edit',
+    'source files, invoke OpenHands to change code, commit, push, merge, reset,',
+    'delete, or force-push. Any real code change and any commit/push remain manual,',
+    'separately-approved steps.',
+    ''
+  ];
+  fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+  const reportFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.md`);
+  fs.writeFileSync(reportFile, reportLines.join('\n'), 'utf8');
+
+  request.status = status;
+  request.runAt = new Date().toISOString();
+  request.runBy = String(req.body.runBy || 'user').trim().slice(0, 80) || 'user';
+  request.validationCommand = commandKey;
+  request.validationOk = validationOk;
+  request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
+  fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+
+  ok(res, {
+    request,
+    status,
+    validationOk,
+    filesChangedByRun: runChanged,
+    reportPath: request.reportPath,
+    performedActions: ['ran allowlisted validation command', 'wrote report'],
+    refusedActions: ['commit', 'push', 'merge', 'reset', 'delete', 'force-push', 'arbitrary command', 'OpenHands code edit'],
+    message: validationOk
+      ? 'Validation passed. Report written. No files were changed, committed, or pushed by the runner.'
+      : (result.ok ? 'Validation command succeeded but the run exceeded the file-change limit; marked validation-failed.' : 'Validation command failed. See the report; nothing was committed or pushed.')
+  });
+});
+
+app.get('/api/tooling/openhands/requests/:id/report', (req, res) => {
+  try {
+    const raw = String(req.params.id || '').trim();
+    if (!/^oh-req-[A-Za-z0-9._-]+$/.test(raw)) return fail(res, 400, 'Invalid request id.');
+    const reportFile = path.resolve(OPENHANDS_REPORT_DIR, `${raw}.md`);
+    const dirWithSep = OPENHANDS_REPORT_DIR.endsWith(path.sep) ? OPENHANDS_REPORT_DIR : `${OPENHANDS_REPORT_DIR}${path.sep}`;
+    if (!reportFile.startsWith(dirWithSep)) return fail(res, 400, 'Report id must stay inside the reports directory.');
+    if (!fs.existsSync(reportFile)) return fail(res, 404, 'No report yet for this request.');
+    ok(res, { id: raw, reportPath: path.relative(root, reportFile).replaceAll('\\', '/'), content: fs.readFileSync(reportFile, 'utf8') });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
 app.get('/api/source/status', async (_req, res) => {
   const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami, wingetStatus] = await Promise.all([
     runCli('git', ['rev-parse', '--is-inside-work-tree']),

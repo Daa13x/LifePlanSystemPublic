@@ -1654,6 +1654,7 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
   const [model, setModel] = useState(null);
   const [requests, setRequests] = useState([]);
   const [busy, setBusy] = useState('');
+  const [report, setReport] = useState(null);
   const [form, setForm] = useState({
     title: '',
     objective: '',
@@ -1682,6 +1683,22 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
   const checkOllama = () => run('ollama', async () => setOllama(await api('/api/tooling/ollama/status')));
   const checkModel = () => run('model', async () => setModel(await api('/api/tooling/ollama/model-status')));
   const loadRequests = () => run('requests', async () => setRequests(await api('/api/tooling/openhands/requests')));
+
+  const approveRequest = (id) => run(`approve-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify({ approvedBy: form.requestedBy || 'user' }) });
+    setNotice(result.note);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
+  const runRequest = (id) => run(`run-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/run`, { method: 'POST', body: JSON.stringify({ runBy: form.requestedBy || 'user' }) });
+    setNotice(result.message);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
+  const viewReport = (id) => run(`report-${id}`, async () => {
+    setReport(await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/report`));
+  });
 
   useEffect(() => {
     checkOpenHands();
@@ -1803,6 +1820,15 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
         <button onClick={loadRequests} disabled={Boolean(busy)}><RefreshCcw size={16} /> Refresh list</button>
       </div>
 
+      <h3>Approved Request Runner</h3>
+      <div className="source-warning info">
+        <small>
+          <strong>Gated runner, not an autonomous agent.</strong> A request must be explicitly Approved by a human, then Run.
+          The runner executes only an allowlisted validation command (<code>node --check server/index.js</code> or <code>npm run build</code>),
+          writes a report under <code>.lps/tooling/openhands/reports/</code>, and never edits code, runs arbitrary commands, commits, pushes, merges, resets, deletes, or force-pushes.
+        </small>
+      </div>
+
       <h3>Requests</h3>
       {requests.length === 0 ? (
         <Empty title="No requests yet" body="Stored OpenHands task requests will appear here for review." />
@@ -1811,7 +1837,7 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
           {requests.map((request) => (
             <div className="review-card" key={request.id}>
               <div className="review-card-heading">
-                <Pill tone={request.status === 'pending' ? 'warn' : request.status === 'complete' ? 'good' : 'muted'}>{request.status}</Pill>
+                <Pill tone={request.status === 'approved' ? 'good' : request.status === 'validated' ? 'good' : request.status === 'validation-failed' ? 'bad' : request.status === 'pending' ? 'warn' : 'muted'}>{request.status}</Pill>
                 <Pill tone={request.riskLevel === 'low' ? 'good' : 'warn'}>{request.riskLevel || 'unrated'} risk</Pill>
               </div>
               <h3>{request.title}</h3>
@@ -1820,10 +1846,40 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
                 <span>Created: {request.createdAt ? new Date(request.createdAt).toLocaleString() : 'unknown'}</span>
                 <span>Repo: {request.targetRepoPath}</span>
                 <span>Max files: {request.maxFilesChanged}</span>
+                {request.approvedBy && <span>Approved by: {request.approvedBy}</span>}
+                {request.validationCommand && <span>Validated: {request.validationCommand} ({request.validationOk ? 'ok' : 'failed'})</span>}
                 {request.reportPath && <span>Report: {request.reportPath}</span>}
+              </div>
+              <div className="decision-row">
+                {request.status === 'pending' && (
+                  <button className="primary" disabled={Boolean(busy)} onClick={() => approveRequest(request.id)}>
+                    <Check size={16} /> {busy === `approve-${request.id}` ? 'Approving...' : 'Approve for runner'}
+                  </button>
+                )}
+                <button
+                  disabled={Boolean(busy) || request.status !== 'approved'}
+                  title={request.status !== 'approved' ? 'A human must approve this request before it can run' : 'Run the allowlisted validation only'}
+                  onClick={() => runRequest(request.id)}
+                >
+                  <Bot size={16} /> {busy === `run-${request.id}` ? 'Running...' : 'Run validation'}
+                </button>
+                {request.reportPath && (
+                  <button disabled={Boolean(busy)} onClick={() => viewReport(request.id)}>
+                    <FileText size={16} /> View report
+                  </button>
+                )}
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {report && (
+        <div className="panel">
+          <div className="panel-heading">
+            <h3>Runner report: {report.reportPath}</h3>
+            <button onClick={() => setReport(null)}><X size={14} /> Close</button>
+          </div>
+          <pre className="code-block diff-detail">{report.content}</pre>
         </div>
       )}
     </div>
