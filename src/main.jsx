@@ -1700,6 +1700,18 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
     setReport(await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/report`));
   });
 
+  const confirmExecution = (id) => run(`confirm-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/confirm-execution`, { method: 'POST', body: JSON.stringify({ confirmedBy: form.requestedBy || 'user' }) });
+    setNotice(result.note);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
+  const runExecutionPlan = (id) => run(`plan-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/execution-plan`, { method: 'POST', body: JSON.stringify({}) });
+    setNotice(result.message);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
   useEffect(() => {
     checkOpenHands();
     checkOllama();
@@ -1829,6 +1841,16 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
         </small>
       </div>
 
+      <h3>Execution Worker (dry-run / plan only)</h3>
+      <div className="source-warning warn">
+        <small>
+          <strong>Gated local coding worker — not an autonomous agent.</strong> This first version is <strong>dry-run / plan only</strong>:
+          it does not edit code or invoke OpenHands. It needs a <strong>second explicit confirmation</strong> beyond approval, then produces
+          an execution plan (proposed dedicated branch, protected-path scan, max-files budget) and a report. It never runs on main/master,
+          never commits/pushes/merges/resets/deletes/force-pushes, and never runs arbitrary commands. <strong>Human review is required before any commit, push, or PR.</strong>
+        </small>
+      </div>
+
       <h3>Requests</h3>
       {requests.length === 0 ? (
         <Empty title="No requests yet" body="Stored OpenHands task requests will appear here for review." />
@@ -1837,8 +1859,9 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
           {requests.map((request) => (
             <div className="review-card" key={request.id}>
               <div className="review-card-heading">
-                <Pill tone={request.status === 'approved' ? 'good' : request.status === 'validated' ? 'good' : request.status === 'validation-failed' ? 'bad' : request.status === 'pending' ? 'warn' : 'muted'}>{request.status}</Pill>
+                <Pill tone={['approved', 'validated', 'execution-planned'].includes(request.status) ? 'good' : request.status === 'validation-failed' ? 'bad' : request.status === 'pending' ? 'warn' : 'muted'}>{request.status}</Pill>
                 <Pill tone={request.riskLevel === 'low' ? 'good' : 'warn'}>{request.riskLevel || 'unrated'} risk</Pill>
+                {request.executionConfirmed && <Pill tone="info">execution confirmed</Pill>}
               </div>
               <h3>{request.title}</h3>
               <div className="candidate-meta">
@@ -1848,6 +1871,8 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
                 <span>Max files: {request.maxFilesChanged}</span>
                 {request.approvedBy && <span>Approved by: {request.approvedBy}</span>}
                 {request.validationCommand && <span>Validated: {request.validationCommand} ({request.validationOk ? 'ok' : 'failed'})</span>}
+                {request.executionConfirmedBy && <span>Exec confirmed by: {request.executionConfirmedBy}</span>}
+                {request.status === 'execution-planned' && <span>Plan eligible: {request.executionEligible ? 'yes' : 'no (blocked)'}</span>}
                 {request.reportPath && <span>Report: {request.reportPath}</span>}
               </div>
               <div className="decision-row">
@@ -1862,6 +1887,22 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
                   onClick={() => runRequest(request.id)}
                 >
                   <Bot size={16} /> {busy === `run-${request.id}` ? 'Running...' : 'Run validation'}
+                </button>
+                {['approved', 'execution-planned'].includes(request.status) && !request.executionConfirmed && (
+                  <button
+                    disabled={Boolean(busy)}
+                    title="Second explicit human confirmation required before an execution plan can run"
+                    onClick={() => confirmExecution(request.id)}
+                  >
+                    <ShieldCheck size={16} /> {busy === `confirm-${request.id}` ? 'Confirming...' : 'Confirm execution (2nd)'}
+                  </button>
+                )}
+                <button
+                  disabled={Boolean(busy) || !request.executionConfirmed || !['approved', 'execution-planned'].includes(request.status)}
+                  title={!request.executionConfirmed ? 'Requires a second execution confirmation first' : 'Dry-run: evaluate safety gates and write a plan. No code is edited.'}
+                  onClick={() => runExecutionPlan(request.id)}
+                >
+                  <SearchCheck size={16} /> {busy === `plan-${request.id}` ? 'Planning...' : 'Run execution plan (dry run)'}
                 </button>
                 {request.reportPath && (
                   <button disabled={Boolean(busy)} onClick={() => viewReport(request.id)}>
