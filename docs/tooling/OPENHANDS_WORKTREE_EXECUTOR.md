@@ -66,3 +66,14 @@ for any commit/push/PR. The executor itself never commits or pushes.
   as-is. Left as future work.
 - Executor-created `openhands/exec-<id>` branches are never auto-deleted; a
   future human-gated cleanup can prune them.
+
+## Agent Mode integration boundary
+
+- The worktree executor may *eventually* implement approved Agent Mode plans
+  (see `docs/agent_mode/AGENT_MODE_STANDARD.md`).
+- Real OpenHands invocation remains **OFF**
+  (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`).
+- Enabling future invocation requires the 7 known blockers above to be fixed
+  first, on a separate, explicitly-approved branch.
+- Agent Mode scaffolding (docs/schema) does **not** authorize execution and
+  changes no runtime behaviour.

@@ -1,0 +1,30 @@
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ NON-EXECUTABLE DOCUMENTATION ONLY.                                        │
+# │ This is an EXAMPLE skill registry. No runtime code reads this file.       │
+# │ It grants no capability and activates nothing. It exists to show the      │
+# │ shape a future, human-approved registry might take.                       │
+# │ A real registry would live elsewhere and be gated per AGENT_MODE_STANDARD.│
+# └─────────────────────────────────────────────────────────────────────────┘
+
+registry_version: 0            # example schema version
+executable: false             # this example is never executed
+approved_skills: []           # NONE — no approved/live skills exist
+
+# Example of a PROPOSED (not approved, not runnable) skill entry. It mirrors
+# SKILL_MANIFEST_SCHEMA.yaml. runtime_enabled and approval stay unset.
+proposed_skills:
+  - name: weekly-doc-change-summary
+    purpose: "Read-only summary of docs/ changes over the last 7 days."
+    status: proposed
+    risk_level: low
+    permission_tier: 1
+    permissions: ["read:docs"]
+    created_by: agent
+    approved_by: ""           # not approved (must be a human)
+    approved_at: ""
+    source_branch: ""
+    source_pr: ""
+    tests: ["node --check server/index.js", "npm run build"]
+    protected_paths_checked: true
+    rollback_plan: "Delete the entry; no runtime state to revert."
+    runtime_enabled: false    # inert
