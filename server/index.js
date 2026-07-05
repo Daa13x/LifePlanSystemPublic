@@ -2491,6 +2491,208 @@ app.get('/api/tooling/openhands/requests/:id/report', (req, res) => {
   }
 });
 
+// ── OpenHands Execution Worker (dry-run / plan-only, first safe slice) ────────
+// This layer is deliberately NON-mutating. It does NOT invoke OpenHands, create
+// worktrees, edit files, or run Git write operations. It only (a) records a
+// SECOND explicit human confirmation beyond approval, and (b) produces an
+// execution PLAN after verifying every safety gate, writing a report a human
+// reviews. Real code editing is a later, separately-approved layer.
+const PROTECTED_EXEC_BRANCHES = ['main', 'master'];
+
+// Fixed OpenHands wiring — request JSON can never override any of this.
+const OPENHANDS_EXEC_CONFIG = {
+  model: 'openai/qwen2.5-coder:14b-gpu',
+  baseUrl: 'http://host.docker.internal:11434/v1',
+  apiKeyRef: 'dummy (Ollama ignores it; no real key stored)'
+};
+
+function proposedExecutionBranch(id) {
+  const suffix = String(id).replace(/[^A-Za-z0-9._-]/g, '').slice(-40);
+  return `openhands/exec-${suffix}`;
+}
+
+async function branchExists(name) {
+  const result = await runCli('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]);
+  return result.ok && Boolean(result.stdout);
+}
+
+// Evaluate every execution gate WITHOUT mutating anything. Returns structured
+// pass/fail plus the concrete plan the (future) executor would follow.
+async function evaluateExecutionPlan(request) {
+  const gates = [];
+  const pass = (name, ok, detail) => { gates.push({ gate: name, ok, detail }); return ok; };
+
+  const approved = pass('human_approval', request.status === 'approved' || request.status === 'execution-planned',
+    request.status === 'approved' || request.status === 'execution-planned' ? `status is ${request.status}` : `status is ${request.status}, needs approved`);
+  const confirmed = pass('second_confirmation', request.executionConfirmed === true,
+    request.executionConfirmed === true ? `confirmed by ${request.executionConfirmedBy || 'unknown'}` : 'execution not confirmed (second human confirmation required)');
+
+  const allowedPaths = Array.isArray(request.allowedPaths) ? request.allowedPaths : [];
+  const forbiddenPaths = Array.isArray(request.forbiddenPaths) ? request.forbiddenPaths : [];
+  const allowedNonEmpty = pass('allowed_paths_present', allowedPaths.length > 0,
+    allowedPaths.length ? `${allowedPaths.length} allowed path(s)` : 'no allowedPaths — executor would have nothing safe to scope to');
+  // Scan the ALLOWED paths only: forbiddenPaths deliberately contains the
+  // protected prefixes (it is the deny-list), so scanning it would always flag.
+  const protectedHits = allowedPaths.filter((item) => violatesMandatoryForbidden(item));
+  const protectedClean = pass('protected_path_scan', protectedHits.length === 0,
+    protectedHits.length ? `BLOCKED — an allowed path touches protected locations: ${protectedHits.join(', ')}` : 'no allowed path references protected locations');
+
+  const baseBranch = String(request.baseBranch || 'main');
+  const baseNotProtectedTarget = pass('base_branch_not_execution_target', true,
+    `base branch "${baseBranch}" is a read reference only; the executor would never write to main/master`);
+  const execBranch = proposedExecutionBranch(request.id);
+  const execNameSafe = pass('execution_branch_not_main_master', !PROTECTED_EXEC_BRANCHES.includes(execBranch.toLowerCase()),
+    `dedicated execution branch would be "${execBranch}"`);
+  const execBranchFree = !(await branchExists(execBranch));
+  pass('execution_branch_available', execBranchFree, execBranchFree ? `"${execBranch}" does not exist yet` : `"${execBranch}" already exists`);
+
+  const maxFiles = Number(request.maxFilesChanged) || 0;
+  const maxFilesSane = pass('max_files_changed', maxFiles >= 1 && maxFiles <= 5, `maxFilesChanged = ${maxFiles} (limit 1–5)`);
+
+  const requested = String(request.testCommand || '').trim();
+  const validationKey = requested || RUNNER_DEFAULT_VALIDATION;
+  const validationAllowlisted = pass('validation_command_allowlisted', Boolean(RUNNER_VALIDATION_ALLOWLIST[validationKey]),
+    RUNNER_VALIDATION_ALLOWLIST[validationKey] ? `post-change validation would run: ${validationKey}` : `"${requested}" is not allowlisted — arbitrary commands are refused`);
+
+  const eligible = approved && confirmed && allowedNonEmpty && protectedClean && baseNotProtectedTarget
+    && execNameSafe && execBranchFree && maxFilesSane && validationAllowlisted;
+
+  return {
+    eligible,
+    gates,
+    plan: {
+      dryRun: true,
+      executionBranch: execBranch,
+      isolation: 'dedicated git worktree/branch (not created in this dry run)',
+      allowedPaths,
+      forbiddenPaths,
+      maxFilesChanged: maxFiles,
+      validationCommand: validationKey,
+      openHandsConfig: OPENHANDS_EXEC_CONFIG,
+      openHandsInvoked: false,
+      filesChanged: [],
+      wouldRefuse: ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'branch delete', 'force-push', 'push to main/master', 'arbitrary shell from request', 'editing protected paths']
+    }
+  };
+}
+
+app.post('/api/tooling/openhands/requests/:id/confirm-execution', (req, res) => {
+  try {
+    const loaded = loadOpenHandsRequest(req.params.id);
+    if (!loaded) return fail(res, 404, 'Request not found.');
+    const { file, request } = loaded;
+    if (request.status !== 'approved' && request.status !== 'execution-planned') {
+      return fail(res, 403, `Second confirmation refused: request is "${request.status}". It must be human-approved first.`);
+    }
+    request.executionConfirmed = true;
+    request.executionConfirmedAt = new Date().toISOString();
+    request.executionConfirmedBy = String(req.body.confirmedBy || 'user').trim().slice(0, 80) || 'user';
+    fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+    ok(res, { request, note: 'Second execution confirmation recorded. You may now run the dry-run execution plan. No code will be edited; the plan is review-only.' });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) => {
+  let loaded;
+  try {
+    loaded = loadOpenHandsRequest(req.params.id);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  if (!loaded) return fail(res, 404, 'Request not found.');
+  const { file, request } = loaded;
+
+  if (request.status !== 'approved' && request.status !== 'execution-planned') {
+    return fail(res, 403, `Execution plan refused: request is "${request.status}", not approved.`);
+  }
+  if (request.executionConfirmed !== true) {
+    return fail(res, 428, 'Execution plan refused: a second explicit human confirmation is required first (confirm-execution).');
+  }
+
+  const evaluation = await evaluateExecutionPlan(request);
+  const worktrees = await runCli('git', ['worktree', 'list']);
+
+  const gateLines = evaluation.gates.map((g) => `- [${g.ok ? 'PASS' : 'BLOCK'}] ${g.gate}: ${g.detail}`).join('\n');
+  const reportLines = [
+    `# OpenHands Execution Plan (DRY RUN) — ${request.id}`,
+    '',
+    `- Title: ${request.title}`,
+    `- Objective: ${request.objective}`,
+    `- Requested by: ${request.requestedBy}`,
+    `- Approved by: ${request.approvedBy || 'unknown'} at ${request.approvedAt || 'unknown'}`,
+    `- Execution confirmed by: ${request.executionConfirmedBy || 'unknown'} at ${request.executionConfirmedAt || 'unknown'}`,
+    `- Planned at: ${new Date().toISOString()}`,
+    '',
+    '## Execution branch / worktree (would be created; NOT created here)',
+    `- Dedicated branch: ${evaluation.plan.executionBranch}`,
+    `- Isolation: ${evaluation.plan.isolation}`,
+    `- Base reference (read-only): ${request.baseBranch || 'main'}`,
+    '',
+    '## Safety gates',
+    gateLines,
+    '',
+    '## Protected-path scan',
+    `- Result: ${evaluation.gates.find((g) => g.gate === 'protected_path_scan')?.detail}`,
+    `- Hard-blocked prefixes: ${OPENHANDS_MANDATORY_FORBIDDEN.join(', ')}`,
+    '',
+    '## Max files changed',
+    `- ${evaluation.gates.find((g) => g.gate === 'max_files_changed')?.detail}`,
+    '',
+    '## Changed files (dry run)',
+    '- none — no worktree was created, no files were edited, OpenHands was not invoked.',
+    '',
+    '## Diff summary',
+    '- none (dry run).',
+    '',
+    '## Validation output',
+    `- Not executed in the plan. Post-change validation would run: \`${evaluation.plan.validationCommand}\`.`,
+    '',
+    '## OpenHands wiring (fixed; request JSON cannot override)',
+    `- Model: ${OPENHANDS_EXEC_CONFIG.model}`,
+    `- Base URL: ${OPENHANDS_EXEC_CONFIG.baseUrl}`,
+    `- API key: ${OPENHANDS_EXEC_CONFIG.apiKeyRef}`,
+    `- Invoked in this dry run: no`,
+    '',
+    '## Refused / blocked actions',
+    evaluation.plan.wouldRefuse.map((a) => `- ${a}`).join('\n'),
+    '',
+    '## Current git worktrees (read-only)',
+    '```',
+    (worktrees.stdout || '(none)').slice(0, 1000),
+    '```',
+    '',
+    '## Human next steps',
+    evaluation.eligible
+      ? '- All gates passed. A human may later approve the real (still-unbuilt) executor. Until then, no code has been changed. Any commit/push/PR remains a manual step via the Source Control panel.'
+      : '- One or more gates BLOCKED (see above). Fix the request (paths / approval / confirmation) before any execution is considered. Nothing was changed.',
+    ''
+  ];
+  fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+  const reportFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.md`);
+  fs.writeFileSync(reportFile, reportLines.join('\n'), 'utf8');
+
+  request.status = 'execution-planned';
+  request.executionPlannedAt = new Date().toISOString();
+  request.executionEligible = evaluation.eligible;
+  request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
+  fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+
+  ok(res, {
+    request,
+    eligible: evaluation.eligible,
+    gates: evaluation.gates,
+    plan: evaluation.plan,
+    reportPath: request.reportPath,
+    performedActions: ['evaluated safety gates', 'wrote dry-run plan report'],
+    refusedActions: ['edit code', 'invoke OpenHands', 'create worktree', 'commit', 'push', 'merge', 'reset', 'delete branch', 'force-push', 'run arbitrary command'],
+    message: evaluation.eligible
+      ? 'Dry-run plan complete: all gates passed. No code was changed and OpenHands was not invoked.'
+      : 'Dry-run plan complete: one or more gates BLOCKED. No code was changed. See the report.'
+  });
+});
+
 app.get('/api/source/status', async (_req, res) => {
   const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami, wingetStatus] = await Promise.all([
     runCli('git', ['rev-parse', '--is-inside-work-tree']),
