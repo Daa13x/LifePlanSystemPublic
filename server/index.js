@@ -2711,6 +2711,33 @@ function parsePorcelainPaths(stdout) {
   });
 }
 
+// Boundary-safe path authorisation for allowedPaths (executor blocker #4).
+// Raw startsWith prefix matching is unsafe: "README.md" would authorise
+// "README.md.x", and "docs" would authorise "docs-old". A changed file is
+// allowed only by an EXACT match, or — for a directory-like allowed path — as a
+// descendant behind a real "/" boundary. File-vs-directory cannot be known for
+// certain, so an allowed path whose basename contains a "." is treated as a
+// FILE (exact match only); this precisely rejects the suffix/sibling bypasses
+// and fails safe (a directory whose name contains a dot is slightly
+// over-restricted, never over-permissive). Absolute and ".." traversal changed
+// paths are rejected defensively.
+function isChangedFileAllowed(changedFile, allowedPaths) {
+  const clean = (p) => String(p || '').trim().replaceAll('\\', '/')
+    .replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+/g, '/').replace(/\/+$/, '').toLowerCase();
+  const rawForward = String(changedFile || '').replaceAll('\\', '/');
+  if (rawForward.startsWith('/') || /^[a-z]:\//i.test(rawForward)) return false; // absolute
+  const norm = clean(changedFile);
+  if (!norm || norm.split('/').some((seg) => seg === '..')) return false;        // traversal
+  return (Array.isArray(allowedPaths) ? allowedPaths : []).some((allowed) => {
+    const a = clean(allowed);
+    if (!a || a.split('/').some((seg) => seg === '..')) return false;
+    if (norm === a) return true;                       // exact match
+    const basename = a.slice(a.lastIndexOf('/') + 1);
+    if (basename.includes('.')) return false;          // file-like allowed path: exact only
+    return norm.startsWith(`${a}/`);                   // directory-like: descendants behind "/"
+  });
+}
+
 // Enforce every path rule against the FILES ACTUALLY CHANGED in the worktree,
 // not against the request's declared intent. Returns structured violations.
 function enforceChangedFiles(changedFiles, request) {
@@ -2722,7 +2749,7 @@ function enforceChangedFiles(changedFiles, request) {
     const norm = normalizeRequestPath(file);
     if (violatesMandatoryForbidden(norm)) violations.push(`${file}: touches a protected path`);
     else if (forbiddenPaths.some((f) => norm === f || norm.startsWith(f))) violations.push(`${file}: matches a forbidden path`);
-    else if (allowedPaths.length && !allowedPaths.some((a) => norm === a || norm.startsWith(a.endsWith('/') ? a : `${a}/`) || norm.startsWith(a))) {
+    else if (allowedPaths.length && !isChangedFileAllowed(file, request.allowedPaths)) {
       violations.push(`${file}: outside allowedPaths`);
     }
   }
