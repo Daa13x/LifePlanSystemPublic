@@ -2789,16 +2789,36 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     const changedFiles = parsePorcelainPaths(wtStatus.stdout);
     const enforcement = enforceChangedFiles(changedFiles, request);
     const hasRealDiff = changedFiles.length > 0;
-    const wtDiff = await runCli('git', ['-C', worktreePath, 'diff'], { maxBuffer: 8 * 1024 * 1024 });
 
-    // Blocker #2: always persist the FULL, uncapped diff as a .patch artifact so
-    // a large future diff is never lost to the report's preview cap. Written
-    // even when empty (invocation OFF) to keep the report/patch pair consistent.
+    // Blocker #2: `git diff` omits untracked NEW files, so a future run that
+    // creates a file would produce an incomplete patch. Mark untracked files
+    // intent-to-add in the WORKTREE's own index (isolated; no commit; the main
+    // repo is never touched), then `git diff --binary` so both tracked edits and
+    // full new-file contents (text inline, binary as base85) are captured and
+    // the patch stays re-appliable. Enforcement above already ran against the
+    // real changed set, before this index touch.
+    const untrackedFiles = (wtStatus.stdout || '').split('\n')
+      .filter((line) => line.startsWith('??'))
+      .map((line) => line.slice(2).trim().replace(/^"(.*)"$/, '$1'))
+      .filter(Boolean);
+    let untrackedCaptured = 0;
+    if (untrackedFiles.length) {
+      const addRes = await runCli('git', ['-C', worktreePath, 'add', '-N', '--', ...untrackedFiles], { timeout: 60000 });
+      if (addRes.ok) untrackedCaptured = untrackedFiles.length;
+    }
+    const wtDiff = await runCli('git', ['-C', worktreePath, 'diff', '--binary'], { maxBuffer: 16 * 1024 * 1024 });
+
+    // Always persist the FULL, uncapped diff as a .patch artifact so a large
+    // future diff is never lost to the report's preview cap. Written even when
+    // empty (invocation OFF) to keep the report/patch pair consistent.
     fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
     const patchFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.patch`);
     fs.writeFileSync(patchFile, wtDiff.stdout || '', 'utf8');
     const patchRel = path.relative(root, patchFile).replaceAll('\\', '/');
     const diffTruncated = (wtDiff.stdout || '').length > 4000;
+    const untrackedNote = untrackedFiles.length
+      ? `${untrackedCaptured}/${untrackedFiles.length} untracked new file(s) captured via intent-to-add`
+      : 'no untracked new files';
 
     // Allowlisted validation only, run inside the worktree.
     const validationKey = String(request.testCommand || '').trim() || RUNNER_DEFAULT_VALIDATION;
@@ -2842,7 +2862,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       changedFiles.length ? `- ${changedFiles.length} file(s) changed` : '- no diff (no edits were made)',
       '',
       '## Full diff',
-      `- Full uncapped diff written to: ${patchRel}`,
+      `- Full uncapped diff written to: ${patchRel} (git diff --binary; ${untrackedNote})`,
       diffTruncated
         ? '- The preview below is truncated to 4000 chars; use the .patch file for the complete diff.'
         : '- The complete diff is shown below (also in the .patch file).',
@@ -2907,6 +2927,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       validation: validationResult,
       reportPath: request.reportPath,
       patchPath: patchRel,
+      untrackedCaptured,
+      untrackedFiles: untrackedFiles.length,
       refusedActions,
       message: hasRealDiff
         ? `Executor harness ran in an isolated worktree. A diff exists, so the worktree (${worktreeRel}) and branch ${execBranch} are PRESERVED for human review; the full diff is at ${patchRel}. Nothing was committed, pushed, or merged.`

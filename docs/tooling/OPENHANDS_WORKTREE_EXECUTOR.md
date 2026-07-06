@@ -49,6 +49,13 @@ operations, protected paths, or the validation allowlist.
   `.lps/tooling/openhands/reports/<id>.patch`. The report embeds only a
   4000-char preview and points to the `.patch` for the full content, so a large
   future diff is never lost to the preview cap.
+- **Untracked new files are captured:** plain `git diff` omits untracked new
+  files, so before producing the patch the executor marks any untracked files
+  intent-to-add (`git add -N`) inside the worktree's own index — isolated, no
+  commit, the main repo is never touched — and uses `git diff --binary`. New
+  text files appear inline and binary files as base85, so the `.patch` includes
+  new-file contents and stays re-appliable. The report states how many untracked
+  files were captured.
 - **Worktree preservation on real diffs:** teardown now PRESERVES the worktree
   and branch whenever a real diff exists (`changedFiles.length > 0`), so a human
   can review the actual edits in place. With invocation OFF the diff is empty,
