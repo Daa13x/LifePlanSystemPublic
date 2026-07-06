@@ -63,6 +63,29 @@ operations, protected paths, or the validation allowlist.
   auto-deleted either way. (The `.patch` alone is not treated as a substitute
   for the working tree.)
 
+## allowedPaths boundary matching (blocker #4 — addressed)
+
+Enforcement of `allowedPaths` against the real changed files
+(`enforceChangedFiles` → `isChangedFileAllowed`) uses **path-boundary-safe**
+matching, not raw string prefixing. A changed file is authorised only when:
+
+- it **exactly equals** an allowed path, or
+- the allowed path is **directory-like** and the changed file is a descendant
+  behind a real `/` separator (`allowed` + `/` + …).
+
+An allowed path whose basename contains a `.` is treated as a **file** (exact
+match only), since file-vs-directory cannot be known for certain from the string
+alone; this fails safe (a dotted directory name is slightly over-restricted,
+never over-permissive). Absolute paths (`/…`, `C:/…`) and any `..` traversal
+segment in the changed file or allowed path are rejected defensively.
+
+This closes the earlier loose-prefix bypasses, e.g. an allowed path of
+`README.md` no longer authorises `README.md.x` or `README.md/anything`, `docs`
+no longer authorises `docs-old`/`docs2`/`docsite`, and `src/app` no longer
+authorises `src/application`. (The user-supplied `forbiddenPaths` denylist keeps
+its broader prefix match — over-blocking on a denylist is safe — and the
+mandatory protected-path block list is unchanged.)
+
 ## Report fields
 
 request id, execution branch, worktree path, worktree-after-run
@@ -83,8 +106,9 @@ commits or pushes.
 - Real OpenHands invocation is intentionally OFF
   (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`); enabling it is a future,
   separately-approved slice (remaining blockers: rejection-path test against a
-  real violating diff, tighter `allowedPaths` matching, worktree build-deps,
-  base-branch pinning, and tool-level `allowedPaths`/runtime caps on invocation).
+  real violating diff, worktree build-deps, base-branch pinning, and tool-level
+  `allowedPaths`/runtime caps on invocation). The `allowedPaths` boundary-match
+  blocker is addressed (see below).
 - `npm run build` inside a fresh worktree needs a dependency-sharing strategy
   (worktrees do not copy gitignored `node_modules`); `node --check` works
   as-is. Left as future work.
