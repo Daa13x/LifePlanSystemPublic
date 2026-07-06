@@ -2788,7 +2788,37 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     const wtStatus = await runCli('git', ['-C', worktreePath, 'status', '--porcelain']);
     const changedFiles = parsePorcelainPaths(wtStatus.stdout);
     const enforcement = enforceChangedFiles(changedFiles, request);
-    const wtDiff = await runCli('git', ['-C', worktreePath, 'diff'], { maxBuffer: 4 * 1024 * 1024 });
+    const hasRealDiff = changedFiles.length > 0;
+
+    // Blocker #2: `git diff` omits untracked NEW files, so a future run that
+    // creates a file would produce an incomplete patch. Mark untracked files
+    // intent-to-add in the WORKTREE's own index (isolated; no commit; the main
+    // repo is never touched), then `git diff --binary` so both tracked edits and
+    // full new-file contents (text inline, binary as base85) are captured and
+    // the patch stays re-appliable. Enforcement above already ran against the
+    // real changed set, before this index touch.
+    const untrackedFiles = (wtStatus.stdout || '').split('\n')
+      .filter((line) => line.startsWith('??'))
+      .map((line) => line.slice(2).trim().replace(/^"(.*)"$/, '$1'))
+      .filter(Boolean);
+    let untrackedCaptured = 0;
+    if (untrackedFiles.length) {
+      const addRes = await runCli('git', ['-C', worktreePath, 'add', '-N', '--', ...untrackedFiles], { timeout: 60000 });
+      if (addRes.ok) untrackedCaptured = untrackedFiles.length;
+    }
+    const wtDiff = await runCli('git', ['-C', worktreePath, 'diff', '--binary'], { maxBuffer: 16 * 1024 * 1024 });
+
+    // Always persist the FULL, uncapped diff as a .patch artifact so a large
+    // future diff is never lost to the report's preview cap. Written even when
+    // empty (invocation OFF) to keep the report/patch pair consistent.
+    fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+    const patchFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.patch`);
+    fs.writeFileSync(patchFile, wtDiff.stdout || '', 'utf8');
+    const patchRel = path.relative(root, patchFile).replaceAll('\\', '/');
+    const diffTruncated = (wtDiff.stdout || '').length > 4000;
+    const untrackedNote = untrackedFiles.length
+      ? `${untrackedCaptured}/${untrackedFiles.length} untracked new file(s) captured via intent-to-add`
+      : 'no untracked new files';
 
     // Allowlisted validation only, run inside the worktree.
     const validationKey = String(request.testCommand || '').trim() || RUNNER_DEFAULT_VALIDATION;
@@ -2811,6 +2841,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       '## Execution isolation',
       `- Execution branch: ${execBranch}`,
       `- Worktree path: ${worktreeRel}`,
+      `- Worktree after run: ${hasRealDiff ? 'PRESERVED for human review' : 'removed (no diff to review)'}`,
       `- Touched main working tree: no`,
       `- Ran on main/master: no`,
       '',
@@ -2831,6 +2862,10 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       changedFiles.length ? `- ${changedFiles.length} file(s) changed` : '- no diff (no edits were made)',
       '',
       '## Full diff',
+      `- Full uncapped diff written to: ${patchRel} (git diff --binary; ${untrackedNote})`,
+      diffTruncated
+        ? '- The preview below is truncated to 4000 chars; use the .patch file for the complete diff.'
+        : '- The complete diff is shown below (also in the .patch file).',
       '```diff',
       (wtDiff.stdout || '(empty)').slice(0, 4000),
       '```',
@@ -2845,8 +2880,9 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       refusedActions.map((a) => `- ${a}`).join('\n'),
       '',
       '## Human next steps',
-      '- Real OpenHands invocation is OFF, so no code was edited and there is nothing to review yet.',
-      '- When invocation is later enabled, review the diff above, then use the gated Source Control panel to commit/push/PR. The executor never commits, pushes, or merges.',
+      hasRealDiff
+        ? `- The worktree (${worktreeRel}) and branch (${execBranch}) are PRESERVED. Review the .patch, then use the gated Source Control panel for any commit/push/PR. The executor never commits, pushes, or merges.`
+        : '- Real OpenHands invocation is OFF, so no code was edited and there is nothing to review; the worktree was removed. When invocation is later enabled and produces a diff, the worktree is preserved for review instead.',
       ''
     ];
     fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
@@ -2858,19 +2894,29 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     request.openHandsInvoked = invocation.invoked;
     request.executorEnforcementOk = enforcement.ok;
     request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
+    request.patchPath = patchRel;
+    request.worktreePreserved = hasRealDiff;
     fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
 
-    // Teardown BEFORE responding (not in post-response async): with invocation
-    // OFF there is nothing in the worktree to preserve, so remove it now so the
-    // success response reflects an already-clean state. The branch is never
-    // deleted. (A future invocation-ON slice must instead PRESERVE the worktree
-    // for human review.)
-    const removed = await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: 60000 });
-    await runCli('git', ['worktree', 'prune']);
-    worktreeCreated = false;
+    // Blocker #1: teardown BEFORE responding, but PRESERVE the worktree/branch
+    // whenever a real diff exists so a human can review the actual edits in place
+    // (the full .patch alone is not a substitute for the working tree). With
+    // invocation OFF the diff is empty, so the worktree is removed to keep the
+    // repo clean. The branch is never auto-deleted either way.
+    let worktreeRemoved = false;
+    if (hasRealDiff) {
+      // Preserve: neither the teardown nor the error-path net removes it.
+      worktreeCreated = false;
+    } else {
+      const removed = await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: 60000 });
+      await runCli('git', ['worktree', 'prune']);
+      worktreeRemoved = removed.ok;
+      worktreeCreated = false;
+    }
 
     ok(res, {
-      worktreeRemoved: removed.ok,
+      worktreeRemoved,
+      worktreePreserved: hasRealDiff,
       request,
       invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
       openHandsInvoked: invocation.invoked,
@@ -2880,8 +2926,13 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       enforcement,
       validation: validationResult,
       reportPath: request.reportPath,
+      patchPath: patchRel,
+      untrackedCaptured,
+      untrackedFiles: untrackedFiles.length,
       refusedActions,
-      message: `Executor harness ran in an isolated worktree. Real OpenHands invocation is DISABLED, so no code was edited. Worktree removed after the run; branch ${execBranch} left in place (never auto-deleted). Nothing was committed, pushed, or merged.`
+      message: hasRealDiff
+        ? `Executor harness ran in an isolated worktree. A diff exists, so the worktree (${worktreeRel}) and branch ${execBranch} are PRESERVED for human review; the full diff is at ${patchRel}. Nothing was committed, pushed, or merged.`
+        : `Executor harness ran in an isolated worktree. Real OpenHands invocation is DISABLED, so no code was edited; the worktree was removed and branch ${execBranch} left in place (never auto-deleted). Full (empty) diff written to ${patchRel}. Nothing was committed, pushed, or merged.`
     });
   } catch (error) {
     fail(res, 500, `Executor harness error: ${error.message}`);

@@ -43,29 +43,54 @@ operations, protected paths, or the validation allowlist.
   deletes branches, or pushes to `main`/`master`.
 - Never runs arbitrary request-supplied shell.
 
+## Diff preservation (blockers #1 and #2 — addressed)
+
+- **Full uncapped `.patch`:** every run writes the complete diff to
+  `.lps/tooling/openhands/reports/<id>.patch`. The report embeds only a
+  4000-char preview and points to the `.patch` for the full content, so a large
+  future diff is never lost to the preview cap.
+- **Untracked new files are captured:** plain `git diff` omits untracked new
+  files, so before producing the patch the executor marks any untracked files
+  intent-to-add (`git add -N`) inside the worktree's own index — isolated, no
+  commit, the main repo is never touched — and uses `git diff --binary`. New
+  text files appear inline and binary files as base85, so the `.patch` includes
+  new-file contents and stays re-appliable. The report states how many untracked
+  files were captured.
+- **Worktree preservation on real diffs:** teardown now PRESERVES the worktree
+  and branch whenever a real diff exists (`changedFiles.length > 0`), so a human
+  can review the actual edits in place. With invocation OFF the diff is empty,
+  so the worktree is still removed to keep the repo clean. The branch is never
+  auto-deleted either way. (The `.patch` alone is not treated as a substitute
+  for the working tree.)
+
 ## Report fields
 
-request id, execution branch, worktree path, whether OpenHands was invoked,
-model config, changed files, path-enforcement result (allowed/forbidden/
-protected), max-files result, diff summary, full diff, validation output,
+request id, execution branch, worktree path, worktree-after-run
+(preserved/removed), whether OpenHands was invoked, model config, changed files,
+path-enforcement result (allowed/forbidden/protected), max-files result, diff
+summary, full-diff preview + `.patch` pointer, validation output,
 refused/blocked actions, and human next steps.
 
 ## Human review
 
 The executor produces changes for review only (when invocation is later
-enabled). A human reviews the diff and uses the gated **Source Control panel**
-for any commit/push/PR. The executor itself never commits or pushes.
+enabled). A human reviews the diff (worktree preserved + `.patch`) and uses the
+gated **Source Control panel** for any commit/push/PR. The executor itself never
+commits or pushes.
 
 ## Known limitations (this slice)
 
-- Real OpenHands invocation is intentionally OFF; enabling it is a future,
-  separately-approved slice that must also switch teardown to **preserve** the
-  worktree so the human can review real edits.
+- Real OpenHands invocation is intentionally OFF
+  (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`); enabling it is a future,
+  separately-approved slice (remaining blockers: rejection-path test against a
+  real violating diff, tighter `allowedPaths` matching, worktree build-deps,
+  base-branch pinning, and tool-level `allowedPaths`/runtime caps on invocation).
 - `npm run build` inside a fresh worktree needs a dependency-sharing strategy
   (worktrees do not copy gitignored `node_modules`); `node --check` works
   as-is. Left as future work.
 - Executor-created `openhands/exec-<id>` branches are never auto-deleted; a
-  future human-gated cleanup can prune them.
+  future human-gated cleanup can prune them. Preserved worktrees also require a
+  human-gated cleanup after review.
 
 ## Agent Mode integration boundary
 
