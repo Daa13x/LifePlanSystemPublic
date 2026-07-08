@@ -283,6 +283,61 @@ export function buildOpenHandsInvocationConstraints({
   };
 }
 
+export function buildOpenHandsInvocationReadiness({
+  invocationEnabled,
+  toolConstraints = {},
+  serviceCheck = {},
+  dependencySetup = {},
+  dryRunReportShown = false,
+  postRunPatchRequiresSeparateApproval
+} = {}) {
+  const checks = [];
+  const check = (gate, ok, detail) => {
+    checks.push({ gate, ok, detail });
+    return ok;
+  };
+  const toolGate = (name) => (Array.isArray(toolConstraints?.checks) ? toolConstraints.checks : []).find((item) => item.gate === name);
+  const requireToolGate = (name, label = name) => {
+    const gate = toolGate(name);
+    return check(name, Boolean(gate?.ok), gate?.detail || `${label} missing from tool constraint preflight`);
+  };
+
+  check('invocation_flag_explicit_off_by_default', invocationEnabled === false,
+    invocationEnabled === false ? 'real invocation flag is explicit and false' : 'real invocation flag is missing or not off by default');
+  requireToolGate('model_endpoint_config_present', 'model/endpoint config');
+  check('openhands_service_reachable_check', serviceCheck.checked === true && serviceCheck.reachable === true,
+    serviceCheck.checked === true
+      ? (serviceCheck.reachable ? `OpenHands service reachable (${serviceCheck.url || 'local URL'}, code ${serviceCheck.code || 0})` : `OpenHands service is not reachable at ${serviceCheck.url || 'local URL'}`)
+      : 'OpenHands service reachability was not checked');
+  requireToolGate('branch_base_pin', 'branch/base pin');
+  check('dependency_gate_passed', dependencySetup.checked === true && dependencySetup.ok === true && dependencySetup.setupGated !== true,
+    dependencySetup.checked === true ? (dependencySetup.reason || 'dependency gate checked') : 'dependency gate was not checked');
+  requireToolGate('changed_file_count_limit', 'changed-file count limit');
+  requireToolGate('runtime_timeout_present', 'runtime timeout');
+  requireToolGate('output_report_limits_present', 'output/report limits');
+  requireToolGate('allowed_paths_present', 'allowedPaths');
+  requireToolGate('mandatory_forbidden_paths_enforced', 'forbidden/protected paths');
+  requireToolGate('explicit_user_approval_state', 'explicit approval state');
+  const approval = toolConstraints?.constraints?.approval || {};
+  check('second_execution_confirmation_present', approval.executionConfirmed === true && Boolean(approval.executionConfirmedBy) && Boolean(approval.executionConfirmedAt),
+    approval.executionConfirmed === true ? 'second execution confirmation is present' : 'second execution confirmation is missing');
+  check('dry_run_report_shown', dryRunReportShown === true,
+    dryRunReportShown === true ? 'dry-run report has been generated before real invocation' : 'dry-run report has not been generated yet');
+  check('post_run_patch_requires_separate_approval', postRunPatchRequiresSeparateApproval === true,
+    postRunPatchRequiresSeparateApproval === true ? 'post-run patch requires separate human approval before commit/push/PR' : 'post-run patch approval boundary is missing');
+
+  const ok = checks.every((item) => item.ok);
+  return {
+    ok,
+    setupGated: !ok,
+    missing: checks.filter((item) => !item.ok).map((item) => item.gate),
+    reason: ok
+      ? 'OpenHands invocation readiness gate is satisfied, but real invocation still remains disabled by policy/flag.'
+      : `OpenHands invocation readiness setup-gated: ${checks.filter((item) => !item.ok).map((item) => item.gate).join(', ')}`,
+    checks
+  };
+}
+
 export function violatesMandatoryForbidden(candidatePath) {
   const normalized = normalizeRequestPath(candidatePath);
   if (!normalized) return false;

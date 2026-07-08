@@ -17,6 +17,7 @@ import {
   summarizeExecutorCommandResult,
   limitExecutorReportText,
   buildOpenHandsInvocationConstraints,
+  buildOpenHandsInvocationReadiness,
   parsePorcelainPaths,
   isChangedFileAllowed,
   enforceChangedFiles
@@ -2720,11 +2721,34 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
     invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED
   });
   evaluation.plan.toolInvocationConstraints = toolConstraints;
+  const serviceProbe = await probeHttp(OPENHANDS_URL, 1500);
+  const serviceCheck = { checked: true, url: OPENHANDS_URL, ...serviceProbe };
+  const dryRunDependencySetup = {
+    ...checkWorktreeValidationSetup(evaluation.plan.validationCommand, () => false, process.platform),
+    checked: true,
+    reason: evaluation.plan.validationCommand === 'npm run build'
+      ? 'Dependency gate will run inside the isolated worktree; npm build dependencies cannot be proven in dry-run.'
+      : 'No dependency preflight is required for this validation command.'
+  };
+  if (evaluation.plan.validationCommand === 'npm run build') {
+    dryRunDependencySetup.ok = false;
+    dryRunDependencySetup.setupGated = true;
+  }
+  const readiness = buildOpenHandsInvocationReadiness({
+    invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
+    toolConstraints,
+    serviceCheck,
+    dependencySetup: dryRunDependencySetup,
+    dryRunReportShown: true,
+    postRunPatchRequiresSeparateApproval: true
+  });
+  evaluation.plan.invocationReadiness = readiness;
   const planEligible = evaluation.eligible && toolConstraints.ok;
   const worktrees = await runCli('git', ['worktree', 'list']);
 
   const gateLines = evaluation.gates.map((g) => `- [${g.ok ? 'PASS' : 'BLOCK'}] ${g.gate}: ${g.detail}`).join('\n');
   const toolConstraintLines = toolConstraints.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n');
+  const readinessLines = readiness.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n');
   const reportLines = [
     `# OpenHands Execution Plan (DRY RUN) — ${request.id}`,
     '',
@@ -2771,6 +2795,11 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
     `- Reason: ${toolConstraints.reason}`,
     toolConstraintLines,
     '',
+    '## Invocation readiness gate (preflight only)',
+    `- Status: ${readiness.ok ? 'ready' : 'setup-gated'}`,
+    `- Reason: ${readiness.reason}`,
+    readinessLines,
+    '',
     '## Refused / blocked actions',
     evaluation.plan.wouldRefuse.map((a) => `- ${a}`).join('\n'),
     '',
@@ -2796,6 +2825,8 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
   request.executionPlannedBaseCommit = evaluation.plan.baseCommit;
   request.executionToolConstraintsOk = toolConstraints.ok;
   request.executionToolConstraintsReason = toolConstraints.reason;
+  request.invocationReadinessOk = readiness.ok;
+  request.invocationReadinessReason = readiness.reason;
   request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
   fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
 
@@ -2830,7 +2861,7 @@ const OPENHANDS_WORKTREE_DIR = path.join(LPS_TOOLING_DIR, 'worktrees');
 
 // Real OpenHands call lives here in the future. Disabled by the constant above,
 // so this slice never contacts the model endpoint and never edits code.
-async function invokeOpenHandsExecutor(toolConstraints) {
+async function invokeOpenHandsExecutor(toolConstraints, readiness) {
   if (!toolConstraints || toolConstraints.ok !== true) {
     return {
       invoked: false,
@@ -2839,12 +2870,22 @@ async function invokeOpenHandsExecutor(toolConstraints) {
       constraints: toolConstraints || null
     };
   }
+  if (!readiness || readiness.ok !== true) {
+    return {
+      invoked: false,
+      setupGated: true,
+      reason: `Real OpenHands invocation refused: readiness gate is setup-gated (${readiness?.missing?.join(', ') || 'unknown'}).`,
+      constraints: toolConstraints.constraints,
+      readiness: readiness || null
+    };
+  }
   if (!OPENHANDS_EXECUTOR_INVOCATION_ENABLED) {
     return {
       invoked: false,
       setupGated: false,
       reason: 'Real OpenHands invocation is intentionally DISABLED (server-side constant OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false). No code was generated or edited.',
-      constraints: toolConstraints.constraints
+      constraints: toolConstraints.constraints,
+      readiness
     };
   }
   // Future, separately-approved slice would call the OpenHands agent-server here
@@ -2905,8 +2946,29 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     if (!add.ok) return fail(res, 500, `Executor could not create the isolated worktree: ${add.stderr || add.stdout}`);
     worktreeCreated = true;
 
+    // Build the readiness gate before any future invocation could run. This
+    // checks only local readiness; it never starts OpenHands or bypasses login.
+    const validationKey = String(request.testCommand || '').trim() || RUNNER_DEFAULT_VALIDATION;
+    const validation = RUNNER_VALIDATION_ALLOWLIST[validationKey];
+    const hasWorktreePath = (relativePath) => {
+      const parts = String(relativePath || '').replaceAll('\\', '/').replace(/\/+$/, '').split('/').filter(Boolean);
+      return parts.length > 0 && fs.existsSync(path.join(worktreePath, ...parts));
+    };
+    const validationSetup = { ...checkWorktreeValidationSetup(validationKey, hasWorktreePath, process.platform), checked: true };
+    const serviceProbe = await probeHttp(OPENHANDS_URL, 1500);
+    const serviceCheck = { checked: true, url: OPENHANDS_URL, ...serviceProbe };
+    const dryRunReportShown = request.status === 'execution-planned' && Boolean(request.reportPath) && Boolean(request.executionPlannedAt);
+    const readiness = buildOpenHandsInvocationReadiness({
+      invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
+      toolConstraints,
+      serviceCheck,
+      dependencySetup: validationSetup,
+      dryRunReportShown,
+      postRunPatchRequiresSeparateApproval: true
+    });
+
     // Invocation (disabled by constant → no edits made).
-    const invocation = await invokeOpenHandsExecutor(toolConstraints);
+    const invocation = await invokeOpenHandsExecutor(toolConstraints, readiness);
 
     // Post-run enforcement against ACTUAL changed files in the worktree.
     const wtStatus = await runCli('git', ['-C', worktreePath, 'status', '--porcelain']);
@@ -2946,13 +3008,6 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       : 'no untracked new files';
 
     // Allowlisted validation only, run inside the worktree.
-    const validationKey = String(request.testCommand || '').trim() || RUNNER_DEFAULT_VALIDATION;
-    const validation = RUNNER_VALIDATION_ALLOWLIST[validationKey];
-    const hasWorktreePath = (relativePath) => {
-      const parts = String(relativePath || '').replaceAll('\\', '/').replace(/\/+$/, '').split('/').filter(Boolean);
-      return parts.length > 0 && fs.existsSync(path.join(worktreePath, ...parts));
-    };
-    const validationSetup = checkWorktreeValidationSetup(validationKey, hasWorktreePath, process.platform);
     let validationResult = {
       command: validationKey,
       ran: false,
@@ -3018,6 +3073,11 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       `- Status: ${toolConstraints.ok ? 'complete' : 'setup-gated'}`,
       `- Reason: ${toolConstraints.reason}`,
       toolConstraints.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n'),
+      '',
+      '## Invocation readiness gate (preflight; no real invocation)',
+      `- Status: ${readiness.ok ? 'ready' : 'setup-gated'}`,
+      `- Reason: ${readiness.reason}`,
+      readiness.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n'),
       '',
       '## Changed files (actual, in worktree)',
       changedFiles.length ? changedFiles.map((f) => `- ${f}`).join('\n') : '- none',
@@ -3090,6 +3150,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     request.executorToolConstraintsOk = toolConstraints.ok;
     request.executorToolConstraintsReason = toolConstraints.reason;
     request.executorToolConstraints = toolConstraints.constraints;
+    request.executorInvocationReadinessOk = readiness.ok;
+    request.executorInvocationReadinessReason = readiness.reason;
     request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
     request.patchPath = patchRel;
     request.worktreePreserved = hasRealDiff;
@@ -3118,6 +3180,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
       openHandsInvoked: invocation.invoked,
       toolConstraints,
+      invocationReadiness: readiness,
       executionBranch: execBranch,
       baseBranch: pinnedBaseBranch,
       baseCommit: pinnedBaseCommit,

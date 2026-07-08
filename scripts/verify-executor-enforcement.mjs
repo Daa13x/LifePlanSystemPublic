@@ -23,6 +23,7 @@ import {
   OPENHANDS_MANDATORY_FORBIDDEN,
   OPENHANDS_EXECUTOR_LIMITS,
   buildOpenHandsInvocationConstraints,
+  buildOpenHandsInvocationReadiness,
   checkWorktreeValidationSetup,
   checkExecutorMaxFilesChanged,
   enforceChangedFiles,
@@ -365,5 +366,67 @@ const validInvocationConfig = { model: 'openai/qwen-test', baseUrl: 'http://127.
     `F unsafe output limit setup-gated -> ${JSON.stringify(r)}`);
 }
 
-console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, rejects unsafe base branches, dependency-gates missing worktree build deps, reports runtime/file/output limits, and setup-gates missing future invocation constraints.' : failures + ' CHECK(S) FAILED'}`);
+// ---------------------------------------------------------------------------
+// Part G - real invocation readiness gate. This still does not call OpenHands;
+// it proves real invocation would be refused unless every readiness condition is
+// satisfied first.
+// ---------------------------------------------------------------------------
+console.log('\n--- Part G: invocation readiness gate (pure helper) ---');
+const validToolConstraints = buildOpenHandsInvocationConstraints({
+  request: validInvocationRequest,
+  plan: validInvocationPlan,
+  config: validInvocationConfig,
+  limits: OPENHANDS_EXECUTOR_LIMITS,
+  invocationEnabled: false
+});
+const validReadinessInput = {
+  invocationEnabled: false,
+  toolConstraints: validToolConstraints,
+  serviceCheck: { checked: true, reachable: true, code: 200, url: 'http://localhost:3000' },
+  dependencySetup: { checked: true, ok: true, setupGated: false, reason: 'dependency gate passed' },
+  dryRunReportShown: true,
+  postRunPatchRequiresSeparateApproval: true
+};
+{
+  const r = buildOpenHandsInvocationReadiness(validReadinessInput);
+  line(r.ok === true && r.missing.length === 0, `G valid readiness passes with invocation still off -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationReadiness({ ...validReadinessInput, toolConstraints: null });
+  line(r.ok === false && r.missing.includes('model_endpoint_config_present') && r.missing.includes('second_execution_confirmation_present'),
+    `G missing tool constraints setup-gated without throwing -> ${JSON.stringify(r)}`);
+}
+{
+  const { invocationEnabled, ...missingFlagInput } = validReadinessInput;
+  const r = buildOpenHandsInvocationReadiness(missingFlagInput);
+  line(r.ok === false && r.missing.includes('invocation_flag_explicit_off_by_default'),
+    `G missing invocation flag setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationReadiness({ ...validReadinessInput, invocationEnabled: true });
+  line(r.ok === false && r.missing.includes('invocation_flag_explicit_off_by_default'),
+    `G invocation flag not off setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationReadiness({ ...validReadinessInput, serviceCheck: { checked: true, reachable: false, code: 0, url: 'http://localhost:3000' } });
+  line(r.ok === false && r.missing.includes('openhands_service_reachable_check'),
+    `G unreachable OpenHands service setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationReadiness({ ...validReadinessInput, dependencySetup: { checked: true, ok: false, setupGated: true, reason: 'missing dependencies' } });
+  line(r.ok === false && r.missing.includes('dependency_gate_passed'),
+    `G dependency gate missing setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationReadiness({ ...validReadinessInput, dryRunReportShown: false });
+  line(r.ok === false && r.missing.includes('dry_run_report_shown'),
+    `G missing dry-run report setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationReadiness({ ...validReadinessInput, postRunPatchRequiresSeparateApproval: false });
+  line(r.ok === false && r.missing.includes('post_run_patch_requires_separate_approval'),
+    `G missing patch approval boundary setup-gated -> ${JSON.stringify(r)}`);
+}
+
+console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, rejects unsafe base branches, dependency-gates missing worktree build deps, reports runtime/file/output limits, setup-gates missing future invocation constraints, and setup-gates invocation readiness failures.' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);

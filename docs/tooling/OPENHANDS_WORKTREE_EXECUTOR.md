@@ -22,7 +22,10 @@ or edited in this build.
    Before any future invocation could run, the executor also builds a
    tool-level constraint contract covering allowed paths, mandatory forbidden
    paths, base pin, limits, model/endpoint config, and explicit approval state.
-   Missing constraints are refused/setup-gated.
+   Missing constraints are refused/setup-gated. A separate invocation readiness
+   gate then checks the disabled flag, model/endpoint config, read-only service
+   reachability probe, pinned base, dependency gate, limits, paths,
+   approval/confirmation state, dry-run report, and post-run approval boundary.
 5. Compute the **actual** changed files/diff in the worktree and enforce
    allowedPaths, forbiddenPaths, the protected-path block list, and
    maxFilesChanged **against the real diff** (not the declared intent).
@@ -134,6 +137,30 @@ request before future invocation could occur. This does **not** call OpenHands
 and does **not** authorize real execution; it only makes the future invocation
 boundary explicit and testable while the server-side flag remains false.
 
+## Invocation readiness gate (blocker #8 - addressed as preflight)
+
+Real OpenHands invocation remains OFF. Before any future invocation path could
+run, the executor now also builds a readiness result that must pass every
+condition below:
+
+- the real invocation flag is explicitly present and false by default;
+- fixed model/endpoint config is present;
+- a short OpenHands HTTP reachability check has run;
+- the base branch and resolved base commit are pinned;
+- the isolated-worktree dependency gate has passed;
+- changed-file, runtime, output, and report limits are present;
+- `allowedPaths` is present and mandatory protected paths are enforced;
+- approval plus second execution confirmation are present;
+- the dry-run report was generated before execution;
+- any post-run patch still requires separate human approval before commit,
+  push, or PR.
+
+The service reachability check is a probe only. It does not start OpenHands,
+install anything, bypass login/security, or call the agent. If any readiness
+condition is missing, the future invocation boundary is reported as
+`setup-gated` and real invocation is refused before the placeholder invocation
+function can proceed.
+
 ## Enforcement rejection path verified (blocker #3 — addressed)
 
 The changed-file enforcement is verified to **reject a real violating diff**, not
@@ -180,8 +207,8 @@ worktree path, worktree-after-run (preserved/removed), whether OpenHands was
 invoked, model config, changed files, path-enforcement result
 (allowed/forbidden/protected), max-files result, diff summary, full-diff
 preview + `.patch` pointer, runtime/output limits, tool-level invocation
-constraint checks, validation output and limit result, refused/blocked actions,
-and human next steps.
+constraint checks, invocation readiness checks, validation output and limit
+result, refused/blocked actions, and human next steps.
 
 ## Human review
 
@@ -197,8 +224,9 @@ commits or pushes.
   separately-approved slice. The `allowedPaths` boundary-match blocker (#4),
   enforcement rejection-path verification (#3), worktree build-dependency
   detection/reporting (#5), base-branch pinning (#6), tool-level invocation
-  constraints (#7), and executor runtime/file/output limit reporting are
-  addressed as safety scaffolding (see above).
+  constraints (#7), invocation readiness gate (#8), and executor
+  runtime/file/output limit reporting are addressed as safety scaffolding (see
+  above).
 - `npm run build` inside a fresh worktree now performs a dependency preflight
   first. If `node_modules` / local Vite binaries are absent, the run is clearly
   reported as setup-gated. This slice deliberately does not install, copy, or
