@@ -20,6 +20,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  OPENHANDS_MANDATORY_FORBIDDEN,
+  OPENHANDS_EXECUTOR_LIMITS,
+  buildOpenHandsInvocationConstraints,
   checkWorktreeValidationSetup,
   checkExecutorMaxFilesChanged,
   enforceChangedFiles,
@@ -227,7 +230,7 @@ console.log('\n--- Part D: worktree validation dependency gate (pure helper) ---
 console.log('\n--- Part E: executor runtime/file/output limits (pure helpers) ---');
 {
   const r = checkExecutorMaxFilesChanged(0);
-  line(r.ok === false && r.reason.includes('must be 1-5'), `E reject maxFilesChanged below limit -> ${JSON.stringify(r)}`);
+  line(r.ok === false && r.reason.includes('integer 1-5'), `E reject maxFilesChanged below limit -> ${JSON.stringify(r)}`);
 }
 {
   const r = checkExecutorMaxFilesChanged(5);
@@ -235,7 +238,15 @@ console.log('\n--- Part E: executor runtime/file/output limits (pure helpers) --
 }
 {
   const r = checkExecutorMaxFilesChanged(6);
-  line(r.ok === false && r.reason.includes('must be 1-5'), `E reject maxFilesChanged above limit -> ${JSON.stringify(r)}`);
+  line(r.ok === false && r.reason.includes('integer 1-5'), `E reject maxFilesChanged above limit -> ${JSON.stringify(r)}`);
+}
+{
+  const r = checkExecutorMaxFilesChanged(1.5);
+  line(r.ok === false && r.reason.includes('integer 1-5'), `E reject non-integer maxFilesChanged -> ${JSON.stringify(r)}`);
+}
+{
+  const r = checkExecutorMaxFilesChanged(Infinity);
+  line(r.ok === false && r.reason.includes('integer 1-5'), `E reject unsafe maxFilesChanged -> ${JSON.stringify(r)}`);
 }
 {
   const r = summarizeExecutorCommandResult({ ok: false, timedOut: true, timeoutMs: 123 }, { label: 'validation', timeoutMs: 123 });
@@ -254,5 +265,105 @@ console.log('\n--- Part E: executor runtime/file/output limits (pure helpers) --
   line(r.truncated === false && r.text === 'abc', `E report text within limit is preserved -> ${JSON.stringify(r)}`);
 }
 
-console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, rejects unsafe base branches, dependency-gates missing worktree build deps, and reports runtime/file/output limits.' : failures + ' CHECK(S) FAILED'}`);
+// ---------------------------------------------------------------------------
+// Part F - future OpenHands tool-level invocation constraints. This does not
+// call OpenHands; it proves unsafe/missing constraints are setup-gated first.
+// ---------------------------------------------------------------------------
+console.log('\n--- Part F: future invocation tool constraints (pure helper) ---');
+const validInvocationRequest = {
+  id: 'oh-req-verify',
+  status: 'approved',
+  approvedBy: 'verifier',
+  approvedAt: '2026-07-08T00:00:00.000Z',
+  executionConfirmed: true,
+  executionConfirmedBy: 'verifier',
+  executionConfirmedAt: '2026-07-08T00:01:00.000Z',
+  baseBranch: 'main',
+  baseBranchAtCreation: 'main',
+  approvedBaseBranch: 'main',
+  executionConfirmedBaseBranch: 'main',
+  allowedPaths: ['src'],
+  forbiddenPaths: [],
+  maxFilesChanged: 5
+};
+const validInvocationPlan = { baseBranch: 'main', baseCommit: '0123456789abcdef0123456789abcdef01234567' };
+const validInvocationConfig = { model: 'openai/qwen-test', baseUrl: 'http://127.0.0.1:3000/v1', apiKeyRef: 'dummy' };
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: validInvocationRequest,
+    plan: validInvocationPlan,
+    config: validInvocationConfig,
+    limits: OPENHANDS_EXECUTOR_LIMITS,
+    invocationEnabled: false
+  });
+  line(r.ok === true && r.constraints.mandatoryForbiddenPaths.includes(OPENHANDS_MANDATORY_FORBIDDEN[0]),
+    `F valid future invocation constraints pass and carry mandatory forbidden paths -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: { ...validInvocationRequest, allowedPaths: [] },
+    plan: validInvocationPlan,
+    config: validInvocationConfig
+  });
+  line(r.ok === false && r.setupGated === true && r.missing.includes('allowed_paths_present'),
+    `F missing allowedPaths setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: { ...validInvocationRequest, executionConfirmedBaseBranch: 'other' },
+    plan: validInvocationPlan,
+    config: validInvocationConfig
+  });
+  line(r.ok === false && r.missing.includes('branch_base_pin'),
+    `F mismatched base pin setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: { ...validInvocationRequest, approvedBy: '' },
+    plan: validInvocationPlan,
+    config: validInvocationConfig
+  });
+  line(r.ok === false && r.missing.includes('explicit_user_approval_state'),
+    `F missing explicit approval setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: validInvocationRequest,
+    plan: validInvocationPlan,
+    config: { ...validInvocationConfig, baseUrl: '' }
+  });
+  line(r.ok === false && r.missing.includes('model_endpoint_config_present'),
+    `F missing model endpoint setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: validInvocationRequest,
+    plan: validInvocationPlan,
+    config: validInvocationConfig,
+    limits: { ...OPENHANDS_EXECUTOR_LIMITS, validationTimeoutMs: 0 }
+  });
+  line(r.ok === false && r.missing.includes('runtime_timeout_present'),
+    `F missing runtime timeout setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: { ...validInvocationRequest, maxFilesChanged: 1.5 },
+    plan: validInvocationPlan,
+    config: validInvocationConfig
+  });
+  line(r.ok === false && r.missing.includes('changed_file_count_limit'),
+    `F non-integer changed-file limit setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: validInvocationRequest,
+    plan: validInvocationPlan,
+    config: validInvocationConfig,
+    limits: { ...OPENHANDS_EXECUTOR_LIMITS, validationOutputMaxBytes: Infinity }
+  });
+  line(r.ok === false && r.missing.includes('output_report_limits_present'),
+    `F unsafe output limit setup-gated -> ${JSON.stringify(r)}`);
+}
+
+console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, rejects unsafe base branches, dependency-gates missing worktree build deps, reports runtime/file/output limits, and setup-gates missing future invocation constraints.' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);

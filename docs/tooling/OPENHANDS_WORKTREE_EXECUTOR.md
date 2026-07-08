@@ -19,6 +19,10 @@ or edited in this build.
    commit, never from the caller's current `HEAD`. The main working tree,
    main/master, and the user's current branch are never touched.
 4. Invoke OpenHands — **disabled**; records `invoked: false` and makes no edits.
+   Before any future invocation could run, the executor also builds a
+   tool-level constraint contract covering allowed paths, mandatory forbidden
+   paths, base pin, limits, model/endpoint config, and explicit approval state.
+   Missing constraints are refused/setup-gated.
 5. Compute the **actual** changed files/diff in the worktree and enforce
    allowedPaths, forbiddenPaths, the protected-path block list, and
    maxFilesChanged **against the real diff** (not the declared intent).
@@ -39,7 +43,8 @@ or edited in this build.
 - key `dummy`
 
 The request cannot override the model, endpoint, shell commands, git
-operations, protected paths, runtime/output limits, or the validation allowlist.
+operations, protected paths, runtime/output limits, tool-level invocation
+constraints, or the validation allowlist.
 
 ## Base-branch pinning (blocker #6 - addressed)
 
@@ -112,6 +117,23 @@ authorises `src/application`. (The user-supplied `forbiddenPaths` denylist keeps
 its broader prefix match — over-blocking on a denylist is safe — and the
 mandatory protected-path block list is unchanged.)
 
+## Tool-level invocation constraints (blocker #7 — addressed as preflight)
+
+Real OpenHands invocation remains OFF, but the executor now builds and checks a
+future invocation contract before the harness proceeds. The contract must carry:
+
+- `allowedPaths` and the mandatory forbidden/protected paths;
+- the pinned base branch and resolved base commit;
+- the changed-file count limit;
+- validation runtime timeout and output/report caps;
+- fixed model/endpoint/API-key reference;
+- explicit human approval plus second execution confirmation.
+
+If any of these are missing or mismatched, the executor refuses/setup-gates the
+request before future invocation could occur. This does **not** call OpenHands
+and does **not** authorize real execution; it only makes the future invocation
+boundary explicit and testable while the server-side flag remains false.
+
 ## Enforcement rejection path verified (blocker #3 — addressed)
 
 The changed-file enforcement is verified to **reject a real violating diff**, not
@@ -157,8 +179,9 @@ request id, execution branch, pinned base branch, resolved base commit,
 worktree path, worktree-after-run (preserved/removed), whether OpenHands was
 invoked, model config, changed files, path-enforcement result
 (allowed/forbidden/protected), max-files result, diff summary, full-diff
-preview + `.patch` pointer, runtime/output limits, validation output and limit
-result, refused/blocked actions, and human next steps.
+preview + `.patch` pointer, runtime/output limits, tool-level invocation
+constraint checks, validation output and limit result, refused/blocked actions,
+and human next steps.
 
 ## Human review
 
@@ -171,11 +194,11 @@ commits or pushes.
 
 - Real OpenHands invocation is intentionally OFF
   (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`); enabling it is a future,
-  separately-approved slice (remaining blocker: tool-level `allowedPaths` /
-  invocation constraints (#7)). The `allowedPaths` boundary-match blocker (#4),
+  separately-approved slice. The `allowedPaths` boundary-match blocker (#4),
   enforcement rejection-path verification (#3), worktree build-dependency
-  detection/reporting (#5), base-branch pinning (#6), and executor
-  runtime/file/output limit reporting are addressed (see above).
+  detection/reporting (#5), base-branch pinning (#6), tool-level invocation
+  constraints (#7), and executor runtime/file/output limit reporting are
+  addressed as safety scaffolding (see above).
 - `npm run build` inside a fresh worktree now performs a dependency preflight
   first. If `node_modules` / local Vite binaries are absent, the run is clearly
   reported as setup-gated. This slice deliberately does not install, copy, or

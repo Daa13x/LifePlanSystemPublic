@@ -111,16 +111,26 @@ export function checkWorktreeValidationSetup(validationKey, hasPath, platform = 
 
 export function checkExecutorMaxFilesChanged(value, limits = OPENHANDS_EXECUTOR_LIMITS) {
   const maxFiles = Number(value) || 0;
-  const ok = maxFiles >= limits.maxFilesChangedMin && maxFiles <= limits.maxFilesChangedMax;
+  const min = Number(limits.maxFilesChangedMin);
+  const max = Number(limits.maxFilesChangedMax);
+  const ok = Number.isSafeInteger(maxFiles)
+    && Number.isSafeInteger(min)
+    && Number.isSafeInteger(max)
+    && maxFiles >= min
+    && maxFiles <= max;
   return {
     ok,
     maxFiles,
-    min: limits.maxFilesChangedMin,
-    max: limits.maxFilesChangedMax,
+    min,
+    max,
     reason: ok
-      ? `maxFilesChanged = ${maxFiles} (limit ${limits.maxFilesChangedMin}-${limits.maxFilesChangedMax})`
-      : `BLOCKED - maxFilesChanged = ${maxFiles}; must be ${limits.maxFilesChangedMin}-${limits.maxFilesChangedMax}`
+      ? `maxFilesChanged = ${maxFiles} (integer limit ${min}-${max})`
+      : `BLOCKED - maxFilesChanged = ${maxFiles}; must be an integer ${min}-${max}`
   };
+}
+
+function hasPositiveIntegerLimit(value) {
+  return Number.isSafeInteger(Number(value)) && Number(value) > 0;
 }
 
 export function summarizeExecutorCommandResult(result = {}, options = {}) {
@@ -169,6 +179,107 @@ export function limitExecutorReportText(value, maxChars, label = 'output') {
     originalChars: text.length,
     maxChars: limit,
     reason: `${label} fits within the report limit`
+  };
+}
+
+export function buildOpenHandsInvocationConstraints({
+  request = {},
+  plan = {},
+  config = {},
+  limits = OPENHANDS_EXECUTOR_LIMITS,
+  invocationEnabled = false
+} = {}) {
+  const checks = [];
+  const check = (gate, ok, detail) => {
+    checks.push({ gate, ok, detail });
+    return ok;
+  };
+
+  const allowedPaths = Array.isArray(request.allowedPaths) ? request.allowedPaths.filter(Boolean) : [];
+  const forbiddenPaths = Array.isArray(request.forbiddenPaths) ? request.forbiddenPaths.filter(Boolean) : [];
+  const baseCheck = validateExecutorBaseBranch(request.baseBranch || '');
+  const baseBranch = baseCheck.baseBranch;
+  const createdBaseBranch = String(request.baseBranchAtCreation || '');
+  const approvedBaseBranch = String(request.approvedBaseBranch || '');
+  const confirmedBaseBranch = String(request.executionConfirmedBaseBranch || '');
+  const baseCommit = String(plan.baseCommit || '').trim();
+  const maxFilesCheck = checkExecutorMaxFilesChanged(request.maxFilesChanged, limits);
+  const forbiddenWithMandatory = [...new Set([...forbiddenPaths, ...OPENHANDS_MANDATORY_FORBIDDEN])];
+
+  const approvalOk = (request.status === 'approved' || request.status === 'execution-planned')
+    && Boolean(request.approvedBy)
+    && Boolean(request.approvedAt)
+    && request.executionConfirmed === true
+    && Boolean(request.executionConfirmedBy)
+    && Boolean(request.executionConfirmedAt);
+  check('explicit_user_approval_state', approvalOk,
+    approvalOk ? 'approval and second confirmation are present' : 'missing approval/confirmation state for future invocation');
+
+  check('allowed_paths_present', allowedPaths.length > 0,
+    allowedPaths.length ? `${allowedPaths.length} allowed path(s)` : 'missing allowedPaths for future invocation');
+  const protectedHits = allowedPaths.filter((item) => violatesMandatoryForbidden(item));
+  check('mandatory_forbidden_paths_enforced', OPENHANDS_MANDATORY_FORBIDDEN.length > 0 && protectedHits.length === 0,
+    protectedHits.length ? `allowedPaths overlap protected locations: ${protectedHits.join(', ')}` : 'mandatory forbidden paths are bound and allowedPaths are clean');
+
+  const basePinned = baseCheck.ok
+    && createdBaseBranch === baseBranch
+    && approvedBaseBranch === baseBranch
+    && confirmedBaseBranch === baseBranch
+    && /^[0-9a-f]{40}$/i.test(baseCommit);
+  check('branch_base_pin', basePinned,
+    basePinned ? `base "${baseBranch}" pinned to ${baseCommit.slice(0, 12)}` : 'missing or mismatched creation/approval/confirmation base pin or resolved commit');
+
+  check('changed_file_count_limit', maxFilesCheck.ok, maxFilesCheck.reason);
+  check('runtime_timeout_present', hasPositiveIntegerLimit(limits.validationTimeoutMs),
+    hasPositiveIntegerLimit(limits.validationTimeoutMs) ? `validation timeout ${limits.validationTimeoutMs} ms` : 'missing integer validation runtime timeout');
+  const outputLimitsPresent = hasPositiveIntegerLimit(limits.validationOutputMaxBytes)
+    && hasPositiveIntegerLimit(limits.diffOutputMaxBytes)
+    && hasPositiveIntegerLimit(limits.validationReportOutputMaxChars)
+    && hasPositiveIntegerLimit(limits.diffReportPreviewMaxChars);
+  check('output_report_limits_present', outputLimitsPresent,
+    outputLimitsPresent ? 'validation/diff output and report limits are positive integers' : 'missing positive integer output/report limits');
+
+  const model = String(config.model || '').trim();
+  const baseUrl = String(config.baseUrl || '').trim();
+  const apiKeyRef = String(config.apiKeyRef || '').trim();
+  const modelConfigOk = Boolean(model) && /^https?:\/\//i.test(baseUrl) && Boolean(apiKeyRef);
+  check('model_endpoint_config_present', modelConfigOk,
+    modelConfigOk ? `${model} @ ${baseUrl}` : 'missing fixed model, endpoint URL, or API key reference');
+
+  const ok = checks.every((item) => item.ok);
+  return {
+    ok,
+    setupGated: !ok,
+    missing: checks.filter((item) => !item.ok).map((item) => item.gate),
+    reason: ok
+      ? 'Future OpenHands invocation constraints are complete; invocation remains controlled by the disabled server-side flag.'
+      : `Future OpenHands invocation setup-gated: ${checks.filter((item) => !item.ok).map((item) => item.gate).join(', ')}`,
+    checks,
+    constraints: {
+      invocationEnabled: Boolean(invocationEnabled),
+      allowedPaths,
+      forbiddenPaths: forbiddenWithMandatory,
+      mandatoryForbiddenPaths: [...OPENHANDS_MANDATORY_FORBIDDEN],
+      baseBranch,
+      baseCommit,
+      maxFilesChanged: maxFilesCheck.maxFiles,
+      validationTimeoutMs: limits.validationTimeoutMs,
+      validationOutputMaxBytes: limits.validationOutputMaxBytes,
+      validationReportOutputMaxChars: limits.validationReportOutputMaxChars,
+      diffOutputMaxBytes: limits.diffOutputMaxBytes,
+      diffReportPreviewMaxChars: limits.diffReportPreviewMaxChars,
+      model,
+      baseUrl,
+      apiKeyRef,
+      approval: {
+        status: request.status || '',
+        approvedBy: request.approvedBy || '',
+        approvedAt: request.approvedAt || '',
+        executionConfirmed: request.executionConfirmed === true,
+        executionConfirmedBy: request.executionConfirmedBy || '',
+        executionConfirmedAt: request.executionConfirmedAt || ''
+      }
+    }
   };
 }
 

@@ -16,6 +16,7 @@ import {
   checkExecutorMaxFilesChanged,
   summarizeExecutorCommandResult,
   limitExecutorReportText,
+  buildOpenHandsInvocationConstraints,
   parsePorcelainPaths,
   isChangedFileAllowed,
   enforceChangedFiles
@@ -2661,7 +2662,7 @@ async function evaluateExecutionPlan(request) {
       openHandsConfig: OPENHANDS_EXEC_CONFIG,
       openHandsInvoked: false,
       filesChanged: [],
-      wouldRefuse: ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'branch delete', 'force-push', 'push to main/master', 'arbitrary shell from request', 'editing protected paths', 'base branch changes after approval']
+      wouldRefuse: ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'branch delete', 'force-push', 'push to main/master', 'arbitrary shell from request', 'editing protected paths', 'base branch changes after approval', 'future invocation without tool-level constraints']
     }
   };
 }
@@ -2711,9 +2712,19 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
   }
 
   const evaluation = await evaluateExecutionPlan(request);
+  const toolConstraints = buildOpenHandsInvocationConstraints({
+    request,
+    plan: evaluation.plan,
+    config: OPENHANDS_EXEC_CONFIG,
+    limits: OPENHANDS_EXECUTOR_LIMITS,
+    invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED
+  });
+  evaluation.plan.toolInvocationConstraints = toolConstraints;
+  const planEligible = evaluation.eligible && toolConstraints.ok;
   const worktrees = await runCli('git', ['worktree', 'list']);
 
   const gateLines = evaluation.gates.map((g) => `- [${g.ok ? 'PASS' : 'BLOCK'}] ${g.gate}: ${g.detail}`).join('\n');
+  const toolConstraintLines = toolConstraints.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n');
   const reportLines = [
     `# OpenHands Execution Plan (DRY RUN) — ${request.id}`,
     '',
@@ -2755,6 +2766,11 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
     `- API key: ${OPENHANDS_EXEC_CONFIG.apiKeyRef}`,
     `- Invoked in this dry run: no`,
     '',
+    '## Future invocation constraints (preflight only)',
+    `- Status: ${toolConstraints.ok ? 'complete' : 'setup-gated'}`,
+    `- Reason: ${toolConstraints.reason}`,
+    toolConstraintLines,
+    '',
     '## Refused / blocked actions',
     evaluation.plan.wouldRefuse.map((a) => `- ${a}`).join('\n'),
     '',
@@ -2764,9 +2780,9 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
     '```',
     '',
     '## Human next steps',
-    evaluation.eligible
+    planEligible
       ? '- All gates passed. A human may later approve the real (still-unbuilt) executor. Until then, no code has been changed. Any commit/push/PR remains a manual step via the Source Control panel.'
-      : '- One or more gates BLOCKED (see above). Fix the request (paths / approval / confirmation) before any execution is considered. Nothing was changed.',
+      : '- One or more gates/setup checks BLOCKED (see above). Fix the request (paths / approval / confirmation / tool constraints) before any execution is considered. Nothing was changed.',
     ''
   ];
   fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
@@ -2775,23 +2791,25 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
 
   request.status = 'execution-planned';
   request.executionPlannedAt = new Date().toISOString();
-  request.executionEligible = evaluation.eligible;
+  request.executionEligible = planEligible;
   request.executionPlannedBaseBranch = evaluation.plan.baseBranch;
   request.executionPlannedBaseCommit = evaluation.plan.baseCommit;
+  request.executionToolConstraintsOk = toolConstraints.ok;
+  request.executionToolConstraintsReason = toolConstraints.reason;
   request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
   fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
 
   ok(res, {
     request,
-    eligible: evaluation.eligible,
+    eligible: planEligible,
     gates: evaluation.gates,
     plan: evaluation.plan,
     reportPath: request.reportPath,
     performedActions: ['evaluated safety gates', 'wrote dry-run plan report'],
     refusedActions: ['edit code', 'invoke OpenHands', 'create worktree', 'commit', 'push', 'merge', 'reset', 'delete branch', 'force-push', 'run arbitrary command'],
-    message: evaluation.eligible
+    message: planEligible
       ? 'Dry-run plan complete: all gates passed. No code was changed and OpenHands was not invoked.'
-      : 'Dry-run plan complete: one or more gates BLOCKED. No code was changed. See the report.'
+      : 'Dry-run plan complete: one or more gates/setup checks BLOCKED. No code was changed. See the report.'
   });
 });
 
@@ -2812,13 +2830,27 @@ const OPENHANDS_WORKTREE_DIR = path.join(LPS_TOOLING_DIR, 'worktrees');
 
 // Real OpenHands call lives here in the future. Disabled by the constant above,
 // so this slice never contacts the model endpoint and never edits code.
-async function invokeOpenHandsExecutor() {
+async function invokeOpenHandsExecutor(toolConstraints) {
+  if (!toolConstraints || toolConstraints.ok !== true) {
+    return {
+      invoked: false,
+      setupGated: true,
+      reason: `Real OpenHands invocation refused: missing tool-level constraints (${toolConstraints?.missing?.join(', ') || 'unknown'}).`,
+      constraints: toolConstraints || null
+    };
+  }
   if (!OPENHANDS_EXECUTOR_INVOCATION_ENABLED) {
-    return { invoked: false, reason: 'Real OpenHands invocation is intentionally DISABLED (server-side constant OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false). No code was generated or edited.' };
+    return {
+      invoked: false,
+      setupGated: false,
+      reason: 'Real OpenHands invocation is intentionally DISABLED (server-side constant OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false). No code was generated or edited.',
+      constraints: toolConstraints.constraints
+    };
   }
   // Future, separately-approved slice would call the OpenHands agent-server here
-  // with OPENHANDS_EXEC_CONFIG (fixed model/endpoint/key) and constrain edits to
-  // allowedPaths. Intentionally not reachable in this build.
+  // with OPENHANDS_EXEC_CONFIG (fixed model/endpoint/key), allowedPaths,
+  // mandatory forbidden paths, base pin, and runtime/output limits from
+  // toolConstraints. Intentionally not reachable in this build.
   return { invoked: false, reason: 'not implemented' };
 }
 
@@ -2839,6 +2871,16 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
   if (!evaluation.eligible) {
     return fail(res, 403, `Executor refused: not eligible. Blocked gates: ${evaluation.gates.filter((g) => !g.ok).map((g) => g.gate).join(', ')}. Approve, confirm execution, and fix paths first.`);
   }
+  const toolConstraints = buildOpenHandsInvocationConstraints({
+    request,
+    plan: evaluation.plan,
+    config: OPENHANDS_EXEC_CONFIG,
+    limits: OPENHANDS_EXECUTOR_LIMITS,
+    invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED
+  });
+  if (!toolConstraints.ok) {
+    return fail(res, 428, `Executor refused: future OpenHands invocation constraints are setup-gated (${toolConstraints.missing.join(', ')}). Fix approval, paths, base pin, limits, or model config before execution.`);
+  }
 
   const execBranch = proposedExecutionBranch(request.id);
   const pinnedBaseBranch = evaluation.plan.baseBranch;
@@ -2853,7 +2895,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
   const worktreePath = path.join(OPENHANDS_WORKTREE_DIR, String(request.id).replace(/[^A-Za-z0-9._-]/g, ''));
   const worktreeRel = path.relative(root, worktreePath).replaceAll('\\', '/');
   let worktreeCreated = false;
-  const refusedActions = ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'delete branch', 'force-push', 'push to main/master', 'arbitrary request shell', 'edit outside allowedPaths', 'base branch changes after approval'];
+  const refusedActions = ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'delete branch', 'force-push', 'push to main/master', 'arbitrary request shell', 'edit outside allowedPaths', 'base branch changes after approval', 'future invocation without tool-level constraints'];
 
   try {
     // Isolated worktree on a fresh dedicated branch from the pinned base commit
@@ -2864,7 +2906,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     worktreeCreated = true;
 
     // Invocation (disabled by constant → no edits made).
-    const invocation = await invokeOpenHandsExecutor();
+    const invocation = await invokeOpenHandsExecutor(toolConstraints);
 
     // Post-run enforcement against ACTUAL changed files in the worktree.
     const wtStatus = await runCli('git', ['-C', worktreePath, 'status', '--porcelain']);
@@ -2972,6 +3014,11 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       `- Reason: ${invocation.reason}`,
       `- Model config (fixed; request cannot override): ${OPENHANDS_EXEC_CONFIG.model} @ ${OPENHANDS_EXEC_CONFIG.baseUrl}, key ${OPENHANDS_EXEC_CONFIG.apiKeyRef}`,
       '',
+      '## Tool-level invocation constraints (preflight; no real invocation)',
+      `- Status: ${toolConstraints.ok ? 'complete' : 'setup-gated'}`,
+      `- Reason: ${toolConstraints.reason}`,
+      toolConstraints.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n'),
+      '',
       '## Changed files (actual, in worktree)',
       changedFiles.length ? changedFiles.map((f) => `- ${f}`).join('\n') : '- none',
       '',
@@ -3040,6 +3087,9 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     request.executorLimits = OPENHANDS_EXECUTOR_LIMITS;
     request.executorDiffLimitHit = diffLimit.limitHit;
     request.executorDiffResultReason = diffLimit.reason;
+    request.executorToolConstraintsOk = toolConstraints.ok;
+    request.executorToolConstraintsReason = toolConstraints.reason;
+    request.executorToolConstraints = toolConstraints.constraints;
     request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
     request.patchPath = patchRel;
     request.worktreePreserved = hasRealDiff;
@@ -3067,6 +3117,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       request,
       invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
       openHandsInvoked: invocation.invoked,
+      toolConstraints,
       executionBranch: execBranch,
       baseBranch: pinnedBaseBranch,
       baseCommit: pinnedBaseCommit,
