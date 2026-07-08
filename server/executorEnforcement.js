@@ -28,6 +28,19 @@ export const OPENHANDS_MANDATORY_FORBIDDEN = [
   'rules/'
 ];
 
+export const OPENHANDS_EXECUTOR_LIMITS = Object.freeze({
+  maxFilesChangedMin: 1,
+  maxFilesChangedMax: 5,
+  validationTimeoutMs: 5 * 60 * 1000,
+  validationOutputMaxBytes: 4 * 1024 * 1024,
+  validationReportOutputMaxChars: 3000,
+  diffOutputMaxBytes: 16 * 1024 * 1024,
+  diffReportPreviewMaxChars: 4000,
+  worktreeCreateTimeoutMs: 120000,
+  untrackedIntentTimeoutMs: 60000,
+  worktreeRemoveTimeoutMs: 60000
+});
+
 export function normalizeRequestPath(value) {
   return String(value || '').trim().replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase();
 }
@@ -93,6 +106,69 @@ export function checkWorktreeValidationSetup(validationKey, hasPath, platform = 
     setupGated: false,
     missing: [],
     reason: 'npm run build dependencies are present in the isolated worktree'
+  };
+}
+
+export function checkExecutorMaxFilesChanged(value, limits = OPENHANDS_EXECUTOR_LIMITS) {
+  const maxFiles = Number(value) || 0;
+  const ok = maxFiles >= limits.maxFilesChangedMin && maxFiles <= limits.maxFilesChangedMax;
+  return {
+    ok,
+    maxFiles,
+    min: limits.maxFilesChangedMin,
+    max: limits.maxFilesChangedMax,
+    reason: ok
+      ? `maxFilesChanged = ${maxFiles} (limit ${limits.maxFilesChangedMin}-${limits.maxFilesChangedMax})`
+      : `BLOCKED - maxFilesChanged = ${maxFiles}; must be ${limits.maxFilesChangedMin}-${limits.maxFilesChangedMax}`
+  };
+}
+
+export function summarizeExecutorCommandResult(result = {}, options = {}) {
+  const label = options.label || 'command';
+  if (result.timedOut) {
+    return {
+      ok: false,
+      limitHit: true,
+      limit: 'runtime',
+      reason: `${label} hit runtime limit (${options.timeoutMs || result.timeoutMs || 'unknown'} ms)`
+    };
+  }
+  if (result.outputLimitHit) {
+    return {
+      ok: false,
+      limitHit: true,
+      limit: 'output',
+      reason: `${label} hit output limit (${options.outputMaxBytes || result.maxBufferBytes || 'unknown'} bytes)`
+    };
+  }
+  return {
+    ok: Boolean(result.ok),
+    limitHit: false,
+    limit: '',
+    reason: result.ok
+      ? `${label} completed within runtime/output limits`
+      : `${label} failed before any runtime/output limit was reported`
+  };
+}
+
+export function limitExecutorReportText(value, maxChars, label = 'output') {
+  const text = String(value ?? '');
+  const limit = Number(maxChars) || 0;
+  if (limit > 0 && text.length > limit) {
+    return {
+      text: text.slice(0, limit),
+      truncated: true,
+      originalChars: text.length,
+      maxChars: limit,
+      reason: `${label} truncated to ${limit} chars for the report (${text.length} chars total)`
+    };
+  }
+  return {
+    text,
+    truncated: false,
+    originalChars: text.length,
+    maxChars: limit,
+    reason: `${label} fits within the report limit`
   };
 }
 

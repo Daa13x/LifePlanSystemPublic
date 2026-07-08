@@ -26,7 +26,9 @@ or edited in this build.
    or `npm run build`) inside the worktree. For `npm run build`, first check
    that build dependencies are actually present in that isolated worktree; if
    they are missing, report `setup-gated` instead of attempting an implicit
-   install/copy/link or pretending build validation ran.
+   install/copy/link or pretending build validation ran. Validation runs with
+   explicit runtime/output limits and the report names timeout or output-cap
+   failures instead of treating them as generic validation failures.
 7. Write a report to `.lps/tooling/openhands/reports/<id>.md`.
 8. Teardown removes the throwaway worktree (never deletes the branch).
 
@@ -37,7 +39,7 @@ or edited in this build.
 - key `dummy`
 
 The request cannot override the model, endpoint, shell commands, git
-operations, protected paths, or the validation allowlist.
+operations, protected paths, runtime/output limits, or the validation allowlist.
 
 ## Base-branch pinning (blocker #6 - addressed)
 
@@ -68,10 +70,11 @@ executor silently run from the user's current branch.
 
 ## Diff preservation (blockers #1 and #2 — addressed)
 
-- **Full uncapped `.patch`:** every run writes the complete diff to
-  `.lps/tooling/openhands/reports/<id>.patch`. The report embeds only a
-  4000-char preview and points to the `.patch` for the full content, so a large
-  future diff is never lost to the preview cap.
+- **Diff artifact with explicit capture limit:** every run writes the captured
+  diff to `.lps/tooling/openhands/reports/<id>.patch`. The report embeds only a
+  4000-char preview and points to the `.patch` for review. If `git diff --binary`
+  ever hits the explicit diff-output cap, the report names that limit hit and
+  the preserved worktree remains the review source of truth.
 - **Untracked new files are captured:** plain `git diff` omits untracked new
   files, so before producing the patch the executor marks any untracked files
   intent-to-add (`git add -N`) inside the worktree's own index — isolated, no
@@ -154,8 +157,8 @@ request id, execution branch, pinned base branch, resolved base commit,
 worktree path, worktree-after-run (preserved/removed), whether OpenHands was
 invoked, model config, changed files, path-enforcement result
 (allowed/forbidden/protected), max-files result, diff summary, full-diff
-preview + `.patch` pointer, validation output, refused/blocked actions, and
-human next steps.
+preview + `.patch` pointer, runtime/output limits, validation output and limit
+result, refused/blocked actions, and human next steps.
 
 ## Human review
 
@@ -169,10 +172,10 @@ commits or pushes.
 - Real OpenHands invocation is intentionally OFF
   (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`); enabling it is a future,
   separately-approved slice (remaining blocker: tool-level `allowedPaths` /
-  runtime caps on invocation (#7)). The `allowedPaths` boundary-match blocker
-  (#4), enforcement rejection-path verification (#3), worktree build-dependency
-  detection/reporting (#5), and base-branch pinning (#6) are addressed (see
-  above).
+  invocation constraints (#7)). The `allowedPaths` boundary-match blocker (#4),
+  enforcement rejection-path verification (#3), worktree build-dependency
+  detection/reporting (#5), base-branch pinning (#6), and executor
+  runtime/file/output limit reporting are addressed (see above).
 - `npm run build` inside a fresh worktree now performs a dependency preflight
   first. If `node_modules` / local Vite binaries are absent, the run is clearly
   reported as setup-gated. This slice deliberately does not install, copy, or

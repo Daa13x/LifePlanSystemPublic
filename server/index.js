@@ -11,7 +11,11 @@ import {
   normalizeRequestPath,
   violatesMandatoryForbidden,
   validateExecutorBaseBranch,
+  OPENHANDS_EXECUTOR_LIMITS,
   checkWorktreeValidationSetup,
+  checkExecutorMaxFilesChanged,
+  summarizeExecutorCommandResult,
+  limitExecutorReportText,
   parsePorcelainPaths,
   isChangedFileAllowed,
   enforceChangedFiles
@@ -46,22 +50,31 @@ function sleep(ms) {
 }
 
 async function runCli(command, args, options = {}) {
+  const timeoutMs = options.timeout || 20000;
+  const maxBufferBytes = options.maxBuffer || 1024 * 1024;
   try {
     const useShell = process.platform === 'win32' && /\.cmd$/i.test(command);
     const result = await execFileAsync(command, args, {
-      cwd: root,
-      timeout: options.timeout || 20000,
+      cwd: options.cwd || root,
+      timeout: timeoutMs,
       windowsHide: true,
       shell: useShell,
-      maxBuffer: options.maxBuffer || 1024 * 1024
+      maxBuffer: maxBufferBytes
     });
-    return { available: true, ok: true, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+    return { available: true, ok: true, stdout: result.stdout.trim(), stderr: result.stderr.trim(), timedOut: false, outputLimitHit: false, timeoutMs, maxBufferBytes };
   } catch (error) {
     const missing = error.code === 'ENOENT';
+    const outputLimitHit = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || /maxBuffer/i.test(String(error.message || ''));
+    const timedOut = !outputLimitHit && Boolean(error.killed || error.signal || /timed out/i.test(String(error.message || '')));
     return {
       available: !missing,
       ok: false,
       code: error.code,
+      signal: error.signal || '',
+      timedOut,
+      outputLimitHit,
+      timeoutMs,
+      maxBufferBytes,
       stdout: error.stdout?.trim() || '',
       stderr: error.stderr?.trim() || error.message
     };
@@ -2618,8 +2631,9 @@ async function evaluateExecutionPlan(request) {
   const execBranchFree = !(await branchExists(execBranch));
   pass('execution_branch_available', execBranchFree, execBranchFree ? `"${execBranch}" does not exist yet` : `"${execBranch}" already exists`);
 
-  const maxFiles = Number(request.maxFilesChanged) || 0;
-  const maxFilesSane = pass('max_files_changed', maxFiles >= 1 && maxFiles <= 5, `maxFilesChanged = ${maxFiles} (limit 1–5)`);
+  const maxFilesCheck = checkExecutorMaxFilesChanged(request.maxFilesChanged);
+  const maxFiles = maxFilesCheck.maxFiles;
+  const maxFilesSane = pass('max_files_changed', maxFilesCheck.ok, maxFilesCheck.reason);
 
   const requested = String(request.testCommand || '').trim();
   const validationKey = requested || RUNNER_DEFAULT_VALIDATION;
@@ -2642,6 +2656,7 @@ async function evaluateExecutionPlan(request) {
       allowedPaths,
       forbiddenPaths,
       maxFilesChanged: maxFiles,
+      limits: OPENHANDS_EXECUTOR_LIMITS,
       validationCommand: validationKey,
       openHandsConfig: OPENHANDS_EXEC_CONFIG,
       openHandsInvoked: false,
@@ -2844,7 +2859,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     // Isolated worktree on a fresh dedicated branch from the pinned base commit
     // (never touches main tree; never uses the caller's current HEAD).
     fs.mkdirSync(OPENHANDS_WORKTREE_DIR, { recursive: true });
-    const add = await runCli('git', ['worktree', 'add', '-b', execBranch, worktreePath, '--', pinnedBaseCommit], { timeout: 120000 });
+    const add = await runCli('git', ['worktree', 'add', '-b', execBranch, worktreePath, '--', pinnedBaseCommit], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeCreateTimeoutMs });
     if (!add.ok) return fail(res, 500, `Executor could not create the isolated worktree: ${add.stderr || add.stdout}`);
     worktreeCreated = true;
 
@@ -2870,19 +2885,20 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       .filter(Boolean);
     let untrackedCaptured = 0;
     if (untrackedFiles.length) {
-      const addRes = await runCli('git', ['-C', worktreePath, 'add', '-N', '--', ...untrackedFiles], { timeout: 60000 });
+      const addRes = await runCli('git', ['-C', worktreePath, 'add', '-N', '--', ...untrackedFiles], { timeout: OPENHANDS_EXECUTOR_LIMITS.untrackedIntentTimeoutMs });
       if (addRes.ok) untrackedCaptured = untrackedFiles.length;
     }
-    const wtDiff = await runCli('git', ['-C', worktreePath, 'diff', '--binary'], { maxBuffer: 16 * 1024 * 1024 });
+    const wtDiff = await runCli('git', ['-C', worktreePath, 'diff', '--binary'], { maxBuffer: OPENHANDS_EXECUTOR_LIMITS.diffOutputMaxBytes });
+    const diffLimit = summarizeExecutorCommandResult(wtDiff, { label: 'git diff --binary', outputMaxBytes: OPENHANDS_EXECUTOR_LIMITS.diffOutputMaxBytes });
 
-    // Always persist the FULL, uncapped diff as a .patch artifact so a large
-    // future diff is never lost to the report's preview cap. Written even when
-    // empty (invocation OFF) to keep the report/patch pair consistent.
+    // Always persist the diff artifact so the report has a review pointer.
+    // If git diff hits the explicit output limit, the report says so and the
+    // preserved worktree remains the source of truth for review.
     fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
     const patchFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.patch`);
     fs.writeFileSync(patchFile, wtDiff.stdout || '', 'utf8');
     const patchRel = path.relative(root, patchFile).replaceAll('\\', '/');
-    const diffTruncated = (wtDiff.stdout || '').length > 4000;
+    const diffPreview = limitExecutorReportText(wtDiff.stdout || '(empty)', OPENHANDS_EXECUTOR_LIMITS.diffReportPreviewMaxChars, 'diff preview');
     const untrackedNote = untrackedFiles.length
       ? `${untrackedCaptured}/${untrackedFiles.length} untracked new file(s) captured via intent-to-add`
       : 'no untracked new files';
@@ -2901,17 +2917,35 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       ok: null,
       setupGated: Boolean(validation && validationSetup.setupGated),
       missingDependencies: validationSetup.missing,
+      limitHit: false,
+      limit: '',
+      resultReason: validation ? validationSetup.reason : 'not run',
+      outputTruncated: false,
       output: validation ? validationSetup.reason : 'not run'
     };
     if (validation && validationSetup.ok) {
-      const vr = await runCli(validation.command, validation.args, { cwd: worktreePath, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+      const vr = await runCli(validation.command, validation.args, {
+        cwd: worktreePath,
+        timeout: OPENHANDS_EXECUTOR_LIMITS.validationTimeoutMs,
+        maxBuffer: OPENHANDS_EXECUTOR_LIMITS.validationOutputMaxBytes
+      });
+      const validationLimit = summarizeExecutorCommandResult(vr, {
+        label: validationKey,
+        timeoutMs: OPENHANDS_EXECUTOR_LIMITS.validationTimeoutMs,
+        outputMaxBytes: OPENHANDS_EXECUTOR_LIMITS.validationOutputMaxBytes
+      });
+      const validationOutput = limitExecutorReportText(vr.stdout || vr.stderr || '', OPENHANDS_EXECUTOR_LIMITS.validationReportOutputMaxChars, 'validation output');
       validationResult = {
         command: validationKey,
         ran: true,
         ok: vr.ok,
         setupGated: false,
         missingDependencies: [],
-        output: (vr.stdout || vr.stderr || '').slice(0, 3000)
+        limitHit: validationLimit.limitHit,
+        limit: validationLimit.limit,
+        resultReason: validationLimit.reason,
+        outputTruncated: validationOutput.truncated,
+        output: validationOutput.text || '(no output)'
       };
     }
 
@@ -2945,22 +2979,33 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       `- allowedPaths / forbiddenPaths / protected-path scan: ${enforcement.ok ? 'PASS' : 'BLOCKED'}`,
       enforcement.violations.length ? enforcement.violations.map((v) => `  - ${v}`).join('\n') : '  - no violations',
       `- maxFilesChanged: ${enforcement.changedCount}/${enforcement.maxFiles}`,
+      `- Allowed file-count limit range: ${OPENHANDS_EXECUTOR_LIMITS.maxFilesChangedMin}-${OPENHANDS_EXECUTOR_LIMITS.maxFilesChangedMax}`,
       '',
       '## Diff summary',
       changedFiles.length ? `- ${changedFiles.length} file(s) changed` : '- no diff (no edits were made)',
       '',
       '## Full diff',
-      `- Full uncapped diff written to: ${patchRel} (git diff --binary; ${untrackedNote})`,
-      diffTruncated
-        ? '- The preview below is truncated to 4000 chars; use the .patch file for the complete diff.'
-        : '- The complete diff is shown below (also in the .patch file).',
+      `- Diff artifact written to: ${patchRel} (git diff --binary; capture limit ${OPENHANDS_EXECUTOR_LIMITS.diffOutputMaxBytes} bytes; ${untrackedNote})`,
+      `- Diff capture: ${diffLimit.limitHit ? 'LIMIT HIT' : 'ok'} - ${diffLimit.reason}`,
+      diffPreview.truncated
+        ? `- ${diffPreview.reason}; use the .patch file and preserved worktree for review.`
+        : '- The diff preview fits within the report limit.',
       '```diff',
-      (wtDiff.stdout || '(empty)').slice(0, 4000),
+      diffPreview.text,
       '```',
+      '',
+      '## Runtime / output limits',
+      `- Validation timeout: ${OPENHANDS_EXECUTOR_LIMITS.validationTimeoutMs} ms`,
+      `- Validation output capture limit: ${OPENHANDS_EXECUTOR_LIMITS.validationOutputMaxBytes} bytes`,
+      `- Validation report output limit: ${OPENHANDS_EXECUTOR_LIMITS.validationReportOutputMaxChars} chars`,
+      `- Diff capture limit: ${OPENHANDS_EXECUTOR_LIMITS.diffOutputMaxBytes} bytes`,
+      `- Diff report preview limit: ${OPENHANDS_EXECUTOR_LIMITS.diffReportPreviewMaxChars} chars`,
       '',
       '## Validation output (allowlisted; run in worktree)',
       `- Command: ${validationResult.command} — ${validationResult.ran ? (validationResult.ok ? 'ok' : 'failed') : (validationResult.setupGated ? 'setup-gated' : 'not run')}`,
       `- Dependency preflight: ${validationSetup.ok ? 'ok' : 'setup-gated'} — ${validationSetup.reason}`,
+      `- Runtime/output result: ${validationResult.limitHit ? 'LIMIT HIT' : 'ok'} — ${validationResult.resultReason}`,
+      validationResult.outputTruncated ? `- Validation output report cap: truncated to ${OPENHANDS_EXECUTOR_LIMITS.validationReportOutputMaxChars} chars` : '- Validation output report cap: not truncated',
       '```',
       validationResult.output,
       '```',
@@ -2989,6 +3034,12 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     request.executorValidationOk = validationResult.ok;
     request.executorValidationSetupGated = validationResult.setupGated;
     request.executorValidationMissingDependencies = validationResult.missingDependencies;
+    request.executorValidationLimitHit = validationResult.limitHit;
+    request.executorValidationLimit = validationResult.limit;
+    request.executorValidationResultReason = validationResult.resultReason;
+    request.executorLimits = OPENHANDS_EXECUTOR_LIMITS;
+    request.executorDiffLimitHit = diffLimit.limitHit;
+    request.executorDiffResultReason = diffLimit.reason;
     request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
     request.patchPath = patchRel;
     request.worktreePreserved = hasRealDiff;
@@ -3004,7 +3055,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       // Preserve: neither the teardown nor the error-path net removes it.
       worktreeCreated = false;
     } else {
-      const removed = await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: 60000 });
+      const removed = await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeRemoveTimeoutMs });
       await runCli('git', ['worktree', 'prune']);
       worktreeRemoved = removed.ok;
       worktreeCreated = false;
@@ -3023,6 +3074,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       changedFiles,
       enforcement,
       validation: validationResult,
+      limits: OPENHANDS_EXECUTOR_LIMITS,
+      diffLimit,
       reportPath: request.reportPath,
       patchPath: patchRel,
       untrackedCaptured,
@@ -3038,7 +3091,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     // Error-path safety net: if teardown did not already run (an error was
     // thrown before it), remove the throwaway worktree. Never deletes a branch.
     if (worktreeCreated) {
-      await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: 60000 });
+      await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeRemoveTimeoutMs });
       await runCli('git', ['worktree', 'prune']);
     }
   }

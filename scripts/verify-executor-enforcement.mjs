@@ -21,7 +21,10 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   checkWorktreeValidationSetup,
+  checkExecutorMaxFilesChanged,
   enforceChangedFiles,
+  limitExecutorReportText,
+  summarizeExecutorCommandResult,
   parsePorcelainPaths,
   validateExecutorBaseBranch,
 } from '../server/executorEnforcement.js';
@@ -217,5 +220,39 @@ console.log('\n--- Part D: worktree validation dependency gate (pure helper) ---
   line(r.ok === true && r.setupGated === false, `D npm run build allowed when POSIX worktree deps are present -> ${JSON.stringify(r)}`);
 }
 
-console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, rejects unsafe base branches, and dependency-gates missing worktree build deps.' : failures + ' CHECK(S) FAILED'}`);
+// ---------------------------------------------------------------------------
+// Part E - executor runtime/file/output limits. These pure checks prove the
+// harness can name limit failures without enabling real OpenHands invocation.
+// ---------------------------------------------------------------------------
+console.log('\n--- Part E: executor runtime/file/output limits (pure helpers) ---');
+{
+  const r = checkExecutorMaxFilesChanged(0);
+  line(r.ok === false && r.reason.includes('must be 1-5'), `E reject maxFilesChanged below limit -> ${JSON.stringify(r)}`);
+}
+{
+  const r = checkExecutorMaxFilesChanged(5);
+  line(r.ok === true && r.maxFiles === 5, `E allow maxFilesChanged at upper bound -> ${JSON.stringify(r)}`);
+}
+{
+  const r = checkExecutorMaxFilesChanged(6);
+  line(r.ok === false && r.reason.includes('must be 1-5'), `E reject maxFilesChanged above limit -> ${JSON.stringify(r)}`);
+}
+{
+  const r = summarizeExecutorCommandResult({ ok: false, timedOut: true, timeoutMs: 123 }, { label: 'validation', timeoutMs: 123 });
+  line(r.limitHit === true && r.limit === 'runtime' && r.reason.includes('runtime limit'), `E runtime timeout is named -> ${JSON.stringify(r)}`);
+}
+{
+  const r = summarizeExecutorCommandResult({ ok: false, outputLimitHit: true, maxBufferBytes: 456 }, { label: 'validation', outputMaxBytes: 456 });
+  line(r.limitHit === true && r.limit === 'output' && r.reason.includes('output limit'), `E output cap is named -> ${JSON.stringify(r)}`);
+}
+{
+  const r = limitExecutorReportText('abcdef', 3, 'validation output');
+  line(r.truncated === true && r.text === 'abc' && r.reason.includes('truncated'), `E report text truncates clearly -> ${JSON.stringify(r)}`);
+}
+{
+  const r = limitExecutorReportText('abc', 3, 'validation output');
+  line(r.truncated === false && r.text === 'abc', `E report text within limit is preserved -> ${JSON.stringify(r)}`);
+}
+
+console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, rejects unsafe base branches, dependency-gates missing worktree build deps, and reports runtime/file/output limits.' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);
