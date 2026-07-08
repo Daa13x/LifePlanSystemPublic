@@ -22,6 +22,7 @@ import path from 'node:path';
 import {
   enforceChangedFiles,
   parsePorcelainPaths,
+  validateExecutorBaseBranch,
 } from '../server/executorEnforcement.js';
 
 let failures = 0;
@@ -145,5 +146,48 @@ expectAllow(['docs/file.md'], { allowedPaths: ['docs'] }, 'B allowed=[docs] chan
 expectAllow(['README.md'], { allowedPaths: ['README.md'] }, 'B allowed=[README.md] changed=README.md');
 expectAllow(['docs/tooling/OPENHANDS_WORKTREE_EXECUTOR.md'], { allowedPaths: ['docs/tooling'] }, 'B allowed=[docs/tooling] changed=docs/tooling/OPENHANDS_WORKTREE_EXECUTOR.md');
 
-console.log(`\n${failures === 0 ? 'ALL PASS — executor enforcement rejects real violating diffs and accepts allowed changes.' : failures + ' CHECK(S) FAILED'}`);
+// ---------------------------------------------------------------------------
+// Part C - base-branch pinning input validation. The server persists this
+// normalized base branch at request creation, pins it again at approval and
+// confirmation, and uses the resolved commit for `git worktree add -- <commit>`.
+// These cases prove malicious values cannot smuggle git flags, revision syntax,
+// shell-ish separators, or alternate full refs through the request JSON.
+// ---------------------------------------------------------------------------
+console.log('\n--- Part C: base-branch validation matrix (pure helper) ---');
+function expectBaseAllow(input, expected, label) {
+  const r = validateExecutorBaseBranch(input);
+  line(r.ok === true && r.baseBranch === expected, `${label} -> allow ${JSON.stringify(r)}`);
+}
+function expectBaseReject(input, reasonNeedle, label) {
+  const r = validateExecutorBaseBranch(input);
+  line(r.ok === false && r.reason.includes(reasonNeedle), `${label} -> reject ${JSON.stringify(r)}`);
+}
+
+expectBaseAllow('main', 'main', 'C base main');
+expectBaseAllow(' main ', 'main', 'C base trims surrounding whitespace');
+expectBaseAllow('master', 'master', 'C base master');
+expectBaseAllow('origin/main', 'origin/main', 'C base remote branch');
+expectBaseAllow('fable/exec-rejection-path-test-2026-07-06', 'fable/exec-rejection-path-test-2026-07-06', 'C base stacked PR branch');
+expectBaseAllow('codex/executor_base-1.2', 'codex/executor_base-1.2', 'C base slash underscore dot dash');
+
+expectBaseReject('', 'required', 'C reject empty base');
+expectBaseReject('   ', 'required', 'C reject blank base');
+expectBaseReject('-main', 'must not start', 'C reject leading dash');
+expectBaseReject('--detach', 'must not start', 'C reject option-like flag');
+expectBaseReject('main --force', 'whitespace', 'C reject space option smuggling');
+expectBaseReject('main\tother', 'whitespace', 'C reject control/whitespace');
+expectBaseReject('/main', 'normalized branch name', 'C reject leading slash');
+expectBaseReject('main/', 'normalized branch name', 'C reject trailing slash');
+expectBaseReject('origin//main', 'normalized branch name', 'C reject double slash');
+expectBaseReject('refs/heads/main', 'short branch name', 'C reject full ref');
+expectBaseReject('main..evil', 'revision syntax', 'C reject dot-dot revision syntax');
+expectBaseReject('main@{1}', 'revision syntax', 'C reject reflog revision syntax');
+expectBaseReject('HEAD', 'unsafe ref component', 'C reject HEAD');
+expectBaseReject('origin/HEAD', 'unsafe ref component', 'C reject origin/HEAD');
+expectBaseReject('.hidden/main', 'unsafe ref component', 'C reject leading-dot component');
+expectBaseReject('main.lock', 'unsafe ref component', 'C reject .lock component');
+expectBaseReject('main~1', 'unsafe in git refs', 'C reject tilde revision syntax');
+expectBaseReject('main;rm', 'ASCII branch-name characters', 'C reject shell-ish separator');
+
+console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, and rejects unsafe base branches.' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);

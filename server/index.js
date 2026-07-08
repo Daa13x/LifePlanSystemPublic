@@ -10,6 +10,7 @@ import {
   OPENHANDS_MANDATORY_FORBIDDEN,
   normalizeRequestPath,
   violatesMandatoryForbidden,
+  validateExecutorBaseBranch,
   parsePorcelainPaths,
   isChangedFileAllowed,
   enforceChangedFiles
@@ -2269,7 +2270,9 @@ app.post('/api/tooling/openhands/requests', (req, res) => {
   if (!objective) return fail(res, 400, 'Request objective is required.');
 
   const targetRepoPath = String(req.body.targetRepoPath || '').trim() || root;
-  const baseBranch = String(req.body.baseBranch || 'main').trim();
+  const baseBranchCheck = validateExecutorBaseBranch(req.body.baseBranch || 'main');
+  if (!baseBranchCheck.ok) return fail(res, 400, `Request rejected: ${baseBranchCheck.reason}.`);
+  const baseBranch = baseBranchCheck.baseBranch;
   const allowedPaths = (Array.isArray(req.body.allowedPaths) ? req.body.allowedPaths : String(req.body.allowedPaths || '').split('\n'))
     .map((item) => String(item).trim()).filter(Boolean);
   const forbiddenPaths = (Array.isArray(req.body.forbiddenPaths) ? req.body.forbiddenPaths : String(req.body.forbiddenPaths || '').split('\n'))
@@ -2287,7 +2290,8 @@ app.post('/api/tooling/openhands/requests', (req, res) => {
   const maxFilesRaw = Number(req.body.maxFilesChanged);
   const maxFilesChanged = Math.min(5, Math.max(1, Number.isFinite(maxFilesRaw) && maxFilesRaw > 0 ? Math.floor(maxFilesRaw) : 5));
 
-  const id = `oh-req-${new Date().toISOString().replace(/[:.]/g, '-')}-${openHandsRequestSeq++}`;
+  const createdAt = new Date().toISOString();
+  const id = `oh-req-${createdAt.replace(/[:.]/g, '-')}-${openHandsRequestSeq++}`;
   const request = {
     id,
     title: title.slice(0, 160),
@@ -2295,6 +2299,7 @@ app.post('/api/tooling/openhands/requests', (req, res) => {
     requestedBy: String(req.body.requestedBy || 'unknown').trim().slice(0, 80) || 'unknown',
     targetRepoPath,
     baseBranch,
+    baseBranchAtCreation: baseBranch,
     allowedPaths,
     forbiddenPaths: [...new Set([...forbiddenPaths, ...OPENHANDS_MANDATORY_FORBIDDEN])],
     testCommand: String(req.body.testCommand || '').trim().slice(0, 300),
@@ -2304,7 +2309,7 @@ app.post('/api/tooling/openhands/requests', (req, res) => {
     requiresApprovalBeforeCommit: true,
     requiresApprovalBeforePush: true,
     riskLevel: maxFilesChanged <= 3 && String(req.body.testCommand || '').trim() ? 'low' : 'medium',
-    createdAt: new Date().toISOString(),
+    createdAt,
     status: 'pending',
     reportPath: ''
   };
@@ -2358,9 +2363,17 @@ app.post('/api/tooling/openhands/requests/:id/approve', (req, res) => {
     if (request.status === 'validated' || request.status === 'validation-failed') {
       return fail(res, 409, `Request already ran (status: ${request.status}). Approval cannot be re-applied after a run.`);
     }
+    const baseBranch = normalizeStoredBaseBranch(request);
+    const createdBaseBranch = String(request.baseBranchAtCreation || baseBranch);
+    if (createdBaseBranch !== baseBranch) {
+      return fail(res, 409, `Approval refused: baseBranch changed from "${createdBaseBranch}" to "${baseBranch}" after request creation. Create a new request for a different base branch.`);
+    }
     request.status = 'approved';
     request.approvedAt = new Date().toISOString();
     request.approvedBy = String(req.body.approvedBy || 'user').trim().slice(0, 80) || 'user';
+    request.baseBranchAtCreation = createdBaseBranch;
+    request.approvedBaseBranch = baseBranch;
+    request.approvedBaseBranchAt = request.approvedAt;
     fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
     ok(res, { request, note: 'Human approval recorded. The gated runner may now run allowlisted validation only.' });
   } catch (error) {
@@ -2504,6 +2517,23 @@ async function branchExists(name) {
   return result.ok && Boolean(result.stdout);
 }
 
+async function resolveBaseBranchCommit(baseBranch) {
+  const result = await runCli('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `${baseBranch}^{commit}`]);
+  const sha = String(result.stdout || '').trim();
+  return {
+    ok: result.ok && /^[0-9a-f]{40}$/i.test(sha),
+    sha,
+    detail: result.ok && sha ? `${baseBranch} resolves to ${sha.slice(0, 12)}` : `${baseBranch} does not resolve to a commit`
+  };
+}
+
+function normalizeStoredBaseBranch(request) {
+  const check = validateExecutorBaseBranch(request.baseBranch || 'main');
+  if (!check.ok) throw new Error(`Invalid base branch: ${check.reason}.`);
+  request.baseBranch = check.baseBranch;
+  return check.baseBranch;
+}
+
 // Evaluate every execution gate WITHOUT mutating anything. Returns structured
 // pass/fail plus the concrete plan the (future) executor would follow.
 async function evaluateExecutionPlan(request) {
@@ -2525,9 +2555,31 @@ async function evaluateExecutionPlan(request) {
   const protectedClean = pass('protected_path_scan', protectedHits.length === 0,
     protectedHits.length ? `BLOCKED — an allowed path touches protected locations: ${protectedHits.join(', ')}` : 'no allowed path references protected locations');
 
-  const baseBranch = String(request.baseBranch || 'main');
-  const baseNotProtectedTarget = pass('base_branch_not_execution_target', true,
-    `base branch "${baseBranch}" is a read reference only; the executor would never write to main/master`);
+  const baseCheck = validateExecutorBaseBranch(request.baseBranch || 'main');
+  const baseBranch = baseCheck.baseBranch;
+  const baseSyntaxOk = pass('base_branch_ref_syntax', baseCheck.ok,
+    baseCheck.ok ? `base branch "${baseBranch}" is syntactically safe` : `BLOCKED - ${baseCheck.reason}`);
+  const createdBaseBranch = String(request.baseBranchAtCreation || '');
+  const baseCreatedPinned = pass('base_branch_creation_pin', baseCheck.ok && createdBaseBranch === baseBranch,
+    createdBaseBranch
+      ? `created with "${createdBaseBranch}"${createdBaseBranch === baseBranch ? '' : ` but request currently says "${baseBranch}"`}`
+      : 'missing creation-time base pin; create a new request or re-approve before execution');
+  const approvedBaseBranch = String(request.approvedBaseBranch || '');
+  const baseApprovedPinned = pass('base_branch_approval_pin', baseCheck.ok && approvedBaseBranch === baseBranch,
+    approvedBaseBranch
+      ? `approved with "${approvedBaseBranch}"${approvedBaseBranch === baseBranch ? '' : ` but request currently says "${baseBranch}"`}`
+      : 'missing approval-time base pin; re-approve before execution');
+  const confirmedBaseBranch = String(request.executionConfirmedBaseBranch || '');
+  const baseConfirmedPinned = pass('base_branch_confirmation_pin', baseCheck.ok && request.executionConfirmed === true && confirmedBaseBranch === baseBranch,
+    request.executionConfirmed === true
+      ? (confirmedBaseBranch
+        ? `confirmed with "${confirmedBaseBranch}"${confirmedBaseBranch === baseBranch ? '' : ` but request currently says "${baseBranch}"`}`
+        : 'missing confirmation-time base pin; confirm execution again')
+      : 'execution not confirmed; base branch will be pinned at confirmation');
+  const baseResolution = baseCheck.ok
+    ? await resolveBaseBranchCommit(baseBranch)
+    : { ok: false, sha: '', detail: 'base branch syntax is invalid, so it was not resolved' };
+  const baseRefResolves = pass('base_branch_resolves', baseResolution.ok, baseResolution.detail);
   const execBranch = proposedExecutionBranch(request.id);
   const execNameSafe = pass('execution_branch_not_main_master', !PROTECTED_EXEC_BRANCHES.includes(execBranch.toLowerCase()),
     `dedicated execution branch would be "${execBranch}"`);
@@ -2542,7 +2594,8 @@ async function evaluateExecutionPlan(request) {
   const validationAllowlisted = pass('validation_command_allowlisted', Boolean(RUNNER_VALIDATION_ALLOWLIST[validationKey]),
     RUNNER_VALIDATION_ALLOWLIST[validationKey] ? `post-change validation would run: ${validationKey}` : `"${requested}" is not allowlisted — arbitrary commands are refused`);
 
-  const eligible = approved && confirmed && allowedNonEmpty && protectedClean && baseNotProtectedTarget
+  const eligible = approved && confirmed && allowedNonEmpty && protectedClean && baseSyntaxOk
+    && baseCreatedPinned && baseApprovedPinned && baseConfirmedPinned && baseRefResolves
     && execNameSafe && execBranchFree && maxFilesSane && validationAllowlisted;
 
   return {
@@ -2551,7 +2604,9 @@ async function evaluateExecutionPlan(request) {
     plan: {
       dryRun: true,
       executionBranch: execBranch,
-      isolation: 'dedicated git worktree/branch (not created in this dry run)',
+      baseBranch,
+      baseCommit: baseResolution.sha,
+      isolation: 'dedicated git worktree/branch from the pinned base branch (not created in this dry run)',
       allowedPaths,
       forbiddenPaths,
       maxFilesChanged: maxFiles,
@@ -2559,7 +2614,7 @@ async function evaluateExecutionPlan(request) {
       openHandsConfig: OPENHANDS_EXEC_CONFIG,
       openHandsInvoked: false,
       filesChanged: [],
-      wouldRefuse: ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'branch delete', 'force-push', 'push to main/master', 'arbitrary shell from request', 'editing protected paths']
+      wouldRefuse: ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'branch delete', 'force-push', 'push to main/master', 'arbitrary shell from request', 'editing protected paths', 'base branch changes after approval']
     }
   };
 }
@@ -2572,9 +2627,18 @@ app.post('/api/tooling/openhands/requests/:id/confirm-execution', (req, res) => 
     if (request.status !== 'approved' && request.status !== 'execution-planned') {
       return fail(res, 403, `Second confirmation refused: request is "${request.status}". It must be human-approved first.`);
     }
+    const baseBranch = normalizeStoredBaseBranch(request);
+    if (!request.approvedBaseBranch) {
+      return fail(res, 409, 'Second confirmation refused: this request was approved before base-branch pinning existed. Re-approve it to pin the base branch.');
+    }
+    if (request.approvedBaseBranch !== baseBranch) {
+      return fail(res, 409, `Second confirmation refused: request baseBranch is "${baseBranch}" but approval pinned "${request.approvedBaseBranch}". Re-create the request for a different base branch.`);
+    }
     request.executionConfirmed = true;
     request.executionConfirmedAt = new Date().toISOString();
     request.executionConfirmedBy = String(req.body.confirmedBy || 'user').trim().slice(0, 80) || 'user';
+    request.executionConfirmedBaseBranch = baseBranch;
+    request.executionConfirmedBaseBranchAt = request.executionConfirmedAt;
     fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
     ok(res, { request, note: 'Second execution confirmation recorded. You may now run the dry-run execution plan. No code will be edited; the plan is review-only.' });
   } catch (error) {
@@ -2616,7 +2680,8 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
     '## Execution branch / worktree (would be created; NOT created here)',
     `- Dedicated branch: ${evaluation.plan.executionBranch}`,
     `- Isolation: ${evaluation.plan.isolation}`,
-    `- Base reference (read-only): ${request.baseBranch || 'main'}`,
+    `- Base reference (pinned, read-only): ${evaluation.plan.baseBranch || '(invalid)'}`,
+    `- Base commit: ${evaluation.plan.baseCommit || '(not resolved)'}`,
     '',
     '## Safety gates',
     gateLines,
@@ -2664,6 +2729,8 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
   request.status = 'execution-planned';
   request.executionPlannedAt = new Date().toISOString();
   request.executionEligible = evaluation.eligible;
+  request.executionPlannedBaseBranch = evaluation.plan.baseBranch;
+  request.executionPlannedBaseCommit = evaluation.plan.baseCommit;
   request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
   fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
 
@@ -2727,6 +2794,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
   }
 
   const execBranch = proposedExecutionBranch(request.id);
+  const pinnedBaseBranch = evaluation.plan.baseBranch;
+  const pinnedBaseCommit = evaluation.plan.baseCommit;
   // Gate 2: never main/master, never the user's current branch, never an
   // existing branch.
   const currentBranch = (await runCli('git', ['branch', '--show-current'])).stdout.trim();
@@ -2737,12 +2806,13 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
   const worktreePath = path.join(OPENHANDS_WORKTREE_DIR, String(request.id).replace(/[^A-Za-z0-9._-]/g, ''));
   const worktreeRel = path.relative(root, worktreePath).replaceAll('\\', '/');
   let worktreeCreated = false;
-  const refusedActions = ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'delete branch', 'force-push', 'push to main/master', 'arbitrary request shell', 'edit outside allowedPaths'];
+  const refusedActions = ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'delete branch', 'force-push', 'push to main/master', 'arbitrary request shell', 'edit outside allowedPaths', 'base branch changes after approval'];
 
   try {
-    // Isolated worktree on a fresh dedicated branch (never touches main tree).
+    // Isolated worktree on a fresh dedicated branch from the pinned base commit
+    // (never touches main tree; never uses the caller's current HEAD).
     fs.mkdirSync(OPENHANDS_WORKTREE_DIR, { recursive: true });
-    const add = await runCli('git', ['worktree', 'add', '-b', execBranch, worktreePath, 'HEAD'], { timeout: 120000 });
+    const add = await runCli('git', ['worktree', 'add', '-b', execBranch, worktreePath, '--', pinnedBaseCommit], { timeout: 120000 });
     if (!add.ok) return fail(res, 500, `Executor could not create the isolated worktree: ${add.stderr || add.stdout}`);
     worktreeCreated = true;
 
@@ -2805,6 +2875,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       '',
       '## Execution isolation',
       `- Execution branch: ${execBranch}`,
+      `- Base reference (pinned, read-only): ${pinnedBaseBranch}`,
+      `- Base commit used for worktree: ${pinnedBaseCommit}`,
       `- Worktree path: ${worktreeRel}`,
       `- Worktree after run: ${hasRealDiff ? 'PRESERVED for human review' : 'removed (no diff to review)'}`,
       `- Touched main working tree: no`,
@@ -2858,6 +2930,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     request.executorRanAt = new Date().toISOString();
     request.openHandsInvoked = invocation.invoked;
     request.executorEnforcementOk = enforcement.ok;
+    request.executorBaseBranch = pinnedBaseBranch;
+    request.executorBaseCommit = pinnedBaseCommit;
     request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
     request.patchPath = patchRel;
     request.worktreePreserved = hasRealDiff;
@@ -2886,6 +2960,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
       openHandsInvoked: invocation.invoked,
       executionBranch: execBranch,
+      baseBranch: pinnedBaseBranch,
+      baseCommit: pinnedBaseCommit,
       worktreePath: worktreeRel,
       changedFiles,
       enforcement,
@@ -2896,8 +2972,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       untrackedFiles: untrackedFiles.length,
       refusedActions,
       message: hasRealDiff
-        ? `Executor harness ran in an isolated worktree. A diff exists, so the worktree (${worktreeRel}) and branch ${execBranch} are PRESERVED for human review; the full diff is at ${patchRel}. Nothing was committed, pushed, or merged.`
-        : `Executor harness ran in an isolated worktree. Real OpenHands invocation is DISABLED, so no code was edited; the worktree was removed and branch ${execBranch} left in place (never auto-deleted). Full (empty) diff written to ${patchRel}. Nothing was committed, pushed, or merged.`
+        ? `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. A diff exists, so the worktree (${worktreeRel}) and branch ${execBranch} are PRESERVED for human review; the full diff is at ${patchRel}. Nothing was committed, pushed, or merged.`
+        : `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. Real OpenHands invocation is DISABLED, so no code was edited; the worktree was removed and branch ${execBranch} left in place (never auto-deleted). Full (empty) diff written to ${patchRel}. Nothing was committed, pushed, or merged.`
     });
   } catch (error) {
     fail(res, 500, `Executor harness error: ${error.message}`);
