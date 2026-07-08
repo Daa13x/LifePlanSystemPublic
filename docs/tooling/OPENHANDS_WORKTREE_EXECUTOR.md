@@ -23,7 +23,10 @@ or edited in this build.
    allowedPaths, forbiddenPaths, the protected-path block list, and
    maxFilesChanged **against the real diff** (not the declared intent).
 6. Run **only** an allowlisted validation command (`node --check server/index.js`
-   or `npm run build`) inside the worktree.
+   or `npm run build`) inside the worktree. For `npm run build`, first check
+   that build dependencies are actually present in that isolated worktree; if
+   they are missing, report `setup-gated` instead of attempting an implicit
+   install/copy/link or pretending build validation ran.
 7. Write a report to `.lps/tooling/openhands/reports/<id>.md`.
 8. Teardown removes the throwaway worktree (never deletes the branch).
 
@@ -165,13 +168,16 @@ commits or pushes.
 
 - Real OpenHands invocation is intentionally OFF
   (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`); enabling it is a future,
-  separately-approved slice (remaining blockers: worktree build-deps (#5) and
-  tool-level `allowedPaths`/runtime caps on invocation (#7)). The `allowedPaths`
-  boundary-match blocker (#4), enforcement rejection-path verification (#3),
-  and base-branch pinning (#6) are addressed (see above).
-- `npm run build` inside a fresh worktree needs a dependency-sharing strategy
-  (worktrees do not copy gitignored `node_modules`); `node --check` works
-  as-is. Left as future work.
+  separately-approved slice (remaining blocker: tool-level `allowedPaths` /
+  runtime caps on invocation (#7)). The `allowedPaths` boundary-match blocker
+  (#4), enforcement rejection-path verification (#3), worktree build-dependency
+  detection/reporting (#5), and base-branch pinning (#6) are addressed (see
+  above).
+- `npm run build` inside a fresh worktree now performs a dependency preflight
+  first. If `node_modules` / local Vite binaries are absent, the run is clearly
+  reported as setup-gated. This slice deliberately does not install, copy, or
+  link dependencies; choosing such a provisioning strategy remains a separate
+  approval decision. `node --check` works as-is.
 - Executor-created `openhands/exec-<id>` branches are never auto-deleted; a
   future human-gated cleanup can prune them. Preserved worktrees also require a
   human-gated cleanup after review.
