@@ -86,6 +86,45 @@ authorises `src/application`. (The user-supplied `forbiddenPaths` denylist keeps
 its broader prefix match — over-blocking on a denylist is safe — and the
 mandatory protected-path block list is unchanged.)
 
+## Enforcement rejection path verified (blocker #3 — addressed)
+
+The changed-file enforcement is verified to **reject a real violating diff**, not
+just the no-diff case. To make this testable without booting the server or
+enabling invocation, the pure enforcement helpers (`OPENHANDS_MANDATORY_FORBIDDEN`,
+`normalizeRequestPath`, `violatesMandatoryForbidden`, `parsePorcelainPaths`,
+`isChangedFileAllowed`, `enforceChangedFiles`) were moved verbatim from
+`server/index.js` into `server/executorEnforcement.js` (a side-effect-free
+module; `server/index.js` imports them, so behaviour is unchanged).
+
+A committed verification script exercises the **real** functions:
+
+    npm run verify:executor-enforcement      # node scripts/verify-executor-enforcement.mjs
+
+It creates a throwaway git repo in the OS temp dir, makes a **real** changed file
+outside a narrow `allowedPaths`, gathers changed files exactly as the executor
+does (`git status --porcelain` → `parsePorcelainPaths`, the same order
+enforcement runs in), calls `enforceChangedFiles`, and asserts the result is
+rejected (`ok: false`) with the offending path named. Verified cases include:
+
+- **Rejected (real isolated git working tree):** a new file `docs-forbidden/file.md`
+  and a modified tracked `README.md`, each with `allowedPaths` scoped elsewhere →
+  `ok: false`, violation names the file as `outside allowedPaths`.
+- **Rejected (direct matrix):** `README.md.x` vs `[README.md]`,
+  `src/application/file.js` vs `[src/app]`, `docs2/file.md` vs `[docs]`, a `..`
+  traversal path, and an absolute path.
+- **Protected-path denylist still blocks** `source_of_truth/…`, `memory/…`, `.env`
+  (reported as *touches a protected path*) — proving the extract did **not**
+  loosen the protected/forbidden denylist.
+- **Positive control (must still pass):** `docs/file.md` vs `[docs]` and other
+  in-scope changes → `ok: true`, no violations. This guards against a check that
+  merely blocks everything.
+
+The script requires no network, no secrets, and no OpenHands invocation; it
+cleans up its temp repos and leaves no committed fixtures. **This verification
+does not enable, approve, or imply real invocation** — it only proves the
+enforcement gate rejects out-of-scope changes when a future, separately-approved
+slice produces a real diff.
+
 ## Report fields
 
 request id, execution branch, worktree path, worktree-after-run
@@ -105,10 +144,10 @@ commits or pushes.
 
 - Real OpenHands invocation is intentionally OFF
   (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`); enabling it is a future,
-  separately-approved slice (remaining blockers: rejection-path test against a
-  real violating diff, worktree build-deps, base-branch pinning, and tool-level
-  `allowedPaths`/runtime caps on invocation). The `allowedPaths` boundary-match
-  blocker is addressed (see below).
+  separately-approved slice (remaining blockers: worktree build-deps (#5),
+  base-branch pinning (#6), and tool-level `allowedPaths`/runtime caps on
+  invocation (#7)). The `allowedPaths` boundary-match blocker (#4) and the
+  enforcement rejection-path verification (#3) are addressed (see above).
 - `npm run build` inside a fresh worktree needs a dependency-sharing strategy
   (worktrees do not copy gitignored `node_modules`); `node --check` works
   as-is. Left as future work.

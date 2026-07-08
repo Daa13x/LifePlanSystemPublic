@@ -12,6 +12,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "start": "node server/index.js",
     "check": "npm run build",
+    "verify:executor-enforcement": "node scripts/verify-executor-enforcement.mjs",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss"
   },
