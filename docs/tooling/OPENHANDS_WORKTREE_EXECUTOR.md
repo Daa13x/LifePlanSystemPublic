@@ -15,8 +15,9 @@ or edited in this build.
 2. Extra guards: execution branch is never `main`/`master`, never the user's
    current branch, and must not already exist.
 3. Create an **isolated git worktree** at `.lps/tooling/openhands/worktrees/<id>`
-   on a dedicated `openhands/exec-<id>` branch (from `HEAD`). The main working
-   tree, main/master, and the user's current branch are never touched.
+   on a dedicated `openhands/exec-<id>` branch from the pinned `baseBranch`
+   commit, never from the caller's current `HEAD`. The main working tree,
+   main/master, and the user's current branch are never touched.
 4. Invoke OpenHands — **disabled**; records `invoked: false` and makes no edits.
 5. Compute the **actual** changed files/diff in the worktree and enforce
    allowedPaths, forbiddenPaths, the protected-path block list, and
@@ -34,6 +35,25 @@ or edited in this build.
 
 The request cannot override the model, endpoint, shell commands, git
 operations, protected paths, or the validation allowlist.
+
+## Base-branch pinning (blocker #6 - addressed)
+
+The executor no longer creates worktrees from whatever branch the app happens to
+be running on. Request creation normalizes and validates `baseBranch` (default
+`main`) and rejects option-like or revision-like values such as `--detach`,
+`main --force`, `refs/heads/main`, `main..other`, `main@{1}`, `HEAD`, or
+shell-ish separators.
+
+That same base branch is pinned again at approval and at the second execution
+confirmation. The dry-run plan and real execute gate refuse a request if the
+stored base branch differs across creation, approval, confirmation, or execution
+time. The gate also resolves the base branch to a commit before execution.
+
+The real worktree command uses argument-array `git` invocation and a `--`
+separator, then creates the execution branch from the resolved pinned commit:
+`git worktree add -b <exec-branch> <worktree-path> -- <base-commit>`. A malicious
+request therefore cannot smuggle flags through the base branch or make the
+executor silently run from the user's current branch.
 
 ## What it never does
 
@@ -127,11 +147,12 @@ slice produces a real diff.
 
 ## Report fields
 
-request id, execution branch, worktree path, worktree-after-run
-(preserved/removed), whether OpenHands was invoked, model config, changed files,
-path-enforcement result (allowed/forbidden/protected), max-files result, diff
-summary, full-diff preview + `.patch` pointer, validation output,
-refused/blocked actions, and human next steps.
+request id, execution branch, pinned base branch, resolved base commit,
+worktree path, worktree-after-run (preserved/removed), whether OpenHands was
+invoked, model config, changed files, path-enforcement result
+(allowed/forbidden/protected), max-files result, diff summary, full-diff
+preview + `.patch` pointer, validation output, refused/blocked actions, and
+human next steps.
 
 ## Human review
 
@@ -144,10 +165,10 @@ commits or pushes.
 
 - Real OpenHands invocation is intentionally OFF
   (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`); enabling it is a future,
-  separately-approved slice (remaining blockers: worktree build-deps (#5),
-  base-branch pinning (#6), and tool-level `allowedPaths`/runtime caps on
-  invocation (#7)). The `allowedPaths` boundary-match blocker (#4) and the
-  enforcement rejection-path verification (#3) are addressed (see above).
+  separately-approved slice (remaining blockers: worktree build-deps (#5) and
+  tool-level `allowedPaths`/runtime caps on invocation (#7)). The `allowedPaths`
+  boundary-match blocker (#4), enforcement rejection-path verification (#3),
+  and base-branch pinning (#6) are addressed (see above).
 - `npm run build` inside a fresh worktree needs a dependency-sharing strategy
   (worktrees do not copy gitignored `node_modules`); `node --check` works
   as-is. Left as future work.
@@ -161,7 +182,7 @@ commits or pushes.
   (see `docs/agent_mode/AGENT_MODE_STANDARD.md`).
 - Real OpenHands invocation remains **OFF**
   (`OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`).
-- Enabling future invocation requires the 7 known blockers above to be fixed
-  first, on a separate, explicitly-approved branch.
+- Enabling future invocation still requires the remaining known blockers above
+  to be fixed first, on a separate, explicitly-approved branch.
 - Agent Mode scaffolding (docs/schema) does **not** authorize execution and
   changes no runtime behaviour.

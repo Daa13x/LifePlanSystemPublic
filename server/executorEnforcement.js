@@ -32,6 +32,33 @@ export function normalizeRequestPath(value) {
   return String(value || '').trim().replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '').toLowerCase();
 }
 
+export function validateExecutorBaseBranch(value) {
+  const baseBranch = String(value || '').trim();
+  if (!baseBranch) return { ok: false, baseBranch: '', reason: 'baseBranch is required' };
+  if (baseBranch.length > 120) return { ok: false, baseBranch, reason: 'baseBranch is too long' };
+  if (baseBranch.startsWith('-')) return { ok: false, baseBranch, reason: 'baseBranch must not start with "-"' };
+  if (/[\s\x00-\x1f\x7f]/.test(baseBranch)) return { ok: false, baseBranch, reason: 'baseBranch must not contain whitespace or control characters' };
+  if (baseBranch === '@') return { ok: false, baseBranch, reason: 'baseBranch must name a branch, not "@"' };
+  if (baseBranch.startsWith('/') || baseBranch.endsWith('/') || baseBranch.includes('//')) {
+    return { ok: false, baseBranch, reason: 'baseBranch must be a normalized branch name' };
+  }
+  if (baseBranch.startsWith('refs/')) return { ok: false, baseBranch, reason: 'baseBranch must be a short branch name, not a full ref' };
+  if (baseBranch.includes('..') || baseBranch.includes('@{')) {
+    return { ok: false, baseBranch, reason: 'baseBranch must not contain revision syntax' };
+  }
+  if (['~', '^', ':', '?', '*', '[', ']', '\\'].some((ch) => baseBranch.includes(ch))) {
+    return { ok: false, baseBranch, reason: 'baseBranch contains characters that are unsafe in git refs' };
+  }
+  const parts = baseBranch.split('/');
+  if (parts.some((part) => !part || part === 'HEAD' || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) {
+    return { ok: false, baseBranch, reason: 'baseBranch contains an unsafe ref component' };
+  }
+  if (!/^[A-Za-z0-9._/-]+$/.test(baseBranch)) {
+    return { ok: false, baseBranch, reason: 'baseBranch must use only ASCII branch-name characters' };
+  }
+  return { ok: true, baseBranch, reason: '' };
+}
+
 export function violatesMandatoryForbidden(candidatePath) {
   const normalized = normalizeRequestPath(candidatePath);
   if (!normalized) return false;
