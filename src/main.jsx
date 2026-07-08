@@ -173,6 +173,37 @@ const CLOUD_AGENTS = [
   { name: 'Other web agent', url: '' }
 ];
 
+function githubRepoFromRemote(url = '') {
+  const value = String(url || '').trim();
+  if (!value) return '';
+  const sshMatch = value.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/i);
+  if (sshMatch) return sshMatch[1];
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname !== 'github.com') return '';
+    return parsed.pathname.replace(/^\/+/, '').replace(/\.git$/i, '');
+  } catch {
+    return '';
+  }
+}
+
+function githubWebUrlFromRemote(url = '') {
+  const repo = githubRepoFromRemote(url);
+  return repo ? `https://github.com/${repo}` : '';
+}
+
+function repoBoundaryLabel(repoPath = '', repoName = '') {
+  const pathText = String(repoPath || '').toLowerCase();
+  const repoText = String(repoName || '').toLowerCase();
+  if (repoText === 'daa13x/lifeplansystempublic' || pathText.includes('lps-public') || pathText.includes('lifeplansystempublic')) {
+    return 'Public app checkout';
+  }
+  if (repoText === 'daa13x/lifeplansystem' || pathText.endsWith('lifeplansystem')) {
+    return 'Private repo checkout';
+  }
+  return 'Current local checkout';
+}
+
 function App() {
   const [view, setView] = useState('planner');
   const [theme, setTheme] = useState(() => localStorage.getItem('life-planner-theme') || 'dark');
@@ -415,6 +446,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [draft, setDraft] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [runtimeMode, setRuntimeMode] = useState('');
+  const [runtime, setRuntime] = useState(null);
   const [repoFiles, setRepoFiles] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
@@ -483,11 +515,23 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
 
   useEffect(() => {
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
+    api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
   }, []);
 
   useEffect(() => {
     loadContext();
   }, [selectedSession]);
+
+  const modelReady = Boolean(runtime?.endpointConfigured || runtime?.assigned || runtime?.managedServerRunning);
+  const modelStatus = !runtime
+    ? 'Checking local Planner Assistant setup...'
+    : modelReady
+      ? runtime.managedServerRunning
+        ? `Planner Assistant endpoint is running at ${runtime.managedEndpoint}.`
+        : runtime.endpointConfigured
+          ? `Planner Assistant will try local endpoint ${runtime.endpoint}.`
+          : `Planner Assistant model is assigned: ${runtime.model?.name}.`
+      : 'No Planner Assistant model or local endpoint is configured. Chat will still save messages and memory candidates, but model replies use the setup-gated fallback until Settings is configured.';
 
   return (
     <section className="chat-layout">
@@ -518,6 +562,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
+          <div className={cx('source-warning', modelReady ? 'info' : 'warn')}>
+            <strong>{modelReady ? 'Planner Assistant configured' : 'Planner Assistant setup needed'}</strong>
+            <small>{modelStatus} Open Settings to save a local endpoint, scan/load a GGUF model, or set llama-cli/llama-server paths.</small>
+          </div>
           <div className="inline-form">
             <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
               <option value="">Attach repo file as context</option>
@@ -545,7 +593,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         </div>
         <div className="composer">
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
-          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
+          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save chat and use setup-gated fallback until Settings has a model or endpoint'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
       </div>
     </section>
@@ -949,6 +997,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const [temporaryChatRequired, setTemporaryChatRequired] = useState(true);
   const [temporaryChatConfirmed, setTemporaryChatConfirmed] = useState(false);
   const browserReady = Boolean(cap?.playwright && cap?.chromium);
+  const connectorReady = Boolean(agentTabs.connectorAvailable);
   const controlledBrowserWarning = controlledBrowserWarningForUrl(browserUrl);
   const chatGptTarget = targetAgent === 'ChatGPT' || isChatGptUrl(browserUrl);
   const temporaryChatGateActive = temporaryChatRequired && chatGptTarget;
@@ -967,6 +1016,9 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           : !browserUrl.trim()
             ? 'Enter a URL before opening the controlled browser.'
             : '';
+  const connectorDisabledReason = connectorReady
+    ? ''
+    : 'Chrome connector is not connected. Load browser-extension/lps-browser-agent in the signed-in Chrome profile and keep this app open.';
   const normalBrowserDisabledReason = !browserUrl.trim()
     ? 'Enter a URL before opening a normal browser tab.'
     : '';
@@ -1012,7 +1064,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
       ? 'Enter a message before running cloud consultation.'
       : temporaryChatNeedsConfirmation
           ? 'Turn on Temporary Chat in ChatGPT, then tick the confirmation box before sending the full prompt.'
-          : browserDisabledReason;
+          : connectorDisabledReason || browserDisabledReason;
   const waitingForExternalResponse = Boolean(activeConsultationId || browserResult || consultPrompt);
   const responseCaptureHint = external.trim()
     ? 'Automatic answer captured. Choose what to save below; nothing is saved or synced until you click a save option.'
@@ -1024,7 +1076,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         ? 'Manual fallback is active. Copy the answer from that browser only if automatic capture is blocked.'
         : waitingForExternalResponse
           ? 'Waiting for the automatic cloud response. If the site blocks automation, use the manual fallback controls.'
-          : 'Run automatic consultation to send the prompt, wait for ChatGPT, and fill this box automatically. Manual paste is only a fallback.';
+          : connectorDisabledReason || 'Run automatic consultation to send the prompt, wait for ChatGPT, and fill this box automatically. Manual paste is only a fallback.';
 
   async function load() {
     setCap(await api('/api/browser/capabilities'));
@@ -1422,9 +1474,31 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         <div className="source-warning info">
           Primary flow: select context, type the browser-agent question, use local assist if helpful, then send to the browser agent in the user's Chrome tab. It will not save, sync, or promote anything until you choose a save option.
         </div>
+        <div className="connection-grid">
+          <div>
+            <span>Playwright</span>
+            <Pill tone={cap?.playwright ? 'good' : 'warn'}>{cap ? (cap.playwright ? 'Installed' : 'Missing') : 'Checking'}</Pill>
+            <small>{cap?.playwright ? 'Available for controlled-browser fallback.' : 'Required only for controlled-browser fallback.'}</small>
+          </div>
+          <div>
+            <span>Chromium</span>
+            <Pill tone={cap?.chromium ? 'good' : 'warn'}>{cap ? (cap.chromium ? 'Installed' : 'Missing') : 'Checking'}</Pill>
+            <small>{cap?.chromium ? 'Local Playwright browser is present.' : 'Use Tooling only if controlled-browser fallback is needed.'}</small>
+          </div>
+          <div>
+            <span>Chrome connector</span>
+            <Pill tone={connectorReady ? 'good' : 'warn'}>{connectorReady ? 'Connected' : 'Disconnected'}</Pill>
+            <small>{connectorReady ? 'Normal Chrome can receive browser-agent jobs.' : 'Cloud Consultant send is setup-gated until the extension is loaded.'}</small>
+          </div>
+        </div>
         {!browserReady && (
           <div className="source-warning warn">
             Browser automation disabled: {browserDisabledReason || cap?.note || 'Browser automation is not ready.'}
+          </div>
+        )}
+        {browserReady && connectorDisabledReason && (
+          <div className="source-warning warn">
+            Cloud Consultant setup-gated: {connectorDisabledReason} Do not bypass sign-in, verification, or Cloudflare checks; finish those only in your own browser profile.
           </div>
         )}
         {browserReady && controlledBrowserWarning && (
@@ -2351,8 +2425,8 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [branchName, setBranchName] = useState('codex/life-planner-ui');
   const [branches, setBranches] = useState({ current: '', branches: [] });
   const [branchToSwitch, setBranchToSwitch] = useState('');
-  const [remoteUrl, setRemoteUrl] = useState('https://github.com/neuro-1977/lps.git');
-  const [githubRepo, setGithubRepo] = useState('neuro-1977/lps');
+  const [remoteUrl, setRemoteUrl] = useState('');
+  const [githubRepo, setGithubRepo] = useState('');
   const [hfRepo, setHfRepo] = useState('');
   const [hfRepoType, setHfRepoType] = useState('model');
   const [sourceBusy, setSourceBusy] = useState(false);
@@ -2364,11 +2438,16 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
 
   async function refresh(announce = false) {
     try {
-      setSource(await api('/api/source/status'));
+      const sourceData = await api('/api/source/status');
+      setSource(sourceData);
       setDiff(await api('/api/source/diff'));
       const branchData = await api('/api/source/branches');
       setBranches(branchData);
       setBranchToSwitch((current) => current || branchData.current || '');
+      const originRemote = sourceData.remoteList?.find((remote) => remote.name === 'origin') || sourceData.remoteList?.[0];
+      if (originRemote?.url) setRemoteUrl(originRemote.url);
+      const originRepo = githubRepoFromRemote(originRemote?.url || '');
+      if (originRepo) setGithubRepo((current) => current || originRepo);
       if (announce) setNotice('Source status refreshed.');
     } catch (err) {
       setNotice(err.message);
@@ -2426,6 +2505,12 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const stagedFiles = changedFiles.filter((file) => file.staged);
   const localBranches = (branches.branches || []).filter((branch) => !branch.remote);
   const currentBranch = source?.branch || '';
+  const originRemote = source?.remoteList?.find((remote) => remote.name === 'origin') || source?.remoteList?.[0];
+  const currentRemoteUrl = originRemote?.url || '';
+  const currentRepoName = githubRepoFromRemote(currentRemoteUrl);
+  const currentRepoWebUrl = githubWebUrlFromRemote(currentRemoteUrl);
+  const boundaryLabel = repoBoundaryLabel(source?.repoPath || '', currentRepoName);
+  const isPublicCheckout = boundaryLabel === 'Public app checkout';
   const pushProtectedBranch = ['main', 'master'].includes(currentBranch.toLowerCase());
   const pushDisabledReason = sourceBusy
     ? 'A source control operation is already running.'
@@ -2464,8 +2549,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           <button onClick={() => refresh(true)} disabled={sourceBusy}><RefreshCcw size={16} /> Refresh</button>
           <button onClick={() => action('/api/source/login/github')} disabled={Boolean(githubLoginDisabledReason)} title={githubLoginDisabledReason || 'Start GitHub CLI browser login'}><Github size={16} /> Login with Git</button>
           <button onClick={() => openExternal(source?.installUrls?.githubCli || 'https://cli.github.com/', 'GitHub CLI download')} disabled={sourceBusy}><Download size={16} /> GitHub CLI</button>
-          <button onClick={() => openExternal('https://github.com/neuro-1977/lps', 'push repo')} disabled={sourceBusy}><Github size={16} /> Open push repo</button>
-          <button onClick={() => openExternal('https://github.com/Daa13x/LifePlanSystemPublic', 'upstream merge target')} disabled={sourceBusy}><Github size={16} /> Upstream merge target</button>
+          <button onClick={() => openExternal(currentRepoWebUrl, 'current origin repository')} disabled={sourceBusy || !currentRepoWebUrl}><Github size={16} /> Open origin repo</button>
           <button onClick={() => action('/api/source/login/hf')} disabled={Boolean(hfLoginDisabledReason)} title={hfLoginDisabledReason || 'Start Hugging Face CLI login'}>Login with HF</button>
           <button onClick={() => openExternal(source?.installUrls?.huggingFaceCli || 'https://huggingface.co/docs/huggingface_hub/guides/cli', 'Hugging Face CLI docs')} disabled={sourceBusy}>HF CLI docs</button>
         </div>
@@ -2473,8 +2557,20 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
 
       <div className="panel">
         <h2>Connection</h2>
-        <p>Active pushes go to <code>neuro-1977/lps</code>. Merge handoff target is <code>Daa13x/LifePlanSystemPublic</code>.</p>
+        <div className={cx('source-warning', isPublicCheckout ? 'warn' : 'info')}>
+          <strong>{boundaryLabel}</strong>
+          <small>
+            This Source panel controls only the local checkout at <code>{source?.repoPath || 'unknown path'}</code>.
+            {currentRepoName ? <> Current origin is <code>{currentRepoName}</code>.</> : ' No GitHub origin repository was detected.'}
+            {isPublicCheckout ? ' Do not use this panel to move private LifePlanSystem content into the public app checkout.' : ''}
+          </small>
+        </div>
         <div className="connection-grid">
+          <div>
+            <span>Origin</span>
+            <strong>{currentRepoName || 'Unknown remote'}</strong>
+            <small>{currentRemoteUrl || 'No origin URL configured'}</small>
+          </div>
           <div>
             <span>Branch</span>
             <strong>{source?.branch || 'Unknown'}</strong>
@@ -2509,7 +2605,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
 
       <div className="panel">
         <h2>Write</h2>
-        <p>These buttons run local Git commands in this workspace. Protected runtime files are blocked from staging and commits.</p>
+        <p>These buttons run local Git commands in this checkout against the displayed origin. Protected runtime files are blocked from staging and commits; push is review-armed and main/master is blocked.</p>
         {sourceBusy && <div className="source-warning info">Running source control operation...</div>}
         {source && !source.github?.cliAvailable && <div className="source-warning warn">GitHub CLI login is unavailable because <code>gh</code> is not installed or not on PATH. Use GitHub CLI above to open the official download page, install it, restart the app terminal, then refresh.</div>}
         {source && !source.huggingface?.cliAvailable && <div className="source-warning warn">Hugging Face CLI login is unavailable because <code>hf</code> is not installed or not on PATH. Use HF CLI docs above, or add an HF token in Settings.</div>}
@@ -2533,7 +2629,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
         <label>Origin remote</label>
         <div className="inline-form">
           <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} disabled={sourceBusy} />
-          <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
+          <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated. Review the boundary label before any fetch, pull, or push.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
         </div>
         <label>Create GitHub repo</label>
         <div className="inline-form">
@@ -2571,8 +2667,8 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!canStageAll}><Check size={16} /> Stage all</button>
           <button onClick={() => action('/api/source/unstage-all', {}, 'Unstaged all files.')} disabled={sourceBusy || !changedFiles.some((file) => file.staged)}><X size={16} /> Unstage all</button>
           <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')} disabled={!canCommit}><Check size={16} /> Commit</button>
-          <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch</button>
-          <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull</button>
+          <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest refs from the displayed origin.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch origin</button>
+          <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes for this checkout branch.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull current</button>
           <button
             onClick={() => setPushArmed(true)}
             disabled={Boolean(pushDisabledReason) || pushArmed}
@@ -2770,6 +2866,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
+  const [saveStatus, setSaveStatus] = useState('Settings load from local SQLite when the app starts. Click Save after changing model, endpoint, connector, or download values.');
   const recommendedQwen = useMemo(() => recommendedQwenForHardware(hardware), [hardware]);
 
   useEffect(() => {
@@ -2783,25 +2880,33 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   }, [hardware, recommendedQwen, repoTouched]);
 
   async function saveSettings() {
-    const data = await api('/api/settings', {
-      method: 'POST',
-      body: JSON.stringify({
-        hfToken,
-        modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean),
-        modelDownloadFolder: downloadFolder,
-        localModelEndpoint,
-        localModelName,
-        llamaCliPath,
-        llamaServerPath,
-        llamaServerPort: Number(llamaServerPort),
-        llamaContextSize: Number(llamaContextSize),
-        browserAgentMode,
-        browserAgentPort: Number(browserAgentPort)
-      })
-    });
-    setSettings(data);
-    setRuntime(await api('/api/models/runtime'));
-    setNotice('Settings saved locally.');
+    setSaveStatus('Saving settings to local SQLite...');
+    try {
+      const data = await api('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          hfToken,
+          modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean),
+          modelDownloadFolder: downloadFolder,
+          localModelEndpoint,
+          localModelName,
+          llamaCliPath,
+          llamaServerPath,
+          llamaServerPort: Number(llamaServerPort),
+          llamaContextSize: Number(llamaContextSize),
+          browserAgentMode,
+          browserAgentPort: Number(browserAgentPort)
+        })
+      });
+      setSettings(data);
+      setRuntime(await api('/api/models/runtime'));
+      setSaveStatus('Saved locally. These settings will load from SQLite on the next app start.');
+      setNotice('Settings saved locally.');
+    } catch (err) {
+      setSaveStatus(`Save failed: ${err.message}`);
+      setNotice(err.message);
+      throw err;
+    }
   }
 
   async function scan() {
@@ -2909,6 +3014,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           <strong>{runtime?.endpointConfigured ? runtime.endpointModelName : runtime?.model?.name || 'Planner Assistant unavailable'}</strong>
           <span>{runtime?.managedServerRunning ? `Managed llama-server running: ${runtime.managedEndpoint}` : runtime?.endpointConfigured ? `Endpoint: ${runtime.endpoint}` : runtime?.llamaCliConfigured ? `llama-cli: ${runtime.llamaCliExists ? 'found' : 'missing'}` : 'Configure a local endpoint, llama-server, or llama-cli to generate chat responses.'}</span>
         </div>
+        <div className={cx('source-warning', runtime?.endpointConfigured || runtime?.assigned ? 'info' : 'warn')}>
+          <strong>{runtime?.endpointConfigured || runtime?.assigned ? 'Model setup saved' : 'Model setup needed'}</strong>
+          <small>{saveStatus}</small>
+        </div>
         <label>Model folders</label>
         <textarea value={modelFolders} onChange={(event) => setModelFolders(event.target.value)} placeholder="C:\\Models&#10;D:\\LLMs" />
         <label>OpenAI-compatible local endpoint</label>
@@ -2956,6 +3065,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <div className="source-warning info">
           <strong>Chrome connector</strong>
           <small>Load the unpacked extension from browser-extension/lps-browser-agent in the same Chrome profile where the user is logged into ChatGPT, Gemini, Grok, or Claude. It talks only to 127.0.0.1:{browserAgentPort}; no public firewall rule is needed for localhost-only use.</small>
+        </div>
+        <div className="source-warning warn">
+          <strong>Setup-gated</strong>
+          <small>Saving this port and mode does not sign in, bypass verification, or start cloud automation. Cloud Consultant runs only after the connector is loaded and the user completes any required session or Temporary Chat steps.</small>
         </div>
       </div>
       <div className="panel">

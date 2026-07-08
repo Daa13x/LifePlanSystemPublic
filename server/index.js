@@ -1032,14 +1032,44 @@ async function runPlannerAssistant(sessionId, userMessage) {
   };
 }
 
-function plannerData() {
+function browserConnectorConnected() {
+  return Date.now() - browserExtensionState.lastSeen < 15000;
+}
+
+function browserSetupText(status = {}, connectorConnected = false) {
+  const playwright = status.playwright ? 'Playwright installed' : 'Playwright missing';
+  const chromium = status.chromium ? 'Chromium installed' : 'Chromium missing';
+  const connector = connectorConnected ? 'Chrome connector connected' : 'Chrome connector disconnected';
+  return `${playwright}; ${chromium}; ${connector}.`;
+}
+
+function normalizeBrowserBlocker(item, status = {}, connectorConnected = false) {
+  if (item.title !== 'Cloud browser automation is not configured yet') return item;
+  const ready = status.playwright && status.chromium && connectorConnected;
+  return {
+    ...item,
+    body: ready
+      ? 'Playwright, Chromium, and the Chrome connector are available. Cloud Consultant still requires an explicit user prompt, any required signed-in browser session, and Temporary Chat/manual confirmation before sending.'
+      : `${browserSetupText(status, connectorConnected)} Cloud Consultant remains setup-gated until the connector is loaded in the signed-in Chrome profile and the user confirms any required Temporary Chat or session steps.`,
+    evidence: status.note || item.evidence,
+    next_action: ready
+      ? 'Use the Browser tab only after reviewing the prompt and required save/review gates.'
+      : status.playwright && status.chromium
+        ? 'Load browser-extension/lps-browser-agent in the signed-in Chrome profile, then refresh Browser/Tooling status.'
+        : 'Use Tooling to install the missing local browser component before trying controlled-browser fallback.'
+  };
+}
+
+async function plannerData() {
+  const browserReady = await browserAutomationStatus().catch(() => ({}));
+  const connectorConnected = browserConnectorConnected();
   const items = allRows(`
     SELECT k.*, p.name AS project_name
     FROM knowledge_items k
     LEFT JOIN projects p ON p.id = k.project_id
     WHERE k.status NOT IN ('archived', 'deprecated', 'superseded')
     ORDER BY COALESCE(k.due_at, k.updated_at) ASC, k.confidence ASC
-  `);
+  `).map((item) => normalizeBrowserBlocker(item, browserReady, connectorConnected));
   const pendingApprovals = allRows('SELECT * FROM approvals WHERE status = ? ORDER BY created_at DESC', ['pending']);
   const candidates = allRows('SELECT * FROM memory_candidates WHERE status IN (?, ?) ORDER BY created_at DESC', ['candidate', 'deferred']);
   const staleCutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
@@ -1077,30 +1107,31 @@ function plannerData() {
 async function refreshPlannerState() {
   const changes = [];
   const browserReady = await browserAutomationStatus();
+  const connectorConnected = browserConnectorConnected();
   const browserBlocker = row(
     "SELECT * FROM knowledge_items WHERE title = ? AND status NOT IN ('archived', 'deprecated', 'superseded')",
     ['Cloud browser automation is not configured yet']
   );
 
-  if (browserReady.playwright && browserReady.chromium && browserBlocker) {
+  if (browserReady.playwright && browserReady.chromium && connectorConnected && browserBlocker) {
     const existing = row(
       "SELECT * FROM approvals WHERE action_type = 'update_memory' AND title = ? AND status = 'pending'",
-      ['Retire resolved Playwright blocker']
+      ['Retire resolved browser connector blocker']
     );
     if (!existing) {
       db.prepare(`
         INSERT INTO approvals (action_type, title, payload, priority)
         VALUES (?, ?, ?, 'P1')
-      `).run('update_memory', 'Retire resolved Playwright blocker', JSON.stringify({
+      `).run('update_memory', 'Retire resolved browser connector blocker', JSON.stringify({
         id: browserBlocker.id,
         updates: {
           status: 'archived',
           confidence: 0.9,
-          evidence: 'Planner refresh found the local Playwright package available.',
-          next_action: 'Use the Browser tab for cloud consultation when needed.'
+          evidence: 'Planner refresh found Playwright, Chromium, and the Chrome connector available.',
+          next_action: 'Use the Browser tab for cloud consultation only after prompt review and required manual confirmation.'
         }
       }));
-      changes.push('Created approval to archive the resolved Playwright blocker.');
+      changes.push('Created approval to archive the resolved browser-connector blocker.');
     }
   }
 
@@ -1112,22 +1143,22 @@ async function refreshPlannerState() {
 
 app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: path.resolve('data/life-planner.sqlite') }));
 
-app.get('/api/bootstrap', (_req, res) => {
+app.get('/api/bootstrap', async (_req, res) => {
   ok(res, {
     settings: Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)])),
-    planner: plannerData(),
+    planner: await plannerData(),
     sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC'),
     projects: allRows('SELECT * FROM projects ORDER BY updated_at DESC'),
     models: allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')
   });
 });
 
-app.get('/api/planner', (_req, res) => ok(res, plannerData()));
+app.get('/api/planner', async (_req, res) => ok(res, await plannerData()));
 
 app.post('/api/planner/refresh', async (_req, res) => {
   try {
     const result = await refreshPlannerState();
-    ok(res, { ...result, planner: plannerData() });
+    ok(res, { ...result, planner: await plannerData() });
   } catch (error) {
     fail(res, 500, error.message || 'Planner refresh failed.');
   }
@@ -1218,7 +1249,7 @@ app.get('/api/memory', (_req, res) => {
   });
 });
 
-app.post('/api/memory/candidates/:id/:decision', (req, res) => {
+app.post('/api/memory/candidates/:id/:decision', async (req, res) => {
   const candidate = row('SELECT * FROM memory_candidates WHERE id = ?', [req.params.id]);
   if (!candidate) return fail(res, 404, 'Candidate not found.');
   const decision = req.params.decision;
@@ -1234,10 +1265,10 @@ app.post('/api/memory/candidates/:id/:decision', (req, res) => {
   } else {
     db.prepare('UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run(decision === 'deny' ? 'denied' : 'deferred', candidate.id);
   }
-  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: plannerData() });
+  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: await plannerData() });
 });
 
-app.patch('/api/memory/candidates/:id', (req, res) => {
+app.patch('/api/memory/candidates/:id', async (req, res) => {
   const candidate = row('SELECT * FROM memory_candidates WHERE id = ?', [req.params.id]);
   if (!candidate) return fail(res, 404, 'Candidate not found.');
   if (!['candidate', 'deferred'].includes(candidate.status)) return fail(res, 409, 'Only candidate or deferred memory can be edited.');
@@ -1251,10 +1282,10 @@ app.patch('/api/memory/candidates/:id', (req, res) => {
         confidence = ?
     WHERE id = ?
   `).run(req.body.type || null, req.body.title || null, req.body.body || null, req.body.evidence || null, confidence, candidate.id);
-  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: plannerData() });
+  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: await plannerData() });
 });
 
-app.post('/api/approvals/:id/:decision', (req, res) => {
+app.post('/api/approvals/:id/:decision', async (req, res) => {
   try {
     if (!['approve', 'deny', 'defer'].includes(req.params.decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
     const approval = row('SELECT * FROM approvals WHERE id = ?', [req.params.id]);
@@ -1359,7 +1390,7 @@ app.post('/api/approvals/:id/:decision', (req, res) => {
       }
     }
     db.prepare('UPDATE approvals SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);
-    ok(res, plannerData());
+    ok(res, await plannerData());
   } catch (error) {
     fail(res, 400, error.message);
   }
@@ -3261,7 +3292,7 @@ app.post('/api/source/login/hf', async (_req, res) => {
 app.post('/api/source/create/github', async (req, res) => {
   const repo = String(req.body.repo || '').trim();
   const visibility = req.body.visibility === 'private' ? '--private' : '--public';
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return fail(res, 400, 'Use owner/repo format, for example neuro-1977/lps.');
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return fail(res, 400, 'Use owner/repo format, for example username/life-planner-app.');
   const cli = await runCli('gh', ['--version']);
   if (!cli.available) return fail(res, 404, 'GitHub CLI is not installed or not on PATH. Use the Open GitHub New button instead.');
   const auth = await runCli('gh', ['auth', 'status']);
