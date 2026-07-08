@@ -11,6 +11,7 @@ import {
   normalizeRequestPath,
   violatesMandatoryForbidden,
   validateExecutorBaseBranch,
+  checkWorktreeValidationSetup,
   parsePorcelainPaths,
   isChangedFileAllowed,
   enforceChangedFiles
@@ -2889,10 +2890,29 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     // Allowlisted validation only, run inside the worktree.
     const validationKey = String(request.testCommand || '').trim() || RUNNER_DEFAULT_VALIDATION;
     const validation = RUNNER_VALIDATION_ALLOWLIST[validationKey];
-    let validationResult = { command: validationKey, ran: false, ok: null, output: 'not run' };
-    if (validation) {
+    const hasWorktreePath = (relativePath) => {
+      const parts = String(relativePath || '').replaceAll('\\', '/').replace(/\/+$/, '').split('/').filter(Boolean);
+      return parts.length > 0 && fs.existsSync(path.join(worktreePath, ...parts));
+    };
+    const validationSetup = checkWorktreeValidationSetup(validationKey, hasWorktreePath, process.platform);
+    let validationResult = {
+      command: validationKey,
+      ran: false,
+      ok: null,
+      setupGated: Boolean(validation && validationSetup.setupGated),
+      missingDependencies: validationSetup.missing,
+      output: validation ? validationSetup.reason : 'not run'
+    };
+    if (validation && validationSetup.ok) {
       const vr = await runCli(validation.command, validation.args, { cwd: worktreePath, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
-      validationResult = { command: validationKey, ran: true, ok: vr.ok, output: (vr.stdout || vr.stderr || '').slice(0, 3000) };
+      validationResult = {
+        command: validationKey,
+        ran: true,
+        ok: vr.ok,
+        setupGated: false,
+        missingDependencies: [],
+        output: (vr.stdout || vr.stderr || '').slice(0, 3000)
+      };
     }
 
     const reportLines = [
@@ -2939,7 +2959,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       '```',
       '',
       '## Validation output (allowlisted; run in worktree)',
-      `- Command: ${validationResult.command} — ${validationResult.ran ? (validationResult.ok ? 'ok' : 'failed') : 'not run'}`,
+      `- Command: ${validationResult.command} — ${validationResult.ran ? (validationResult.ok ? 'ok' : 'failed') : (validationResult.setupGated ? 'setup-gated' : 'not run')}`,
+      `- Dependency preflight: ${validationSetup.ok ? 'ok' : 'setup-gated'} — ${validationSetup.reason}`,
       '```',
       validationResult.output,
       '```',
@@ -2963,6 +2984,11 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     request.executorEnforcementOk = enforcement.ok;
     request.executorBaseBranch = pinnedBaseBranch;
     request.executorBaseCommit = pinnedBaseCommit;
+    request.executorValidationCommand = validationResult.command;
+    request.executorValidationRan = validationResult.ran;
+    request.executorValidationOk = validationResult.ok;
+    request.executorValidationSetupGated = validationResult.setupGated;
+    request.executorValidationMissingDependencies = validationResult.missingDependencies;
     request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
     request.patchPath = patchRel;
     request.worktreePreserved = hasRealDiff;
@@ -3004,7 +3030,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       refusedActions,
       message: hasRealDiff
         ? `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. A diff exists, so the worktree (${worktreeRel}) and branch ${execBranch} are PRESERVED for human review; the full diff is at ${patchRel}. Nothing was committed, pushed, or merged.`
-        : `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. Real OpenHands invocation is DISABLED, so no code was edited; the worktree was removed and branch ${execBranch} left in place (never auto-deleted). Full (empty) diff written to ${patchRel}. Nothing was committed, pushed, or merged.`
+        : `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. Real OpenHands invocation is DISABLED, so no code was edited; the worktree was removed and branch ${execBranch} left in place (never auto-deleted). Full (empty) diff written to ${patchRel}. ${validationResult.setupGated ? validationSetup.reason : 'Allowlisted validation setup was checked.'} Nothing was committed, pushed, or merged.`
     });
   } catch (error) {
     fail(res, 500, `Executor harness error: ${error.message}`);

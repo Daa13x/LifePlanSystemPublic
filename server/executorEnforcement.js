@@ -59,6 +59,43 @@ export function validateExecutorBaseBranch(value) {
   return { ok: true, baseBranch, reason: '' };
 }
 
+export function checkWorktreeValidationSetup(validationKey, hasPath, platform = process.platform) {
+  const command = String(validationKey || '').trim();
+  const exists = typeof hasPath === 'function' ? hasPath : () => false;
+  if (command !== 'npm run build') {
+    return {
+      ok: true,
+      setupGated: false,
+      missing: [],
+      reason: 'no dependency preflight required for this allowlisted validation command'
+    };
+  }
+
+  const viteBins = platform === 'win32'
+    ? ['node_modules/.bin/vite.cmd', 'node_modules/.bin/vite']
+    : ['node_modules/.bin/vite'];
+  const missing = [];
+  if (!exists('package.json')) missing.push('package.json');
+  if (!exists('node_modules')) missing.push('node_modules/');
+  if (!viteBins.some((candidate) => exists(candidate))) missing.push(`one of ${viteBins.join(', ')}`);
+
+  if (missing.length) {
+    return {
+      ok: false,
+      setupGated: true,
+      missing,
+      reason: `Dependency-gated: npm run build was not run because the isolated worktree is missing ${missing.join(', ')}. Worktrees do not copy gitignored dependencies; installing, copying, or linking dependencies requires separate approval.`
+    };
+  }
+
+  return {
+    ok: true,
+    setupGated: false,
+    missing: [],
+    reason: 'npm run build dependencies are present in the isolated worktree'
+  };
+}
+
 export function violatesMandatoryForbidden(candidatePath) {
   const normalized = normalizeRequestPath(candidatePath);
   if (!normalized) return false;

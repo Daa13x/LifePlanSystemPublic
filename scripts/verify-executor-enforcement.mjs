@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  checkWorktreeValidationSetup,
   enforceChangedFiles,
   parsePorcelainPaths,
   validateExecutorBaseBranch,
@@ -189,5 +190,32 @@ expectBaseReject('main.lock', 'unsafe ref component', 'C reject .lock component'
 expectBaseReject('main~1', 'unsafe in git refs', 'C reject tilde revision syntax');
 expectBaseReject('main;rm', 'ASCII branch-name characters', 'C reject shell-ish separator');
 
-console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, and rejects unsafe base branches.' : failures + ' CHECK(S) FAILED'}`);
+// ---------------------------------------------------------------------------
+// Part D - worktree build-dependency setup gate. This proves `npm run build`
+// does not pretend to run in a fresh worktree when gitignored dependencies are
+// absent, while dependency-free validation remains allowed.
+// ---------------------------------------------------------------------------
+console.log('\n--- Part D: worktree validation dependency gate (pure helper) ---');
+{
+  const r = checkWorktreeValidationSetup('node --check server/index.js', () => false, 'win32');
+  line(r.ok === true && r.setupGated === false, `D node --check needs no dependency preflight -> ${JSON.stringify(r)}`);
+}
+{
+  const present = new Set(['package.json']);
+  const r = checkWorktreeValidationSetup('npm run build', (rel) => present.has(rel), 'win32');
+  line(r.ok === false && r.setupGated === true && r.missing.includes('node_modules/') && r.reason.includes('Dependency-gated'),
+    `D npm run build setup-gated when worktree deps are missing -> ${JSON.stringify(r)}`);
+}
+{
+  const present = new Set(['package.json', 'node_modules', 'node_modules/.bin/vite.cmd']);
+  const r = checkWorktreeValidationSetup('npm run build', (rel) => present.has(rel), 'win32');
+  line(r.ok === true && r.setupGated === false, `D npm run build allowed when Windows worktree deps are present -> ${JSON.stringify(r)}`);
+}
+{
+  const present = new Set(['package.json', 'node_modules', 'node_modules/.bin/vite']);
+  const r = checkWorktreeValidationSetup('npm run build', (rel) => present.has(rel), 'linux');
+  line(r.ok === true && r.setupGated === false, `D npm run build allowed when POSIX worktree deps are present -> ${JSON.stringify(r)}`);
+}
+
+console.log(`\n${failures === 0 ? 'ALL PASS - executor enforcement rejects real violating diffs, accepts allowed changes, rejects unsafe base branches, and dependency-gates missing worktree build deps.' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);
