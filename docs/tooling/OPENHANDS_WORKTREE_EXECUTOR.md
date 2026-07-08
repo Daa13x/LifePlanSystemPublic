@@ -161,6 +161,9 @@ condition is missing, the future invocation boundary is reported as
 `setup-gated` and real invocation is refused before the placeholder invocation
 function can proceed.
 
+For the future local-only enablement plan, see
+[`OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md`](OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md).
+
 ## Enforcement rejection path verified (blocker #3 — addressed)
 
 The changed-file enforcement is verified to **reject a real violating diff**, not
