@@ -19,6 +19,8 @@ scaffolding only.
 
 - Enablement plan:
   [`OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md`](OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md)
+- Real invocation contract design (design-only; not implemented):
+  [`OPENHANDS_REAL_INVOCATION_CONTRACT_DESIGN.md`](OPENHANDS_REAL_INVOCATION_CONTRACT_DESIGN.md)
 - Adapter contract:
   [`OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md`](OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md)
 - Safety matrix:
@@ -47,6 +49,12 @@ npm run build
 
 ## Next Safe Prompt
 
+The real invocation contract is now designed in
+[`OPENHANDS_REAL_INVOCATION_CONTRACT_DESIGN.md`](OPENHANDS_REAL_INVOCATION_CONTRACT_DESIGN.md)
+(design-only, not implemented). Real invocation still requires a future,
+separate, **explicit approval** step and remains disabled. The next safe step is
+a **mock transport only** — still no real call:
+
 ```text
-Review and design the real OpenHands invocation contract without implementing it. Define the approval gates, dry-run payload format, human confirmation UX, transport abstraction, kill switch, audit logs, failure modes, and tests proving no real call can happen without explicit approval. Do not enable invocation. Do not add invoke UI. Do not add network/model calls.
+Implement the OpenHands transport abstraction as a MOCK ONLY (PR B). Add the transport interface, a refusing default that returns invoked:false, and an injectable mock used solely in tests. Do not call OpenHands. Do not add a real network/model call. Do not change OPENHANDS_EXECUTOR_INVOCATION_ENABLED. Do not add invoke/run UI or a server invocation route. Add tests proving: no invocation when the flag is false, no invocation without approval, and the real transport is never reachable in tests. Keep it docs+mock+tests only.
 ```
