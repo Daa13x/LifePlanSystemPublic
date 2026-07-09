@@ -1,0 +1,22 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "post-run review required",
+  "status": "blocked",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "Post-run review is required before any commit, push, PR, merge, cleanup, reset, or stash operation.",
+  "humanNextStep": "Review the preserved worktree and patch, then provide separate approval for any follow-up action.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "reviewArtifacts": ["example-report.md", "example.patch"]
+}

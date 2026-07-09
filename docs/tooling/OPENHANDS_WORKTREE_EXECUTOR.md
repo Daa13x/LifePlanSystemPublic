@@ -182,6 +182,10 @@ false. Focused verification is available via:
 
     npm run verify:openhands-invocation-adapter
 
+For the adapter contract and example shapes, see
+[`OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md`](OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md)
+and [`openhands_invocation_examples/`](openhands_invocation_examples/).
+
 Real invocation remains blocked pending a separate, explicitly approved
 implementation PR.
 

@@ -1,0 +1,22 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "missing model/provider",
+  "status": "setup-gated",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "Missing model or provider config.",
+  "humanNextStep": "Name the local model/provider explicitly before any future dry-run can pass.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "missing": ["model_provider_config_present"]
+}

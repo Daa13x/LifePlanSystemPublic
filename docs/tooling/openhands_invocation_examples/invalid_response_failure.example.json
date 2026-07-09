@@ -1,0 +1,21 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "invalid response",
+  "status": "invalid-response",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "The future invocation returned an invalid or unparseable response.",
+  "humanNextStep": "Treat the response as blocked and require human inspection before another attempt.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true
+}
