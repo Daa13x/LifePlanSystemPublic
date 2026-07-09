@@ -23,6 +23,8 @@ this folder enables execution, real OpenHands invocation, or external actions.
   [`skills/SKILL_TEMPLATE.md`](skills/SKILL_TEMPLATE.md)
 - Export guide (Claude + ChatGPT; manual upload only):
   [`skills/EXPORT_GUIDE_CHATGPT_AND_CLAUDE.md`](skills/EXPORT_GUIDE_CHATGPT_AND_CLAUDE.md)
+- Routing and local learning loop (design-only):
+  [`LIFESKILL_ROUTING_LOCAL_LEARNING_LOOP.md`](LIFESKILL_ROUTING_LOCAL_LEARNING_LOOP.md)
 
 ### Starter skills (instruction-only)
 
