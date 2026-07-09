@@ -80,6 +80,21 @@
       "description": "Whether human approval is required before any durable write or action."
     }
   },
+  "if": {
+    "properties": {
+      "memory_route": {
+        "const": "source_of_truth_candidate_requires_approval"
+      }
+    },
+    "required": ["memory_route"]
+  },
+  "then": {
+    "properties": {
+      "approval_required": {
+        "const": true
+      }
+    }
+  },
   "nonAuthorizing": true,
   "runtimeEnabled": false
 }

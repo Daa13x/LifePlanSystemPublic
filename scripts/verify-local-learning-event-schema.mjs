@@ -72,8 +72,16 @@ function rel(file) {
   return path.relative(repoRoot, file).replaceAll('\\', '/');
 }
 
-function forbiddenHits(raw) {
-  return FORBIDDEN.filter(([, pattern]) => pattern.test(raw)).map(([label]) => label);
+function safetyBoundaryTextAllowed(name, raw, label) {
+  return name === 'docs/agent_mode/LOCAL_LEARNING_EVENT_SCHEMA.md'
+    && label === 'source_of_truth/ path'
+    && raw.includes('does not authorize writing to `source_of_truth/`');
+}
+
+function forbiddenHits(name, raw) {
+  return FORBIDDEN
+    .filter(([label, pattern]) => pattern.test(raw) && !safetyBoundaryTextAllowed(name, raw, label))
+    .map(([label]) => label);
 }
 
 function isNonEmptyString(value) {
@@ -134,6 +142,13 @@ line(JSON.stringify(schema.properties?.result_quality?.enum || []) === JSON.stri
 line(JSON.stringify(schema.properties?.memory_route?.enum || []) === JSON.stringify(ALLOWED_MEMORY_ROUTES),
   'schema memory_route enum is exact');
 
+line(schema.if?.properties?.memory_route?.const === 'source_of_truth_candidate_requires_approval',
+  'schema conditional checks source-of-truth candidate memory_route const');
+line(Array.isArray(schema.if?.required) && schema.if.required.includes('memory_route'),
+  'schema conditional requires memory_route before applying approval rule');
+line(schema.then?.properties?.approval_required?.const === true,
+  'schema conditional requires approval_required true for source-of-truth candidates');
+
 for (const route of ALLOWED_MEMORY_ROUTES) {
   line(doc.includes(route), `document mentions memory route ${route}`);
 }
@@ -149,7 +164,7 @@ const scanTargets = [
 ];
 
 for (const target of scanTargets) {
-  const hits = forbiddenHits(target.raw);
+  const hits = forbiddenHits(target.name, target.raw);
   line(hits.length === 0, `${target.name} contains no forbidden runtime/action tokens -> ${JSON.stringify(hits)}`);
 }
 
