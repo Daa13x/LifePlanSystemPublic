@@ -3,7 +3,11 @@
 // This module is intentionally pure and side-effect-free. It defines the
 // future local-only invocation boundary and failure mapping, but it does not
 // contact OpenHands, run commands, write files, install dependencies, or grant
-// commit/push/merge permissions.
+// commit/push/merge permissions. Its only import is the equally pure
+// executorEnforcement module, so the protected-path policy has one source of
+// truth instead of a drifting copy.
+
+import { OPENHANDS_MANDATORY_FORBIDDEN, violatesMandatoryForbidden } from './executorEnforcement.js';
 
 export const OPENHANDS_ADAPTER_LIMITS = Object.freeze({
   timeoutMsMin: 1,
@@ -12,18 +16,14 @@ export const OPENHANDS_ADAPTER_LIMITS = Object.freeze({
   outputMaxBytesMax: 16 * 1024 * 1024
 });
 
-export const OPENHANDS_ADAPTER_FORBIDDEN_PATHS = Object.freeze([
-  'source_of_truth/',
-  'memory/',
-  '.env',
-  'secrets/',
-  'data/',
-  '.git/',
-  '.lps/',
-  'credentials',
-  'rules/'
-]);
+// Same list the executor enforces (single source of truth; re-exported for
+// contract/report display).
+export const OPENHANDS_ADAPTER_FORBIDDEN_PATHS = Object.freeze([...OPENHANDS_MANDATORY_FORBIDDEN]);
 
+// Display statuses for UI/report surfaces. 'not-implemented' and 'disabled'
+// are reserved: the schema specs and safety matrix admit them for future
+// display use, but no current helper emits them (the disabled stub reports
+// 'setup-gated'). policy statuses stay the narrower VALID_STATUSES set below.
 export const OPENHANDS_INVOCATION_STATUS_TAXONOMY = Object.freeze([
   'setup-gated',
   'blocked',
@@ -31,7 +31,9 @@ export const OPENHANDS_INVOCATION_STATUS_TAXONOMY = Object.freeze([
   'validation-failed',
   'timeout',
   'output-capped',
-  'invalid-response'
+  'invalid-response',
+  'not-implemented',
+  'disabled'
 ]);
 
 export const OPENHANDS_ADAPTER_SAFE_DENIALS = Object.freeze({
@@ -68,7 +70,7 @@ const FAILURE_MAP = Object.freeze({
     status: 'validation-failed',
     reason: 'OpenHands invocation timed out before a usable result was available.'
   },
-  excessive_output: {
+  output_capped: {
     status: 'validation-failed',
     reason: 'OpenHands output exceeded the configured report/output cap.'
   },
@@ -80,7 +82,7 @@ const FAILURE_MAP = Object.freeze({
     status: 'refused',
     reason: 'OpenHands output touched a mandatory protected path.'
   },
-  changed_file_outside_allowedPaths: {
+  changed_file_outside_allowed_paths: {
     status: 'refused',
     reason: 'OpenHands output changed a file outside allowedPaths.'
   },
@@ -141,11 +143,10 @@ function normalizeAllowedPath(value) {
 }
 
 function pathTouchesForbidden(normalizedPath) {
-  const lower = normalizedPath.toLowerCase();
-  return OPENHANDS_ADAPTER_FORBIDDEN_PATHS.some((blocked) => {
-    const clean = blocked.toLowerCase().replace(/\/+$/, '');
-    return lower === clean || lower.startsWith(`${clean}/`) || lower.includes(`/${clean}/`);
-  });
+  // Delegate to the executor's matcher so the adapter can never accept an
+  // allowedPath the executor would refuse (e.g. "nested/.env" or
+  // "docs/credentials.json", which the previous local matcher let through).
+  return violatesMandatoryForbidden(normalizedPath);
 }
 
 function validateAllowedPath(value) {
@@ -318,7 +319,7 @@ export function invokeOpenHandsAdapter(options = {}) {
       : (invocationFlagNotOff ? 'The invocation flag is not false, but the adapter is still a disabled stub and did not invoke OpenHands.' : '');
     return safeResult({
       status: 'setup-gated',
-      code: !invocationFlagPresent || invocationFlagNotOff ? 'adapter_stub_not_enabled' : '',
+      code: !invocationFlagPresent || invocationFlagNotOff ? 'adapter_stub_not_enabled' : 'adapter_config_setup_gated',
       reason: `OpenHands adapter setup-gated: ${[...new Set(missing)].join(', ')}${flagReason ? ` ${flagReason}` : ''}`,
       missing: [...new Set(missing)],
       checks: validation.checks,
@@ -341,14 +342,16 @@ function normalizeAdapterOutcome(input = {}) {
   const code = stringValue(raw.code);
   const displayStatus = code === 'timeout'
     ? 'timeout'
-    : (code === 'excessive_output' ? 'output-capped'
+    : (code === 'output_capped' ? 'output-capped'
       : (code === 'invalid_response' ? 'invalid-response'
         : (OPENHANDS_INVOCATION_STATUS_TAXONOMY.includes(raw.status) ? raw.status : 'blocked')));
+  // Policy fallback mirrors FAILURE_MAP: timeout/output-capped degrade to
+  // validation-failed, invalid-response degrades to blocked.
   return {
     ok: false,
     invoked: false,
     status: displayStatus,
-    policyStatus: VALID_STATUSES.has(raw.status) ? raw.status : (displayStatus === 'timeout' || displayStatus === 'output-capped' || displayStatus === 'invalid-response' ? 'validation-failed' : 'blocked'),
+    policyStatus: VALID_STATUSES.has(raw.status) ? raw.status : (displayStatus === 'timeout' || displayStatus === 'output-capped' ? 'validation-failed' : 'blocked'),
     code,
     reason: stringValue(raw.reason) || 'Real OpenHands invocation remains disabled.',
     missing: Array.isArray(raw.missing) ? raw.missing : [],

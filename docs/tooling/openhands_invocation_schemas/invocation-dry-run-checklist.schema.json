@@ -7,6 +7,6 @@
   "safetyBooleansMustBeFalse": ["patchApproved", "commitAllowed", "pushAllowed", "mergeAllowed", "branchDeletionAllowed", "resetAllowed", "stashPopAllowed", "mainMasterWriteAllowed", "privateMemoryAccessAllowed", "dependencyProvisioningAllowed"],
   "humanReviewFieldsMustBeTrue": ["requiresHumanReview", "requiresSeparatePostRunApproval", "requiresHumanApproval", "approvalRequiredBeforeInvocation"],
   "forbiddenSecretFields": ["apiKey", "apiKeyValue", "secret", "token", "password", "privateKey"],
-  "allowedEndpointPatterns": ["^http://localhost(:[0-9]+)?(/.*)?$", "^http://127\\\\.0\\\\.0\\\\.1(:[0-9]+)?(/.*)?$", "^http://example\\\\.invalid(:[0-9]+)?(/.*)?$"],
+  "allowedEndpointPatterns": ["^http://localhost(:[0-9]+)?(/.*)?$", "^http://127\\.0\\.0\\.1(:[0-9]+)?(/.*)?$", "^http://example\\.invalid(:[0-9]+)?(/.*)?$"],
   "nonAuthorizing": true
 }

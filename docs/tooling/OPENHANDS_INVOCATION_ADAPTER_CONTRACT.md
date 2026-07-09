@@ -67,7 +67,9 @@ stash-pop, or branch deletion permissions.
 
 ## Status Values
 
-The UI/report taxonomy currently covers:
+The UI/report display taxonomy (one list, shared verbatim by
+`OPENHANDS_INVOCATION_STATUS_TAXONOMY` and every schema spec's
+`allowedStatusValues`) covers:
 
 - `setup-gated`;
 - `blocked`;
@@ -75,25 +77,38 @@ The UI/report taxonomy currently covers:
 - `validation-failed`;
 - `timeout`;
 - `output-capped`;
-- `invalid-response`.
+- `invalid-response`;
+- `not-implemented` (reserved — no current helper emits it);
+- `disabled` (reserved — no current helper emits it).
 
-The implementation may keep policy statuses narrower than display statuses as
-long as every output remains non-authorizing.
+The implementation keeps policy statuses narrower than display statuses
+(`setup-gated`, `blocked`, `refused`, `validation-failed`); every display
+status degrades to one of those for policy purposes, and every output remains
+non-authorizing.
+
+One value sits outside the outcome taxonomy on purpose:
+`buildOpenHandsInvocationPayload(...)` returns `status: 'payload-ready'` for a
+successfully assembled (but never sent) payload shape. It is a builder-only
+status, not an invocation outcome; if a payload-ready object is fed to the
+status-card/report helpers it is conservatively displayed as `blocked`.
 
 ## Failure Taxonomy
 
-Known failures are mapped without invoking OpenHands:
+Known failures are mapped without invoking OpenHands. Failure codes are
+snake_case and align with fixture names and display statuses
+(`output_capped` → `output-capped`, `changed_file_outside_allowed_paths` →
+`changed_file_outside_allowed_paths_failure.example.json`):
 
-- OpenHands unavailable;
-- endpoint misconfigured;
-- model missing;
-- timeout;
-- excessive output;
-- invalid or unparseable response;
-- protected path touched;
-- changed file outside `allowedPaths`;
-- too many files changed;
-- validation failed.
+- `openhands_unavailable`;
+- `endpoint_misconfigured`;
+- `model_missing`;
+- `timeout`;
+- `output_capped`;
+- `invalid_response`;
+- `protected_path_touched`;
+- `changed_file_outside_allowed_paths`;
+- `too_many_files_changed`;
+- `validation_failed`.
 
 Every failure must remain blocked, refused, setup-gated, or validation-failed
 from an authorization perspective.
@@ -143,6 +158,12 @@ The checklist always requires separate post-run approval.
 Human next-step strings must direct review, setup correction, or separate
 approval. They must never instruct automatic commit, push, merge, branch
 deletion, reset, or stash-pop.
+
+Note for fixture authors: the schema verifier is deliberately strict — a
+fixture's `humanNextStep` fails on the bare words `reset`, `stash-pop`,
+`delete branch`, or `enable invocation` even in prohibitive phrasing ("do not
+reset"). Word prohibitions positively ("keep history untouched", "require
+separate cleanup approval") instead.
 
 ## Fixture List
 
