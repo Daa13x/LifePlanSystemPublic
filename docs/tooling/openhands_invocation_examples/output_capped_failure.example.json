@@ -1,0 +1,24 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "output capped",
+  "status": "output-capped",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "The future invocation output exceeded the configured cap.",
+  "humanNextStep": "Review the capped output summary and keep any full artifact behind human review.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "limit": {
+    "outputMaxBytes": 1048576
+  }
+}

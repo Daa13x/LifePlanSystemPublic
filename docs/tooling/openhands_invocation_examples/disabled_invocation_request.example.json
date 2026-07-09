@@ -1,0 +1,31 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "disabled invocation request",
+  "status": "setup-gated",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "Real OpenHands invocation remains disabled by default.",
+  "humanNextStep": "Review the dry-run report and keep invocation blocked until a separate approved implementation PR exists.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "request": {
+    "endpoint": "http://localhost:3000",
+    "model": "example-local-model",
+    "provider": "local-example",
+    "apiKeyRef": "example-local-reference",
+    "worktreeDir": "example-worktree",
+    "allowedPaths": ["src/example"],
+    "timeoutMs": 300000,
+    "outputMaxBytes": 1048576
+  }
+}

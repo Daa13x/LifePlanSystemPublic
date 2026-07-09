@@ -24,7 +24,19 @@ export const OPENHANDS_ADAPTER_FORBIDDEN_PATHS = Object.freeze([
   'rules/'
 ]);
 
-const SAFE_DENIALS = Object.freeze({
+export const OPENHANDS_INVOCATION_STATUS_TAXONOMY = Object.freeze([
+  'setup-gated',
+  'blocked',
+  'refused',
+  'validation-failed',
+  'timeout',
+  'output-capped',
+  'invalid-response'
+]);
+
+export const OPENHANDS_ADAPTER_SAFE_DENIALS = Object.freeze({
+  invoked: false,
+  realInvocationEnabled: false,
   patchApproved: false,
   commitAllowed: false,
   pushAllowed: false,
@@ -34,7 +46,9 @@ const SAFE_DENIALS = Object.freeze({
   stashPopAllowed: false,
   mainMasterWriteAllowed: false,
   privateMemoryAccessAllowed: false,
-  dependencyProvisioningAllowed: false
+  dependencyProvisioningAllowed: false,
+  requiresHumanReview: true,
+  requiresSeparatePostRunApproval: true
 });
 
 const FAILURE_MAP = Object.freeze({
@@ -81,6 +95,7 @@ const FAILURE_MAP = Object.freeze({
 });
 
 const VALID_STATUSES = new Set(['setup-gated', 'blocked', 'refused', 'validation-failed']);
+const SAFE_DENIALS = OPENHANDS_ADAPTER_SAFE_DENIALS;
 
 function safeResult({
   status = 'setup-gated',
@@ -319,4 +334,159 @@ export function invokeOpenHandsAdapter(options = {}) {
     config: validation.config,
     payload: buildOpenHandsInvocationPayload(validation.config).payload
   });
+}
+
+function normalizeAdapterOutcome(input = {}) {
+  const raw = input && typeof input === 'object' ? input : {};
+  const code = stringValue(raw.code);
+  const displayStatus = code === 'timeout'
+    ? 'timeout'
+    : (code === 'excessive_output' ? 'output-capped'
+      : (code === 'invalid_response' ? 'invalid-response'
+        : (OPENHANDS_INVOCATION_STATUS_TAXONOMY.includes(raw.status) ? raw.status : 'blocked')));
+  return {
+    ok: false,
+    invoked: false,
+    status: displayStatus,
+    policyStatus: VALID_STATUSES.has(raw.status) ? raw.status : (displayStatus === 'timeout' || displayStatus === 'output-capped' || displayStatus === 'invalid-response' ? 'validation-failed' : 'blocked'),
+    code,
+    reason: stringValue(raw.reason) || 'Real OpenHands invocation remains disabled.',
+    missing: Array.isArray(raw.missing) ? raw.missing : [],
+    details: raw.details || null,
+    checks: Array.isArray(raw.checks) ? raw.checks : [],
+    ...SAFE_DENIALS,
+    safety: { ...SAFE_DENIALS }
+  };
+}
+
+export function buildOpenHandsHumanNextSteps(input = {}) {
+  const outcome = normalizeAdapterOutcome(input);
+  const steps = [];
+  if (outcome.status === 'setup-gated') {
+    steps.push('Review the setup-gated fields and update local configuration only after explicit approval.');
+  } else if (outcome.status === 'refused') {
+    steps.push('Review the refused path or diff reason and narrow the request before another dry run.');
+  } else if (outcome.status === 'validation-failed' || outcome.status === 'timeout' || outcome.status === 'output-capped' || outcome.status === 'invalid-response') {
+    steps.push('Review the failed output and keep the worktree/report available for human inspection.');
+  } else {
+    steps.push('Keep real invocation blocked until a separate approved implementation PR exists.');
+  }
+  steps.push('Require separate human approval before any later commit, push, PR, merge, cleanup, reset, or stash operation.');
+  return steps;
+}
+
+export function buildOpenHandsInvocationStatusCard(input = {}) {
+  const outcome = normalizeAdapterOutcome(input);
+  const humanNextSteps = buildOpenHandsHumanNextSteps(outcome);
+  return {
+    kind: 'openhands-invocation-status-card',
+    title: 'OpenHands invocation',
+    status: outcome.status,
+    policyStatus: outcome.policyStatus,
+    code: outcome.code,
+    invoked: false,
+    reason: outcome.reason,
+    missing: [...outcome.missing],
+    badgeTone: outcome.status === 'refused' ? 'danger' : (outcome.status === 'blocked' ? 'warning' : 'neutral'),
+    humanNextStep: humanNextSteps[0],
+    humanNextSteps,
+    ...SAFE_DENIALS,
+    safety: { ...SAFE_DENIALS }
+  };
+}
+
+export function buildOpenHandsInvocationDryRunChecklist(input = {}) {
+  const outcome = normalizeAdapterOutcome(input);
+  const checkMap = new Map(outcome.checks.map((item) => [item.gate, item]));
+  const item = (id, label, required = true) => {
+    const check = checkMap.get(id);
+    return {
+      id,
+      label,
+      required,
+      ok: check ? check.ok === true : false,
+      detail: check?.detail || 'not yet verified'
+    };
+  };
+  return {
+    kind: 'openhands-invocation-dry-run-checklist',
+    status: outcome.status,
+    requiresHumanApproval: true,
+    approvalRequiredBeforeInvocation: true,
+    items: [
+      item('endpoint_config_present', 'Local endpoint is configured'),
+      item('model_provider_config_present', 'Model/provider is configured'),
+      item('allowed_paths_present', 'allowedPaths are present'),
+      item('allowed_paths_valid', 'allowedPaths avoid protected paths'),
+      item('worktree_directory_present', 'Worktree directory is present'),
+      item('timeout_limit_present', 'Timeout limit is safe'),
+      item('output_cap_present', 'Output cap is safe')
+    ],
+    ...SAFE_DENIALS,
+    safety: { ...SAFE_DENIALS }
+  };
+}
+
+export function buildOpenHandsPostRunReviewChecklist(input = {}) {
+  const outcome = normalizeAdapterOutcome(input);
+  return {
+    kind: 'openhands-post-run-review-checklist',
+    status: outcome.status,
+    requiresHumanReview: true,
+    requiresSeparatePostRunApproval: true,
+    approvalRequiredBeforeCommitPushPr: true,
+    items: [
+      { id: 'actual_diff_captured', label: 'Actual diff captured from the isolated worktree', required: true, ok: false },
+      { id: 'allowed_paths_enforced', label: 'Changed files checked against allowedPaths', required: true, ok: false },
+      { id: 'protected_paths_enforced', label: 'Protected paths checked against the actual diff', required: true, ok: false },
+      { id: 'validation_reviewed', label: 'Allowlisted validation output reviewed', required: true, ok: false },
+      { id: 'separate_commit_push_pr_approval', label: 'Separate human approval before commit, push, or PR', required: true, ok: false }
+    ],
+    ...SAFE_DENIALS,
+    safety: { ...SAFE_DENIALS }
+  };
+}
+
+export function buildOpenHandsInvocationReportSection(input = {}) {
+  const statusCard = buildOpenHandsInvocationStatusCard(input);
+  const dryRunChecklist = buildOpenHandsInvocationDryRunChecklist(input);
+  const postRunChecklist = buildOpenHandsPostRunReviewChecklist(input);
+  const lines = [
+    '## OpenHands invocation adapter',
+    `- Status: ${statusCard.status}`,
+    `- Invoked: ${statusCard.invoked ? 'yes' : 'no'}`,
+    `- Reason: ${statusCard.reason}`,
+    `- Next human step: ${statusCard.humanNextStep}`,
+    '- Commit/push/merge allowed: no',
+    '- Patch approved: no'
+  ];
+  return {
+    kind: 'openhands-invocation-report-section',
+    heading: 'OpenHands invocation adapter',
+    status: statusCard.status,
+    statusCard,
+    dryRunChecklist,
+    postRunChecklist,
+    lines,
+    markdown: lines.join('\n'),
+    ...SAFE_DENIALS,
+    safety: { ...SAFE_DENIALS }
+  };
+}
+
+export function buildOpenHandsAdapterUiState(input = {}) {
+  const statusCard = buildOpenHandsInvocationStatusCard(input);
+  return {
+    kind: 'openhands-adapter-ui-state',
+    status: statusCard.status,
+    label: statusCard.status.replaceAll('-', ' '),
+    description: statusCard.reason,
+    statusCard,
+    reportSection: buildOpenHandsInvocationReportSection(input),
+    dryRunChecklist: buildOpenHandsInvocationDryRunChecklist(input),
+    postRunReviewChecklist: buildOpenHandsPostRunReviewChecklist(input),
+    humanNextSteps: buildOpenHandsHumanNextSteps(input),
+    ...SAFE_DENIALS,
+    safety: { ...SAFE_DENIALS }
+  };
 }

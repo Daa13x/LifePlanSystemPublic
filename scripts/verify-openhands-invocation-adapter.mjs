@@ -9,8 +9,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildOpenHandsInvocationPayload,
+  buildOpenHandsAdapterUiState,
+  buildOpenHandsHumanNextSteps,
+  buildOpenHandsInvocationDryRunChecklist,
+  buildOpenHandsInvocationReportSection,
+  buildOpenHandsInvocationStatusCard,
+  buildOpenHandsPostRunReviewChecklist,
   invokeOpenHandsAdapter,
   mapOpenHandsInvocationFailure,
+  OPENHANDS_INVOCATION_STATUS_TAXONOMY,
   summarizeOpenHandsInvocationResult,
   validateOpenHandsInvocationConfig
 } from '../server/openhandsInvocationAdapter.js';
@@ -19,6 +26,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
 const adapterPath = path.join(repoRoot, 'server', 'openhandsInvocationAdapter.js');
+const fixtureDir = path.join(repoRoot, 'docs', 'tooling', 'openhands_invocation_examples');
 
 let failures = 0;
 const line = (ok, msg) => {
@@ -50,6 +58,9 @@ function deniesAutonomy(result) {
     && result.mainMasterWriteAllowed === false
     && result.privateMemoryAccessAllowed === false
     && result.dependencyProvisioningAllowed === false
+    && result.realInvocationEnabled === false
+    && result.requiresHumanReview === true
+    && result.requiresSeparatePostRunApproval === true
     && result.safety?.patchApproved === false
     && result.safety?.commitAllowed === false
     && result.safety?.pushAllowed === false
@@ -59,7 +70,33 @@ function deniesAutonomy(result) {
     && result.safety?.stashPopAllowed === false
     && result.safety?.mainMasterWriteAllowed === false
     && result.safety?.privateMemoryAccessAllowed === false
-    && result.safety?.dependencyProvisioningAllowed === false;
+    && result.safety?.dependencyProvisioningAllowed === false
+    && result.safety?.realInvocationEnabled === false
+    && result.safety?.requiresHumanReview === true
+    && result.safety?.requiresSeparatePostRunApproval === true;
+}
+
+function fixtureDeniesAutonomy(fixture) {
+  return fixture
+    && fixture.invoked === false
+    && fixture.realInvocationEnabled === false
+    && fixture.patchApproved === false
+    && fixture.commitAllowed === false
+    && fixture.pushAllowed === false
+    && fixture.mergeAllowed === false
+    && fixture.branchDeletionAllowed === false
+    && fixture.resetAllowed === false
+    && fixture.stashPopAllowed === false
+    && fixture.mainMasterWriteAllowed === false
+    && fixture.privateMemoryAccessAllowed === false
+    && fixture.dependencyProvisioningAllowed === false
+    && fixture.requiresHumanReview === true
+    && fixture.requiresSeparatePostRunApproval === true;
+}
+
+function textHasNoAutomationCommand(text) {
+  return !/\bauto-(commit|push|merge)\b/i.test(text)
+    && !/\bautomatically\s+(commit|push|merge)\b/i.test(text);
 }
 
 console.log('--- Disabled OpenHands invocation adapter verification ---');
@@ -176,6 +213,83 @@ console.log('--- Disabled OpenHands invocation adapter verification ---');
     `adapter never claims commit/push/merge or branch deletion/reset/stash-pop/private access is allowed -> ${JSON.stringify(r)}`);
 }
 {
+  const requiredStatuses = ['setup-gated', 'blocked', 'refused', 'validation-failed', 'timeout', 'output-capped', 'invalid-response'];
+  const missing = requiredStatuses.filter((status) => !OPENHANDS_INVOCATION_STATUS_TAXONOMY.includes(status));
+  line(missing.length === 0, `status taxonomy covers required statuses -> ${JSON.stringify({ taxonomy: OPENHANDS_INVOCATION_STATUS_TAXONOMY, missing })}`);
+}
+{
+  const expectedFixtures = [
+    'disabled_invocation_request.example.json',
+    'valid_local_config.example.json',
+    'missing_endpoint_failure.example.json',
+    'missing_model_failure.example.json',
+    'timeout_failure.example.json',
+    'output_capped_failure.example.json',
+    'invalid_response_failure.example.json',
+    'protected_path_failure.example.json',
+    'changed_file_outside_allowed_paths_failure.example.json',
+    'too_many_files_failure.example.json',
+    'validation_failed_failure.example.json',
+    'post_run_review_required.example.json'
+  ];
+  const parsed = [];
+  for (const filename of expectedFixtures) {
+    const fullPath = path.join(fixtureDir, filename);
+    const raw = fs.readFileSync(fullPath, 'utf8');
+    const fixture = JSON.parse(raw);
+    parsed.push({ filename, raw, fixture });
+  }
+  line(parsed.length === expectedFixtures.length, `all fixtures parse successfully -> ${JSON.stringify(parsed.map((item) => item.filename))}`);
+
+  const secretPattern = /(sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|AKIA[0-9A-Z]{16}|BEGIN (RSA |OPENSSH |EC |)PRIVATE KEY|password\s*[:=]|secret\s*[:=]|token\s*[:=])/i;
+  const secretHits = parsed.filter((item) => secretPattern.test(item.raw)).map((item) => item.filename);
+  line(secretHits.length === 0, `fixture files contain no likely secrets or real API keys -> ${JSON.stringify(secretHits)}`);
+
+  const protectedHits = parsed.filter((item) => /source_of_truth|memory\//i.test(item.raw)
+    && !(item.filename === 'protected_path_failure.example.json' && /forbidden\/protected path example/i.test(item.raw))).map((item) => item.filename);
+  line(protectedHits.length === 0, `fixtures avoid private memory/source_of_truth except forbidden examples -> ${JSON.stringify(protectedHits)}`);
+
+  const permissionFailures = parsed.filter((item) => !fixtureDeniesAutonomy(item.fixture)).map((item) => item.filename);
+  line(permissionFailures.length === 0, `every fixture denies patch approval and commit/push/merge permissions -> ${JSON.stringify(permissionFailures)}`);
+
+  const fixtureText = parsed.map((item) => item.fixture.humanNextStep || '').join('\n');
+  line(textHasNoAutomationCommand(fixtureText), 'fixture human next steps never say to auto-commit, auto-push, or auto-merge');
+}
+{
+  const outcomes = [
+    invokeOpenHandsAdapter({ config: validConfig, invocationEnabled: false }),
+    mapOpenHandsInvocationFailure({ code: 'timeout' }),
+    mapOpenHandsInvocationFailure({ code: 'excessive_output' }),
+    mapOpenHandsInvocationFailure({ code: 'invalid_response' }),
+    mapOpenHandsInvocationFailure({ code: 'protected_path_touched' })
+  ];
+  const cards = outcomes.map(buildOpenHandsInvocationStatusCard);
+  const reports = outcomes.map(buildOpenHandsInvocationReportSection);
+  const uiStates = outcomes.map(buildOpenHandsAdapterUiState);
+  line(cards.every(deniesAutonomy), `every status card denies autonomy -> ${JSON.stringify(cards)}`);
+  line(reports.every(deniesAutonomy), `every report section denies autonomy -> ${JSON.stringify(reports.map((item) => ({ status: item.status, safety: item.safety })))}`);
+  line(uiStates.every(deniesAutonomy), `every UI state denies autonomy -> ${JSON.stringify(uiStates.map((item) => ({ status: item.status, safety: item.safety })))}`);
+}
+{
+  const dryRun = buildOpenHandsInvocationDryRunChecklist(validateOpenHandsInvocationConfig(validConfig));
+  line(dryRun.requiresHumanApproval === true && dryRun.approvalRequiredBeforeInvocation === true && deniesAutonomy(dryRun),
+    `dry-run checklist requires human approval -> ${JSON.stringify(dryRun)}`);
+}
+{
+  const postRun = buildOpenHandsPostRunReviewChecklist(mapOpenHandsInvocationFailure({ code: 'validation_failed' }));
+  line(postRun.requiresSeparatePostRunApproval === true && postRun.approvalRequiredBeforeCommitPushPr === true && deniesAutonomy(postRun),
+    `post-run review checklist requires separate approval before commit/push/PR -> ${JSON.stringify(postRun)}`);
+}
+{
+  const nextSteps = [
+    ...buildOpenHandsHumanNextSteps({ status: 'setup-gated', reason: 'missing endpoint' }),
+    ...buildOpenHandsHumanNextSteps({ status: 'refused', reason: 'protected path touched' }),
+    ...buildOpenHandsHumanNextSteps({ status: 'validation-failed', code: 'timeout', reason: 'timeout' })
+  ];
+  line(textHasNoAutomationCommand(nextSteps.join('\n')),
+    `human next steps never say to auto-commit, auto-push, or auto-merge -> ${JSON.stringify(nextSteps)}`);
+}
+{
   const source = fs.readFileSync(adapterPath, 'utf8');
   const forbiddenSourcePatterns = [
     /\bfetch\s*\(/,
@@ -188,10 +302,27 @@ console.log('--- Disabled OpenHands invocation adapter verification ---');
     /\bchild_process\b/,
     /\bspawn\s*\(/,
     /\bexecFile\s*\(/,
-    /\bexec\s*\(/
+    /\bexec\s*\(/,
+    /\bwriteFile(?:Sync)?\s*\(/,
+    /\bcreateWriteStream\s*\(/,
+    /\bappendFile(?:Sync)?\s*\(/
   ];
   const matches = forbiddenSourcePatterns.filter((pattern) => pattern.test(source)).map(String);
-  line(matches.length === 0, `adapter exposes no network/process caller import -> ${JSON.stringify(matches)}`);
+  line(matches.length === 0, `adapter exposes no network/process/shell/secret-writing caller -> ${JSON.stringify(matches)}`);
+}
+{
+  const source = fs.readFileSync(adapterPath, 'utf8');
+  const truePermissionPatterns = [
+    /patchApproved:\s*true/,
+    /commitAllowed:\s*true/,
+    /pushAllowed:\s*true/,
+    /mergeAllowed:\s*true/,
+    /branchDeletionAllowed:\s*true/,
+    /resetAllowed:\s*true/,
+    /stashPopAllowed:\s*true/
+  ];
+  const matches = truePermissionPatterns.filter((pattern) => pattern.test(source)).map(String);
+  line(matches.length === 0, `no helper returns true for patch/git/reset/stash permissions -> ${JSON.stringify(matches)}`);
 }
 
 console.log(`\n${failures === 0 ? 'ALL PASS - disabled OpenHands adapter remains local-only, setup-gated, and non-authorizing.' : failures + ' CHECK(S) FAILED'}`);

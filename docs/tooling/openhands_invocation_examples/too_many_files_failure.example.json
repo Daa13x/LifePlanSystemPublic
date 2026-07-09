@@ -1,0 +1,23 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "too many files changed",
+  "status": "refused",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "The future output changed more files than the configured limit.",
+  "humanNextStep": "Refuse the result and split the request into a smaller reviewed slice.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "maxFilesChanged": 5,
+  "observedFilesChanged": 6
+}

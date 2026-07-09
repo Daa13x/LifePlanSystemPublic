@@ -147,6 +147,10 @@ It still does not enable real invocation and does not call OpenHands. It defines
 the future local-only call boundary and failure mapping while the real invocation
 flag remains off.
 
+The adapter contract and fixtures are documented in
+[`OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md`](OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md)
+and [`openhands_invocation_examples/`](openhands_invocation_examples/).
+
 Any next implementation PR must remain separate and explicit. It should be
 reviewed only after proving the adapter still refuses real invocation by default,
 still performs no network/model call unless separately approved, and still keeps

@@ -1,0 +1,23 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "changed file outside allowedPaths",
+  "status": "refused",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "The future output changed a file outside allowedPaths.",
+  "humanNextStep": "Refuse the result and narrow allowedPaths or the request before another dry run.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "changedFile": "docs/out-of-scope-example.md",
+  "allowedPaths": ["src/example"]
+}

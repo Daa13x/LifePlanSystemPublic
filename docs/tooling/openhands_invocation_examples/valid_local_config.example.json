@@ -1,0 +1,31 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "valid local config boundary",
+  "status": "setup-gated",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "Local config shape is complete, but the disabled adapter still does not call OpenHands.",
+  "humanNextStep": "Use this only as a future local-only boundary example; keep real invocation blocked.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "config": {
+    "endpoint": "http://127.0.0.1:3000",
+    "model": "example-local-model",
+    "provider": "local-example",
+    "apiKeyRef": "example-local-reference",
+    "worktreeDir": "example-worktree",
+    "allowedPaths": ["src/example"],
+    "timeoutMs": 300000,
+    "outputMaxBytes": 1048576
+  }
+}
