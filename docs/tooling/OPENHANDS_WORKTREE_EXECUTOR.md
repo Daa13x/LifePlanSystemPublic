@@ -194,6 +194,22 @@ and [`OPENHANDS_INVOCATION_DOCS_INDEX.md`](OPENHANDS_INVOCATION_DOCS_INDEX.md).
 Real invocation remains blocked pending a separate, explicitly approved
 implementation PR.
 
+## runCli cwd containment
+
+`runCli` now routes every caller-provided cwd through `resolveRunCliCwd`. With no
+cwd, commands still default to the repo root. A caller cwd, including the
+executor's isolated worktree path, is honored only when it resolves inside the
+repo/worktree boundary. Attempts to escape that boundary return `EBADCWD`
+without executing the command and without silently falling back to the repo
+root.
+
+This containment does not authorize real OpenHands invocation. It only proves
+allowlisted validation runs in the intended safe working directory.
+
+Focused verification is available via:
+
+    npm run verify:runcli-cwd
+
 ## Enforcement rejection path verified (blocker #3 — addressed)
 
 The changed-file enforcement is verified to **reject a real violating diff**, not

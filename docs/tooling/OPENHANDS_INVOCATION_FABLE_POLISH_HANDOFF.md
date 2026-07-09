@@ -22,7 +22,7 @@ real OpenHands invocation.
 - No frontend invoke UI.
 - No runtime server integration.
 
-## What This PR Adds
+## What PR #21 Added
 
 - Schema/spec documents for invocation request, config, result, status card,
   report section, checklists, and human next steps.
@@ -31,6 +31,23 @@ real OpenHands invocation.
 - Safety matrix documentation.
 - Fable polish handoff material.
 - Docs index and links.
+
+## What PR #22 Added
+
+- Fable polish over the adapter, schema specs, fixtures, failure taxonomy, and
+  safety matrix.
+- Schema endpoint-pattern regression checks.
+- Shared status taxonomy with reserved display statuses.
+- Protected-path parity with the executor denylist.
+
+## What PR #23 Added
+
+- `runCli` cwd containment through `resolveRunCliCwd`.
+- Default cwd remains the repo root.
+- Caller cwd is respected only when it resolves inside the repo/worktree
+  boundary.
+- cwd escape attempts fail closed with `EBADCWD`.
+- Focused `npm run verify:runcli-cwd` coverage.
 
 ## Known Rough Edges
 
@@ -81,17 +98,16 @@ real OpenHands invocation.
   stash-pop.
 - Do not touch private memory or `source_of_truth`.
 
-## Suggested Next Fable Review Order
+## Suggested Next Review Order
 
-1. Review PR #19 adapter boundary.
-2. Review PR #20 UI/report boilerplate and fixtures.
-3. Review this schema-validation PR.
-4. Polish names and status taxonomy.
-5. Decide whether docs need consolidation.
-6. Stop before any runtime integration or real invocation.
+1. Treat PRs #19-#23 as the merged disabled-safety baseline.
+2. Review whether docs are now too duplicative.
+3. Design the real invocation contract without implementing it.
+4. Stop before any runtime integration, invoke UI, network/model call, or real
+   invocation.
 
-## Exact Safe Fable Prompt
+## Exact Safe Next Prompt
 
 ```text
-Review PR #19, PR #20, and the stacked schema-validation PR. Polish naming, schema/report shape, failure taxonomy, fixture clarity, and docs duplication. Do not enable real OpenHands invocation. Do not add network/model calls. Do not wire runtime execution.
+Review and design the real OpenHands invocation contract without implementing it. Define the approval gates, dry-run payload format, human confirmation UX, transport abstraction, kill switch, audit logs, failure modes, and tests proving no real call can happen without explicit approval. Do not enable invocation. Do not add invoke UI. Do not add network/model calls.
 ```
