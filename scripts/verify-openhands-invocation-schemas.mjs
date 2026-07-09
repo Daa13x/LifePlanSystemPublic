@@ -125,6 +125,18 @@ for (const schema of schemas) {
   const missingHumanReview = requiredHumanReviewFields.filter((field) => !spec.humanReviewFieldsMustBeTrue?.includes(field));
   line(missingHumanReview.length === 0, `${schema.name} requires human review fields -> ${JSON.stringify(missingHumanReview)}`);
   line(spec.nonAuthorizing === true, `${schema.name} is marked non-authorizing`);
+
+  // The spec's own endpoint patterns must be usable regexes that accept the
+  // canonical local/example endpoints and reject remote ones. (This guards
+  // against escaping mistakes: a broken pattern that matches nothing would
+  // otherwise pass every structural check above.)
+  const specPatterns = (spec.allowedEndpointPatterns || []).map((source) => new RegExp(source));
+  const mustMatch = ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://example.invalid/path'];
+  const mustReject = ['https://api.openai.com', 'http://127a0b0c1:3000', 'http://evil.example.com'];
+  const unmatched = mustMatch.filter((endpoint) => !specPatterns.some((pattern) => pattern.test(endpoint)));
+  const wronglyMatched = mustReject.filter((endpoint) => specPatterns.some((pattern) => pattern.test(endpoint)));
+  line(unmatched.length === 0 && wronglyMatched.length === 0,
+    `${schema.name} endpoint patterns compile and match local/example endpoints only -> ${JSON.stringify({ unmatched, wronglyMatched })}`);
 }
 
 for (const fixture of fixtures) {

@@ -18,7 +18,7 @@ cleanup, reset, stash-pop, dependency provisioning, or real invocation.
 | Changed-file count limit | Prevents overly broad patches | `checkExecutorMaxFilesChanged` | `refused` | Split the request into a smaller slice | No |
 | Dry-run report visibility | Requires report visibility before future invocation | readiness gate and report helpers | `setup-gated` | Show report before any execution approval | No |
 | Second confirmation | Requires explicit execution confirmation after approval | request approval fields | `setup-gated` | Obtain second human confirmation | No |
-| Adapter disabled stub | Prevents any OpenHands call in current code | `invokeOpenHandsAdapter` | `setup-gated` / `disabled` / `not-implemented` | Keep blocked pending separate implementation PR | No |
+| Adapter disabled stub | Prevents any OpenHands call in current code | `invokeOpenHandsAdapter` | `setup-gated` (`disabled` / `not-implemented` are reserved display statuses; the stub does not emit them yet) | Keep blocked pending separate implementation PR | No |
 | Schema validation | Checks specs, statuses, endpoints, and denied autonomy fields | `scripts/verify-openhands-invocation-schemas.mjs` | `blocked` | Fix schema/fixture mismatch before review | No |
 | Fixture validation | Checks examples are local-only and non-authorizing | `scripts/verify-openhands-invocation-schemas.mjs` | `blocked` | Fix examples before using them as review material | No |
 | Post-run review | Keeps any future output untrusted until reviewed | post-run checklist helpers | `blocked` | Require separate human approval before follow-up | No |

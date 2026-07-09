@@ -168,9 +168,9 @@ console.log('--- Disabled OpenHands invocation adapter verification ---');
     `timeout failure maps safely -> ${JSON.stringify(r)}`);
 }
 {
-  const r = mapOpenHandsInvocationFailure({ code: 'excessive_output' });
+  const r = mapOpenHandsInvocationFailure({ code: 'output_capped' });
   line(r.status === 'validation-failed' && deniesAutonomy(r),
-    `excessive output failure maps safely -> ${JSON.stringify(r)}`);
+    `output-capped failure maps safely -> ${JSON.stringify(r)}`);
 }
 {
   const r = mapOpenHandsInvocationFailure({ code: 'invalid_response' });
@@ -183,9 +183,9 @@ console.log('--- Disabled OpenHands invocation adapter verification ---');
     `protected-path result maps safely -> ${JSON.stringify(r)}`);
 }
 {
-  const r = mapOpenHandsInvocationFailure({ code: 'changed_file_outside_allowedPaths' });
+  const r = mapOpenHandsInvocationFailure({ code: 'changed_file_outside_allowed_paths' });
   line(r.status === 'refused' && deniesAutonomy(r),
-    `changed-file-outside-allowedPaths result maps safely -> ${JSON.stringify(r)}`);
+    `changed-file-outside-allowed-paths result maps safely -> ${JSON.stringify(r)}`);
 }
 {
   const r = mapOpenHandsInvocationFailure({ code: 'too_many_files_changed' });
@@ -213,9 +213,40 @@ console.log('--- Disabled OpenHands invocation adapter verification ---');
     `adapter never claims commit/push/merge or branch deletion/reset/stash-pop/private access is allowed -> ${JSON.stringify(r)}`);
 }
 {
-  const requiredStatuses = ['setup-gated', 'blocked', 'refused', 'validation-failed', 'timeout', 'output-capped', 'invalid-response'];
+  // The display taxonomy must match the schema specs' allowedStatusValues
+  // exactly ('not-implemented' and 'disabled' are reserved for future display).
+  const requiredStatuses = ['setup-gated', 'blocked', 'refused', 'validation-failed', 'timeout', 'output-capped', 'invalid-response', 'not-implemented', 'disabled'];
   const missing = requiredStatuses.filter((status) => !OPENHANDS_INVOCATION_STATUS_TAXONOMY.includes(status));
-  line(missing.length === 0, `status taxonomy covers required statuses -> ${JSON.stringify({ taxonomy: OPENHANDS_INVOCATION_STATUS_TAXONOMY, missing })}`);
+  const extra = OPENHANDS_INVOCATION_STATUS_TAXONOMY.filter((status) => !requiredStatuses.includes(status));
+  line(missing.length === 0 && extra.length === 0,
+    `status taxonomy matches the schema status list -> ${JSON.stringify({ taxonomy: OPENHANDS_INVOCATION_STATUS_TAXONOMY, missing, extra })}`);
+}
+{
+  // Policy fallback must mirror FAILURE_MAP when only a code is supplied:
+  // invalid_response degrades to blocked, not validation-failed.
+  const card = buildOpenHandsInvocationStatusCard({ code: 'invalid_response' });
+  line(card.status === 'invalid-response' && card.policyStatus === 'blocked',
+    `code-only invalid_response keeps FAILURE_MAP policy (blocked) -> ${JSON.stringify({ status: card.status, policyStatus: card.policyStatus })}`);
+  const capped = buildOpenHandsInvocationStatusCard({ code: 'output_capped' });
+  line(capped.status === 'output-capped' && capped.policyStatus === 'validation-failed',
+    `code-only output_capped keeps FAILURE_MAP policy (validation-failed) -> ${JSON.stringify({ status: capped.status, policyStatus: capped.policyStatus })}`);
+}
+{
+  // The adapter must refuse nested protected paths exactly as the executor
+  // does (parity with violatesMandatoryForbidden — no fail-open drift).
+  const nested = validateOpenHandsInvocationConfig({ ...validConfig, allowedPaths: ['nested/.env'] });
+  line(nested.ok === false && nested.missing.includes('allowed_paths_valid'),
+    `nested/.env allowedPath is refused like the executor would -> ${JSON.stringify(nested.checks.find((c) => c.gate === 'allowed_paths_valid'))}`);
+  const credFile = validateOpenHandsInvocationConfig({ ...validConfig, allowedPaths: ['docs/credentials.json'] });
+  line(credFile.ok === false && credFile.missing.includes('allowed_paths_valid'),
+    `docs/credentials.json allowedPath is refused like the executor would -> ${JSON.stringify(credFile.checks.find((c) => c.gate === 'allowed_paths_valid'))}`);
+}
+{
+  // Explicit-off flag with an incomplete config must still carry a greppable
+  // code instead of an empty string.
+  const r = invokeOpenHandsAdapter({ config: { ...validConfig, endpoint: '' }, invocationEnabled: false });
+  line(r.status === 'setup-gated' && r.code === 'adapter_config_setup_gated',
+    `incomplete config with flag off reports adapter_config_setup_gated -> ${JSON.stringify({ status: r.status, code: r.code })}`);
 }
 {
   const expectedFixtures = [
@@ -259,7 +290,7 @@ console.log('--- Disabled OpenHands invocation adapter verification ---');
   const outcomes = [
     invokeOpenHandsAdapter({ config: validConfig, invocationEnabled: false }),
     mapOpenHandsInvocationFailure({ code: 'timeout' }),
-    mapOpenHandsInvocationFailure({ code: 'excessive_output' }),
+    mapOpenHandsInvocationFailure({ code: 'output_capped' }),
     mapOpenHandsInvocationFailure({ code: 'invalid_response' }),
     mapOpenHandsInvocationFailure({ code: 'protected_path_touched' })
   ];

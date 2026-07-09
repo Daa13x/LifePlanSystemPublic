@@ -8,6 +8,6 @@
   "humanReviewFieldsMustBeTrue": ["requiresHumanReview", "requiresSeparatePostRunApproval"],
   "forbiddenSecretFields": ["apiKey", "apiKeyValue", "secret", "token", "password", "privateKey"],
   "forbiddenHumanStepPhrases": ["auto-commit", "auto-push", "auto-merge", "delete branch", "reset", "stash-pop", "enable invocation"],
-  "allowedEndpointPatterns": ["^http://localhost(:[0-9]+)?(/.*)?$", "^http://127\\\\.0\\\\.0\\\\.1(:[0-9]+)?(/.*)?$", "^http://example\\\\.invalid(:[0-9]+)?(/.*)?$"],
+  "allowedEndpointPatterns": ["^http://localhost(:[0-9]+)?(/.*)?$", "^http://127\\.0\\.0\\.1(:[0-9]+)?(/.*)?$", "^http://example\\.invalid(:[0-9]+)?(/.*)?$"],
   "nonAuthorizing": true
 }
