@@ -24,6 +24,11 @@ The route value `source_of_truth_candidate_requires_approval` is only a label
 for a future review queue. It must not write to, edit, promote into, or otherwise
 touch any source-of-truth path.
 
+When `memory_route` is `source_of_truth_candidate_requires_approval`,
+`approval_required` must be `true`. This mirrors the fail-closed validator rule:
+the route label does not authorize writing to `source_of_truth/`, promotion still
+requires explicit human approval, and no automatic memory sync occurs.
+
 ## Required Fields
 
 `task_type`
