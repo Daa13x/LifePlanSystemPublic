@@ -9,11 +9,15 @@ scaffolding only.
   schemas, fixtures, and Fable polish.
 - PR #23 landed `runCli` cwd containment: default cwd is the repo root, an
   in-repo/worktree caller cwd is respected, and cwd escape attempts fail closed.
+- PR #24 added aggregate runtime-safety verification and stop-boundary docs
+  cleanup.
+- PR #25 adds the real invocation contract design as documentation only. It
+  implements no transport, route, UI, network/model call, or invocation path.
 - Verification scripts are safety gates and regression checks. They do not
   authorize real invocation, dependency provisioning, commit, push, merge, or
   branch cleanup.
-- The next future milestone is a design review for the real invocation contract,
-  not turning invocation on.
+- The next future milestone after this design is mock transport only with a
+  refusing default and tests, not real invocation.
 
 ## Documents
 
