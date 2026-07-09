@@ -153,6 +153,7 @@ for (const field of REQUIRED_FIELDS) {
 
 line(schema.nonAuthorizing === true, 'schema is marked non-authorizing');
 line(schema.runtimeEnabled === false, 'schema runtimeEnabled is false');
+line(schema.additionalProperties === false, 'schema rejects additional properties');
 
 line(JSON.stringify(schema.properties?.agent_target?.enum || []) === JSON.stringify(ALLOWED_AGENT_TARGETS),
   'schema agent_target enum is exact');
