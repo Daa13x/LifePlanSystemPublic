@@ -3,6 +3,7 @@ import path from 'node:path';
 import { validateLocalLearningEvent } from './localLearningEventValidator.js';
 
 export const LOCAL_LEARNING_REVIEW_INBOX_RELATIVE = '.lps/local-learning/review-inbox';
+const LOCAL_LEARNING_REVIEW_INBOX_SEGMENTS = LOCAL_LEARNING_REVIEW_INBOX_RELATIVE.split('/');
 
 function normalizeRepoRoot(repoRoot) {
   return path.resolve(String(repoRoot || process.cwd()));
@@ -11,6 +12,64 @@ function normalizeRepoRoot(repoRoot) {
 function isInside(parent, child) {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function directoryFailure(reason) {
+  return { ok: false, root: '', directory: '', reason };
+}
+
+function resolveContainedDirectory(root, directory) {
+  try {
+    const stats = fs.lstatSync(directory);
+    if (stats.isSymbolicLink()) {
+      return directoryFailure('review inbox path must not contain symbolic links or junctions');
+    }
+    if (!stats.isDirectory()) {
+      return directoryFailure('review inbox path component must be a directory');
+    }
+
+    const resolved = fs.realpathSync(directory);
+    if (!isInside(root, resolved)) {
+      return directoryFailure('review inbox path escapes repository root');
+    }
+    return { ok: true, root, directory: resolved, reason: '' };
+  } catch (error) {
+    return directoryFailure(`review inbox path could not be resolved: ${error.message}`);
+  }
+}
+
+function prepareReviewInboxDirectory(repoRoot) {
+  let root;
+  try {
+    root = fs.realpathSync(normalizeRepoRoot(repoRoot));
+    if (!fs.statSync(root).isDirectory()) {
+      return directoryFailure('repository root must be an existing directory');
+    }
+  } catch (error) {
+    return directoryFailure(`repository root could not be resolved: ${error.message}`);
+  }
+
+  let current = root;
+  for (const segment of LOCAL_LEARNING_REVIEW_INBOX_SEGMENTS) {
+    const parent = resolveContainedDirectory(root, current);
+    if (!parent.ok) return parent;
+    current = parent.directory;
+
+    const next = path.join(current, segment);
+    try {
+      fs.mkdirSync(next, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code !== 'EEXIST') {
+        return directoryFailure(`review inbox path could not be created: ${error.message}`);
+      }
+    }
+
+    const checked = resolveContainedDirectory(root, next);
+    if (!checked.ok) return checked;
+    current = checked.directory;
+  }
+
+  return { ok: true, root, directory: current, reason: '' };
 }
 
 export function getLocalLearningReviewInboxPath(repoRoot = process.cwd()) {
@@ -88,25 +147,27 @@ export function writeLocalLearningReviewCandidate(event, options = {}) {
     return resultFailure(slugCheck.reason, { errors: [slugCheck.reason] });
   }
 
-  const root = normalizeRepoRoot(options.repoRoot);
-  const directory = getLocalLearningReviewInboxPath(root);
-  if (!isInside(root, directory)) {
-    return resultFailure('review inbox path escapes repository root', { errors: ['review inbox path escapes repository root'] });
-  }
-
   const requestedSlug = slugCheck.slug || defaultSlug(event);
   const { base, extension } = splitSlug(requestedSlug);
   if (!base || base === '.' || base.includes('..')) {
     return resultFailure('slug must resolve to a safe filename', { errors: ['slug must resolve to a safe filename'] });
   }
 
-  fs.mkdirSync(directory, { recursive: true });
+  const prepared = prepareReviewInboxDirectory(options.repoRoot);
+  if (!prepared.ok) {
+    return resultFailure(prepared.reason, { errors: [prepared.reason] });
+  }
+  const { root, directory } = prepared;
   const content = `${JSON.stringify(event, null, 2)}\n`;
 
   for (let index = 1; index <= 1000; index += 1) {
     const suffix = index === 1 ? '' : `-${index}`;
-    const absolute = path.resolve(directory, `${base}${suffix}${extension}`);
-    if (!isInside(directory, absolute)) {
+    const checked = resolveContainedDirectory(root, directory);
+    if (!checked.ok) {
+      return resultFailure(checked.reason, { errors: [checked.reason] });
+    }
+    const absolute = path.resolve(checked.directory, `${base}${suffix}${extension}`);
+    if (!isInside(checked.directory, absolute)) {
       return resultFailure('candidate path escapes review inbox', { errors: ['candidate path escapes review inbox'] });
     }
     try {

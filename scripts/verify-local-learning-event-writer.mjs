@@ -129,6 +129,27 @@ checkWritesNothing('absolute-path', validExample, { slug: path.resolve(os.tmpdir
 checkWritesNothing('sensitive-target', validExample, { slug: ['source_of_truth', 'target'].join('/') }, 'path separators');
 checkWritesNothing('repo-root-target', validExample, { slug: '.' }, 'dot');
 
+for (const [index, component] of LOCAL_LEARNING_REVIEW_INBOX_RELATIVE.split('/').entries()) {
+  const root = makeTempRoot(`junction-root-${index}`);
+  const outside = makeTempRoot(`junction-outside-${index}`);
+  const slug = `junction-escape-${index}`;
+  try {
+    const components = LOCAL_LEARNING_REVIEW_INBOX_RELATIVE.split('/');
+    const parent = path.join(root, ...components.slice(0, index));
+    fs.mkdirSync(parent, { recursive: true });
+    fs.symlinkSync(outside, path.join(parent, component), process.platform === 'win32' ? 'junction' : 'dir');
+
+    const result = writeLocalLearningReviewCandidate(validExample, { repoRoot: root, slug });
+    const outsideCandidate = path.join(outside, ...components.slice(index + 1), `${slug}.json`);
+    line(!result.ok && result.written === false && !fs.existsSync(outsideCandidate)
+      && result.reason.includes('symbolic links'),
+    `${component} junction cannot redirect a write outside repo root -> ${JSON.stringify({ result, outsideCandidate })}`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+}
+
 withTempRoot('no-overwrite', (root) => {
   const inbox = getLocalLearningReviewInboxPath(root);
   fs.mkdirSync(inbox, { recursive: true });
