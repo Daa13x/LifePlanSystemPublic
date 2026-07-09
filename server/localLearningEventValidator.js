@@ -106,5 +106,13 @@ export function validateLocalLearningEvent(event) {
     errors.push('approval_required must be a boolean');
   }
 
+  // Fail closed on the sensitive route: a source-of-truth candidate must always
+  // require human approval. The route stays a label only (never authorization
+  // to write); this check is intentionally stricter than the JSON schema.
+  if (event.memory_route === 'source_of_truth_candidate_requires_approval'
+    && event.approval_required !== true) {
+    errors.push('approval_required must be true when memory_route is source_of_truth_candidate_requires_approval');
+  }
+
   return { ok: errors.length === 0, errors };
 }

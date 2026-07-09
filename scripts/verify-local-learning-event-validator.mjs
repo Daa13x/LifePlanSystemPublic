@@ -85,6 +85,28 @@ for (const field of REQUIRED_FIELDS) {
 }
 
 {
+  // Fail closed: the sensitive route may never claim approval is not required.
+  const event = {
+    ...clone(validExample),
+    memory_route: 'source_of_truth_candidate_requires_approval',
+    approval_required: false
+  };
+  checkFails('source-of-truth candidate route without approval_required=true', event,
+    'approval_required must be true when memory_route is source_of_truth_candidate_requires_approval');
+}
+
+{
+  // Positive control: the same route with approval_required=true stays valid.
+  const event = {
+    ...clone(validExample),
+    memory_route: 'source_of_truth_candidate_requires_approval',
+    approval_required: true
+  };
+  line(validateLocalLearningEvent(event).ok,
+    'source-of-truth candidate route with approval_required=true passes');
+}
+
+{
   let malformedFailed = false;
   try {
     JSON.parse('{');
