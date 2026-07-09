@@ -1,0 +1,11 @@
+{
+  "task_type": "review_followup",
+  "selected_skills": ["memory-routing-helper", "agent-output-reviewer"],
+  "agent_target": "human",
+  "result_quality": "partial",
+  "mistakes": ["A proposed durable note needs human review before it can be kept."],
+  "lesson": "Route durable-learning candidates to approval queues instead of writing them automatically.",
+  "skill_update_candidate": "",
+  "memory_route": "source_of_truth_candidate_requires_approval",
+  "approval_required": true
+}

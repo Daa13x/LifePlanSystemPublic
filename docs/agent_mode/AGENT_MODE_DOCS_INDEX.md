@@ -25,6 +25,10 @@ this folder enables execution, real OpenHands invocation, or external actions.
   [`skills/EXPORT_GUIDE_CHATGPT_AND_CLAUDE.md`](skills/EXPORT_GUIDE_CHATGPT_AND_CLAUDE.md)
 - Routing and local learning loop (design-only):
   [`LIFESKILL_ROUTING_LOCAL_LEARNING_LOOP.md`](LIFESKILL_ROUTING_LOCAL_LEARNING_LOOP.md)
+- Local learning event schema (docs/test-first; no runtime engine):
+  [`LOCAL_LEARNING_EVENT_SCHEMA.md`](LOCAL_LEARNING_EVENT_SCHEMA.md)
+- Machine-readable local learning event schema:
+  [`schemas/local-learning-event.schema.json`](schemas/local-learning-event.schema.json)
 
 ### Starter skills (instruction-only)
 
@@ -38,11 +42,16 @@ this folder enables execution, real OpenHands invocation, or external actions.
 ## Verification commands
 
 ```bash
+npm run verify:local-learning-event-schema
 npm run verify:lifeskillsystem-skills
 npm run verify:runtime-safety
 npm run verify:openhands-stop-boundary
 npm run build
 ```
+
+`verify:local-learning-event-schema` checks the local learning event doc, schema,
+and examples for required fields and safety-boundary tokens. It is docs/test
+first and does not implement a router, local learning engine, or runtime writer.
 
 `verify:lifeskillsystem-skills` checks that every `SKILL.md` under
 `docs/agent_mode/skills/` has the required metadata and sections and contains no

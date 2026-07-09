@@ -20,6 +20,7 @@
     "verify:openhands-stop-boundary": "node scripts/verify-openhands-stop-boundary.mjs",
     "verify:runtime-safety": "npm run verify:runcli-cwd && npm run verify:executor-enforcement && npm run verify:openhands-invocation-all && npm run verify:openhands-stop-boundary",
     "verify:lifeskillsystem-skills": "node scripts/verify-lifeskillsystem-skills.mjs",
+    "verify:local-learning-event-schema": "node scripts/verify-local-learning-event-schema.mjs",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss"
   },
