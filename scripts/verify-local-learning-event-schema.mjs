@@ -57,6 +57,10 @@ const FORBIDDEN = [
   ['token= secret', /\btoken\s*=/i]
 ];
 
+const ALLOWED_SOURCE_OF_TRUTH_DOC_LINES = new Set([
+  'the route label does not authorize writing to `source_of_truth/`, promotion still'
+]);
+
 let failures = 0;
 const line = (ok, msg) => { if (!ok) failures++; console.log(`${ok ? 'ok  ' : 'FAIL'}  ${msg}`); };
 
@@ -72,10 +76,22 @@ function rel(file) {
   return path.relative(repoRoot, file).replaceAll('\\', '/');
 }
 
+function sourceOfTruthPathHitAllowed(name, raw) {
+  if (name !== 'docs/agent_mode/LOCAL_LEARNING_EVENT_SCHEMA.md') {
+    return false;
+  }
+
+  const matchingLines = raw
+    .split(/\r?\n/)
+    .filter((docLine) => /source_of_truth\//.test(docLine))
+    .map((docLine) => docLine.trim());
+
+  return matchingLines.length > 0
+    && matchingLines.every((docLine) => ALLOWED_SOURCE_OF_TRUTH_DOC_LINES.has(docLine));
+}
+
 function safetyBoundaryTextAllowed(name, raw, label) {
-  return name === 'docs/agent_mode/LOCAL_LEARNING_EVENT_SCHEMA.md'
-    && label === 'source_of_truth/ path'
-    && raw.includes('does not authorize writing to `source_of_truth/`');
+  return label === 'source_of_truth/ path' && sourceOfTruthPathHitAllowed(name, raw);
 }
 
 function forbiddenHits(name, raw) {
