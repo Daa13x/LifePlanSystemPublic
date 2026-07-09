@@ -164,18 +164,27 @@ Fixture examples live in
 
 Fixtures use localhost/example values only and contain no real secrets.
 
+Schema specs live in
+[`openhands_invocation_schemas/`](openhands_invocation_schemas/). The safety
+matrix and Fable handoff are in
+[`OPENHANDS_INVOCATION_SAFETY_MATRIX.md`](OPENHANDS_INVOCATION_SAFETY_MATRIX.md)
+and [`OPENHANDS_INVOCATION_FABLE_POLISH_HANDOFF.md`](OPENHANDS_INVOCATION_FABLE_POLISH_HANDOFF.md).
+
 ## Verification Commands
 
 Run:
 
 ```bash
 npm run verify:openhands-invocation-adapter
+npm run verify:openhands-invocation-schemas
+npm run verify:openhands-invocation-all
 npm run verify:executor-enforcement
 npm run build
 node --check server/index.js
 node --check server/executorEnforcement.js
 node --check server/openhandsInvocationAdapter.js
 node --check scripts/verify-openhands-invocation-adapter.mjs
+node --check scripts/verify-openhands-invocation-schemas.mjs
 git diff --check
 ```
 

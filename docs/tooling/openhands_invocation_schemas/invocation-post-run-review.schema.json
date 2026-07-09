@@ -1,0 +1,12 @@
+{
+  "kind": "openhands-invocation-schema-spec",
+  "name": "invocation-post-run-review",
+  "description": "Post-run review checklist shape. Commit/push/PR always requires separate human approval.",
+  "requiredFields": ["kind", "status", "requiresHumanReview", "requiresSeparatePostRunApproval", "approvalRequiredBeforeCommitPushPr", "items"],
+  "allowedStatusValues": ["setup-gated", "blocked", "refused", "validation-failed", "timeout", "output-capped", "invalid-response", "not-implemented", "disabled"],
+  "safetyBooleansMustBeFalse": ["patchApproved", "commitAllowed", "pushAllowed", "mergeAllowed", "branchDeletionAllowed", "resetAllowed", "stashPopAllowed", "mainMasterWriteAllowed", "privateMemoryAccessAllowed", "dependencyProvisioningAllowed"],
+  "humanReviewFieldsMustBeTrue": ["requiresHumanReview", "requiresSeparatePostRunApproval", "approvalRequiredBeforeCommitPushPr"],
+  "forbiddenSecretFields": ["apiKey", "apiKeyValue", "secret", "token", "password", "privateKey"],
+  "allowedEndpointPatterns": ["^http://localhost(:[0-9]+)?(/.*)?$", "^http://127\\\\.0\\\\.0\\\\.1(:[0-9]+)?(/.*)?$", "^http://example\\\\.invalid(:[0-9]+)?(/.*)?$"],
+  "nonAuthorizing": true
+}

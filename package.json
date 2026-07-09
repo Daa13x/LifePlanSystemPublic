@@ -14,6 +14,8 @@
     "check": "npm run build",
     "verify:executor-enforcement": "node scripts/verify-executor-enforcement.mjs",
     "verify:openhands-invocation-adapter": "node scripts/verify-openhands-invocation-adapter.mjs",
+    "verify:openhands-invocation-schemas": "node scripts/verify-openhands-invocation-schemas.mjs",
+    "verify:openhands-invocation-all": "npm run verify:openhands-invocation-adapter && npm run verify:openhands-invocation-schemas",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss"
   },

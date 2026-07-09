@@ -150,6 +150,12 @@ flag remains off.
 The adapter contract and fixtures are documented in
 [`OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md`](OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md)
 and [`openhands_invocation_examples/`](openhands_invocation_examples/).
+Schema specs, the safety matrix, and the Fable polish handoff are documented in
+[`openhands_invocation_schemas/`](openhands_invocation_schemas/),
+[`OPENHANDS_INVOCATION_SAFETY_MATRIX.md`](OPENHANDS_INVOCATION_SAFETY_MATRIX.md),
+and [`OPENHANDS_INVOCATION_FABLE_POLISH_HANDOFF.md`](OPENHANDS_INVOCATION_FABLE_POLISH_HANDOFF.md).
+For navigation, see
+[`OPENHANDS_INVOCATION_DOCS_INDEX.md`](OPENHANDS_INVOCATION_DOCS_INDEX.md).
 
 Any next implementation PR must remain separate and explicit. It should be
 reviewed only after proving the adapter still refuses real invocation by default,
