@@ -184,7 +184,12 @@ false. Focused verification is available via:
 
 For the adapter contract and example shapes, see
 [`OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md`](OPENHANDS_INVOCATION_ADAPTER_CONTRACT.md)
-and [`openhands_invocation_examples/`](openhands_invocation_examples/).
+and [`openhands_invocation_examples/`](openhands_invocation_examples/). For
+schema specs, gate coverage, Fable polish notes, and navigation, see
+[`openhands_invocation_schemas/`](openhands_invocation_schemas/),
+[`OPENHANDS_INVOCATION_SAFETY_MATRIX.md`](OPENHANDS_INVOCATION_SAFETY_MATRIX.md),
+[`OPENHANDS_INVOCATION_FABLE_POLISH_HANDOFF.md`](OPENHANDS_INVOCATION_FABLE_POLISH_HANDOFF.md),
+and [`OPENHANDS_INVOCATION_DOCS_INDEX.md`](OPENHANDS_INVOCATION_DOCS_INDEX.md).
 
 Real invocation remains blocked pending a separate, explicitly approved
 implementation PR.

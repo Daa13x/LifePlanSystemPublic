@@ -1,0 +1,12 @@
+{
+  "kind": "openhands-invocation-schema-spec",
+  "name": "invocation-status-card",
+  "description": "UI-facing status card shape for disabled invocation display.",
+  "requiredFields": ["kind", "title", "status", "policyStatus", "code", "invoked", "reason", "humanNextStep", "humanNextSteps"],
+  "allowedStatusValues": ["setup-gated", "blocked", "refused", "validation-failed", "timeout", "output-capped", "invalid-response", "not-implemented", "disabled"],
+  "safetyBooleansMustBeFalse": ["patchApproved", "commitAllowed", "pushAllowed", "mergeAllowed", "branchDeletionAllowed", "resetAllowed", "stashPopAllowed", "mainMasterWriteAllowed", "privateMemoryAccessAllowed", "dependencyProvisioningAllowed"],
+  "humanReviewFieldsMustBeTrue": ["requiresHumanReview", "requiresSeparatePostRunApproval"],
+  "forbiddenSecretFields": ["apiKey", "apiKeyValue", "secret", "token", "password", "privateKey"],
+  "allowedEndpointPatterns": ["^http://localhost(:[0-9]+)?(/.*)?$", "^http://127\\\\.0\\\\.0\\\\.1(:[0-9]+)?(/.*)?$", "^http://example\\\\.invalid(:[0-9]+)?(/.*)?$"],
+  "nonAuthorizing": true
+}
