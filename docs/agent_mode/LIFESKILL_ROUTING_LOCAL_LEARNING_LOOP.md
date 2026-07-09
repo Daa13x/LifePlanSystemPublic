@@ -8,6 +8,9 @@
 - No browser/Puppeteer automation is enabled.
 - No Claude, ChatGPT, Codex, or Fable account action is automated.
 - No private memory or `source_of_truth` files are changed.
+- This PR is separate from the LifeSkillSystem skill-library PR. It describes
+  routing and learning flow only; it does not create or modify skill-library
+  files.
 
 ## Purpose
 
@@ -49,10 +52,22 @@ Need -> Retrieve Skills -> Compress -> Execute -> Review -> Learn -> Improve Ski
 | Skill retriever | Find candidate skills | Execute actions |
 | Cheap chat router/compressor | Select and compress relevant skills into a handoff packet | Perform final repo work or approve unsafe work |
 | Handoff packet builder | Produce compact instructions for the selected agent | Hide stop boundaries |
-| Puppeteer/browser bridge | Deliver packets to browser-based agents and capture results | Own safety decisions |
+| Puppeteer/browser bridge | Future transport-only delivery/capture layer for browser-based agents | Own safety decisions, bypass login/security, or run without explicit approval |
 | Claude/ChatGPT/Codex/Fable | Do final reasoning or repo work according to the packet | Exceed explicit scope |
 | Result reviewer | Check whether the output followed the packet | Silently promote changes |
 | Local learning engine | Record lessons, skill scores, mistakes, and improvement candidates | Rewrite source-of-truth automatically |
+
+## Skill vs automation boundary
+
+A LifeSkill is an instruction asset: it can explain how to do a task, name
+inputs, define stop conditions, and suggest validation. A LifeSkill is not an
+automation permission grant.
+
+Automation remains a separate, higher-risk layer. Any future automation must
+have its own explicit approval, visible scope, validation, and rollback path.
+Skill selection, skill scores, and cheap-router compression must never convert a
+suggestion into permission to merge, upload, invoke OpenHands, call an external
+agent, or edit durable memory.
 
 ## Task classification
 
@@ -251,6 +266,16 @@ Local learning routes:
 - `memory_inbox_candidate`
 - `source_of_truth_candidate_requires_approval`
 
+Route meanings:
+
+- `temporary_handoff`: useful only for the current thread or PR.
+- `mistake_warning`: a local warning to show before similar future work.
+- `skill_improvement_candidate`: proposed wording or metadata changes for a
+  LifeSkill, queued for review.
+- `memory_inbox_candidate`: possible memory item, queued for human triage.
+- `source_of_truth_candidate_requires_approval`: durable-canonical candidate;
+  never written directly and never promoted without explicit approval.
+
 ## Skill scoring
 
 The local learning engine can maintain simple, local skill scores.
@@ -290,6 +315,7 @@ The loop must preserve these boundaries:
 - Cheap router can compress; it does not approve dangerous work.
 - Puppeteer/browser bridge can deliver and capture; it does not decide safety.
 - Local learning can propose improvements; it does not silently rewrite durable memory.
+- Local learning does not auto-sync memory to external accounts or other repos.
 - Source-of-truth promotion always requires explicit approval.
 - OpenHands real invocation remains separately gated.
 - External account uploads require explicit approval.
@@ -312,5 +338,5 @@ Recommended PR sequence:
 ## Next safe prompt
 
 ```text
-Create the LifeSkillSystem skill library and local-learning routing plan as docs/instruction-only files. Add starter skill markdown files, a skill metadata verifier, and an export guide for Claude/ChatGPT. Do not implement runtime automation, do not upload skills, do not call external agents, do not touch private memory or source_of_truth, and do not enable OpenHands invocation.
+After PR #26 and PR #27 have both been reviewed and validated, review them together for merge order and overlap. Merge only if both remain docs/instruction-only, safety boundaries are preserved, no runtime automation is added, no external agents are called, no private memory or source_of_truth files are touched, and OpenHands invocation remains disabled.
 ```
