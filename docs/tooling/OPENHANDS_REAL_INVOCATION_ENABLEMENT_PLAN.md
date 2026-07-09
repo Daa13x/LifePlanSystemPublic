@@ -142,8 +142,12 @@ A future implementation PR may be considered only when it:
 
 ## Recommended Next PR
 
-After this documentation-only plan, the next smallest PR should implement a
-disabled-by-default invocation adapter stub with tests. That PR must still not
-enable real invocation and must not call OpenHands. Its job should be to define
-the call boundary and failure mapping while the real invocation flag remains
-off.
+The disabled-by-default invocation adapter stub now exists as a safety boundary.
+It still does not enable real invocation and does not call OpenHands. It defines
+the future local-only call boundary and failure mapping while the real invocation
+flag remains off.
+
+Any next implementation PR must remain separate and explicit. It should be
+reviewed only after proving the adapter still refuses real invocation by default,
+still performs no network/model call unless separately approved, and still keeps
+post-run commit/push/PR actions behind human approval.

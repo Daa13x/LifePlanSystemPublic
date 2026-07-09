@@ -164,6 +164,27 @@ function can proceed.
 For the future local-only enablement plan, see
 [`OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md`](OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md).
 
+## Invocation adapter stub (blocker #9 - boundary only)
+
+`server/openhandsInvocationAdapter.js` now defines a disabled, side-effect-free
+adapter boundary for future local-only OpenHands invocation. It validates the
+future local config, can assemble the future payload shape, maps failure modes
+to safe `setup-gated` / `blocked` / `refused` / `validation-failed` results,
+and denies patch approval, commit, push, merge, branch deletion, reset,
+stash-pop, main/master writes, private memory access, and dependency
+provisioning.
+
+The adapter stub does **not** call OpenHands, make a network/model call, mutate
+files, install/copy/link dependencies, or enable real invocation. Its exported
+`invokeOpenHandsAdapter(...)` function always returns `invoked: false` and a
+non-authorizing result while `OPENHANDS_EXECUTOR_INVOCATION_ENABLED` remains
+false. Focused verification is available via:
+
+    npm run verify:openhands-invocation-adapter
+
+Real invocation remains blocked pending a separate, explicitly approved
+implementation PR.
+
 ## Enforcement rejection path verified (blocker #3 — addressed)
 
 The changed-file enforcement is verified to **reject a real violating diff**, not
