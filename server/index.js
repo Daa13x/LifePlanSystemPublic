@@ -22,6 +22,7 @@ import {
   isChangedFileAllowed,
   enforceChangedFiles
 } from './executorEnforcement.js';
+import { resolveRunCliCwd } from './runCliCwd.js';
 
 migrate();
 
@@ -54,10 +55,21 @@ function sleep(ms) {
 async function runCli(command, args, options = {}) {
   const timeoutMs = options.timeout || 20000;
   const maxBufferBytes = options.maxBuffer || 1024 * 1024;
+  // A caller-provided cwd (e.g. the executor's isolated worktree) is honoured
+  // only when it resolves inside the repo root; anything else is refused here
+  // rather than executed elsewhere or silently retargeted to root.
+  const cwdResolution = resolveRunCliCwd(root, options.cwd);
+  if (!cwdResolution.ok) {
+    return {
+      available: true, ok: false, code: 'EBADCWD', signal: '',
+      timedOut: false, outputLimitHit: false, timeoutMs, maxBufferBytes,
+      stdout: '', stderr: `runCli refused cwd: ${cwdResolution.reason}`
+    };
+  }
   try {
     const useShell = process.platform === 'win32' && /\.cmd$/i.test(command);
     const result = await execFileAsync(command, args, {
-      cwd: options.cwd || root,
+      cwd: cwdResolution.cwd,
       timeout: timeoutMs,
       windowsHide: true,
       shell: useShell,
