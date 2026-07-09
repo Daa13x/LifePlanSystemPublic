@@ -12,7 +12,8 @@ scaffolding only.
 - PR #24 added aggregate runtime-safety verification and stop-boundary docs
   cleanup.
 - PR #25 adds the real invocation contract design as documentation only. It
-  implements no transport, route, UI, network/model call, or invocation path.
+  captures the design review boundary and implements no transport, route, UI,
+  network/model call, or invocation path.
 - Verification scripts are safety gates and regression checks. They do not
   authorize real invocation, dependency provisioning, commit, push, merge, or
   branch cleanup.
