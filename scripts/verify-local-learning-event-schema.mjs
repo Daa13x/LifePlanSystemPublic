@@ -33,13 +33,14 @@ const REQUIRED_FIELDS = [
 
 const ALLOWED_AGENT_TARGETS = ['chatgpt', 'claude', 'codex', 'fable', 'human'];
 const ALLOWED_RESULT_QUALITY = ['success', 'partial', 'blocked', 'unsafe', 'unknown'];
+const APPROVAL_REQUIRED_MEMORY_ROUTE = 'source_of_truth_candidate_requires_approval';
 const ALLOWED_MEMORY_ROUTES = [
   'ignore',
   'temporary_handoff',
   'mistake_warning',
   'skill_improvement_candidate',
   'memory_inbox_candidate',
-  'source_of_truth_candidate_requires_approval'
+  APPROVAL_REQUIRED_MEMORY_ROUTE
 ];
 
 const FORBIDDEN = [
@@ -128,6 +129,8 @@ function validateExample(name, json) {
     `${name} memory_route uses an allowed value`);
   line(typeof json.approval_required === 'boolean',
     `${name} approval_required is a boolean`);
+  line(json.memory_route !== APPROVAL_REQUIRED_MEMORY_ROUTE || json.approval_required === true,
+    `${name} source-of-truth candidate route requires approval_required true`);
 }
 
 console.log('--- Local learning event schema verification ---');
@@ -158,7 +161,7 @@ line(JSON.stringify(schema.properties?.result_quality?.enum || []) === JSON.stri
 line(JSON.stringify(schema.properties?.memory_route?.enum || []) === JSON.stringify(ALLOWED_MEMORY_ROUTES),
   'schema memory_route enum is exact');
 
-line(schema.if?.properties?.memory_route?.const === 'source_of_truth_candidate_requires_approval',
+line(schema.if?.properties?.memory_route?.const === APPROVAL_REQUIRED_MEMORY_ROUTE,
   'schema conditional checks source-of-truth candidate memory_route const');
 line(Array.isArray(schema.if?.required) && schema.if.required.includes('memory_route'),
   'schema conditional requires memory_route before applying approval rule');
@@ -167,6 +170,10 @@ line(schema.then?.properties?.approval_required?.const === true,
 
 for (const route of ALLOWED_MEMORY_ROUTES) {
   line(doc.includes(route), `document mentions memory route ${route}`);
+}
+
+for (const allowedLine of ALLOWED_SOURCE_OF_TRUTH_DOC_LINES) {
+  line(doc.includes(allowedLine), `document includes allowed source-of-truth safety line -> ${allowedLine}`);
 }
 
 for (const item of examples) {
