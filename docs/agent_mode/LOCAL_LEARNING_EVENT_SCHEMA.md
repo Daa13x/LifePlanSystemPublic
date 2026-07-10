@@ -69,8 +69,11 @@ imports neither tool, and no runtime local-learning engine is enabled.
   durable memory write.
 
 `skill_update_candidate`
-: Proposed skill change, if any. Use either an object with reviewable fields or
-  an empty string when no update is proposed.
+: Proposed skill change, if any. Use either a closed object with exactly `skill`
+  and `change` (both non-empty strings), for example
+  `{ "skill": "...", "change": "..." }`, or the empty string `""` when no update
+  is proposed. No other shape is accepted: a free-form non-empty string, an
+  object missing `skill` or `change`, or an object with extra keys is invalid.
 
 `memory_route`
 : Route for any durable-learning candidate. This is routing metadata only and
@@ -122,8 +125,18 @@ npm run verify:local-learning-review-inbox-reader
 ```
 
 The schema verifier checks this document, the machine-readable schema, and
-examples for required fields and safety-boundary tokens. The validator verifier
-checks the pure event validation path. The writer verifier checks the manual,
-fixed-path review-inbox boundary. The reader verifier checks missing, valid,
-malformed, schema-invalid, and symlinked inbox cases while proving listing stays
-read-only. All are deterministic and local-only.
+examples for required fields and safety-boundary tokens (including the closed
+`skill_update_candidate` shape and that this document's Example Shape matches the
+valid example file). The validator verifier checks the pure event validation
+path. The writer verifier checks the manual, fixed-path review-inbox boundary.
+The reader verifier checks missing, valid, malformed, schema-invalid, and
+symlinked inbox cases while proving listing stays read-only. All are
+deterministic and local-only.
+
+To validate a single event JSON file by hand — without the inbox tools — run the
+manual validator CLI, which reads one file, prints the result, and writes
+nothing:
+
+```bash
+node scripts/validate-local-learning-event.mjs <event.json>
+```
