@@ -107,6 +107,35 @@ for (const field of REQUIRED_FIELDS) {
 }
 
 {
+  const event = { ...clone(validExample), skill_update_candidate: 'free-form note' };
+  checkFails('skill_update_candidate non-empty string', event,
+    'skill_update_candidate string form must be the empty string');
+}
+
+{
+  const event = { ...clone(validExample), skill_update_candidate: {} };
+  checkFails('skill_update_candidate empty object', event, 'skill_update_candidate.skill is required');
+}
+
+{
+  const event = { ...clone(validExample), skill_update_candidate: { skill: '', change: 'c' } };
+  checkFails('skill_update_candidate empty skill', event, 'skill_update_candidate.skill must be a non-empty string');
+}
+
+{
+  const event = { ...clone(validExample), skill_update_candidate: { skill: 's', change: 'c', extra: 'x' } };
+  checkFails('skill_update_candidate with extra key', event, 'skill_update_candidate.extra is not an allowed field');
+}
+
+{
+  // Positive controls for the tightened shape.
+  const objectOk = { ...clone(validExample), skill_update_candidate: { skill: 's', change: 'c' } };
+  line(validateLocalLearningEvent(objectOk).ok, 'skill_update_candidate closed {skill, change} object passes');
+  const emptyStringOk = { ...clone(validExample), skill_update_candidate: '' };
+  line(validateLocalLearningEvent(emptyStringOk).ok, 'skill_update_candidate empty string passes');
+}
+
+{
   let malformedFailed = false;
   try {
     JSON.parse('{');

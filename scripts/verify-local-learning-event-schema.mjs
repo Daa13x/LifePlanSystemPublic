@@ -105,6 +105,39 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
 }
 
+// The enforced skill_update_candidate shape (mirrors the schema oneOf and the
+// validator): the empty string, or a closed object with exactly non-empty
+// `skill` and `change`.
+function skillUpdateCandidateShapeOk(value) {
+  if (typeof value === 'string') return value === '';
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value).sort();
+  return keys.length === 2 && keys[0] === 'change' && keys[1] === 'skill'
+    && isNonEmptyString(value.skill) && isNonEmptyString(value.change);
+}
+
+// Order-insensitive canonical form for deep-equality of parsed JSON.
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      acc[key] = canonical(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+}
+
+function extractFirstJsonBlock(markdown) {
+  const match = markdown.replace(/\r\n/g, '\n').match(/```json\n([\s\S]*?)```/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+
 function validateExample(name, json) {
   const missing = REQUIRED_FIELDS.filter((field) => !Object.prototype.hasOwnProperty.call(json, field));
   line(missing.length === 0, `${name} contains required fields -> ${JSON.stringify(missing)}`);
@@ -122,9 +155,8 @@ function validateExample(name, json) {
   line(Array.isArray(json.mistakes) && json.mistakes.every((item) => typeof item === 'string'),
     `${name} mistakes is an array of strings`);
   line(typeof json.lesson === 'string', `${name} lesson is a string`);
-  line(typeof json.skill_update_candidate === 'string'
-    || (json.skill_update_candidate && typeof json.skill_update_candidate === 'object' && !Array.isArray(json.skill_update_candidate)),
-    `${name} skill_update_candidate is an object or string`);
+  line(skillUpdateCandidateShapeOk(json.skill_update_candidate),
+    `${name} skill_update_candidate is a closed {skill, change} object or the empty string -> ${JSON.stringify(json.skill_update_candidate)}`);
   line(ALLOWED_MEMORY_ROUTES.includes(json.memory_route),
     `${name} memory_route uses an allowed value`);
   line(typeof json.approval_required === 'boolean',
@@ -153,7 +185,24 @@ for (const field of REQUIRED_FIELDS) {
 
 line(schema.nonAuthorizing === true, 'schema is marked non-authorizing');
 line(schema.runtimeEnabled === false, 'schema runtimeEnabled is false');
-line(schema.additionalProperties === false, 'schema rejects additional properties');
+line(schema.additionalProperties === false, 'schema rejects additional top-level properties');
+
+// Nested closure of skill_update_candidate: the object branch must be closed and
+// require non-empty skill/change; the string branch must be exactly const "".
+const skillUpdate = schema.properties?.skill_update_candidate || {};
+const skillUpdateBranches = Array.isArray(skillUpdate.oneOf) ? skillUpdate.oneOf : [];
+const skillUpdateObjectBranch = skillUpdateBranches.find((branch) => branch && branch.type === 'object') || {};
+const skillUpdateStringBranch = skillUpdateBranches.find((branch) => branch && branch.type === 'string') || {};
+line(skillUpdateObjectBranch.additionalProperties === false,
+  'schema skill_update_candidate object branch rejects additional (nested) properties');
+line(JSON.stringify(skillUpdateObjectBranch.required || []) === JSON.stringify(['skill', 'change']),
+  'schema skill_update_candidate object branch requires skill and change');
+line(skillUpdateObjectBranch.properties?.skill?.type === 'string' && skillUpdateObjectBranch.properties?.skill?.minLength === 1,
+  'schema skill_update_candidate.skill is a non-empty string');
+line(skillUpdateObjectBranch.properties?.change?.type === 'string' && skillUpdateObjectBranch.properties?.change?.minLength === 1,
+  'schema skill_update_candidate.change is a non-empty string');
+line(skillUpdateStringBranch.const === '',
+  'schema skill_update_candidate string branch is exactly const ""');
 
 line(JSON.stringify(schema.properties?.agent_target?.enum || []) === JSON.stringify(ALLOWED_AGENT_TARGETS),
   'schema agent_target enum is exact');
@@ -180,6 +229,14 @@ for (const allowedLine of ALLOWED_SOURCE_OF_TRUTH_DOC_LINES) {
 for (const item of examples) {
   validateExample(rel(item.file), item.json);
 }
+
+// The doc's embedded Example Shape must stay identical to the valid example file
+// so the two cannot drift silently.
+const docExample = extractFirstJsonBlock(doc);
+const validExampleForDoc = examples[0].json;
+line(docExample !== null
+  && JSON.stringify(canonical(docExample)) === JSON.stringify(canonical(validExampleForDoc)),
+  'document Example Shape equals docs/agent_mode/examples/local-learning-event.valid.json');
 
 const scanTargets = [
   { name: rel(docPath), raw: doc },

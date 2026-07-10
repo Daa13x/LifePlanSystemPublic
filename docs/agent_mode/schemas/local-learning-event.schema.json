@@ -52,14 +52,28 @@
       "description": "Short lesson learned."
     },
     "skill_update_candidate": {
-      "description": "Proposed LifeSkill change, or an empty string when none is proposed.",
+      "description": "Proposed LifeSkill change as a closed object with exactly `skill` and `change` (both non-empty strings), or the empty string when none is proposed.",
       "oneOf": [
         {
           "type": "object",
-          "additionalProperties": true
+          "additionalProperties": false,
+          "required": ["skill", "change"],
+          "properties": {
+            "skill": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Stable skill name or identifier the change applies to."
+            },
+            "change": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Proposed wording or metadata change, for human review only."
+            }
+          }
         },
         {
-          "type": "string"
+          "type": "string",
+          "const": ""
         }
       ]
     },

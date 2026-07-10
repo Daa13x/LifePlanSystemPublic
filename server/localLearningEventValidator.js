@@ -33,6 +33,40 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.length > 0;
 }
 
+const SKILL_UPDATE_CANDIDATE_FIELDS = ['skill', 'change'];
+
+// Mirror the JSON schema's skill_update_candidate oneOf exactly: either a closed
+// object with non-empty-string `skill` and `change` and no other keys, or the
+// empty string when no update is proposed. Nothing else is accepted (a free-form
+// non-empty string is rejected so proposals stay reviewable and structured).
+function validateSkillUpdateCandidate(value) {
+  if (typeof value === 'string') {
+    if (value !== '') {
+      return ['skill_update_candidate string form must be the empty string ""; use a {skill, change} object to propose a change'];
+    }
+    return [];
+  }
+
+  if (!isRecord(value)) {
+    return ['skill_update_candidate must be a closed {skill, change} object or the empty string ""'];
+  }
+
+  const errors = [];
+  for (const field of SKILL_UPDATE_CANDIDATE_FIELDS) {
+    if (!hasOwn(value, field)) {
+      errors.push(`skill_update_candidate.${field} is required`);
+    } else if (!isNonEmptyString(value[field])) {
+      errors.push(`skill_update_candidate.${field} must be a non-empty string`);
+    }
+  }
+  for (const key of Object.keys(value)) {
+    if (!SKILL_UPDATE_CANDIDATE_FIELDS.includes(key)) {
+      errors.push(`skill_update_candidate.${key} is not an allowed field`);
+    }
+  }
+  return errors;
+}
+
 function validateStringArray(value, field, { requireNonEmptyItems = false } = {}) {
   if (!Array.isArray(value)) {
     return [`${field} must be an array`];
@@ -92,10 +126,7 @@ export function validateLocalLearningEvent(event) {
   }
 
   if (hasOwn(event, 'skill_update_candidate')) {
-    const value = event.skill_update_candidate;
-    if (typeof value !== 'string' && !isRecord(value)) {
-      errors.push('skill_update_candidate must be an object or string');
-    }
+    errors.push(...validateSkillUpdateCandidate(event.skill_update_candidate));
   }
 
   if (hasOwn(event, 'memory_route') && !ALLOWED_MEMORY_ROUTES.includes(event.memory_route)) {
