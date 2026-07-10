@@ -1,8 +1,9 @@
 # Agent Mode Docs Index
 
-Navigation for the Agent Mode and LifeSkillSystem documentation. Everything here
-is **documentation-only** — no runtime loader reads these files, and nothing in
+Navigation for the Agent Mode and LifeSkillSystem documentation. Files in this
+folder are **documentation-only** — no runtime loader reads them, and nothing in
 this folder enables execution, real OpenHands invocation, or external actions.
+Links to runtime-isolated manual helpers are labelled explicitly.
 
 ## Agent Mode foundations
 
@@ -31,6 +32,9 @@ this folder enables execution, real OpenHands invocation, or external actions.
   [`schemas/local-learning-event.schema.json`](schemas/local-learning-event.schema.json)
 - Manual review-inbox writer (direct invocation only; not a learning engine):
   [`../../server/localLearningReviewInbox.js`](../../server/localLearningReviewInbox.js)
+- Manual read-only review-inbox reader/list command (direct invocation only):
+  [`../../server/localLearningReviewInboxReader.js`](../../server/localLearningReviewInboxReader.js),
+  [`../../scripts/list-local-learning-review-inbox.mjs`](../../scripts/list-local-learning-review-inbox.mjs)
 
 ### Starter skills (instruction-only)
 
@@ -47,6 +51,7 @@ this folder enables execution, real OpenHands invocation, or external actions.
 npm run verify:local-learning-event-schema
 npm run verify:local-learning-event-validator
 npm run verify:local-learning-event-writer
+npm run verify:local-learning-review-inbox-reader
 npm run verify:lifeskillsystem-skills
 npm run verify:runtime-safety
 npm run verify:openhands-stop-boundary
@@ -63,6 +68,14 @@ writer that can place validated candidate files only in
 `.lps/local-learning/review-inbox/`. Candidates are not memory; the writer does
 not promote them, write to `source_of_truth`, or enable a runtime learning
 engine.
+
+`verify:local-learning-review-inbox-reader` checks the directly invoked,
+read-only reader/list boundary. A missing inbox is an empty success, malformed
+or schema-invalid JSON remains reviewable, and listing does not create, modify,
+move, approve, reject, or promote candidates. It also checks deterministic
+`.json` ordering, containment failures, terminal control-character escaping,
+and import/startup isolation. Package wiring exposes the verifier only; the list
+CLI remains a direct manual command.
 
 `verify:lifeskillsystem-skills` checks that every `SKILL.md` under
 `docs/agent_mode/skills/` has the required metadata and sections and contains no
