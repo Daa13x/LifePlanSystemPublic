@@ -2,7 +2,10 @@
 
 ## Status
 
-- Design/documentation only.
+- The routing and local-learning engine described here remain
+  design/documentation only.
+- The implemented local-learning write path is a separate, directly invoked
+  review-inbox writer for validated candidate files only.
 - No runtime automation is added by this document.
 - No OpenHands invocation is enabled.
 - No browser/Puppeteer automation is enabled.
@@ -238,22 +241,27 @@ Which assumptions were stale, which PRs were already merged, and whether future 
 
 Local learning should start as structured, reviewable logs rather than model fine-tuning.
 
+The implemented safe subset is manual-only: a validated event can be written
+only to `.lps/local-learning/review-inbox/`. That candidate is not memory, is
+not promoted automatically, does not write to `source_of_truth`, and does not
+enable a runtime local-learning engine.
+
 A local learning event can record:
 
 ```json
 {
   "task_type": "repo_prompt_generation",
-  "skills_used": [
+  "selected_skills": [
     "lifeskillsystem-next-move",
     "codex-bulk-prompt-builder"
   ],
-  "agent_target": "ChatGPT",
-  "result_quality": "good",
+  "agent_target": "chatgpt",
+  "result_quality": "success",
   "mistakes": [],
   "lesson": "Include verified GitHub state before writing next repo prompt.",
   "skill_update_candidate": "Add stronger Phase 0 repo verification rule.",
   "memory_route": "skill_improvement_candidate",
-  "requires_user_approval": true
+  "approval_required": true
 }
 ```
 
@@ -278,7 +286,8 @@ Route meanings:
 
 ## Skill scoring
 
-The local learning engine can maintain simple, local skill scores.
+A future, separately approved local learning engine could maintain simple,
+local skill scores.
 
 Suggested fields:
 
@@ -320,23 +329,21 @@ The loop must preserve these boundaries:
 - OpenHands real invocation remains separately gated.
 - External account uploads require explicit approval.
 
-## Future implementation sequence
+## Implementation sequence
 
-Recommended PR sequence:
+Completed safe foundations:
 
 1. Skill library docs and starter instruction-only skills.
 2. Skill metadata verifier.
-3. Local learning event schema.
-4. Local learning inbox / log.
-5. Skill retrieval prototype using metadata only.
-6. Cheap-router handoff packet design.
-7. Puppeteer/browser bridge handoff transport design.
-8. Response capture parser.
-9. Result reviewer and skill-score update proposal.
-10. Only later: approved automation candidates.
+3. Local learning event schema and validator.
+4. Manual review-inbox writer for validated candidates.
 
-## Next safe prompt
+Possible future slices, each requiring separate review:
 
-```text
-After PR #26 and PR #27 have both been reviewed and validated, review them together for merge order and overlap. Merge only if both remain docs/instruction-only, safety boundaries are preserved, no runtime automation is added, no external agents are called, no private memory or source_of_truth files are touched, and OpenHands invocation remains disabled.
-```
+1. Read-only review-inbox listing.
+2. Skill retrieval prototype using metadata only.
+3. Cheap-router handoff packet design.
+4. Puppeteer/browser bridge handoff transport design.
+5. Response capture parser.
+6. Result reviewer and skill-score update proposal.
+7. Only later: approved automation candidates.

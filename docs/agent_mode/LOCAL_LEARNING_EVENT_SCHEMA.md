@@ -1,8 +1,7 @@
 # Local Learning Event Schema
 
-Status: docs/test-first only. This document defines an inert record shape for
-future local learning review. No runtime loader reads it, no local learning
-engine writes it, and no router uses it.
+Status: schema and validation are implemented for a manual review path. No
+runtime loader, local-learning engine, or router uses this record automatically.
 
 ## Safety Boundary
 
@@ -20,14 +19,22 @@ This schema does not authorize:
 - invoke/run UI;
 - network or model calls.
 
-The route value `source_of_truth_candidate_requires_approval` is only a label
-for a future review queue. It must not write to, edit, promote into, or otherwise
+The route value `source_of_truth_candidate_requires_approval` is only routing
+metadata for human review. It must not write to, edit, promote into, or otherwise
 touch any source-of-truth path.
 
 When `memory_route` is `source_of_truth_candidate_requires_approval`,
 `approval_required` must be `true`. This mirrors the fail-closed validator rule:
 the route label does not authorize writing to `source_of_truth/`, promotion still
 requires explicit human approval, and no automatic memory sync occurs.
+
+## Manual Review-Inbox Writer
+
+PR #31 added only a directly invoked writer for validated review candidates. It
+writes candidate JSON files exclusively to `.lps/local-learning/review-inbox/`.
+These files are not memory: they are not promoted automatically and are never
+written to `source_of_truth`. Server startup does not import the writer, and no
+runtime local-learning engine is enabled.
 
 ## Required Fields
 
@@ -103,8 +110,11 @@ Run:
 
 ```bash
 npm run verify:local-learning-event-schema
+npm run verify:local-learning-event-validator
+npm run verify:local-learning-event-writer
 ```
 
-The verifier checks this document, the machine-readable schema, and examples for
-required fields and safety-boundary tokens. It is deterministic, local-only, and
-uses built-in Node APIs only.
+The schema verifier checks this document, the machine-readable schema, and
+examples for required fields and safety-boundary tokens. The validator verifier
+checks the pure event validation path. The writer verifier checks the manual,
+fixed-path review-inbox boundary. All are deterministic and local-only.

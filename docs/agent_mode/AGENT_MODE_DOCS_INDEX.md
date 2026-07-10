@@ -29,6 +29,8 @@ this folder enables execution, real OpenHands invocation, or external actions.
   [`LOCAL_LEARNING_EVENT_SCHEMA.md`](LOCAL_LEARNING_EVENT_SCHEMA.md)
 - Machine-readable local learning event schema:
   [`schemas/local-learning-event.schema.json`](schemas/local-learning-event.schema.json)
+- Manual review-inbox writer (direct invocation only; not a learning engine):
+  [`../../server/localLearningReviewInbox.js`](../../server/localLearningReviewInbox.js)
 
 ### Starter skills (instruction-only)
 
@@ -43,6 +45,8 @@ this folder enables execution, real OpenHands invocation, or external actions.
 
 ```bash
 npm run verify:local-learning-event-schema
+npm run verify:local-learning-event-validator
+npm run verify:local-learning-event-writer
 npm run verify:lifeskillsystem-skills
 npm run verify:runtime-safety
 npm run verify:openhands-stop-boundary
@@ -51,7 +55,14 @@ npm run build
 
 `verify:local-learning-event-schema` checks the local learning event doc, schema,
 and examples for required fields and safety-boundary tokens. It is docs/test
-first and does not implement a router, local learning engine, or runtime writer.
+first and does not implement a router or local learning engine.
+
+`verify:local-learning-event-validator` checks the pure, non-writing event
+validator. `verify:local-learning-event-writer` checks the directly invoked
+writer that can place validated candidate files only in
+`.lps/local-learning/review-inbox/`. Candidates are not memory; the writer does
+not promote them, write to `source_of_truth`, or enable a runtime learning
+engine.
 
 `verify:lifeskillsystem-skills` checks that every `SKILL.md` under
 `docs/agent_mode/skills/` has the required metadata and sections and contains no
