@@ -22,6 +22,7 @@
     "verify:lifeskillsystem-skills": "node scripts/verify-lifeskillsystem-skills.mjs",
     "verify:local-learning-event-schema": "node scripts/verify-local-learning-event-schema.mjs",
     "verify:local-learning-event-validator": "node scripts/verify-local-learning-event-validator.mjs",
+    "verify:local-learning-event-writer": "node scripts/verify-local-learning-event-writer.mjs",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss"
   },
