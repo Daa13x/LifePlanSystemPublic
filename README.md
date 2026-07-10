@@ -44,10 +44,13 @@ This repository is `Daa13x/LifePlanSystemPublic`; its default branch is `main`.
 - Local model registry for `.gguf` files, Planner Assistant assignment, and Hugging Face GGUF download.
 - JSON and Markdown import/export.
 - Manual local-learning support is limited to a directly invoked review-inbox
-  writer. It writes validated candidate files only to
-  `.lps/local-learning/review-inbox/`; candidates are not memory, nothing is
-  promoted automatically, no `source_of_truth` path is written, and no runtime
-  local-learning engine is enabled.
+  writer and read-only reader/list command. The writer places validated
+  candidate files only in `.lps/local-learning/review-inbox/`; the reader lists
+  and validates `.json` candidates there in deterministic filename order. A
+  missing inbox is an empty result and is not created. The reader does not
+  modify, move, approve, or reject candidates. Candidates are not memory,
+  nothing is promoted automatically, no `source_of_truth` path is written, and
+  no runtime local-learning engine is enabled.
 - Dark mode by default.
 
 ## Local Install

@@ -6,6 +6,8 @@
   design/documentation only.
 - The implemented local-learning write path is a separate, directly invoked
   review-inbox writer for validated candidate files only.
+- The implemented read path is a separate, directly invoked, read-only
+  review-inbox reader/list command.
 - No runtime automation is added by this document.
 - No OpenHands invocation is enabled.
 - No browser/Puppeteer automation is enabled.
@@ -242,9 +244,12 @@ Which assumptions were stale, which PRs were already merged, and whether future 
 Local learning should start as structured, reviewable logs rather than model fine-tuning.
 
 The implemented safe subset is manual-only: a validated event can be written
-only to `.lps/local-learning/review-inbox/`. That candidate is not memory, is
-not promoted automatically, does not write to `source_of_truth`, and does not
-enable a runtime local-learning engine.
+only to `.lps/local-learning/review-inbox/`, then listed and validated by the
+read-only reader. It lists only `.json` entries in deterministic filename order;
+a missing inbox is an empty result and malformed or schema-invalid candidates
+remain visible as invalid. Listing does not create, modify, move, approve,
+reject, or promote candidates. A candidate is not memory, does not write to
+`source_of_truth`, and does not enable a runtime local-learning engine.
 
 A local learning event can record:
 
@@ -337,10 +342,11 @@ Completed safe foundations:
 2. Skill metadata verifier.
 3. Local learning event schema and validator.
 4. Manual review-inbox writer for validated candidates.
+5. Manual read-only review-inbox reader/list command.
 
 Possible future slices, each requiring separate review:
 
-1. Read-only review-inbox listing.
+1. Human-gated approval/reject staging workflow (not implemented).
 2. Skill retrieval prototype using metadata only.
 3. Cheap-router handoff packet design.
 4. Puppeteer/browser bridge handoff transport design.

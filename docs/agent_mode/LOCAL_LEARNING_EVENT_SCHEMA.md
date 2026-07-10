@@ -28,13 +28,19 @@ When `memory_route` is `source_of_truth_candidate_requires_approval`,
 the route label does not authorize writing to `source_of_truth/`, promotion still
 requires explicit human approval, and no automatic memory sync occurs.
 
-## Manual Review-Inbox Writer
+## Manual Review-Inbox Tools
 
 PR #31 added only a directly invoked writer for validated review candidates. It
 writes candidate JSON files exclusively to `.lps/local-learning/review-inbox/`.
-These files are not memory: they are not promoted automatically and are never
-written to `source_of_truth`. Server startup does not import the writer, and no
-runtime local-learning engine is enabled.
+PR #33 added a directly invoked, read-only reader/list command for that same
+fixed inbox. The reader lists JSON candidates, parses them safely, and reports
+their existing validator status. Malformed or schema-invalid candidates remain
+visible as invalid, while symlink, junction, or containment failures fail
+closed. A missing inbox is an empty success and is not created by listing.
+
+These files are not memory. The tools do not approve, reject, promote, move, or
+delete candidates, and they never write to `source_of_truth`. Server startup
+imports neither tool, and no runtime local-learning engine is enabled.
 
 ## Required Fields
 
@@ -112,9 +118,12 @@ Run:
 npm run verify:local-learning-event-schema
 npm run verify:local-learning-event-validator
 npm run verify:local-learning-event-writer
+npm run verify:local-learning-review-inbox-reader
 ```
 
 The schema verifier checks this document, the machine-readable schema, and
 examples for required fields and safety-boundary tokens. The validator verifier
 checks the pure event validation path. The writer verifier checks the manual,
-fixed-path review-inbox boundary. All are deterministic and local-only.
+fixed-path review-inbox boundary. The reader verifier checks missing, valid,
+malformed, schema-invalid, and symlinked inbox cases while proving listing stays
+read-only. All are deterministic and local-only.
