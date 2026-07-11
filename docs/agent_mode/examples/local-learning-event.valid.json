@@ -1,0 +1,14 @@
+{
+  "task_type": "docs_schema",
+  "selected_skills": ["pr-merge-safety-review"],
+  "agent_target": "codex",
+  "result_quality": "success",
+  "mistakes": [],
+  "lesson": "Keep local learning as reviewable records before adding any runtime writer.",
+  "skill_update_candidate": {
+    "skill": "lifeskillsystem-next-move",
+    "change": "Mention the local learning event schema when planning future feedback loops."
+  },
+  "memory_route": "skill_improvement_candidate",
+  "approval_required": true
+}

@@ -188,6 +188,37 @@ const CLOUD_AGENTS = [
   { name: 'Other web agent', url: '' }
 ];
 
+function githubRepoFromRemote(url = '') {
+  const value = String(url || '').trim();
+  if (!value) return '';
+  const sshMatch = value.match(/^git@github\.com:([^/]+\/[^/]+?)(?:\.git)?$/i);
+  if (sshMatch) return sshMatch[1];
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname !== 'github.com') return '';
+    return parsed.pathname.replace(/^\/+/, '').replace(/\.git$/i, '');
+  } catch {
+    return '';
+  }
+}
+
+function githubWebUrlFromRemote(url = '') {
+  const repo = githubRepoFromRemote(url);
+  return repo ? `https://github.com/${repo}` : '';
+}
+
+function repoBoundaryLabel(repoPath = '', repoName = '') {
+  const pathText = String(repoPath || '').toLowerCase();
+  const repoText = String(repoName || '').toLowerCase();
+  if (repoText === 'daa13x/lifeplansystempublic' || pathText.includes('lps-public') || pathText.includes('lifeplansystempublic')) {
+    return 'Public app checkout';
+  }
+  if (repoText === 'daa13x/lifeplansystem' || pathText.endsWith('lifeplansystem')) {
+    return 'Private repo checkout';
+  }
+  return 'Current local checkout';
+}
+
 function App() {
   const [view, setView] = useState('planner');
   const [theme, setTheme] = useState(() => localStorage.getItem('life-planner-theme') || 'dark');
@@ -474,6 +505,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [draft, setDraft] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [runtimeMode, setRuntimeMode] = useState('');
+  const [runtime, setRuntime] = useState(null);
   const [repoFiles, setRepoFiles] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
@@ -572,11 +604,23 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
 
   useEffect(() => {
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
+    api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
   }, []);
 
   useEffect(() => {
     loadContext();
   }, [selectedSession]);
+
+  const modelReady = Boolean(runtime?.endpointConfigured || runtime?.assigned || runtime?.managedServerRunning);
+  const modelStatus = !runtime
+    ? 'Checking local Planner Assistant setup...'
+    : modelReady
+      ? runtime.managedServerRunning
+        ? `Planner Assistant endpoint is running at ${runtime.managedEndpoint}.`
+        : runtime.endpointConfigured
+          ? `Planner Assistant will try local endpoint ${runtime.endpoint}.`
+          : `Planner Assistant model is assigned: ${runtime.model?.name}.`
+      : 'No Planner Assistant model or local endpoint is configured. Chat will still save messages and memory candidates, but model replies use the setup-gated fallback until Settings is configured.';
 
   return (
     <section className="chat-layout">
@@ -610,6 +654,12 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           <div className="context-chips">
             {chatProviderPills(providers).map((pill) => <Pill tone={pill.tone} key={pill.text}>{pill.text}</Pill>)}
           </div>
+          {!modelReady && (
+            <div className="source-warning warn">
+              <strong>Planner Assistant setup needed</strong>
+              <small>{modelStatus} Open Settings to save a local endpoint, scan/load a GGUF model, or set llama-cli/llama-server paths.</small>
+            </div>
+          )}
           <div className="inline-form">
             <select value={chatMode} onChange={(event) => setChatMode(event.target.value)} title="Where this chat is allowed to send your message">
               <option value="auto">Auto: ChatGPT first, local fallback</option>
@@ -660,7 +710,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         </div>
         <div className="composer">
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
-          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
+          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save chat and use setup-gated fallback until Settings has a model or endpoint'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
         {sendHint && <small className="inline-hint">{sendHint}</small>}
       </div>
@@ -1073,6 +1123,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const [temporaryChatRequired, setTemporaryChatRequired] = useState(true);
   const [temporaryChatConfirmed, setTemporaryChatConfirmed] = useState(false);
   const browserReady = Boolean(cap?.playwright && cap?.chromium);
+  const connectorReady = Boolean(agentTabs.connectorAvailable);
   const controlledBrowserWarning = controlledBrowserWarningForUrl(browserUrl);
   const chatGptTarget = targetAgent === 'ChatGPT' || isChatGptUrl(browserUrl);
   const temporaryChatGateActive = temporaryChatRequired && chatGptTarget;
@@ -1091,6 +1142,9 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           : !browserUrl.trim()
             ? 'Enter a URL before opening the controlled browser.'
             : '';
+  const connectorDisabledReason = connectorReady
+    ? ''
+    : 'Chrome connector is not connected. Load browser-extension/lps-browser-agent in the signed-in Chrome profile and keep this app open.';
   const normalBrowserDisabledReason = !browserUrl.trim()
     ? 'Enter a URL before opening a normal browser tab.'
     : '';
@@ -1136,7 +1190,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
       ? 'Enter a message before running cloud consultation.'
       : temporaryChatNeedsConfirmation
           ? 'Turn on Temporary Chat in ChatGPT, then tick the confirmation box before sending the full prompt.'
-          : browserDisabledReason;
+          : connectorDisabledReason || browserDisabledReason;
   const waitingForExternalResponse = Boolean(activeConsultationId || browserResult || consultPrompt);
   const responseCaptureHint = external.trim()
     ? 'Automatic answer captured. Choose what to save below; nothing is saved or synced until you click a save option.'
@@ -1148,7 +1202,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         ? 'Manual fallback is active. Copy the answer from that browser only if automatic capture is blocked.'
         : waitingForExternalResponse
           ? 'Waiting for the automatic cloud response. If the site blocks automation, use the manual fallback controls.'
-          : 'Run automatic consultation to send the prompt, wait for ChatGPT, and fill this box automatically. Manual paste is only a fallback.';
+          : connectorDisabledReason || 'Run automatic consultation to send the prompt, wait for ChatGPT, and fill this box automatically. Manual paste is only a fallback.';
 
   async function load() {
     setCap(await api('/api/browser/capabilities'));
@@ -1546,9 +1600,31 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
         <div className="source-warning info">
           Primary flow: select context, type the browser-agent question, use local assist if helpful, then send to the browser agent in the user's Chrome tab. It will not save, sync, or promote anything until you choose a save option.
         </div>
+        <div className="connection-grid">
+          <div>
+            <span>Playwright</span>
+            <Pill tone={cap?.playwright ? 'good' : 'warn'}>{cap ? (cap.playwright ? 'Installed' : 'Missing') : 'Checking'}</Pill>
+            <small>{cap?.playwright ? 'Available for controlled-browser fallback.' : 'Required only for controlled-browser fallback.'}</small>
+          </div>
+          <div>
+            <span>Chromium</span>
+            <Pill tone={cap?.chromium ? 'good' : 'warn'}>{cap ? (cap.chromium ? 'Installed' : 'Missing') : 'Checking'}</Pill>
+            <small>{cap?.chromium ? 'Local Playwright browser is present.' : 'Use Tooling only if controlled-browser fallback is needed.'}</small>
+          </div>
+          <div>
+            <span>Chrome connector</span>
+            <Pill tone={connectorReady ? 'good' : 'warn'}>{connectorReady ? 'Connected' : 'Disconnected'}</Pill>
+            <small>{connectorReady ? 'Normal Chrome can receive browser-agent jobs.' : 'Cloud Consultant send is setup-gated until the extension is loaded.'}</small>
+          </div>
+        </div>
         {!browserReady && (
           <div className="source-warning warn">
             Browser automation disabled: {browserDisabledReason || cap?.note || 'Browser automation is not ready.'}
+          </div>
+        )}
+        {browserReady && connectorDisabledReason && (
+          <div className="source-warning warn">
+            Cloud Consultant setup-gated: {connectorDisabledReason} Do not bypass sign-in, verification, or Cloudflare checks; finish those only in your own browser profile.
           </div>
         )}
         {browserReady && controlledBrowserWarning && (
@@ -1772,6 +1848,311 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   );
 }
 
+function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
+  const [status, setStatus] = useState(null);
+  const [ollama, setOllama] = useState(null);
+  const [model, setModel] = useState(null);
+  const [requests, setRequests] = useState([]);
+  const [busy, setBusy] = useState('');
+  const [report, setReport] = useState(null);
+  const [form, setForm] = useState({
+    title: '',
+    objective: '',
+    targetRepoPath: '',
+    baseBranch: 'main',
+    allowedPaths: '',
+    forbiddenPaths: '',
+    testCommand: 'npm run build',
+    maxFilesChanged: 3,
+    requestedBy: 'Alex'
+  });
+  const set = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }));
+
+  async function run(label, fn) {
+    setBusy(label);
+    try {
+      await fn();
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  const checkOpenHands = () => run('oh-status', async () => setStatus(await api('/api/tooling/openhands/status')));
+  const checkOllama = () => run('ollama', async () => setOllama(await api('/api/tooling/ollama/status')));
+  const checkModel = () => run('model', async () => setModel(await api('/api/tooling/ollama/model-status')));
+  const loadRequests = () => run('requests', async () => setRequests(await api('/api/tooling/openhands/requests')));
+
+  const approveRequest = (id) => run(`approve-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify({ approvedBy: form.requestedBy || 'user' }) });
+    setNotice(result.note);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
+  const runRequest = (id) => run(`run-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/run`, { method: 'POST', body: JSON.stringify({ runBy: form.requestedBy || 'user' }) });
+    setNotice(result.message);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
+  const viewReport = (id) => run(`report-${id}`, async () => {
+    setReport(await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/report`));
+  });
+
+  const confirmExecution = (id) => run(`confirm-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/confirm-execution`, { method: 'POST', body: JSON.stringify({ confirmedBy: form.requestedBy || 'user' }) });
+    setNotice(result.note);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
+  const runExecutionPlan = (id) => run(`plan-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/execution-plan`, { method: 'POST', body: JSON.stringify({}) });
+    setNotice(result.message);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
+  const runExecutor = (id) => run(`exec-${id}`, async () => {
+    const result = await api(`/api/tooling/openhands/requests/${encodeURIComponent(id)}/execute`, { method: 'POST', body: JSON.stringify({}) });
+    setNotice(result.message);
+    setRequests(await api('/api/tooling/openhands/requests'));
+  });
+
+  useEffect(() => {
+    checkOpenHands();
+    checkOllama();
+    checkModel();
+    loadRequests();
+  }, [refreshSignal]);
+
+  async function startOpenHands() {
+    await run('start', async () => {
+      const result = await api('/api/tooling/openhands/start', { method: 'POST', body: JSON.stringify({}) });
+      setNotice(result.message);
+      setStatus(await api('/api/tooling/openhands/status'));
+    });
+  }
+
+  async function stopOpenHands() {
+    await run('stop', async () => {
+      const result = await api('/api/tooling/openhands/stop', { method: 'POST', body: JSON.stringify({}) });
+      setNotice(result.message);
+      setStatus(await api('/api/tooling/openhands/status'));
+    });
+  }
+
+  async function openUi() {
+    await run('open', async () => {
+      await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: status?.url || 'http://localhost:3000' }) });
+      setNotice('Opened the OpenHands UI in your external browser.');
+    });
+  }
+
+  async function submitRequest() {
+    if (!form.title.trim() || !form.objective.trim()) return;
+    await run('submit', async () => {
+      const result = await api('/api/tooling/openhands/requests', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...form,
+          maxFilesChanged: Number(form.maxFilesChanged)
+        })
+      });
+      setNotice(`Request stored at ${result.storedAt}. Nothing runs until approved.`);
+      setForm((prev) => ({ ...prev, title: '', objective: '' }));
+      setRequests(await api('/api/tooling/openhands/requests'));
+    });
+  }
+
+  const installedTone = status?.installed === 'installed' ? 'good' : status?.installed === 'missing' ? 'bad' : 'warn';
+
+  return (
+    <div className="panel wide-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>OpenHands Worker</h2>
+          <p>Local coding worker for minor tasks. LPS is the brain and approval gate: requests are stored for review; nothing executes automatically.</p>
+        </div>
+        <Pill tone="info">local worker</Pill>
+      </div>
+
+      <div className="connection-grid">
+        <div>
+          <span>OpenHands</span>
+          <Pill tone={installedTone}>{status?.installed || 'unknown'}</Pill>
+          <small>{status?.container?.exists ? `${status.container.image}` : 'container not found'}</small>
+        </div>
+        <div>
+          <span>Container</span>
+          <Pill tone={status?.container?.running ? 'good' : 'warn'}>{status?.container?.running ? 'running' : status?.container?.exists ? 'stopped' : 'absent'}</Pill>
+          <small>{status?.container?.status || 'no status'}</small>
+        </div>
+        <div>
+          <span>UI</span>
+          <Pill tone={status?.http?.reachable ? 'good' : 'warn'}>{status?.http?.reachable ? `HTTP ${status.http.code}` : 'unreachable'}</Pill>
+          <small>{status?.url || 'http://localhost:3000'}</small>
+        </div>
+        <div>
+          <span>Ollama</span>
+          <Pill tone={ollama?.running ? 'good' : 'bad'}>{ollama?.running ? `running ${ollama.version}` : 'unreachable'}</Pill>
+          <small>{model ? `${model.model}: ${model.present ? 'present' : 'missing'}` : 'model unchecked'}</small>
+        </div>
+      </div>
+      {status?.note && <div className="source-warning warn"><small>{status.note}</small></div>}
+      {model && !model.present && <div className="source-warning warn"><small>{model.note} Installed coder models: {model.coderModels.join(', ') || 'none'}</small></div>}
+
+      <div className="decision-row">
+        <button onClick={checkOpenHands} disabled={Boolean(busy)}><RefreshCcw size={16} /> {busy === 'oh-status' ? 'Checking...' : 'Check OpenHands'}</button>
+        <button onClick={startOpenHands} disabled={Boolean(busy) || !status?.container?.exists || status?.container?.running}><Bot size={16} /> {busy === 'start' ? 'Starting...' : 'Start OpenHands'}</button>
+        <button onClick={stopOpenHands} disabled={Boolean(busy) || !status?.container?.running}><X size={16} /> {busy === 'stop' ? 'Stopping...' : 'Stop OpenHands'}</button>
+        <button onClick={openUi} disabled={Boolean(busy)}><Globe2 size={16} /> Open OpenHands UI</button>
+        <button onClick={checkOllama} disabled={Boolean(busy)}><RefreshCcw size={16} /> Check Ollama</button>
+        <button onClick={checkModel} disabled={Boolean(busy)}><SearchCheck size={16} /> Check coding model</button>
+      </div>
+
+      <h3>Request minor work</h3>
+      <p>One focused objective, max 5 files. Requests are stored under .lps/tooling/openhands/requests for review — never committed, never auto-run.</p>
+      <div className="inline-form">
+        <input value={form.title} onChange={set('title')} placeholder="Task title (required)" />
+        <input value={form.requestedBy} onChange={set('requestedBy')} placeholder="Requested by" />
+      </div>
+      <textarea value={form.objective} onChange={set('objective')} placeholder="Objective — one focused change (required)" rows={3} />
+      <div className="inline-form">
+        <input value={form.targetRepoPath} onChange={set('targetRepoPath')} placeholder="Target repo path (blank = this workspace)" />
+        <input value={form.baseBranch} onChange={set('baseBranch')} placeholder="Base branch" />
+        <input type="number" min="1" max="5" value={form.maxFilesChanged} onChange={set('maxFilesChanged')} title="Max files changed (1-5)" />
+      </div>
+      <div className="inline-form">
+        <textarea value={form.allowedPaths} onChange={set('allowedPaths')} placeholder="Allowed paths (one per line, optional)" rows={2} />
+        <textarea value={form.forbiddenPaths} onChange={set('forbiddenPaths')} placeholder="Extra forbidden paths (one per line)" rows={2} />
+      </div>
+      <input value={form.testCommand} onChange={set('testCommand')} placeholder="Test command (stored, never auto-run)" />
+      <label className="toggle-row" title="Always on in this version">
+        <input type="checkbox" checked readOnly disabled />
+        Approval required before run, commit, and push (always on)
+      </label>
+      <div className="decision-row">
+        <button className="primary" onClick={submitRequest} disabled={Boolean(busy) || !form.title.trim() || !form.objective.trim()}>
+          <Check size={16} /> {busy === 'submit' ? 'Storing...' : 'Store request for review'}
+        </button>
+        <button onClick={loadRequests} disabled={Boolean(busy)}><RefreshCcw size={16} /> Refresh list</button>
+      </div>
+
+      <h3>Approved Request Runner</h3>
+      <div className="source-warning info">
+        <small>
+          <strong>Gated runner, not an autonomous agent.</strong> A request must be explicitly Approved by a human, then Run.
+          The runner executes only an allowlisted validation command (<code>node --check server/index.js</code> or <code>npm run build</code>),
+          writes a report under <code>.lps/tooling/openhands/reports/</code>, and never edits code, runs arbitrary commands, commits, pushes, merges, resets, deletes, or force-pushes.
+        </small>
+      </div>
+
+      <h3>Execution Worker (dry-run / plan only)</h3>
+      <div className="source-warning warn">
+        <small>
+          <strong>Gated local coding worker — not an autonomous agent.</strong> This first version is <strong>dry-run / plan only</strong>:
+          it does not edit code or invoke OpenHands. It needs a <strong>second explicit confirmation</strong> beyond approval, then produces
+          an execution plan (proposed dedicated branch, protected-path scan, max-files budget) and a report. It never runs on main/master,
+          never commits/pushes/merges/resets/deletes/force-pushes, and never runs arbitrary commands. <strong>Human review is required before any commit, push, or PR.</strong>
+        </small>
+      </div>
+
+      <h3>Worktree Executor (high risk — real invocation OFF)</h3>
+      <div className="source-warning bad">
+        <small>
+          <strong>Gated local coding worker — high risk.</strong> The executor runs all work inside an <strong>isolated git worktree</strong> on a
+          dedicated <code>openhands/exec-&lt;id&gt;</code> branch — never on main/master and never in your working tree. It requires approval
+          <strong>and</strong> the second execution confirmation. <strong>Real OpenHands invocation is currently DISABLED</strong> by a server-side flag, so
+          this proves the worktree/gate/report flow without editing any code. It enforces allowed/forbidden/protected paths and max-files against the
+          <em>actual</em> diff, runs only allowlisted validation, and writes a report. It never commits, pushes, merges, resets, deletes branches, or
+          force-pushes. <strong>A human must review the diff and use the Source Control panel for any commit/push/PR.</strong>
+        </small>
+      </div>
+
+      <h3>Requests</h3>
+      {requests.length === 0 ? (
+        <Empty title="No requests yet" body="Stored OpenHands task requests will appear here for review." />
+      ) : (
+        <div className="table-list">
+          {requests.map((request) => (
+            <div className="review-card" key={request.id}>
+              <div className="review-card-heading">
+                <Pill tone={['approved', 'validated', 'execution-planned'].includes(request.status) ? 'good' : request.status === 'validation-failed' ? 'bad' : request.status === 'pending' ? 'warn' : 'muted'}>{request.status}</Pill>
+                <Pill tone={request.riskLevel === 'low' ? 'good' : 'warn'}>{request.riskLevel || 'unrated'} risk</Pill>
+                {request.executionConfirmed && <Pill tone="info">execution confirmed</Pill>}
+              </div>
+              <h3>{request.title}</h3>
+              <div className="candidate-meta">
+                <span>By: {request.requestedBy}</span>
+                <span>Created: {request.createdAt ? new Date(request.createdAt).toLocaleString() : 'unknown'}</span>
+                <span>Repo: {request.targetRepoPath}</span>
+                <span>Max files: {request.maxFilesChanged}</span>
+                {request.approvedBy && <span>Approved by: {request.approvedBy}</span>}
+                {request.validationCommand && <span>Validated: {request.validationCommand} ({request.validationOk ? 'ok' : 'failed'})</span>}
+                {request.executionConfirmedBy && <span>Exec confirmed by: {request.executionConfirmedBy}</span>}
+                {request.status === 'execution-planned' && <span>Plan eligible: {request.executionEligible ? 'yes' : 'no (blocked)'}</span>}
+                {request.reportPath && <span>Report: {request.reportPath}</span>}
+              </div>
+              <div className="decision-row">
+                {request.status === 'pending' && (
+                  <button className="primary" disabled={Boolean(busy)} onClick={() => approveRequest(request.id)}>
+                    <Check size={16} /> {busy === `approve-${request.id}` ? 'Approving...' : 'Approve for runner'}
+                  </button>
+                )}
+                <button
+                  disabled={Boolean(busy) || request.status !== 'approved'}
+                  title={request.status !== 'approved' ? 'A human must approve this request before it can run' : 'Run the allowlisted validation only'}
+                  onClick={() => runRequest(request.id)}
+                >
+                  <Bot size={16} /> {busy === `run-${request.id}` ? 'Running...' : 'Run validation'}
+                </button>
+                {['approved', 'execution-planned'].includes(request.status) && !request.executionConfirmed && (
+                  <button
+                    disabled={Boolean(busy)}
+                    title="Second explicit human confirmation required before an execution plan can run"
+                    onClick={() => confirmExecution(request.id)}
+                  >
+                    <ShieldCheck size={16} /> {busy === `confirm-${request.id}` ? 'Confirming...' : 'Confirm execution (2nd)'}
+                  </button>
+                )}
+                <button
+                  disabled={Boolean(busy) || !request.executionConfirmed || !['approved', 'execution-planned'].includes(request.status)}
+                  title={!request.executionConfirmed ? 'Requires a second execution confirmation first' : 'Dry-run: evaluate safety gates and write a plan. No code is edited.'}
+                  onClick={() => runExecutionPlan(request.id)}
+                >
+                  <SearchCheck size={16} /> {busy === `plan-${request.id}` ? 'Planning...' : 'Run execution plan (dry run)'}
+                </button>
+                <button
+                  className="danger"
+                  disabled={Boolean(busy) || !request.executionConfirmed || !['approved', 'execution-planned', 'executor-ran'].includes(request.status)}
+                  title={!request.executionConfirmed ? 'Requires a second execution confirmation first' : 'Runs the harness in an isolated worktree. Real OpenHands invocation is OFF; no code is edited.'}
+                  onClick={() => runExecutor(request.id)}
+                >
+                  <Bot size={16} /> {busy === `exec-${request.id}` ? 'Running harness...' : 'Run worktree executor (invocation OFF)'}
+                </button>
+                {request.reportPath && (
+                  <button disabled={Boolean(busy)} onClick={() => viewReport(request.id)}>
+                    <FileText size={16} /> View report
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {report && (
+        <div className="panel">
+          <div className="panel-heading">
+            <h3>Runner report: {report.reportPath}</h3>
+            <button onClick={() => setReport(null)}><X size={14} /> Close</button>
+          </div>
+          <pre className="code-block diff-detail">{report.content}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Tooling({ setNotice, refreshSignal = 0 }) {
   const [status, setStatus] = useState(null);
   const [connector, setConnector] = useState(null);
@@ -1919,6 +2300,8 @@ function Tooling({ setNotice, refreshSignal = 0 }) {
           ))}
         </div>
       </div>
+
+      <OpenHandsPanel setNotice={setNotice} refreshSignal={refreshSignal} />
 
       <div className="panel wide-panel">
         <h2>Notes</h2>
@@ -2090,6 +2473,77 @@ function Calibration({ setNotice, refreshSignal = 0 }) {
   );
 }
 
+// LPS-native line diff. LCS alignment for normal files; a positional fallback
+// above a line cap keeps very large files responsive (avoids O(n*m) work).
+function computeLineDiff(oldText, newText) {
+  // Normalize line endings so CRLF-vs-LF (e.g. git's LF blob vs a CRLF working
+  // file on Windows) does not render every line as a change.
+  const normalize = (text) => (text ? text.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n') : []);
+  const a = normalize(oldText);
+  const b = normalize(newText);
+  const rows = [];
+  const CAP = 1500;
+  if (a.length > CAP || b.length > CAP) {
+    const max = Math.max(a.length, b.length);
+    for (let k = 0; k < max; k++) {
+      const left = k < a.length ? a[k] : null;
+      const right = k < b.length ? b[k] : null;
+      rows.push({ type: left === right ? 'context' : 'change', left, right, ln: left === null ? null : k + 1, rn: right === null ? null : k + 1 });
+    }
+    return { rows, approximate: true };
+  }
+  const n = a.length;
+  const m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { rows.push({ type: 'context', left: a[i], right: b[j], ln: i + 1, rn: j + 1 }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ type: 'del', left: a[i], right: null, ln: i + 1, rn: null }); i++; }
+    else { rows.push({ type: 'add', left: null, right: b[j], ln: null, rn: j + 1 }); j++; }
+  }
+  while (i < n) { rows.push({ type: 'del', left: a[i], right: null, ln: i + 1, rn: null }); i++; }
+  while (j < m) { rows.push({ type: 'add', left: null, right: b[j], ln: null, rn: j + 1 }); j++; }
+  return { rows, approximate: false };
+}
+
+function SideBySideDiff({ data }) {
+  const { rows, approximate } = useMemo(
+    () => computeLineDiff(data.oldContent || '', data.newContent || ''),
+    [data.oldContent, data.newContent]
+  );
+  if (data.binary || data.tooLarge) return <div className="sbs-note">{data.note}</div>;
+  const changed = rows.some((row) => row.type !== 'context');
+  return (
+    <div className="sbs-diff">
+      <div className="sbs-head">
+        <span>{data.path}</span>
+        <span>{data.changeType}{approximate ? ' · approx (large file)' : ''}</span>
+      </div>
+      {!changed && <div className="sbs-note">No differences versus the last commit.</div>}
+      <div className="sbs-grid">
+        {rows.map((row, idx) => {
+          const leftDel = row.type === 'del' || row.type === 'change';
+          const rightAdd = row.type === 'add' || row.type === 'change';
+          return (
+            <React.Fragment key={idx}>
+              <div className="sbs-lnum">{row.ln ?? ''}</div>
+              <div className={cx('sbs-cell', leftDel && 'sbs-del')}>{row.left ?? ' '}</div>
+              <div className="sbs-lnum">{row.rn ?? ''}</div>
+              <div className={cx('sbs-cell', rightAdd && 'sbs-add')}>{row.right ?? ' '}</div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [source, setSource] = useState(null);
   const [diff, setDiff] = useState(null);
@@ -2097,23 +2551,45 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [branchName, setBranchName] = useState('codex/life-planner-ui');
   const [branches, setBranches] = useState({ current: '', branches: [] });
   const [branchToSwitch, setBranchToSwitch] = useState('');
-  const [remoteUrl, setRemoteUrl] = useState('https://github.com/neuro-1977/lps.git');
-  const [githubRepo, setGithubRepo] = useState('neuro-1977/lps');
+  const [remoteUrl, setRemoteUrl] = useState('');
+  const [githubRepo, setGithubRepo] = useState('');
   const [hfRepo, setHfRepo] = useState('');
   const [hfRepoType, setHfRepoType] = useState('model');
   const [sourceBusy, setSourceBusy] = useState(false);
   const [operationOutput, setOperationOutput] = useState('');
+  const [diffPath, setDiffPath] = useState('');
+  const [fileDiff, setFileDiff] = useState(null);
+  const [diffBusy, setDiffBusy] = useState(false);
+  const [pushArmed, setPushArmed] = useState(false);
 
   async function refresh(announce = false) {
     try {
-      setSource(await api('/api/source/status'));
+      const sourceData = await api('/api/source/status');
+      setSource(sourceData);
       setDiff(await api('/api/source/diff'));
       const branchData = await api('/api/source/branches');
       setBranches(branchData);
       setBranchToSwitch((current) => current || branchData.current || '');
+      const originRemote = sourceData.remoteList?.find((remote) => remote.name === 'origin') || sourceData.remoteList?.[0];
+      if (originRemote?.url) setRemoteUrl(originRemote.url);
+      const originRepo = githubRepoFromRemote(originRemote?.url || '');
+      if (originRepo) setGithubRepo((current) => current || originRepo);
       if (announce) setNotice('Source status refreshed.');
     } catch (err) {
       setNotice(err.message);
+    }
+  }
+
+  async function openFileDiff(path) {
+    setDiffPath(path);
+    setDiffBusy(true);
+    try {
+      setFileDiff(await api(`/api/source/file-diff?path=${encodeURIComponent(path)}`));
+    } catch (err) {
+      setFileDiff(null);
+      setNotice(err.message);
+    } finally {
+      setDiffBusy(false);
     }
   }
 
@@ -2128,6 +2604,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       setOperationOutput(output);
       setNotice(success || result.message || result.output || 'Source control action complete.');
       await refresh();
+      if (diffPath) await openFileDiff(diffPath);
     } catch (err) {
       setNotice(err.message);
       setOperationOutput(err.message);
@@ -2151,7 +2628,23 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   }
 
   const changedFiles = source?.changedFiles || [];
+  const stagedFiles = changedFiles.filter((file) => file.staged);
   const localBranches = (branches.branches || []).filter((branch) => !branch.remote);
+  const currentBranch = source?.branch || '';
+  const originRemote = source?.remoteList?.find((remote) => remote.name === 'origin') || source?.remoteList?.[0];
+  const currentRemoteUrl = originRemote?.url || '';
+  const currentRepoName = githubRepoFromRemote(currentRemoteUrl);
+  const currentRepoWebUrl = githubWebUrlFromRemote(currentRemoteUrl);
+  const boundaryLabel = repoBoundaryLabel(source?.repoPath || '', currentRepoName);
+  const isPublicCheckout = boundaryLabel === 'Public app checkout';
+  const pushProtectedBranch = ['main', 'master'].includes(currentBranch.toLowerCase());
+  const pushDisabledReason = sourceBusy
+    ? 'A source control operation is already running.'
+    : source?.hasConflicts
+      ? 'Resolve conflicts before pushing.'
+      : pushProtectedBranch
+        ? `Pushing ${currentBranch} from Life Planner is blocked. Push a review branch instead.`
+        : '';
   const hasChanges = changedFiles.length > 0;
   const protectedFiles = changedFiles.filter((file) => file.protected);
   const canStageAll = hasChanges && !sourceBusy && !source?.hasConflicts && protectedFiles.length === 0;
@@ -2182,8 +2675,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           <button onClick={() => refresh(true)} disabled={sourceBusy}><RefreshCcw size={16} /> Refresh</button>
           <button onClick={() => action('/api/source/login/github')} disabled={Boolean(githubLoginDisabledReason)} title={githubLoginDisabledReason || 'Start GitHub CLI browser login'}><Github size={16} /> Login with Git</button>
           <button onClick={() => openExternal(source?.installUrls?.githubCli || 'https://cli.github.com/', 'GitHub CLI download')} disabled={sourceBusy}><Download size={16} /> GitHub CLI</button>
-          <button onClick={() => openExternal('https://github.com/neuro-1977/lps', 'push repo')} disabled={sourceBusy}><Github size={16} /> Open push repo</button>
-          <button onClick={() => openExternal('https://github.com/Daa13x/LifePlanSystemPublic', 'upstream merge target')} disabled={sourceBusy}><Github size={16} /> Upstream merge target</button>
+          <button onClick={() => openExternal(currentRepoWebUrl, 'current origin repository')} disabled={sourceBusy || !currentRepoWebUrl}><Github size={16} /> Open origin repo</button>
           <button onClick={() => action('/api/source/login/hf')} disabled={Boolean(hfLoginDisabledReason)} title={hfLoginDisabledReason || 'Start Hugging Face CLI login'}>Login with HF</button>
           <button onClick={() => openExternal(source?.installUrls?.huggingFaceCli || 'https://huggingface.co/docs/huggingface_hub/guides/cli', 'Hugging Face CLI docs')} disabled={sourceBusy}>HF CLI docs</button>
         </div>
@@ -2191,8 +2683,20 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
 
       <div className="panel">
         <h2>Connection</h2>
-        <p>Active pushes go to <code>neuro-1977/lps</code>. Merge handoff target is <code>Daa13x/LifePlanSystemPublic</code>.</p>
+        <div className={cx('source-warning', isPublicCheckout ? 'warn' : 'info')}>
+          <strong>{boundaryLabel}</strong>
+          <small>
+            This Source panel controls only the local checkout at <code>{source?.repoPath || 'unknown path'}</code>.
+            {currentRepoName ? <> Current origin is <code>{currentRepoName}</code>.</> : ' No GitHub origin repository was detected.'}
+            {isPublicCheckout ? ' Do not use this panel to move private LifePlanSystem content into the public app checkout.' : ''}
+          </small>
+        </div>
         <div className="connection-grid">
+          <div>
+            <span>Origin</span>
+            <strong>{currentRepoName || 'Unknown remote'}</strong>
+            <small>{currentRemoteUrl || 'No origin URL configured'}</small>
+          </div>
           <div>
             <span>Branch</span>
             <strong>{source?.branch || 'Unknown'}</strong>
@@ -2227,7 +2731,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
 
       <div className="panel">
         <h2>Write</h2>
-        <p>These buttons run local Git commands in this workspace. Protected runtime files are blocked from staging and commits.</p>
+        <p>These buttons run local Git commands in this checkout against the displayed origin. Protected runtime files are blocked from staging and commits; push is review-armed and main/master is blocked.</p>
         {sourceBusy && <div className="source-warning info">Running source control operation...</div>}
         {source && !source.github?.cliAvailable && <div className="source-warning warn">GitHub CLI login is unavailable because <code>gh</code> is not installed or not on PATH. Use GitHub CLI above to open the official download page, install it, restart the app terminal, then refresh.</div>}
         {source && !source.huggingface?.cliAvailable && <div className="source-warning warn">Hugging Face CLI login is unavailable because <code>hf</code> is not installed or not on PATH. Use HF CLI docs above, or add an HF token in Settings.</div>}
@@ -2251,7 +2755,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
         <label>Origin remote</label>
         <div className="inline-form">
           <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} disabled={sourceBusy} />
-          <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
+          <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated. Review the boundary label before any fetch, pull, or push.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
         </div>
         <label>Create GitHub repo</label>
         <div className="inline-form">
@@ -2270,16 +2774,57 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'public' })} disabled={sourceBusy || !hfRepo.trim()}>Create public</button>
           <button onClick={() => openExternal('https://huggingface.co/new', 'Hugging Face new repository page')} disabled={sourceBusy}>Open HF New</button>
         </div>
+        <label>Files to be committed ({stagedFiles.length})</label>
+        {stagedFiles.length ? (
+          <div className="commit-file-list">
+            {stagedFiles.map((file) => (
+              <div className="commit-file-row" key={file.path}>
+                <span>{file.status}</span>
+                <strong>{file.path}</strong>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="source-warning info">Nothing staged. Stage at least one file to commit.</div>
+        )}
         <label>Commit message</label>
-        <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change..." disabled={sourceBusy} />
+        <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change... (required)" disabled={sourceBusy} />
         <div className="decision-row">
           <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!canStageAll}><Check size={16} /> Stage all</button>
           <button onClick={() => action('/api/source/unstage-all', {}, 'Unstaged all files.')} disabled={sourceBusy || !changedFiles.some((file) => file.staged)}><X size={16} /> Unstage all</button>
           <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')} disabled={!canCommit}><Check size={16} /> Commit</button>
-          <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch</button>
-          <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull</button>
-          <button onClick={() => action('/api/source/push', {}, 'Pushed current branch.')} disabled={sourceBusy || source?.hasConflicts}><Upload size={16} /> Push</button>
+          <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest refs from the displayed origin.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch origin</button>
+          <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes for this checkout branch.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull current</button>
+          <button
+            onClick={() => setPushArmed(true)}
+            disabled={Boolean(pushDisabledReason) || pushArmed}
+            title={pushDisabledReason || 'Review the push target before confirming'}
+          >
+            <Upload size={16} /> Push...
+          </button>
         </div>
+        {pushArmed && (
+          <div className="source-warning warn">
+            <strong>Confirm push</strong>
+            <small>
+              This will run <code>git push -u origin {currentBranch}</code> — the current review branch to remote <code>origin</code> only.
+              No force flags. Life Planner refuses to push main/master.
+            </small>
+            <div className="decision-row">
+              <button
+                className="primary"
+                disabled={sourceBusy}
+                onClick={async () => {
+                  await action('/api/source/push', { confirm: true }, `Pushed ${currentBranch} to origin.`);
+                  setPushArmed(false);
+                }}
+              >
+                <Upload size={16} /> Confirm push to origin
+              </button>
+              <button disabled={sourceBusy} onClick={() => setPushArmed(false)}><X size={16} /> Cancel</button>
+            </div>
+          </div>
+        )}
         {operationOutput && <pre className="code-block compact-code">{operationOutput}</pre>}
       </div>
 
@@ -2291,29 +2836,60 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           {changedFiles.length === 0 ? (
             <Empty title="Clean" body="No changed files." />
           ) : changedFiles.map((file) => (
-            <div className="source-file-row" key={`${file.status}-${file.path}`}>
+            <div className={cx('source-file-row', diffPath === file.path && 'selected')} key={`${file.status}-${file.path}`}>
               <div>
                 <strong>{file.path}</strong>
                 <span>{file.status}{file.staged ? ' staged' : ' unstaged'}</span>
               </div>
-              {file.protected ? (
-                <Pill tone="bad">Protected</Pill>
-              ) : file.staged ? (
-                <button onClick={() => action('/api/source/unstage-file', { path: file.path }, `Unstaged ${file.path}`)} disabled={sourceBusy}><X size={14} /> Unstage</button>
-              ) : (
-                <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>
-              )}
+              <div className="mini-actions">
+                {!file.protected && (
+                  <button onClick={() => openFileDiff(file.path)} disabled={diffBusy} title="Show side-by-side diff"><FileText size={14} /> Diff</button>
+                )}
+                {file.protected ? (
+                  <Pill tone="bad">Protected</Pill>
+                ) : file.staged ? (
+                  <button onClick={() => action('/api/source/unstage-file', { path: file.path }, `Unstaged ${file.path}`)} disabled={sourceBusy}><X size={14} /> Unstage</button>
+                ) : (
+                  <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>
+                )}
+              </div>
             </div>
           ))}
         </div>
         <h2>Remotes</h2>
-        <pre className="code-block">{source?.remotes || 'No Git remotes configured yet.'}</pre>
+        {source?.remoteList?.length ? (
+          <div className="remote-list">
+            {source.remoteList.map((remote) => (
+              <div className="remote-row" key={remote.name}>
+                <strong>{remote.name}</strong>
+                <span>{remote.url}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <pre className="code-block">{source?.remotes || 'No Git remotes configured yet.'}</pre>
+        )}
       </div>
 
       <div className="panel wide-panel">
+        <div className="panel-heading">
+          <h2>Side-by-side Diff{diffPath ? `: ${diffPath}` : ''}</h2>
+          {diffPath && <button onClick={() => { setDiffPath(''); setFileDiff(null); }} disabled={diffBusy}><X size={14} /> Close</button>}
+        </div>
+        {diffPath ? (
+          diffBusy ? (
+            <div className="loading">Loading diff...</div>
+          ) : fileDiff ? (
+            <SideBySideDiff data={fileDiff} />
+          ) : (
+            <Empty title="No diff" body="Could not load a diff for this file." />
+          )
+        ) : (
+          <Empty title="No file selected" body="Click Diff on a changed file to compare committed vs current side by side." />
+        )}
         <h2>Recent Log</h2>
         <pre className="code-block">{source?.log || 'No commits yet.'}</pre>
-        <h2>Diff</h2>
+        <h2>Aggregate Diff</h2>
         <pre className="code-block">{diff?.stat || 'No diff stat.'}</pre>
         <pre className="code-block diff-detail">{diff?.detail || 'No unstaged diff.'}</pre>
         {diff?.truncated && <Pill tone="warn">Diff truncated</Pill>}
@@ -2418,6 +2994,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
+  const [saveStatus, setSaveStatus] = useState('Settings load from local SQLite when the app starts. Click Save after changing model, endpoint, connector, or download values.');
   const recommendedQwen = useMemo(() => recommendedQwenForHardware(hardware), [hardware]);
 
   useEffect(() => {
@@ -2431,27 +3008,35 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   }, [hardware, recommendedQwen, repoTouched]);
 
   async function saveSettings() {
-    const data = await api('/api/settings', {
-      method: 'POST',
-      body: JSON.stringify({
-        hfToken,
-        modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean),
-        modelDownloadFolder: downloadFolder,
-        localModelEndpoint,
-        localModelName,
-        llamaCliPath,
-        llamaServerPath,
-        llamaServerPort: Number(llamaServerPort),
-        llamaContextSize: Number(llamaContextSize),
-        browserAgentMode,
-        browserAgentPort: Number(browserAgentPort),
-        brainRootPath: brainRootPath.trim()
-      })
-    });
-    setSettings(data);
-    setRuntime(await api('/api/models/runtime'));
-    setBrainState(await api('/api/brain/status').catch(() => null));
-    setNotice('Settings saved locally.');
+    setSaveStatus('Saving settings to local SQLite...');
+    try {
+      const data = await api('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({
+          hfToken,
+          modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean),
+          modelDownloadFolder: downloadFolder,
+          localModelEndpoint,
+          localModelName,
+          llamaCliPath,
+          llamaServerPath,
+          llamaServerPort: Number(llamaServerPort),
+          llamaContextSize: Number(llamaContextSize),
+          browserAgentMode,
+          browserAgentPort: Number(browserAgentPort),
+          brainRootPath: brainRootPath.trim()
+        })
+      });
+      setSettings(data);
+      setRuntime(await api('/api/models/runtime'));
+      setBrainState(await api('/api/brain/status').catch(() => null));
+      setSaveStatus('Saved locally. These settings will load from SQLite on the next app start.');
+      setNotice('Settings saved locally.');
+    } catch (err) {
+      setSaveStatus(`Save failed: ${err.message}`);
+      setNotice(err.message);
+      throw err;
+    }
   }
 
   async function checkBrain() {
@@ -2567,6 +3152,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           <strong>{runtime?.endpointConfigured ? runtime.endpointModelName : runtime?.model?.name || 'Planner Assistant unavailable'}</strong>
           <span>{runtime?.managedServerRunning ? `Managed llama-server running: ${runtime.managedEndpoint}` : runtime?.endpointConfigured ? `Endpoint: ${runtime.endpoint}` : runtime?.llamaCliConfigured ? `llama-cli: ${runtime.llamaCliExists ? 'found' : 'missing'}` : 'Configure a local endpoint, llama-server, or llama-cli to generate chat responses.'}</span>
         </div>
+        <div className={cx('source-warning', runtime?.endpointConfigured || runtime?.assigned ? 'info' : 'warn')}>
+          <strong>{runtime?.endpointConfigured || runtime?.assigned ? 'Model setup saved' : 'Model setup needed'}</strong>
+          <small>{saveStatus}</small>
+        </div>
         <label>Model folders</label>
         <textarea value={modelFolders} onChange={(event) => setModelFolders(event.target.value)} placeholder="C:\\Models&#10;D:\\LLMs" />
         <label>OpenAI-compatible local endpoint</label>
@@ -2614,6 +3203,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <div className="source-warning info">
           <strong>Chrome connector</strong>
           <small>Load the unpacked extension from browser-extension/lps-browser-agent in the same Chrome profile where the user is logged into ChatGPT, Gemini, Grok, or Claude. It talks only to 127.0.0.1:{browserAgentPort}; no public firewall rule is needed for localhost-only use.</small>
+        </div>
+        <div className="source-warning warn">
+          <strong>Setup-gated</strong>
+          <small>Saving this port and mode does not sign in, bypass verification, or start cloud automation. Cloud Consultant runs only after the connector is loaded and the user completes any required session or Temporary Chat steps.</small>
         </div>
       </div>
       <div className="panel">

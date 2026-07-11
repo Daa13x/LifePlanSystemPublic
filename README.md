@@ -1,6 +1,6 @@
 ﻿# LifePlanSystemPublic / Life Planner
 
-Public-safe Life Planner UI and local-first planning assistant. This branch contains the runnable app plus the sanitised collaboration scaffold.
+Public-safe Life Planner UI and local-first planning assistant. This repository contains the runnable app plus the sanitised collaboration scaffold.
 
 ## Public Scaffold Purpose
 
@@ -27,7 +27,7 @@ Start here for scaffold context:
 
 Local-first desktop planning assistant and repo control centre. The app is designed to help a user decide what deserves attention next, review memory safely, browse source files, and stage repo writes behind explicit approval.
 
-This repository is currently pushed to `neuro-1977/lps` and is intended to be merged into `Daa13x/LifePlanSystemPublic`.
+This repository is `Daa13x/LifePlanSystemPublic`; its default branch is `main`.
 
 ## Current Capabilities
 
@@ -43,6 +43,14 @@ This repository is currently pushed to `neuro-1977/lps` and is intended to be me
 - Browser/cloud consultation workflow. Cloud output is saved as reviewable suggestion only.
 - Local model registry for `.gguf` files, Planner Assistant assignment, and Hugging Face GGUF download.
 - JSON and Markdown import/export.
+- Manual local-learning support is limited to a directly invoked review-inbox
+  writer and read-only reader/list command. The writer places validated
+  candidate files only in `.lps/local-learning/review-inbox/`; the reader lists
+  and validates `.json` candidates there in deterministic filename order. A
+  missing inbox is an empty result and is not created. The reader does not
+  modify, move, approve, or reject candidates. Candidates are not memory,
+  nothing is promoted automatically, no `source_of_truth` path is written, and
+  no runtime local-learning engine is enabled.
 - Dark mode by default.
 
 ## Local Install
@@ -187,39 +195,19 @@ Cloud agents and external browser consultations are advisory only. Their respons
 
 ## Repository Setup
 
-This checkout should push to:
+The canonical repository is `Daa13x/LifePlanSystemPublic`, with `main` as its
+default branch.
 
-```bash
-git remote set-url origin https://github.com/neuro-1977/lps.git
-```
-
-Verify:
+Verify the current checkout before making changes:
 
 ```bash
 git remote -v
 git status --short --branch
 ```
 
-If the repository is empty or this is the first push:
-
-```bash
-git add -A
-git commit -m "Build Life Planner MVP"
-git branch -M main
-git push -u origin main
-```
-
-If auth fails, install/login with GitHub CLI or use Git Credential Manager:
-
-```powershell
-winget install --id GitHub.cli
-gh auth login
-git push -u origin main
-```
-
 ## Pulling Fresh Changes
 
-From the `neuro-1977/lps` repo:
+From the `Daa13x/LifePlanSystemPublic` repository:
 
 ```bash
 git fetch origin
@@ -239,47 +227,6 @@ git pull --ff-only origin main
 git stash pop
 npm install
 npm run build
-```
-
-## Merge Into Daa13x/LifePlanSystemPublic
-
-Recommended path:
-
-```bash
-git remote add upstream https://github.com/Daa13x/LifePlanSystemPublic.git
-git fetch upstream
-git switch -c merge/life-planner-mvp main
-git merge upstream/main --allow-unrelated-histories
-npm install
-npm run build
-```
-
-Resolve conflicts, then:
-
-```bash
-git add -A
-git commit -m "Merge Life Planner MVP into public system repo"
-git push -u origin merge/life-planner-mvp
-```
-
-Then open a pull request from:
-
-```text
-neuro-1977/lps:merge/life-planner-mvp
-```
-
-into:
-
-```text
-Daa13x/LifePlanSystemPublic:main
-```
-
-If the upstream repo is private or unavailable locally, add the remote after authenticating:
-
-```bash
-gh auth login
-git remote add upstream https://github.com/Daa13x/LifePlanSystemPublic.git
-git fetch upstream
 ```
 
 ## Public-Safe Defaults

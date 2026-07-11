@@ -7,6 +7,23 @@ import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { db, getSetting, migrate, setSetting } from './db.js';
 import { BRAIN_ALLOWLIST, brainStatus, loadBrainContext } from './brain.js';
+import {
+  OPENHANDS_MANDATORY_FORBIDDEN,
+  normalizeRequestPath,
+  violatesMandatoryForbidden,
+  validateExecutorBaseBranch,
+  OPENHANDS_EXECUTOR_LIMITS,
+  checkWorktreeValidationSetup,
+  checkExecutorMaxFilesChanged,
+  summarizeExecutorCommandResult,
+  limitExecutorReportText,
+  buildOpenHandsInvocationConstraints,
+  buildOpenHandsInvocationReadiness,
+  parsePorcelainPaths,
+  isChangedFileAllowed,
+  enforceChangedFiles
+} from './executorEnforcement.js';
+import { resolveRunCliCwd } from './runCliCwd.js';
 
 migrate();
 
@@ -93,22 +110,42 @@ async function runConnectorJob({ targetAgent = 'ChatGPT', url, prompt, timeoutMs
 }
 
 async function runCli(command, args, options = {}) {
+  const timeoutMs = options.timeout || 20000;
+  const maxBufferBytes = options.maxBuffer || 1024 * 1024;
+  // A caller-provided cwd (e.g. the executor's isolated worktree) is honoured
+  // only when it resolves inside the repo root; anything else is refused here
+  // rather than executed elsewhere or silently retargeted to root.
+  const cwdResolution = resolveRunCliCwd(root, options.cwd);
+  if (!cwdResolution.ok) {
+    return {
+      available: true, ok: false, code: 'EBADCWD', signal: '',
+      timedOut: false, outputLimitHit: false, timeoutMs, maxBufferBytes,
+      stdout: '', stderr: `runCli refused cwd: ${cwdResolution.reason}`
+    };
+  }
   try {
     const useShell = process.platform === 'win32' && /\.cmd$/i.test(command);
     const result = await execFileAsync(command, args, {
-      cwd: root,
-      timeout: options.timeout || 20000,
+      cwd: cwdResolution.cwd,
+      timeout: timeoutMs,
       windowsHide: true,
       shell: useShell,
-      maxBuffer: options.maxBuffer || 1024 * 1024
+      maxBuffer: maxBufferBytes
     });
-    return { available: true, ok: true, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+    return { available: true, ok: true, stdout: result.stdout.trim(), stderr: result.stderr.trim(), timedOut: false, outputLimitHit: false, timeoutMs, maxBufferBytes };
   } catch (error) {
     const missing = error.code === 'ENOENT';
+    const outputLimitHit = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || /maxBuffer/i.test(String(error.message || ''));
+    const timedOut = !outputLimitHit && Boolean(error.killed || error.signal || /timed out/i.test(String(error.message || '')));
     return {
       available: !missing,
       ok: false,
       code: error.code,
+      signal: error.signal || '',
+      timedOut,
+      outputLimitHit,
+      timeoutMs,
+      maxBufferBytes,
       stdout: error.stdout?.trim() || '',
       stderr: error.stderr?.trim() || error.message
     };
@@ -813,12 +850,30 @@ function safeWorkspacePath(relativePath = '') {
 
 function isProtectedWorkspacePath(filePath = '') {
   const normalized = String(filePath).replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase();
-  const protectedRoots = ['.git/', 'data/', 'dist/', 'node_modules/', 'release/', '.cache/'];
+  const protectedRoots = ['.git/', 'data/', 'dist/', 'node_modules/', 'release/', '.cache/', '.lps/'];
   const protectedNames = ['.env', '.env.local', '.env.production'];
   const protectedExts = ['.sqlite', '.sqlite3', '.db', '.gguf', '.safetensors', '.onnx', '.log'];
   return protectedRoots.some((rootName) => normalized.startsWith(rootName))
     || protectedNames.includes(normalized)
     || protectedExts.some((ext) => normalized.endsWith(ext));
+}
+
+function parseRemotes(remoteText = '') {
+  const map = new Map();
+  for (const line of remoteText.split('\n')) {
+    const match = line.match(/^(\S+)\s+(\S+)\s+\((fetch|push)\)$/);
+    if (!match) continue;
+    const [, name, url, kind] = match;
+    const existing = map.get(name) || { name, fetchUrl: '', pushUrl: '' };
+    if (kind === 'fetch') existing.fetchUrl = url;
+    else existing.pushUrl = url;
+    map.set(name, existing);
+  }
+  return [...map.values()].map((remote) => ({
+    name: remote.name,
+    url: remote.fetchUrl || remote.pushUrl,
+    pushUrl: remote.pushUrl || remote.fetchUrl
+  }));
 }
 
 function parseGitStatus(statusText = '') {
@@ -1175,14 +1230,44 @@ async function runPlannerAssistant(sessionId, userMessage) {
   };
 }
 
-function plannerData() {
+function browserConnectorConnected() {
+  return Date.now() - browserExtensionState.lastSeen < 15000;
+}
+
+function browserSetupText(status = {}, connectorConnected = false) {
+  const playwright = status.playwright ? 'Playwright installed' : 'Playwright missing';
+  const chromium = status.chromium ? 'Chromium installed' : 'Chromium missing';
+  const connector = connectorConnected ? 'Chrome connector connected' : 'Chrome connector disconnected';
+  return `${playwright}; ${chromium}; ${connector}.`;
+}
+
+function normalizeBrowserBlocker(item, status = {}, connectorConnected = false) {
+  if (item.title !== 'Cloud browser automation is not configured yet') return item;
+  const ready = status.playwright && status.chromium && connectorConnected;
+  return {
+    ...item,
+    body: ready
+      ? 'Playwright, Chromium, and the Chrome connector are available. Cloud Consultant still requires an explicit user prompt, any required signed-in browser session, and Temporary Chat/manual confirmation before sending.'
+      : `${browserSetupText(status, connectorConnected)} Cloud Consultant remains setup-gated until the connector is loaded in the signed-in Chrome profile and the user confirms any required Temporary Chat or session steps.`,
+    evidence: status.note || item.evidence,
+    next_action: ready
+      ? 'Use the Browser tab only after reviewing the prompt and required save/review gates.'
+      : status.playwright && status.chromium
+        ? 'Load browser-extension/lps-browser-agent in the signed-in Chrome profile, then refresh Browser/Tooling status.'
+        : 'Use Tooling to install the missing local browser component before trying controlled-browser fallback.'
+  };
+}
+
+async function plannerData() {
+  const browserReady = await browserAutomationStatus().catch(() => ({}));
+  const connectorConnected = browserConnectorConnected();
   const items = allRows(`
     SELECT k.*, p.name AS project_name
     FROM knowledge_items k
     LEFT JOIN projects p ON p.id = k.project_id
     WHERE k.status NOT IN ('archived', 'deprecated', 'superseded')
     ORDER BY COALESCE(k.due_at, k.updated_at) ASC, k.confidence ASC
-  `);
+  `).map((item) => normalizeBrowserBlocker(item, browserReady, connectorConnected));
   const pendingApprovals = allRows('SELECT * FROM approvals WHERE status = ? ORDER BY created_at DESC', ['pending']);
   const candidates = allRows('SELECT * FROM memory_candidates WHERE status IN (?, ?) ORDER BY created_at DESC', ['candidate', 'deferred']);
   const staleCutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
@@ -1220,30 +1305,31 @@ function plannerData() {
 async function refreshPlannerState() {
   const changes = [];
   const browserReady = await browserAutomationStatus();
+  const connectorConnected = browserConnectorConnected();
   const browserBlocker = row(
     "SELECT * FROM knowledge_items WHERE title = ? AND status NOT IN ('archived', 'deprecated', 'superseded')",
     ['Cloud browser automation is not configured yet']
   );
 
-  if (browserReady.playwright && browserReady.chromium && browserBlocker) {
+  if (browserReady.playwright && browserReady.chromium && connectorConnected && browserBlocker) {
     const existing = row(
       "SELECT * FROM approvals WHERE action_type = 'update_memory' AND title = ? AND status = 'pending'",
-      ['Retire resolved Playwright blocker']
+      ['Retire resolved browser connector blocker']
     );
     if (!existing) {
       db.prepare(`
         INSERT INTO approvals (action_type, title, payload, priority)
         VALUES (?, ?, ?, 'P1')
-      `).run('update_memory', 'Retire resolved Playwright blocker', JSON.stringify({
+      `).run('update_memory', 'Retire resolved browser connector blocker', JSON.stringify({
         id: browserBlocker.id,
         updates: {
           status: 'archived',
           confidence: 0.9,
-          evidence: 'Planner refresh found the local Playwright package available.',
-          next_action: 'Use the Browser tab for cloud consultation when needed.'
+          evidence: 'Planner refresh found Playwright, Chromium, and the Chrome connector available.',
+          next_action: 'Use the Browser tab for cloud consultation only after prompt review and required manual confirmation.'
         }
       }));
-      changes.push('Created approval to archive the resolved Playwright blocker.');
+      changes.push('Created approval to archive the resolved browser-connector blocker.');
     }
   }
 
@@ -1255,22 +1341,22 @@ async function refreshPlannerState() {
 
 app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: path.resolve('data/life-planner.sqlite') }));
 
-app.get('/api/bootstrap', (_req, res) => {
+app.get('/api/bootstrap', async (_req, res) => {
   ok(res, {
     settings: Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)])),
-    planner: plannerData(),
+    planner: await plannerData(),
     sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC'),
     projects: allRows('SELECT * FROM projects ORDER BY updated_at DESC'),
     models: allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')
   });
 });
 
-app.get('/api/planner', (_req, res) => ok(res, plannerData()));
+app.get('/api/planner', async (_req, res) => ok(res, await plannerData()));
 
 app.post('/api/planner/refresh', async (_req, res) => {
   try {
     const result = await refreshPlannerState();
-    ok(res, { ...result, planner: plannerData() });
+    ok(res, { ...result, planner: await plannerData() });
   } catch (error) {
     fail(res, 500, error.message || 'Planner refresh failed.');
   }
@@ -1511,7 +1597,7 @@ app.get('/api/memory', (_req, res) => {
   });
 });
 
-app.post('/api/memory/candidates/:id/:decision', (req, res) => {
+app.post('/api/memory/candidates/:id/:decision', async (req, res) => {
   const candidate = row('SELECT * FROM memory_candidates WHERE id = ?', [req.params.id]);
   if (!candidate) return fail(res, 404, 'Candidate not found.');
   const decision = req.params.decision;
@@ -1527,10 +1613,10 @@ app.post('/api/memory/candidates/:id/:decision', (req, res) => {
   } else {
     db.prepare('UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run(decision === 'deny' ? 'denied' : 'deferred', candidate.id);
   }
-  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: plannerData() });
+  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: await plannerData() });
 });
 
-app.patch('/api/memory/candidates/:id', (req, res) => {
+app.patch('/api/memory/candidates/:id', async (req, res) => {
   const candidate = row('SELECT * FROM memory_candidates WHERE id = ?', [req.params.id]);
   if (!candidate) return fail(res, 404, 'Candidate not found.');
   if (!['candidate', 'deferred'].includes(candidate.status)) return fail(res, 409, 'Only candidate or deferred memory can be edited.');
@@ -1544,10 +1630,10 @@ app.patch('/api/memory/candidates/:id', (req, res) => {
         confidence = ?
     WHERE id = ?
   `).run(req.body.type || null, req.body.title || null, req.body.body || null, req.body.evidence || null, confidence, candidate.id);
-  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: plannerData() });
+  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: await plannerData() });
 });
 
-app.post('/api/approvals/:id/:decision', (req, res) => {
+app.post('/api/approvals/:id/:decision', async (req, res) => {
   try {
     if (!['approve', 'deny', 'defer'].includes(req.params.decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
     const approval = row('SELECT * FROM approvals WHERE id = ?', [req.params.id]);
@@ -1652,7 +1738,7 @@ app.post('/api/approvals/:id/:decision', (req, res) => {
       }
     }
     db.prepare('UPDATE approvals SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);
-    ok(res, plannerData());
+    ok(res, await plannerData());
   } catch (error) {
     fail(res, 400, error.message);
   }
@@ -2385,6 +2471,1065 @@ app.post('/api/tooling/install', async (req, res) => {
   ok(res, { tool, output: result.stdout || result.stderr || `${tool} installed locally.` });
 });
 
+// ── OpenHands local worker tooling ──────────────────────────────────────────
+// OpenHands is a local worker, never the brain: LPS only checks status, starts/
+// stops the one known container, and stores reviewable task-request files.
+// No arbitrary commands, no automatic execution, no writes to brain locations.
+const OPENHANDS_CONTAINER = 'openhands-app';
+const OPENHANDS_URL = 'http://localhost:3000';
+const OLLAMA_URL = 'http://127.0.0.1:11434';
+const OPENHANDS_MODEL = 'qwen2.5-coder:14b-gpu';
+const LPS_TOOLING_DIR = path.join(root, '.lps', 'tooling', 'openhands');
+const OPENHANDS_REQUEST_DIR = path.join(LPS_TOOLING_DIR, 'requests');
+const OPENHANDS_REPORT_DIR = path.join(LPS_TOOLING_DIR, 'reports');
+
+// OpenHands executor path-enforcement helpers (OPENHANDS_MANDATORY_FORBIDDEN,
+// normalizeRequestPath, violatesMandatoryForbidden, parsePorcelainPaths,
+// isChangedFileAllowed, enforceChangedFiles) live in ./executorEnforcement.js so
+// the rejection path can be exercised by a committed verification script without
+// booting the server. Imported at the top of this file. Behaviour is unchanged.
+
+async function probeHttp(url, timeoutMs = 3000) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    return { reachable: true, code: response.status };
+  } catch {
+    return { reachable: false, code: 0 };
+  }
+}
+
+// Docker may be missing from PATH depending on how the server was launched;
+// fall back to Docker Desktop's standard CLI location on Windows.
+let dockerCommand = 'docker';
+
+async function runDocker(args, options = {}) {
+  const attempted = dockerCommand;
+  let result = await runCli(attempted, args, options);
+  if (!result.available) {
+    const fallback = process.platform === 'win32' && process.env.ProgramFiles
+      ? path.join(process.env.ProgramFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe')
+      : '';
+    // Concurrent callers may race the shared dockerCommand switch, so retry
+    // whenever THIS call's attempt failed and the fallback is a different path.
+    if (fallback && attempted !== fallback && fs.existsSync(fallback)) {
+      dockerCommand = fallback;
+      result = await runCli(fallback, args, options);
+    }
+  }
+  return result;
+}
+
+app.get('/api/tooling/openhands/status', async (_req, res) => {
+  const [docker, container, http] = await Promise.all([
+    runDocker(['--version'], { timeout: 10000 }),
+    runDocker(['ps', '-a', '--filter', `name=${OPENHANDS_CONTAINER}`, '--format', '{{.Names}}|{{.State}}|{{.Status}}|{{.Image}}'], { timeout: 15000 }),
+    probeHttp(OPENHANDS_URL)
+  ]);
+  const line = (container.stdout || '').split('\n').find((item) => item.startsWith(`${OPENHANDS_CONTAINER}|`)) || '';
+  const [, state = '', statusText = '', image = ''] = line.split('|');
+  const installed = docker.ok ? (line ? 'installed' : 'missing') : 'unknown';
+  ok(res, {
+    url: OPENHANDS_URL,
+    docker: { available: docker.ok, version: docker.stdout || docker.stderr },
+    installed,
+    container: {
+      name: OPENHANDS_CONTAINER,
+      exists: Boolean(line),
+      running: state === 'running',
+      state,
+      status: statusText,
+      image
+    },
+    http,
+    note: !docker.ok
+      ? 'Docker CLI is unavailable, so container state is unknown. Start Docker Desktop first.'
+      : !line
+        ? 'OpenHands container not found. Install it once with the official docker run command from docs.openhands.dev; LPS does not install it automatically.'
+        : ''
+  });
+});
+
+app.post('/api/tooling/openhands/start', async (_req, res) => {
+  // Fixed, known-safe command: start the one named container. Never docker run.
+  const result = await runDocker(['start', OPENHANDS_CONTAINER], { timeout: 60000 });
+  if (!result.ok) {
+    return fail(res, 500, result.stderr || result.stdout || `docker start ${OPENHANDS_CONTAINER} failed. If the container does not exist, install OpenHands once per docs.openhands.dev.`);
+  }
+  const http = await probeHttp(OPENHANDS_URL, 5000);
+  ok(res, { started: true, container: OPENHANDS_CONTAINER, http, message: `Started ${OPENHANDS_CONTAINER}. The UI can take ~30s to answer on ${OPENHANDS_URL}.` });
+});
+
+app.post('/api/tooling/openhands/stop', async (_req, res) => {
+  const result = await runDocker(['stop', OPENHANDS_CONTAINER], { timeout: 90000 });
+  if (!result.ok) {
+    return fail(res, 500, result.stderr || result.stdout || `docker stop ${OPENHANDS_CONTAINER} failed.`);
+  }
+  ok(res, { stopped: true, container: OPENHANDS_CONTAINER, message: `Stopped ${OPENHANDS_CONTAINER}.` });
+});
+
+app.get('/api/tooling/ollama/status', async (_req, res) => {
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/version`, { signal: AbortSignal.timeout(3000) });
+    if (!response.ok) return ok(res, { running: false, url: OLLAMA_URL, error: `Ollama answered HTTP ${response.status}.` });
+    const data = await response.json();
+    ok(res, { running: true, url: OLLAMA_URL, version: data.version || 'unknown' });
+  } catch {
+    ok(res, { running: false, url: OLLAMA_URL, error: 'Ollama is not reachable on 127.0.0.1:11434. Start the Ollama app first.' });
+  }
+});
+
+app.get('/api/tooling/ollama/model-status', async (_req, res) => {
+  try {
+    const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return fail(res, 502, `Ollama tag listing failed: HTTP ${response.status}.`);
+    const data = await response.json();
+    const models = (data.models || []).map((model) => model.name);
+    const present = models.includes(OPENHANDS_MODEL);
+    ok(res, {
+      model: OPENHANDS_MODEL,
+      present,
+      openHandsSettings: {
+        model: `openai/${OPENHANDS_MODEL}`,
+        baseUrl: 'http://host.docker.internal:11434/v1',
+        apiKey: 'dummy'
+      },
+      coderModels: models.filter((name) => name.includes('coder')),
+      note: present ? '' : `Model ${OPENHANDS_MODEL} is not in the local Ollama library. Pull it or pick an installed coder model.`
+    });
+  } catch {
+    fail(res, 502, 'Ollama is not reachable, so model status is unknown. Start the Ollama app first.');
+  }
+});
+
+function readOpenHandsRequests() {
+  if (!fs.existsSync(OPENHANDS_REQUEST_DIR)) return [];
+  const requests = [];
+  for (const entry of fs.readdirSync(OPENHANDS_REQUEST_DIR)) {
+    if (!entry.endsWith('.json')) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(OPENHANDS_REQUEST_DIR, entry), 'utf8'));
+      const reportMd = path.join(OPENHANDS_REPORT_DIR, `${parsed.id}.md`);
+      const reportJson = path.join(OPENHANDS_REPORT_DIR, `${parsed.id}.json`);
+      parsed.reportPath = fs.existsSync(reportMd)
+        ? path.relative(root, reportMd).replaceAll('\\', '/')
+        : fs.existsSync(reportJson)
+          ? path.relative(root, reportJson).replaceAll('\\', '/')
+          : '';
+      requests.push(parsed);
+    } catch {
+      requests.push({ id: entry, title: `Unreadable request file: ${entry}`, status: 'invalid', createdAt: '', requestedBy: 'unknown' });
+    }
+  }
+  return requests.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+}
+
+app.get('/api/tooling/openhands/requests', (_req, res) => {
+  ok(res, readOpenHandsRequests());
+});
+
+let openHandsRequestSeq = 1;
+
+app.post('/api/tooling/openhands/requests', (req, res) => {
+  const title = String(req.body.title || '').trim();
+  const objective = String(req.body.objective || '').trim();
+  if (!title) return fail(res, 400, 'Request title is required.');
+  if (!objective) return fail(res, 400, 'Request objective is required.');
+
+  const targetRepoPath = String(req.body.targetRepoPath || '').trim() || root;
+  const baseBranchCheck = validateExecutorBaseBranch(req.body.baseBranch || 'main');
+  if (!baseBranchCheck.ok) return fail(res, 400, `Request rejected: ${baseBranchCheck.reason}.`);
+  const baseBranch = baseBranchCheck.baseBranch;
+  const allowedPaths = (Array.isArray(req.body.allowedPaths) ? req.body.allowedPaths : String(req.body.allowedPaths || '').split('\n'))
+    .map((item) => String(item).trim()).filter(Boolean);
+  const forbiddenPaths = (Array.isArray(req.body.forbiddenPaths) ? req.body.forbiddenPaths : String(req.body.forbiddenPaths || '').split('\n'))
+    .map((item) => String(item).trim()).filter(Boolean);
+
+  const blockedAllowed = allowedPaths.filter((item) => violatesMandatoryForbidden(item));
+  if (blockedAllowed.length) {
+    return fail(res, 400, `Request rejected: allowed paths overlap protected locations (${blockedAllowed.join(', ')}). source_of_truth, memory, secrets, .env, data, rules, .git and .lps are never workable.`);
+  }
+  const secretHints = /api[\s_-]?key|token|password|secret|credential/i;
+  if (secretHints.test(title) || secretHints.test(objective)) {
+    return fail(res, 400, 'Request rejected: it appears to reference credentials/secrets. OpenHands requests must not involve keys, tokens, or passwords.');
+  }
+
+  const maxFilesRaw = Number(req.body.maxFilesChanged);
+  const maxFilesChanged = Math.min(5, Math.max(1, Number.isFinite(maxFilesRaw) && maxFilesRaw > 0 ? Math.floor(maxFilesRaw) : 5));
+
+  const createdAt = new Date().toISOString();
+  const id = `oh-req-${createdAt.replace(/[:.]/g, '-')}-${openHandsRequestSeq++}`;
+  const request = {
+    id,
+    title: title.slice(0, 160),
+    objective: objective.slice(0, 4000),
+    requestedBy: String(req.body.requestedBy || 'unknown').trim().slice(0, 80) || 'unknown',
+    targetRepoPath,
+    baseBranch,
+    baseBranchAtCreation: baseBranch,
+    allowedPaths,
+    forbiddenPaths: [...new Set([...forbiddenPaths, ...OPENHANDS_MANDATORY_FORBIDDEN])],
+    testCommand: String(req.body.testCommand || '').trim().slice(0, 300),
+    maxFilesChanged,
+    // First version: every gate is always on, regardless of what the caller sent.
+    requiresApprovalBeforeRun: true,
+    requiresApprovalBeforeCommit: true,
+    requiresApprovalBeforePush: true,
+    riskLevel: maxFilesChanged <= 3 && String(req.body.testCommand || '').trim() ? 'low' : 'medium',
+    createdAt,
+    status: 'pending',
+    reportPath: ''
+  };
+
+  fs.mkdirSync(OPENHANDS_REQUEST_DIR, { recursive: true });
+  fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+  fs.writeFileSync(path.join(OPENHANDS_REQUEST_DIR, `${id}.json`), JSON.stringify(request, null, 2), 'utf8');
+  ok(res, { request, storedAt: path.relative(root, path.join(OPENHANDS_REQUEST_DIR, `${id}.json`)).replaceAll('\\', '/'), note: 'Request stored for review. Nothing runs until it is approved; execution is not automated in this version.' });
+});
+
+// ── OpenHands Approved Request Runner (first safe layer) ─────────────────────
+// This is a GATED runner, not an autonomous agent. It acts only on a request a
+// human has explicitly approved, and its only "execution" is running a command
+// from a fixed allowlist (validation/build). It never invokes OpenHands to edit
+// code, and never commits, pushes, merges, resets, deletes, or force-pushes.
+// The request's own `testCommand` is honoured only if it exactly matches an
+// allowlist entry; arbitrary commands are refused.
+const RUNNER_VALIDATION_ALLOWLIST = {
+  'node --check server/index.js': { command: 'node', args: ['--check', 'server/index.js'] },
+  'npm run build': { command: process.platform === 'win32' ? 'npm.cmd' : 'npm', args: ['run', 'build'] }
+};
+const RUNNER_DEFAULT_VALIDATION = 'node --check server/index.js';
+
+// Resolve a request id to its file, refusing anything that could escape the
+// requests directory (the id is server-generated, but never trust the URL).
+function openHandsRequestFile(id) {
+  const raw = String(id || '').trim();
+  if (!/^oh-req-[A-Za-z0-9._-]+$/.test(raw)) throw new Error('Invalid request id.');
+  const absolute = path.resolve(OPENHANDS_REQUEST_DIR, `${raw}.json`);
+  const dirWithSep = OPENHANDS_REQUEST_DIR.endsWith(path.sep) ? OPENHANDS_REQUEST_DIR : `${OPENHANDS_REQUEST_DIR}${path.sep}`;
+  if (!absolute.startsWith(dirWithSep)) throw new Error('Request id must stay inside the requests directory.');
+  return absolute;
+}
+
+function loadOpenHandsRequest(id) {
+  const file = openHandsRequestFile(id);
+  if (!fs.existsSync(file)) return null;
+  return { file, request: JSON.parse(fs.readFileSync(file, 'utf8')) };
+}
+
+async function changedTrackedFiles() {
+  const status = await runCli('git', ['status', '--porcelain']);
+  return new Set((status.stdout || '').split('\n').map((line) => line.trim()).filter(Boolean));
+}
+
+app.post('/api/tooling/openhands/requests/:id/approve', (req, res) => {
+  try {
+    const loaded = loadOpenHandsRequest(req.params.id);
+    if (!loaded) return fail(res, 404, 'Request not found.');
+    const { file, request } = loaded;
+    if (request.status === 'validated' || request.status === 'validation-failed') {
+      return fail(res, 409, `Request already ran (status: ${request.status}). Approval cannot be re-applied after a run.`);
+    }
+    const baseBranch = normalizeStoredBaseBranch(request);
+    const createdBaseBranch = String(request.baseBranchAtCreation || baseBranch);
+    if (createdBaseBranch !== baseBranch) {
+      return fail(res, 409, `Approval refused: baseBranch changed from "${createdBaseBranch}" to "${baseBranch}" after request creation. Create a new request for a different base branch.`);
+    }
+    request.status = 'approved';
+    request.approvedAt = new Date().toISOString();
+    request.approvedBy = String(req.body.approvedBy || 'user').trim().slice(0, 80) || 'user';
+    request.baseBranchAtCreation = createdBaseBranch;
+    request.approvedBaseBranch = baseBranch;
+    request.approvedBaseBranchAt = request.approvedAt;
+    fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+    ok(res, { request, note: 'Human approval recorded. The gated runner may now run allowlisted validation only.' });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.post('/api/tooling/openhands/requests/:id/run', async (req, res) => {
+  let loaded;
+  try {
+    loaded = loadOpenHandsRequest(req.params.id);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  if (!loaded) return fail(res, 404, 'Request not found.');
+  const { file, request } = loaded;
+
+  // Gate 1: explicit human approval must be recorded.
+  if (request.status !== 'approved') {
+    return fail(res, 403, `Runner refused: request is "${request.status}", not "approved". A human must approve it before it can run.`);
+  }
+  // Gate 2: protected-path re-check (defence in depth vs. a hand-edited file).
+  const blocked = (request.allowedPaths || []).filter((item) => violatesMandatoryForbidden(item));
+  if (blocked.length) {
+    return fail(res, 403, `Runner refused: request allows protected paths (${blocked.join(', ')}).`);
+  }
+  // Gate 3: only an allowlisted validation command may run. A supplied
+  // testCommand is honoured solely if it matches the allowlist exactly.
+  const requested = String(request.testCommand || '').trim();
+  const commandKey = requested || RUNNER_DEFAULT_VALIDATION;
+  const validation = RUNNER_VALIDATION_ALLOWLIST[commandKey];
+  if (!validation) {
+    return fail(res, 400, `Runner refused: "${requested}" is not in the validation allowlist. Allowed: ${Object.keys(RUNNER_VALIDATION_ALLOWLIST).join(', ')}. Arbitrary commands are never executed.`);
+  }
+
+  // Snapshot before/after so we measure files the RUN changed (not pre-existing
+  // edits), and enforce maxFilesChanged against real filesystem effect.
+  const before = await changedTrackedFiles();
+  const result = await runCli(validation.command, validation.args, { timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+  const after = await changedTrackedFiles();
+  const runChanged = [...after].filter((line) => !before.has(line));
+  const maxFiles = Number(request.maxFilesChanged) || 5;
+  const withinMax = runChanged.length <= maxFiles;
+  const validationOk = result.ok && withinMax;
+  const status = validationOk ? 'validated' : 'validation-failed';
+
+  const reportLines = [
+    `# OpenHands Runner Report — ${request.id}`,
+    '',
+    `- Title: ${request.title}`,
+    `- Objective: ${request.objective}`,
+    `- Requested by: ${request.requestedBy}`,
+    `- Approved by: ${request.approvedBy || 'unknown'} at ${request.approvedAt || 'unknown'}`,
+    `- Run at: ${new Date().toISOString()}`,
+    `- Working directory: ${root}`,
+    '',
+    '## Validation (allowlisted command only)',
+    `- Command: \`${commandKey}\``,
+    `- Exit ok: ${result.ok}`,
+    `- Files changed by this run: ${runChanged.length} (limit ${maxFiles}) ${withinMax ? 'within limit' : 'OVER LIMIT'}`,
+    runChanged.length ? runChanged.map((line) => `  - ${line}`).join('\n') : '  - none',
+    '',
+    '### stdout',
+    '```',
+    (result.stdout || '(empty)').slice(0, 4000),
+    '```',
+    '### stderr',
+    '```',
+    (result.stderr || '(empty)').slice(0, 4000),
+    '```',
+    '',
+    '## Safety',
+    'This gated runner ran an allowlisted validation command only. It did NOT edit',
+    'source files, invoke OpenHands to change code, commit, push, merge, reset,',
+    'delete, or force-push. Any real code change and any commit/push remain manual,',
+    'separately-approved steps.',
+    ''
+  ];
+  fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+  const reportFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.md`);
+  fs.writeFileSync(reportFile, reportLines.join('\n'), 'utf8');
+
+  request.status = status;
+  request.runAt = new Date().toISOString();
+  request.runBy = String(req.body.runBy || 'user').trim().slice(0, 80) || 'user';
+  request.validationCommand = commandKey;
+  request.validationOk = validationOk;
+  request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
+  fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+
+  ok(res, {
+    request,
+    status,
+    validationOk,
+    filesChangedByRun: runChanged,
+    reportPath: request.reportPath,
+    performedActions: ['ran allowlisted validation command', 'wrote report'],
+    refusedActions: ['commit', 'push', 'merge', 'reset', 'delete', 'force-push', 'arbitrary command', 'OpenHands code edit'],
+    message: validationOk
+      ? 'Validation passed. Report written. No files were changed, committed, or pushed by the runner.'
+      : (result.ok ? 'Validation command succeeded but the run exceeded the file-change limit; marked validation-failed.' : 'Validation command failed. See the report; nothing was committed or pushed.')
+  });
+});
+
+app.get('/api/tooling/openhands/requests/:id/report', (req, res) => {
+  try {
+    const raw = String(req.params.id || '').trim();
+    if (!/^oh-req-[A-Za-z0-9._-]+$/.test(raw)) return fail(res, 400, 'Invalid request id.');
+    const reportFile = path.resolve(OPENHANDS_REPORT_DIR, `${raw}.md`);
+    const dirWithSep = OPENHANDS_REPORT_DIR.endsWith(path.sep) ? OPENHANDS_REPORT_DIR : `${OPENHANDS_REPORT_DIR}${path.sep}`;
+    if (!reportFile.startsWith(dirWithSep)) return fail(res, 400, 'Report id must stay inside the reports directory.');
+    if (!fs.existsSync(reportFile)) return fail(res, 404, 'No report yet for this request.');
+    ok(res, { id: raw, reportPath: path.relative(root, reportFile).replaceAll('\\', '/'), content: fs.readFileSync(reportFile, 'utf8') });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+// ── OpenHands Execution Worker (dry-run / plan-only, first safe slice) ────────
+// This layer is deliberately NON-mutating. It does NOT invoke OpenHands, create
+// worktrees, edit files, or run Git write operations. It only (a) records a
+// SECOND explicit human confirmation beyond approval, and (b) produces an
+// execution PLAN after verifying every safety gate, writing a report a human
+// reviews. Real code editing is a later, separately-approved layer.
+const PROTECTED_EXEC_BRANCHES = ['main', 'master'];
+
+// Fixed OpenHands wiring — request JSON can never override any of this.
+const OPENHANDS_EXEC_CONFIG = {
+  model: 'openai/qwen2.5-coder:14b-gpu',
+  baseUrl: 'http://host.docker.internal:11434/v1',
+  apiKeyRef: 'dummy (Ollama ignores it; no real key stored)'
+};
+
+function proposedExecutionBranch(id) {
+  const suffix = String(id).replace(/[^A-Za-z0-9._-]/g, '').slice(-40);
+  return `openhands/exec-${suffix}`;
+}
+
+async function branchExists(name) {
+  const result = await runCli('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]);
+  return result.ok && Boolean(result.stdout);
+}
+
+async function resolveBaseBranchCommit(baseBranch) {
+  const result = await runCli('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `${baseBranch}^{commit}`]);
+  const sha = String(result.stdout || '').trim();
+  return {
+    ok: result.ok && /^[0-9a-f]{40}$/i.test(sha),
+    sha,
+    detail: result.ok && sha ? `${baseBranch} resolves to ${sha.slice(0, 12)}` : `${baseBranch} does not resolve to a commit`
+  };
+}
+
+function normalizeStoredBaseBranch(request) {
+  const check = validateExecutorBaseBranch(request.baseBranch || 'main');
+  if (!check.ok) throw new Error(`Invalid base branch: ${check.reason}.`);
+  request.baseBranch = check.baseBranch;
+  return check.baseBranch;
+}
+
+// Evaluate every execution gate WITHOUT mutating anything. Returns structured
+// pass/fail plus the concrete plan the (future) executor would follow.
+async function evaluateExecutionPlan(request) {
+  const gates = [];
+  const pass = (name, ok, detail) => { gates.push({ gate: name, ok, detail }); return ok; };
+
+  const approved = pass('human_approval', request.status === 'approved' || request.status === 'execution-planned',
+    request.status === 'approved' || request.status === 'execution-planned' ? `status is ${request.status}` : `status is ${request.status}, needs approved`);
+  const confirmed = pass('second_confirmation', request.executionConfirmed === true,
+    request.executionConfirmed === true ? `confirmed by ${request.executionConfirmedBy || 'unknown'}` : 'execution not confirmed (second human confirmation required)');
+
+  const allowedPaths = Array.isArray(request.allowedPaths) ? request.allowedPaths : [];
+  const forbiddenPaths = Array.isArray(request.forbiddenPaths) ? request.forbiddenPaths : [];
+  const allowedNonEmpty = pass('allowed_paths_present', allowedPaths.length > 0,
+    allowedPaths.length ? `${allowedPaths.length} allowed path(s)` : 'no allowedPaths — executor would have nothing safe to scope to');
+  // Scan the ALLOWED paths only: forbiddenPaths deliberately contains the
+  // protected prefixes (it is the deny-list), so scanning it would always flag.
+  const protectedHits = allowedPaths.filter((item) => violatesMandatoryForbidden(item));
+  const protectedClean = pass('protected_path_scan', protectedHits.length === 0,
+    protectedHits.length ? `BLOCKED — an allowed path touches protected locations: ${protectedHits.join(', ')}` : 'no allowed path references protected locations');
+
+  const baseCheck = validateExecutorBaseBranch(request.baseBranch || 'main');
+  const baseBranch = baseCheck.baseBranch;
+  const baseSyntaxOk = pass('base_branch_ref_syntax', baseCheck.ok,
+    baseCheck.ok ? `base branch "${baseBranch}" is syntactically safe` : `BLOCKED - ${baseCheck.reason}`);
+  const createdBaseBranch = String(request.baseBranchAtCreation || '');
+  const baseCreatedPinned = pass('base_branch_creation_pin', baseCheck.ok && createdBaseBranch === baseBranch,
+    createdBaseBranch
+      ? `created with "${createdBaseBranch}"${createdBaseBranch === baseBranch ? '' : ` but request currently says "${baseBranch}"`}`
+      : 'missing creation-time base pin; create a new request or re-approve before execution');
+  const approvedBaseBranch = String(request.approvedBaseBranch || '');
+  const baseApprovedPinned = pass('base_branch_approval_pin', baseCheck.ok && approvedBaseBranch === baseBranch,
+    approvedBaseBranch
+      ? `approved with "${approvedBaseBranch}"${approvedBaseBranch === baseBranch ? '' : ` but request currently says "${baseBranch}"`}`
+      : 'missing approval-time base pin; re-approve before execution');
+  const confirmedBaseBranch = String(request.executionConfirmedBaseBranch || '');
+  const baseConfirmedPinned = pass('base_branch_confirmation_pin', baseCheck.ok && request.executionConfirmed === true && confirmedBaseBranch === baseBranch,
+    request.executionConfirmed === true
+      ? (confirmedBaseBranch
+        ? `confirmed with "${confirmedBaseBranch}"${confirmedBaseBranch === baseBranch ? '' : ` but request currently says "${baseBranch}"`}`
+        : 'missing confirmation-time base pin; confirm execution again')
+      : 'execution not confirmed; base branch will be pinned at confirmation');
+  const baseResolution = baseCheck.ok
+    ? await resolveBaseBranchCommit(baseBranch)
+    : { ok: false, sha: '', detail: 'base branch syntax is invalid, so it was not resolved' };
+  const baseRefResolves = pass('base_branch_resolves', baseResolution.ok, baseResolution.detail);
+  const execBranch = proposedExecutionBranch(request.id);
+  const execNameSafe = pass('execution_branch_not_main_master', !PROTECTED_EXEC_BRANCHES.includes(execBranch.toLowerCase()),
+    `dedicated execution branch would be "${execBranch}"`);
+  const execBranchFree = !(await branchExists(execBranch));
+  pass('execution_branch_available', execBranchFree, execBranchFree ? `"${execBranch}" does not exist yet` : `"${execBranch}" already exists`);
+
+  const maxFilesCheck = checkExecutorMaxFilesChanged(request.maxFilesChanged);
+  const maxFiles = maxFilesCheck.maxFiles;
+  const maxFilesSane = pass('max_files_changed', maxFilesCheck.ok, maxFilesCheck.reason);
+
+  const requested = String(request.testCommand || '').trim();
+  const validationKey = requested || RUNNER_DEFAULT_VALIDATION;
+  const validationAllowlisted = pass('validation_command_allowlisted', Boolean(RUNNER_VALIDATION_ALLOWLIST[validationKey]),
+    RUNNER_VALIDATION_ALLOWLIST[validationKey] ? `post-change validation would run: ${validationKey}` : `"${requested}" is not allowlisted — arbitrary commands are refused`);
+
+  const eligible = approved && confirmed && allowedNonEmpty && protectedClean && baseSyntaxOk
+    && baseCreatedPinned && baseApprovedPinned && baseConfirmedPinned && baseRefResolves
+    && execNameSafe && execBranchFree && maxFilesSane && validationAllowlisted;
+
+  return {
+    eligible,
+    gates,
+    plan: {
+      dryRun: true,
+      executionBranch: execBranch,
+      baseBranch,
+      baseCommit: baseResolution.sha,
+      isolation: 'dedicated git worktree/branch from the pinned base branch (not created in this dry run)',
+      allowedPaths,
+      forbiddenPaths,
+      maxFilesChanged: maxFiles,
+      limits: OPENHANDS_EXECUTOR_LIMITS,
+      validationCommand: validationKey,
+      openHandsConfig: OPENHANDS_EXEC_CONFIG,
+      openHandsInvoked: false,
+      filesChanged: [],
+      wouldRefuse: ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'branch delete', 'force-push', 'push to main/master', 'arbitrary shell from request', 'editing protected paths', 'base branch changes after approval', 'future invocation without tool-level constraints']
+    }
+  };
+}
+
+app.post('/api/tooling/openhands/requests/:id/confirm-execution', (req, res) => {
+  try {
+    const loaded = loadOpenHandsRequest(req.params.id);
+    if (!loaded) return fail(res, 404, 'Request not found.');
+    const { file, request } = loaded;
+    if (request.status !== 'approved' && request.status !== 'execution-planned') {
+      return fail(res, 403, `Second confirmation refused: request is "${request.status}". It must be human-approved first.`);
+    }
+    const baseBranch = normalizeStoredBaseBranch(request);
+    if (!request.approvedBaseBranch) {
+      return fail(res, 409, 'Second confirmation refused: this request was approved before base-branch pinning existed. Re-approve it to pin the base branch.');
+    }
+    if (request.approvedBaseBranch !== baseBranch) {
+      return fail(res, 409, `Second confirmation refused: request baseBranch is "${baseBranch}" but approval pinned "${request.approvedBaseBranch}". Re-create the request for a different base branch.`);
+    }
+    request.executionConfirmed = true;
+    request.executionConfirmedAt = new Date().toISOString();
+    request.executionConfirmedBy = String(req.body.confirmedBy || 'user').trim().slice(0, 80) || 'user';
+    request.executionConfirmedBaseBranch = baseBranch;
+    request.executionConfirmedBaseBranchAt = request.executionConfirmedAt;
+    fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+    ok(res, { request, note: 'Second execution confirmation recorded. You may now run the dry-run execution plan. No code will be edited; the plan is review-only.' });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) => {
+  let loaded;
+  try {
+    loaded = loadOpenHandsRequest(req.params.id);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  if (!loaded) return fail(res, 404, 'Request not found.');
+  const { file, request } = loaded;
+
+  if (request.status !== 'approved' && request.status !== 'execution-planned') {
+    return fail(res, 403, `Execution plan refused: request is "${request.status}", not approved.`);
+  }
+  if (request.executionConfirmed !== true) {
+    return fail(res, 428, 'Execution plan refused: a second explicit human confirmation is required first (confirm-execution).');
+  }
+
+  const evaluation = await evaluateExecutionPlan(request);
+  const toolConstraints = buildOpenHandsInvocationConstraints({
+    request,
+    plan: evaluation.plan,
+    config: OPENHANDS_EXEC_CONFIG,
+    limits: OPENHANDS_EXECUTOR_LIMITS,
+    invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED
+  });
+  evaluation.plan.toolInvocationConstraints = toolConstraints;
+  const serviceProbe = await probeHttp(OPENHANDS_URL, 1500);
+  const serviceCheck = { checked: true, url: OPENHANDS_URL, ...serviceProbe };
+  const dryRunDependencySetup = {
+    ...checkWorktreeValidationSetup(evaluation.plan.validationCommand, () => false, process.platform),
+    checked: true,
+    reason: evaluation.plan.validationCommand === 'npm run build'
+      ? 'Dependency gate will run inside the isolated worktree; npm build dependencies cannot be proven in dry-run.'
+      : 'No dependency preflight is required for this validation command.'
+  };
+  if (evaluation.plan.validationCommand === 'npm run build') {
+    dryRunDependencySetup.ok = false;
+    dryRunDependencySetup.setupGated = true;
+  }
+  const readiness = buildOpenHandsInvocationReadiness({
+    invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
+    toolConstraints,
+    serviceCheck,
+    dependencySetup: dryRunDependencySetup,
+    dryRunReportShown: true,
+    postRunPatchRequiresSeparateApproval: true
+  });
+  evaluation.plan.invocationReadiness = readiness;
+  const planEligible = evaluation.eligible && toolConstraints.ok;
+  const worktrees = await runCli('git', ['worktree', 'list']);
+
+  const gateLines = evaluation.gates.map((g) => `- [${g.ok ? 'PASS' : 'BLOCK'}] ${g.gate}: ${g.detail}`).join('\n');
+  const toolConstraintLines = toolConstraints.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n');
+  const readinessLines = readiness.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n');
+  const reportLines = [
+    `# OpenHands Execution Plan (DRY RUN) — ${request.id}`,
+    '',
+    `- Title: ${request.title}`,
+    `- Objective: ${request.objective}`,
+    `- Requested by: ${request.requestedBy}`,
+    `- Approved by: ${request.approvedBy || 'unknown'} at ${request.approvedAt || 'unknown'}`,
+    `- Execution confirmed by: ${request.executionConfirmedBy || 'unknown'} at ${request.executionConfirmedAt || 'unknown'}`,
+    `- Planned at: ${new Date().toISOString()}`,
+    '',
+    '## Execution branch / worktree (would be created; NOT created here)',
+    `- Dedicated branch: ${evaluation.plan.executionBranch}`,
+    `- Isolation: ${evaluation.plan.isolation}`,
+    `- Base reference (pinned, read-only): ${evaluation.plan.baseBranch || '(invalid)'}`,
+    `- Base commit: ${evaluation.plan.baseCommit || '(not resolved)'}`,
+    '',
+    '## Safety gates',
+    gateLines,
+    '',
+    '## Protected-path scan',
+    `- Result: ${evaluation.gates.find((g) => g.gate === 'protected_path_scan')?.detail}`,
+    `- Hard-blocked prefixes: ${OPENHANDS_MANDATORY_FORBIDDEN.join(', ')}`,
+    '',
+    '## Max files changed',
+    `- ${evaluation.gates.find((g) => g.gate === 'max_files_changed')?.detail}`,
+    '',
+    '## Changed files (dry run)',
+    '- none — no worktree was created, no files were edited, OpenHands was not invoked.',
+    '',
+    '## Diff summary',
+    '- none (dry run).',
+    '',
+    '## Validation output',
+    `- Not executed in the plan. Post-change validation would run: \`${evaluation.plan.validationCommand}\`.`,
+    '',
+    '## OpenHands wiring (fixed; request JSON cannot override)',
+    `- Model: ${OPENHANDS_EXEC_CONFIG.model}`,
+    `- Base URL: ${OPENHANDS_EXEC_CONFIG.baseUrl}`,
+    `- API key: ${OPENHANDS_EXEC_CONFIG.apiKeyRef}`,
+    `- Invoked in this dry run: no`,
+    '',
+    '## Future invocation constraints (preflight only)',
+    `- Status: ${toolConstraints.ok ? 'complete' : 'setup-gated'}`,
+    `- Reason: ${toolConstraints.reason}`,
+    toolConstraintLines,
+    '',
+    '## Invocation readiness gate (preflight only)',
+    `- Status: ${readiness.ok ? 'ready' : 'setup-gated'}`,
+    `- Reason: ${readiness.reason}`,
+    readinessLines,
+    '',
+    '## Refused / blocked actions',
+    evaluation.plan.wouldRefuse.map((a) => `- ${a}`).join('\n'),
+    '',
+    '## Current git worktrees (read-only)',
+    '```',
+    (worktrees.stdout || '(none)').slice(0, 1000),
+    '```',
+    '',
+    '## Human next steps',
+    planEligible
+      ? '- All gates passed. A human may later approve the real (still-unbuilt) executor. Until then, no code has been changed. Any commit/push/PR remains a manual step via the Source Control panel.'
+      : '- One or more gates/setup checks BLOCKED (see above). Fix the request (paths / approval / confirmation / tool constraints) before any execution is considered. Nothing was changed.',
+    ''
+  ];
+  fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+  const reportFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.md`);
+  fs.writeFileSync(reportFile, reportLines.join('\n'), 'utf8');
+
+  request.status = 'execution-planned';
+  request.executionPlannedAt = new Date().toISOString();
+  request.executionEligible = planEligible;
+  request.executionPlannedBaseBranch = evaluation.plan.baseBranch;
+  request.executionPlannedBaseCommit = evaluation.plan.baseCommit;
+  request.executionToolConstraintsOk = toolConstraints.ok;
+  request.executionToolConstraintsReason = toolConstraints.reason;
+  request.invocationReadinessOk = readiness.ok;
+  request.invocationReadinessReason = readiness.reason;
+  request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
+  fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+
+  ok(res, {
+    request,
+    eligible: planEligible,
+    gates: evaluation.gates,
+    plan: evaluation.plan,
+    reportPath: request.reportPath,
+    performedActions: ['evaluated safety gates', 'wrote dry-run plan report'],
+    refusedActions: ['edit code', 'invoke OpenHands', 'create worktree', 'commit', 'push', 'merge', 'reset', 'delete branch', 'force-push', 'run arbitrary command'],
+    message: planEligible
+      ? 'Dry-run plan complete: all gates passed. No code was changed and OpenHands was not invoked.'
+      : 'Dry-run plan complete: one or more gates/setup checks BLOCKED. No code was changed. See the report.'
+  });
+});
+
+// ── OpenHands Worktree Executor harness (gated; real invocation OFF) ──────────
+// FIRST real-executor slice. It proves the isolated-worktree + gate + post-
+// change-enforcement + validation + report flow, but the actual OpenHands
+// invocation is DISABLED behind this server-side constant. Nothing here edits
+// the user's working tree, main/master, or the user's current branch: all work
+// happens in a throwaway git worktree on a dedicated openhands/exec-<id> branch.
+const OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false;
+const OPENHANDS_WORKTREE_DIR = path.join(LPS_TOOLING_DIR, 'worktrees');
+
+// Normalise a repo-relative changed path from `git status --porcelain` output.
+// parsePorcelainPaths, isChangedFileAllowed, and enforceChangedFiles are
+// imported from ./executorEnforcement.js (see the top-of-file import). They are
+// the same functions, moved to a pure module so the enforcement rejection path
+// is testable without booting the server.
+
+// Real OpenHands call lives here in the future. Disabled by the constant above,
+// so this slice never contacts the model endpoint and never edits code.
+async function invokeOpenHandsExecutor(toolConstraints, readiness) {
+  if (!toolConstraints || toolConstraints.ok !== true) {
+    return {
+      invoked: false,
+      setupGated: true,
+      reason: `Real OpenHands invocation refused: missing tool-level constraints (${toolConstraints?.missing?.join(', ') || 'unknown'}).`,
+      constraints: toolConstraints || null
+    };
+  }
+  if (!readiness || readiness.ok !== true) {
+    return {
+      invoked: false,
+      setupGated: true,
+      reason: `Real OpenHands invocation refused: readiness gate is setup-gated (${readiness?.missing?.join(', ') || 'unknown'}).`,
+      constraints: toolConstraints.constraints,
+      readiness: readiness || null
+    };
+  }
+  if (!OPENHANDS_EXECUTOR_INVOCATION_ENABLED) {
+    return {
+      invoked: false,
+      setupGated: false,
+      reason: 'Real OpenHands invocation is intentionally DISABLED (server-side constant OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false). No code was generated or edited.',
+      constraints: toolConstraints.constraints,
+      readiness
+    };
+  }
+  // Future, separately-approved slice would call the OpenHands agent-server here
+  // with OPENHANDS_EXEC_CONFIG (fixed model/endpoint/key), allowedPaths,
+  // mandatory forbidden paths, base pin, and runtime/output limits from
+  // toolConstraints. Intentionally not reachable in this build.
+  return { invoked: false, reason: 'not implemented' };
+}
+
+app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
+  let loaded;
+  try {
+    loaded = loadOpenHandsRequest(req.params.id);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  if (!loaded) return fail(res, 404, 'Request not found.');
+  const { file, request } = loaded;
+
+  // Gate 1: every dry-run gate must pass (approval, second confirmation,
+  // allowedPaths, protected scan, branch-not-main/master, branch-free,
+  // maxFiles, allowlisted validation).
+  const evaluation = await evaluateExecutionPlan(request);
+  if (!evaluation.eligible) {
+    return fail(res, 403, `Executor refused: not eligible. Blocked gates: ${evaluation.gates.filter((g) => !g.ok).map((g) => g.gate).join(', ')}. Approve, confirm execution, and fix paths first.`);
+  }
+  const toolConstraints = buildOpenHandsInvocationConstraints({
+    request,
+    plan: evaluation.plan,
+    config: OPENHANDS_EXEC_CONFIG,
+    limits: OPENHANDS_EXECUTOR_LIMITS,
+    invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED
+  });
+  if (!toolConstraints.ok) {
+    return fail(res, 428, `Executor refused: future OpenHands invocation constraints are setup-gated (${toolConstraints.missing.join(', ')}). Fix approval, paths, base pin, limits, or model config before execution.`);
+  }
+
+  const execBranch = proposedExecutionBranch(request.id);
+  const pinnedBaseBranch = evaluation.plan.baseBranch;
+  const pinnedBaseCommit = evaluation.plan.baseCommit;
+  // Gate 2: never main/master, never the user's current branch, never an
+  // existing branch.
+  const currentBranch = (await runCli('git', ['branch', '--show-current'])).stdout.trim();
+  if (PROTECTED_EXEC_BRANCHES.includes(execBranch.toLowerCase())) return fail(res, 403, 'Executor refused: execution branch resolves to main/master.');
+  if (execBranch === currentBranch) return fail(res, 403, 'Executor refused: execution branch equals the current working branch.');
+  if (await branchExists(execBranch)) return fail(res, 409, `Executor refused: branch ${execBranch} already exists. Review or remove it first (never auto-deleted).`);
+
+  const worktreePath = path.join(OPENHANDS_WORKTREE_DIR, String(request.id).replace(/[^A-Za-z0-9._-]/g, ''));
+  const worktreeRel = path.relative(root, worktreePath).replaceAll('\\', '/');
+  let worktreeCreated = false;
+  const refusedActions = ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'delete branch', 'force-push', 'push to main/master', 'arbitrary request shell', 'edit outside allowedPaths', 'base branch changes after approval', 'future invocation without tool-level constraints'];
+
+  try {
+    // Isolated worktree on a fresh dedicated branch from the pinned base commit
+    // (never touches main tree; never uses the caller's current HEAD).
+    fs.mkdirSync(OPENHANDS_WORKTREE_DIR, { recursive: true });
+    const add = await runCli('git', ['worktree', 'add', '-b', execBranch, worktreePath, '--', pinnedBaseCommit], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeCreateTimeoutMs });
+    if (!add.ok) return fail(res, 500, `Executor could not create the isolated worktree: ${add.stderr || add.stdout}`);
+    worktreeCreated = true;
+
+    // Build the readiness gate before any future invocation could run. This
+    // checks only local readiness; it never starts OpenHands or bypasses login.
+    const validationKey = String(request.testCommand || '').trim() || RUNNER_DEFAULT_VALIDATION;
+    const validation = RUNNER_VALIDATION_ALLOWLIST[validationKey];
+    const hasWorktreePath = (relativePath) => {
+      const parts = String(relativePath || '').replaceAll('\\', '/').replace(/\/+$/, '').split('/').filter(Boolean);
+      return parts.length > 0 && fs.existsSync(path.join(worktreePath, ...parts));
+    };
+    const validationSetup = { ...checkWorktreeValidationSetup(validationKey, hasWorktreePath, process.platform), checked: true };
+    const serviceProbe = await probeHttp(OPENHANDS_URL, 1500);
+    const serviceCheck = { checked: true, url: OPENHANDS_URL, ...serviceProbe };
+    const dryRunReportShown = request.status === 'execution-planned' && Boolean(request.reportPath) && Boolean(request.executionPlannedAt);
+    const readiness = buildOpenHandsInvocationReadiness({
+      invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
+      toolConstraints,
+      serviceCheck,
+      dependencySetup: validationSetup,
+      dryRunReportShown,
+      postRunPatchRequiresSeparateApproval: true
+    });
+
+    // Invocation (disabled by constant → no edits made).
+    const invocation = await invokeOpenHandsExecutor(toolConstraints, readiness);
+
+    // Post-run enforcement against ACTUAL changed files in the worktree.
+    const wtStatus = await runCli('git', ['-C', worktreePath, 'status', '--porcelain']);
+    const changedFiles = parsePorcelainPaths(wtStatus.stdout);
+    const enforcement = enforceChangedFiles(changedFiles, request);
+    const hasRealDiff = changedFiles.length > 0;
+
+    // Blocker #2: `git diff` omits untracked NEW files, so a future run that
+    // creates a file would produce an incomplete patch. Mark untracked files
+    // intent-to-add in the WORKTREE's own index (isolated; no commit; the main
+    // repo is never touched), then `git diff --binary` so both tracked edits and
+    // full new-file contents (text inline, binary as base85) are captured and
+    // the patch stays re-appliable. Enforcement above already ran against the
+    // real changed set, before this index touch.
+    const untrackedFiles = (wtStatus.stdout || '').split('\n')
+      .filter((line) => line.startsWith('??'))
+      .map((line) => line.slice(2).trim().replace(/^"(.*)"$/, '$1'))
+      .filter(Boolean);
+    let untrackedCaptured = 0;
+    if (untrackedFiles.length) {
+      const addRes = await runCli('git', ['-C', worktreePath, 'add', '-N', '--', ...untrackedFiles], { timeout: OPENHANDS_EXECUTOR_LIMITS.untrackedIntentTimeoutMs });
+      if (addRes.ok) untrackedCaptured = untrackedFiles.length;
+    }
+    const wtDiff = await runCli('git', ['-C', worktreePath, 'diff', '--binary'], { maxBuffer: OPENHANDS_EXECUTOR_LIMITS.diffOutputMaxBytes });
+    const diffLimit = summarizeExecutorCommandResult(wtDiff, { label: 'git diff --binary', outputMaxBytes: OPENHANDS_EXECUTOR_LIMITS.diffOutputMaxBytes });
+
+    // Always persist the diff artifact so the report has a review pointer.
+    // If git diff hits the explicit output limit, the report says so and the
+    // preserved worktree remains the source of truth for review.
+    fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+    const patchFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.patch`);
+    fs.writeFileSync(patchFile, wtDiff.stdout || '', 'utf8');
+    const patchRel = path.relative(root, patchFile).replaceAll('\\', '/');
+    const diffPreview = limitExecutorReportText(wtDiff.stdout || '(empty)', OPENHANDS_EXECUTOR_LIMITS.diffReportPreviewMaxChars, 'diff preview');
+    const untrackedNote = untrackedFiles.length
+      ? `${untrackedCaptured}/${untrackedFiles.length} untracked new file(s) captured via intent-to-add`
+      : 'no untracked new files';
+
+    // Allowlisted validation only, run inside the worktree.
+    let validationResult = {
+      command: validationKey,
+      ran: false,
+      ok: null,
+      setupGated: Boolean(validation && validationSetup.setupGated),
+      missingDependencies: validationSetup.missing,
+      limitHit: false,
+      limit: '',
+      resultReason: validation ? validationSetup.reason : 'not run',
+      outputTruncated: false,
+      output: validation ? validationSetup.reason : 'not run'
+    };
+    if (validation && validationSetup.ok) {
+      const vr = await runCli(validation.command, validation.args, {
+        cwd: worktreePath,
+        timeout: OPENHANDS_EXECUTOR_LIMITS.validationTimeoutMs,
+        maxBuffer: OPENHANDS_EXECUTOR_LIMITS.validationOutputMaxBytes
+      });
+      const validationLimit = summarizeExecutorCommandResult(vr, {
+        label: validationKey,
+        timeoutMs: OPENHANDS_EXECUTOR_LIMITS.validationTimeoutMs,
+        outputMaxBytes: OPENHANDS_EXECUTOR_LIMITS.validationOutputMaxBytes
+      });
+      const validationOutput = limitExecutorReportText(vr.stdout || vr.stderr || '', OPENHANDS_EXECUTOR_LIMITS.validationReportOutputMaxChars, 'validation output');
+      validationResult = {
+        command: validationKey,
+        ran: true,
+        ok: vr.ok,
+        setupGated: false,
+        missingDependencies: [],
+        limitHit: validationLimit.limitHit,
+        limit: validationLimit.limit,
+        resultReason: validationLimit.reason,
+        outputTruncated: validationOutput.truncated,
+        output: validationOutput.text || '(no output)'
+      };
+    }
+
+    const reportLines = [
+      `# OpenHands Worktree Executor Report — ${request.id}`,
+      '',
+      `- Title: ${request.title}`,
+      `- Objective: ${request.objective}`,
+      `- Requested by: ${request.requestedBy}`,
+      `- Approved by: ${request.approvedBy || 'unknown'} / Execution confirmed by: ${request.executionConfirmedBy || 'unknown'}`,
+      `- Run at: ${new Date().toISOString()}`,
+      '',
+      '## Execution isolation',
+      `- Execution branch: ${execBranch}`,
+      `- Base reference (pinned, read-only): ${pinnedBaseBranch}`,
+      `- Base commit used for worktree: ${pinnedBaseCommit}`,
+      `- Worktree path: ${worktreeRel}`,
+      `- Worktree after run: ${hasRealDiff ? 'PRESERVED for human review' : 'removed (no diff to review)'}`,
+      `- Touched main working tree: no`,
+      `- Ran on main/master: no`,
+      '',
+      '## OpenHands invocation',
+      `- Invoked: ${invocation.invoked ? 'yes' : 'NO'}`,
+      `- Reason: ${invocation.reason}`,
+      `- Model config (fixed; request cannot override): ${OPENHANDS_EXEC_CONFIG.model} @ ${OPENHANDS_EXEC_CONFIG.baseUrl}, key ${OPENHANDS_EXEC_CONFIG.apiKeyRef}`,
+      '',
+      '## Tool-level invocation constraints (preflight; no real invocation)',
+      `- Status: ${toolConstraints.ok ? 'complete' : 'setup-gated'}`,
+      `- Reason: ${toolConstraints.reason}`,
+      toolConstraints.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n'),
+      '',
+      '## Invocation readiness gate (preflight; no real invocation)',
+      `- Status: ${readiness.ok ? 'ready' : 'setup-gated'}`,
+      `- Reason: ${readiness.reason}`,
+      readiness.checks.map((g) => `- [${g.ok ? 'PASS' : 'SETUP-GATED'}] ${g.gate}: ${g.detail}`).join('\n'),
+      '',
+      '## Changed files (actual, in worktree)',
+      changedFiles.length ? changedFiles.map((f) => `- ${f}`).join('\n') : '- none',
+      '',
+      '## Path enforcement against actual changes',
+      `- allowedPaths / forbiddenPaths / protected-path scan: ${enforcement.ok ? 'PASS' : 'BLOCKED'}`,
+      enforcement.violations.length ? enforcement.violations.map((v) => `  - ${v}`).join('\n') : '  - no violations',
+      `- maxFilesChanged: ${enforcement.changedCount}/${enforcement.maxFiles}`,
+      `- Allowed file-count limit range: ${OPENHANDS_EXECUTOR_LIMITS.maxFilesChangedMin}-${OPENHANDS_EXECUTOR_LIMITS.maxFilesChangedMax}`,
+      '',
+      '## Diff summary',
+      changedFiles.length ? `- ${changedFiles.length} file(s) changed` : '- no diff (no edits were made)',
+      '',
+      '## Full diff',
+      `- Diff artifact written to: ${patchRel} (git diff --binary; capture limit ${OPENHANDS_EXECUTOR_LIMITS.diffOutputMaxBytes} bytes; ${untrackedNote})`,
+      `- Diff capture: ${diffLimit.limitHit ? 'LIMIT HIT' : 'ok'} - ${diffLimit.reason}`,
+      diffPreview.truncated
+        ? `- ${diffPreview.reason}; use the .patch file and preserved worktree for review.`
+        : '- The diff preview fits within the report limit.',
+      '```diff',
+      diffPreview.text,
+      '```',
+      '',
+      '## Runtime / output limits',
+      `- Validation timeout: ${OPENHANDS_EXECUTOR_LIMITS.validationTimeoutMs} ms`,
+      `- Validation output capture limit: ${OPENHANDS_EXECUTOR_LIMITS.validationOutputMaxBytes} bytes`,
+      `- Validation report output limit: ${OPENHANDS_EXECUTOR_LIMITS.validationReportOutputMaxChars} chars`,
+      `- Diff capture limit: ${OPENHANDS_EXECUTOR_LIMITS.diffOutputMaxBytes} bytes`,
+      `- Diff report preview limit: ${OPENHANDS_EXECUTOR_LIMITS.diffReportPreviewMaxChars} chars`,
+      '',
+      '## Validation output (allowlisted; run in worktree)',
+      `- Command: ${validationResult.command} — ${validationResult.ran ? (validationResult.ok ? 'ok' : 'failed') : (validationResult.setupGated ? 'setup-gated' : 'not run')}`,
+      `- Dependency preflight: ${validationSetup.ok ? 'ok' : 'setup-gated'} — ${validationSetup.reason}`,
+      `- Runtime/output result: ${validationResult.limitHit ? 'LIMIT HIT' : 'ok'} — ${validationResult.resultReason}`,
+      validationResult.outputTruncated ? `- Validation output report cap: truncated to ${OPENHANDS_EXECUTOR_LIMITS.validationReportOutputMaxChars} chars` : '- Validation output report cap: not truncated',
+      '```',
+      validationResult.output,
+      '```',
+      '',
+      '## Refused / blocked actions',
+      refusedActions.map((a) => `- ${a}`).join('\n'),
+      '',
+      '## Human next steps',
+      hasRealDiff
+        ? `- The worktree (${worktreeRel}) and branch (${execBranch}) are PRESERVED. Review the .patch, then use the gated Source Control panel for any commit/push/PR. The executor never commits, pushes, or merges.`
+        : '- Real OpenHands invocation is OFF, so no code was edited and there is nothing to review; the worktree was removed. When invocation is later enabled and produces a diff, the worktree is preserved for review instead.',
+      ''
+    ];
+    fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
+    const reportFile = path.join(OPENHANDS_REPORT_DIR, `${request.id}.md`);
+    fs.writeFileSync(reportFile, reportLines.join('\n'), 'utf8');
+
+    request.status = 'executor-ran';
+    request.executorRanAt = new Date().toISOString();
+    request.openHandsInvoked = invocation.invoked;
+    request.executorEnforcementOk = enforcement.ok;
+    request.executorBaseBranch = pinnedBaseBranch;
+    request.executorBaseCommit = pinnedBaseCommit;
+    request.executorValidationCommand = validationResult.command;
+    request.executorValidationRan = validationResult.ran;
+    request.executorValidationOk = validationResult.ok;
+    request.executorValidationSetupGated = validationResult.setupGated;
+    request.executorValidationMissingDependencies = validationResult.missingDependencies;
+    request.executorValidationLimitHit = validationResult.limitHit;
+    request.executorValidationLimit = validationResult.limit;
+    request.executorValidationResultReason = validationResult.resultReason;
+    request.executorLimits = OPENHANDS_EXECUTOR_LIMITS;
+    request.executorDiffLimitHit = diffLimit.limitHit;
+    request.executorDiffResultReason = diffLimit.reason;
+    request.executorToolConstraintsOk = toolConstraints.ok;
+    request.executorToolConstraintsReason = toolConstraints.reason;
+    request.executorToolConstraints = toolConstraints.constraints;
+    request.executorInvocationReadinessOk = readiness.ok;
+    request.executorInvocationReadinessReason = readiness.reason;
+    request.reportPath = path.relative(root, reportFile).replaceAll('\\', '/');
+    request.patchPath = patchRel;
+    request.worktreePreserved = hasRealDiff;
+    fs.writeFileSync(file, JSON.stringify(request, null, 2), 'utf8');
+
+    // Blocker #1: teardown BEFORE responding, but PRESERVE the worktree/branch
+    // whenever a real diff exists so a human can review the actual edits in place
+    // (the full .patch alone is not a substitute for the working tree). With
+    // invocation OFF the diff is empty, so the worktree is removed to keep the
+    // repo clean. The branch is never auto-deleted either way.
+    let worktreeRemoved = false;
+    if (hasRealDiff) {
+      // Preserve: neither the teardown nor the error-path net removes it.
+      worktreeCreated = false;
+    } else {
+      const removed = await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeRemoveTimeoutMs });
+      await runCli('git', ['worktree', 'prune']);
+      worktreeRemoved = removed.ok;
+      worktreeCreated = false;
+    }
+
+    ok(res, {
+      worktreeRemoved,
+      worktreePreserved: hasRealDiff,
+      request,
+      invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED,
+      openHandsInvoked: invocation.invoked,
+      toolConstraints,
+      invocationReadiness: readiness,
+      executionBranch: execBranch,
+      baseBranch: pinnedBaseBranch,
+      baseCommit: pinnedBaseCommit,
+      worktreePath: worktreeRel,
+      changedFiles,
+      enforcement,
+      validation: validationResult,
+      limits: OPENHANDS_EXECUTOR_LIMITS,
+      diffLimit,
+      reportPath: request.reportPath,
+      patchPath: patchRel,
+      untrackedCaptured,
+      untrackedFiles: untrackedFiles.length,
+      refusedActions,
+      message: hasRealDiff
+        ? `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. A diff exists, so the worktree (${worktreeRel}) and branch ${execBranch} are PRESERVED for human review; the full diff is at ${patchRel}. Nothing was committed, pushed, or merged.`
+        : `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. Real OpenHands invocation is DISABLED, so no code was edited; the worktree was removed and branch ${execBranch} left in place (never auto-deleted). Full (empty) diff written to ${patchRel}. ${validationResult.setupGated ? validationSetup.reason : 'Allowlisted validation setup was checked.'} Nothing was committed, pushed, or merged.`
+    });
+  } catch (error) {
+    fail(res, 500, `Executor harness error: ${error.message}`);
+  } finally {
+    // Error-path safety net: if teardown did not already run (an error was
+    // thrown before it), remove the throwaway worktree. Never deletes a branch.
+    if (worktreeCreated) {
+      await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeRemoveTimeoutMs });
+      await runCli('git', ['worktree', 'prune']);
+    }
+  }
+});
+
 app.get('/api/source/status', async (_req, res) => {
   const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami, wingetStatus] = await Promise.all([
     runCli('git', ['rev-parse', '--is-inside-work-tree']),
@@ -2412,6 +3557,7 @@ app.get('/api/source/status', async (_req, res) => {
     upstream: snapshot.upstream,
     counts: snapshot.counts,
     remotes: remotes.stdout,
+    remoteList: parseRemotes(remotes.stdout),
     log: log.stdout,
     user: {
       name: userName.stdout,
@@ -2448,6 +3594,58 @@ app.get('/api/source/diff', async (_req, res) => {
   const diff = await runCli('git', ['diff', '--stat']);
   const detail = await runCli('git', ['diff', '--', '.'], { maxBuffer: 4 * 1024 * 1024 });
   ok(res, { stat: diff.stdout, detail: detail.stdout.slice(0, 50000), truncated: detail.stdout.length > 50000 });
+});
+
+// Per-file side-by-side diff: committed (HEAD) content vs current working-tree
+// content, so the UI can render two columns. Read-only, workspace-confined, and
+// protected/private files are refused rather than leaked.
+const FILE_DIFF_MAX_BYTES = 400000;
+
+function looksBinary(text) {
+  return text.includes('\0');
+}
+
+app.get('/api/source/file-diff', async (req, res) => {
+  try {
+    const target = safeWorkspacePath(req.query.path);
+    if (isProtectedWorkspacePath(target.normalized)) {
+      return fail(res, 403, `Protected/private file cannot be diffed here: ${target.normalized}`);
+    }
+
+    // OLD side: content at HEAD. Missing (new/untracked file) -> empty.
+    const head = await runCli('git', ['show', `HEAD:${target.normalized}`], { maxBuffer: 8 * 1024 * 1024 });
+    const oldContent = head.ok ? head.stdout : '';
+    const inHead = head.ok;
+
+    // NEW side: current working-tree file. Missing (deleted) -> empty.
+    let newContent = '';
+    let existsNow = false;
+    if (fs.existsSync(target.absolute) && fs.statSync(target.absolute).isFile()) {
+      existsNow = true;
+      newContent = fs.readFileSync(target.absolute, 'utf8');
+    }
+
+    const binary = looksBinary(oldContent) || looksBinary(newContent);
+    const oldTooLarge = oldContent.length > FILE_DIFF_MAX_BYTES;
+    const newTooLarge = newContent.length > FILE_DIFF_MAX_BYTES;
+    const changeType = !inHead ? 'added' : !existsNow ? 'deleted' : 'modified';
+
+    ok(res, {
+      path: target.normalized,
+      changeType,
+      binary,
+      tooLarge: oldTooLarge || newTooLarge,
+      oldContent: binary || oldTooLarge ? '' : oldContent,
+      newContent: binary || newTooLarge ? '' : newContent,
+      note: binary
+        ? 'Binary file: side-by-side text diff is not shown.'
+        : (oldTooLarge || newTooLarge)
+          ? 'File is large; side-by-side text diff was skipped to stay responsive.'
+          : ''
+    });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
 });
 
 app.post('/api/source/stage-all', async (_req, res) => {
@@ -2553,12 +3751,26 @@ app.post('/api/source/checkout', async (req, res) => {
   ok(res, { branch, output: result.stdout || result.stderr, status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
 });
 
-app.post('/api/source/push', async (_req, res) => {
+// Push is deliberately narrow: current branch -> origin only, never forced,
+// never main/master, and never without explicit confirmation from the UI.
+const PROTECTED_PUSH_BRANCHES = ['main', 'master'];
+
+app.post('/api/source/push', async (req, res) => {
   const branch = await runCli('git', ['branch', '--show-current']);
-  if (!branch.stdout) return fail(res, 400, 'Cannot push from detached HEAD.');
-  const result = await runCli('git', ['push', '-u', 'origin', branch.stdout], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  const branchName = (branch.stdout || '').trim();
+  if (!branchName) return fail(res, 400, 'Cannot push from detached HEAD.');
+  if (PROTECTED_PUSH_BRANCHES.includes(branchName.toLowerCase())) {
+    return fail(res, 403, `Refusing to push protected branch "${branchName}" from Life Planner. Push a review branch instead; updating ${branchName} stays a manual, reviewed step.`);
+  }
+  if (req.body?.force) {
+    return fail(res, 403, 'Force push is not supported from Life Planner.');
+  }
+  if (req.body?.confirm !== true) {
+    return fail(res, 428, `Push needs explicit confirmation. Confirm to run: git push -u origin ${branchName} (no force flags).`);
+  }
+  const result = await runCli('git', ['push', '-u', 'origin', branchName], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git push failed');
-  ok(res, { output: result.stdout || result.stderr });
+  ok(res, { remote: 'origin', branch: branchName, output: result.stdout || result.stderr });
 });
 
 app.post('/api/source/remote', async (req, res) => {
@@ -2592,7 +3804,7 @@ app.post('/api/source/login/hf', async (_req, res) => {
 app.post('/api/source/create/github', async (req, res) => {
   const repo = String(req.body.repo || '').trim();
   const visibility = req.body.visibility === 'private' ? '--private' : '--public';
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return fail(res, 400, 'Use owner/repo format, for example neuro-1977/lps.');
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return fail(res, 400, 'Use owner/repo format, for example username/life-planner-app.');
   const cli = await runCli('gh', ['--version']);
   if (!cli.available) return fail(res, 404, 'GitHub CLI is not installed or not on PATH. Use the Open GitHub New button instead.');
   const auth = await runCli('gh', ['auth', 'status']);

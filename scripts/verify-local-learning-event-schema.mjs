@@ -1,0 +1,253 @@
+#!/usr/bin/env node
+// Verify local learning event docs, schema, and examples.
+//
+// Deterministic, local-only, docs/test-first. No network, no model calls, no
+// runtime local learning engine, and no filesystem writes.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
+
+const docPath = path.join(repoRoot, 'docs', 'agent_mode', 'LOCAL_LEARNING_EVENT_SCHEMA.md');
+const schemaPath = path.join(repoRoot, 'docs', 'agent_mode', 'schemas', 'local-learning-event.schema.json');
+const examplesDir = path.join(repoRoot, 'docs', 'agent_mode', 'examples');
+const examplePaths = [
+  path.join(examplesDir, 'local-learning-event.valid.json'),
+  path.join(examplesDir, 'local-learning-event.requires-approval.json')
+];
+
+const REQUIRED_FIELDS = [
+  'task_type',
+  'selected_skills',
+  'agent_target',
+  'result_quality',
+  'mistakes',
+  'lesson',
+  'skill_update_candidate',
+  'memory_route',
+  'approval_required'
+];
+
+const ALLOWED_AGENT_TARGETS = ['chatgpt', 'claude', 'codex', 'fable', 'human'];
+const ALLOWED_RESULT_QUALITY = ['success', 'partial', 'blocked', 'unsafe', 'unknown'];
+const APPROVAL_REQUIRED_MEMORY_ROUTE = 'source_of_truth_candidate_requires_approval';
+const ALLOWED_MEMORY_ROUTES = [
+  'ignore',
+  'temporary_handoff',
+  'mistake_warning',
+  'skill_improvement_candidate',
+  'memory_inbox_candidate',
+  APPROVAL_REQUIRED_MEMORY_ROUTE
+];
+
+const FORBIDDEN = [
+  ['OPENHANDS_EXECUTOR_INVOCATION_ENABLED=true', /OPENHANDS_EXECUTOR_INVOCATION_ENABLED\s*=\s*true/],
+  ['fetch(', /\bfetch\s*\(/],
+  ['axios', /\baxios\b/],
+  ['child_process', /\bchild_process\b/],
+  ['exec(', /\bexec\s*\(/],
+  ['spawn(', /\bspawn\s*\(/],
+  ['puppeteer', /\bpuppeteer\b/i],
+  ['playwright', /\bplaywright\b/i],
+  ['source_of_truth/ path', /source_of_truth\//],
+  ['sk- secret prefix', /\bsk-/],
+  ['password= secret', /password\s*=/i],
+  ['token= secret', /\btoken\s*=/i]
+];
+
+const ALLOWED_SOURCE_OF_TRUTH_DOC_LINES = new Set([
+  'the route label does not authorize writing to `source_of_truth/`, promotion still'
+]);
+
+let failures = 0;
+const line = (ok, msg) => { if (!ok) failures++; console.log(`${ok ? 'ok  ' : 'FAIL'}  ${msg}`); };
+
+function readText(file) {
+  return fs.readFileSync(file, 'utf8');
+}
+
+function readJson(file) {
+  return JSON.parse(readText(file));
+}
+
+function rel(file) {
+  return path.relative(repoRoot, file).replaceAll('\\', '/');
+}
+
+function sourceOfTruthPathHitAllowed(name, raw) {
+  if (name !== 'docs/agent_mode/LOCAL_LEARNING_EVENT_SCHEMA.md') {
+    return false;
+  }
+
+  const matchingLines = raw
+    .split(/\r?\n/)
+    .filter((docLine) => /source_of_truth\//.test(docLine))
+    .map((docLine) => docLine.trim());
+
+  return matchingLines.length > 0
+    && matchingLines.every((docLine) => ALLOWED_SOURCE_OF_TRUTH_DOC_LINES.has(docLine));
+}
+
+function safetyBoundaryTextAllowed(name, raw, label) {
+  return label === 'source_of_truth/ path' && sourceOfTruthPathHitAllowed(name, raw);
+}
+
+function forbiddenHits(name, raw) {
+  return FORBIDDEN
+    .filter(([label, pattern]) => pattern.test(raw) && !safetyBoundaryTextAllowed(name, raw, label))
+    .map(([label]) => label);
+}
+
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.length > 0;
+}
+
+// The enforced skill_update_candidate shape (mirrors the schema oneOf and the
+// validator): the empty string, or a closed object with exactly non-empty
+// `skill` and `change`.
+function skillUpdateCandidateShapeOk(value) {
+  if (typeof value === 'string') return value === '';
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value).sort();
+  return keys.length === 2 && keys[0] === 'change' && keys[1] === 'skill'
+    && isNonEmptyString(value.skill) && isNonEmptyString(value.change);
+}
+
+// Order-insensitive canonical form for deep-equality of parsed JSON.
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((acc, key) => {
+      acc[key] = canonical(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+}
+
+function extractFirstJsonBlock(markdown) {
+  const match = markdown.replace(/\r\n/g, '\n').match(/```json\n([\s\S]*?)```/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return null;
+  }
+}
+
+function validateExample(name, json) {
+  const missing = REQUIRED_FIELDS.filter((field) => !Object.prototype.hasOwnProperty.call(json, field));
+  line(missing.length === 0, `${name} contains required fields -> ${JSON.stringify(missing)}`);
+
+  const extra = Object.keys(json).filter((field) => !REQUIRED_FIELDS.includes(field));
+  line(extra.length === 0, `${name} contains no extra fields -> ${JSON.stringify(extra)}`);
+
+  line(isNonEmptyString(json.task_type), `${name} task_type is a non-empty string`);
+  line(Array.isArray(json.selected_skills) && json.selected_skills.every(isNonEmptyString),
+    `${name} selected_skills is an array of strings`);
+  line(ALLOWED_AGENT_TARGETS.includes(json.agent_target),
+    `${name} agent_target uses an allowed value`);
+  line(ALLOWED_RESULT_QUALITY.includes(json.result_quality),
+    `${name} result_quality uses an allowed value`);
+  line(Array.isArray(json.mistakes) && json.mistakes.every((item) => typeof item === 'string'),
+    `${name} mistakes is an array of strings`);
+  line(typeof json.lesson === 'string', `${name} lesson is a string`);
+  line(skillUpdateCandidateShapeOk(json.skill_update_candidate),
+    `${name} skill_update_candidate is a closed {skill, change} object or the empty string -> ${JSON.stringify(json.skill_update_candidate)}`);
+  line(ALLOWED_MEMORY_ROUTES.includes(json.memory_route),
+    `${name} memory_route uses an allowed value`);
+  line(typeof json.approval_required === 'boolean',
+    `${name} approval_required is a boolean`);
+  line(json.memory_route !== APPROVAL_REQUIRED_MEMORY_ROUTE || json.approval_required === true,
+    `${name} source-of-truth candidate route requires approval_required true`);
+}
+
+console.log('--- Local learning event schema verification ---');
+
+const requiredPaths = [docPath, schemaPath, ...examplePaths];
+for (const file of requiredPaths) {
+  line(fs.existsSync(file), `${rel(file)} exists`);
+}
+
+const doc = readText(docPath);
+const schemaRaw = readText(schemaPath);
+const schema = JSON.parse(schemaRaw);
+const examples = examplePaths.map((file) => ({ file, json: readJson(file), raw: readText(file) }));
+
+for (const field of REQUIRED_FIELDS) {
+  line(doc.includes(field), `document mentions ${field}`);
+  line(schema.required?.includes(field), `schema requires ${field}`);
+  line(Object.prototype.hasOwnProperty.call(schema.properties || {}, field), `schema defines ${field}`);
+}
+
+line(schema.nonAuthorizing === true, 'schema is marked non-authorizing');
+line(schema.runtimeEnabled === false, 'schema runtimeEnabled is false');
+line(schema.additionalProperties === false, 'schema rejects additional top-level properties');
+
+// Nested closure of skill_update_candidate: the object branch must be closed and
+// require non-empty skill/change; the string branch must be exactly const "".
+const skillUpdate = schema.properties?.skill_update_candidate || {};
+const skillUpdateBranches = Array.isArray(skillUpdate.oneOf) ? skillUpdate.oneOf : [];
+const skillUpdateObjectBranch = skillUpdateBranches.find((branch) => branch && branch.type === 'object') || {};
+const skillUpdateStringBranch = skillUpdateBranches.find((branch) => branch && branch.type === 'string') || {};
+line(skillUpdateObjectBranch.additionalProperties === false,
+  'schema skill_update_candidate object branch rejects additional (nested) properties');
+line(JSON.stringify(skillUpdateObjectBranch.required || []) === JSON.stringify(['skill', 'change']),
+  'schema skill_update_candidate object branch requires skill and change');
+line(skillUpdateObjectBranch.properties?.skill?.type === 'string' && skillUpdateObjectBranch.properties?.skill?.minLength === 1,
+  'schema skill_update_candidate.skill is a non-empty string');
+line(skillUpdateObjectBranch.properties?.change?.type === 'string' && skillUpdateObjectBranch.properties?.change?.minLength === 1,
+  'schema skill_update_candidate.change is a non-empty string');
+line(skillUpdateStringBranch.const === '',
+  'schema skill_update_candidate string branch is exactly const ""');
+
+line(JSON.stringify(schema.properties?.agent_target?.enum || []) === JSON.stringify(ALLOWED_AGENT_TARGETS),
+  'schema agent_target enum is exact');
+line(JSON.stringify(schema.properties?.result_quality?.enum || []) === JSON.stringify(ALLOWED_RESULT_QUALITY),
+  'schema result_quality enum is exact');
+line(JSON.stringify(schema.properties?.memory_route?.enum || []) === JSON.stringify(ALLOWED_MEMORY_ROUTES),
+  'schema memory_route enum is exact');
+
+line(schema.if?.properties?.memory_route?.const === APPROVAL_REQUIRED_MEMORY_ROUTE,
+  'schema conditional checks source-of-truth candidate memory_route const');
+line(Array.isArray(schema.if?.required) && schema.if.required.includes('memory_route'),
+  'schema conditional requires memory_route before applying approval rule');
+line(schema.then?.properties?.approval_required?.const === true,
+  'schema conditional requires approval_required true for source-of-truth candidates');
+
+for (const route of ALLOWED_MEMORY_ROUTES) {
+  line(doc.includes(route), `document mentions memory route ${route}`);
+}
+
+for (const allowedLine of ALLOWED_SOURCE_OF_TRUTH_DOC_LINES) {
+  line(doc.includes(allowedLine), `document includes allowed source-of-truth safety line -> ${allowedLine}`);
+}
+
+for (const item of examples) {
+  validateExample(rel(item.file), item.json);
+}
+
+// The doc's embedded Example Shape must stay identical to the valid example file
+// so the two cannot drift silently.
+const docExample = extractFirstJsonBlock(doc);
+const validExampleForDoc = examples[0].json;
+line(docExample !== null
+  && JSON.stringify(canonical(docExample)) === JSON.stringify(canonical(validExampleForDoc)),
+  'document Example Shape equals docs/agent_mode/examples/local-learning-event.valid.json');
+
+const scanTargets = [
+  { name: rel(docPath), raw: doc },
+  { name: rel(schemaPath), raw: schemaRaw },
+  ...examples.map((item) => ({ name: rel(item.file), raw: item.raw }))
+];
+
+for (const target of scanTargets) {
+  const hits = forbiddenHits(target.name, target.raw);
+  line(hits.length === 0, `${target.name} contains no forbidden runtime/action tokens -> ${JSON.stringify(hits)}`);
+}
+
+console.log(`\n${failures === 0 ? 'ALL PASS - local learning event schema is docs/test-first and non-authorizing.' : failures + ' CHECK(S) FAILED'}`);
+process.exit(failures === 0 ? 0 : 1);

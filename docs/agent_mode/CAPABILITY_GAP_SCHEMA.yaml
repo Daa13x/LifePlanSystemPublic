@@ -1,0 +1,42 @@
+# Capability Gap record — SCHEMA + EXAMPLE (documentation only).
+#
+# IMPORTANT:
+# - This is a PROPOSAL RECORD ONLY. It describes a missing capability.
+# - It does NOT trigger execution and is NOT read by any runtime code.
+# - Creating one of these must NOT be treated as approval to do anything.
+# - It only advances through the human-gated Agent Mode lifecycle when a human
+#   explicitly approves the next step (see AGENT_MODE_STANDARD.md).
+#
+# Fields:
+type: capability_gap
+id: ""                                  # stable id, human/agent assigned
+created_at: ""                          # ISO timestamp
+created_by: agent | user                # who noticed the gap
+user_request: ""                        # what the user asked for
+missing_capability: ""                  # the capability the system lacks
+reason_current_system_cannot_do_it: ""  # why it can't be done today
+proposed_skill_or_tool: ""              # a proposed (not built) skill/tool name
+risk_level: low | medium | high | critical
+permission_tier: 0                      # 0..6, see AGENT_MODE_STANDARD.md
+requires_user_approval: true            # always true; never auto-actioned
+suggested_next_step: plan_only | implement_after_approval | reject
+related_files: []                       # files a future plan might touch
+source_pr: ""                           # PR that surfaced the gap, if any
+status: proposed | rejected | planned | implemented | approved
+
+# ── EXAMPLE (illustrative only; not an approval, not executable) ──────────────
+# type: capability_gap
+# id: gap-example-0001
+# created_at: 2026-07-05T00:00:00Z
+# created_by: agent
+# user_request: "Summarise which repo docs changed this week."
+# missing_capability: "No read-only weekly doc-change summariser exists."
+# reason_current_system_cannot_do_it: "No skill enumerates git log over docs/."
+# proposed_skill_or_tool: "weekly-doc-change-summary"
+# risk_level: low
+# permission_tier: 1        # read project docs only
+# requires_user_approval: true
+# suggested_next_step: plan_only
+# related_files: ["docs/"]
+# source_pr: ""
+# status: proposed

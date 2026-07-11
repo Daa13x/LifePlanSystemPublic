@@ -1,0 +1,88 @@
+# Agent Mode Docs Index
+
+Navigation for the Agent Mode and LifeSkillSystem documentation. Files in this
+folder are **documentation-only** — no runtime loader reads them, and nothing in
+this folder enables execution, real OpenHands invocation, or external actions.
+Links to runtime-isolated manual helpers are labelled explicitly.
+
+## Agent Mode foundations
+
+- Standard, lifecycle, permission tiers, approval gates:
+  [`AGENT_MODE_STANDARD.md`](AGENT_MODE_STANDARD.md)
+- Capability gap schema (documentation-only):
+  [`CAPABILITY_GAP_SCHEMA.yaml`](CAPABILITY_GAP_SCHEMA.yaml)
+- Skill manifest schema (documentation-only; `runtime_enabled` defaults false):
+  [`SKILL_MANIFEST_SCHEMA.yaml`](SKILL_MANIFEST_SCHEMA.yaml)
+- Example registry (non-executable; no approved/live skills):
+  [`registry.example.yaml`](registry.example.yaml)
+
+## LifeSkillSystem skill library (chat skills)
+
+- Plan and skill backlog:
+  [`LIFESKILLSYSTEM_SKILL_LIBRARY_PLAN.md`](LIFESKILLSYSTEM_SKILL_LIBRARY_PLAN.md)
+- Skill template:
+  [`skills/SKILL_TEMPLATE.md`](skills/SKILL_TEMPLATE.md)
+- Export guide (Claude + ChatGPT; manual upload only):
+  [`skills/EXPORT_GUIDE_CHATGPT_AND_CLAUDE.md`](skills/EXPORT_GUIDE_CHATGPT_AND_CLAUDE.md)
+- Routing and local learning loop (design-only):
+  [`LIFESKILL_ROUTING_LOCAL_LEARNING_LOOP.md`](LIFESKILL_ROUTING_LOCAL_LEARNING_LOOP.md)
+- Local learning event schema (docs/test-first; no runtime engine):
+  [`LOCAL_LEARNING_EVENT_SCHEMA.md`](LOCAL_LEARNING_EVENT_SCHEMA.md)
+- Machine-readable local learning event schema:
+  [`schemas/local-learning-event.schema.json`](schemas/local-learning-event.schema.json)
+- Manual review-inbox writer (direct invocation only; not a learning engine):
+  [`../../server/localLearningReviewInbox.js`](../../server/localLearningReviewInbox.js)
+- Manual read-only review-inbox reader/list command (direct invocation only):
+  [`../../server/localLearningReviewInboxReader.js`](../../server/localLearningReviewInboxReader.js),
+  [`../../scripts/list-local-learning-review-inbox.mjs`](../../scripts/list-local-learning-review-inbox.mjs)
+
+### Starter skills (instruction-only)
+
+- [`skills/starter/lifeskillsystem-next-move/SKILL.md`](skills/starter/lifeskillsystem-next-move/SKILL.md)
+- [`skills/starter/codex-bulk-prompt-builder/SKILL.md`](skills/starter/codex-bulk-prompt-builder/SKILL.md)
+- [`skills/starter/agent-output-reviewer/SKILL.md`](skills/starter/agent-output-reviewer/SKILL.md)
+- [`skills/starter/memory-routing-helper/SKILL.md`](skills/starter/memory-routing-helper/SKILL.md)
+- [`skills/starter/pr-merge-safety-review/SKILL.md`](skills/starter/pr-merge-safety-review/SKILL.md)
+- [`skills/starter/youtube-to-project-ideas/SKILL.md`](skills/starter/youtube-to-project-ideas/SKILL.md)
+
+## Verification commands
+
+```bash
+npm run verify:local-learning-event-schema
+npm run verify:local-learning-event-validator
+npm run verify:local-learning-event-writer
+npm run verify:local-learning-review-inbox-reader
+npm run verify:lifeskillsystem-skills
+npm run verify:runtime-safety
+npm run verify:openhands-stop-boundary
+npm run build
+```
+
+`verify:local-learning-event-schema` checks the local learning event doc, schema,
+and examples for required fields and safety-boundary tokens. It is docs/test
+first and does not implement a router or local learning engine.
+
+`verify:local-learning-event-validator` checks the pure, non-writing event
+validator. `verify:local-learning-event-writer` checks the directly invoked
+writer that can place validated candidate files only in
+`.lps/local-learning/review-inbox/`. Candidates are not memory; the writer does
+not promote them, write to `source_of_truth`, or enable a runtime learning
+engine.
+
+`verify:local-learning-review-inbox-reader` checks the directly invoked,
+read-only reader/list boundary. A missing inbox is an empty success, malformed
+or schema-invalid JSON remains reviewable, and listing does not create, modify,
+move, approve, reject, or promote candidates. It also checks deterministic
+`.json` ordering, containment failures, terminal control-character escaping,
+and import/startup isolation. Package wiring exposes the verifier only; the list
+CLI remains a direct manual command.
+
+`verify:lifeskillsystem-skills` checks that every `SKILL.md` under
+`docs/agent_mode/skills/` has the required metadata and sections and contains no
+runtime/secret/unsafe tokens. It is a docs completeness/safety check — it grants
+no capability and runs nothing.
+
+## Related (separate lanes)
+
+- OpenHands invocation docs index (real invocation stays disabled):
+  [`../tooling/OPENHANDS_INVOCATION_DOCS_INDEX.md`](../tooling/OPENHANDS_INVOCATION_DOCS_INDEX.md)

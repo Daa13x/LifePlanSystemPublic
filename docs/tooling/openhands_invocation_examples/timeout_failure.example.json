@@ -1,0 +1,24 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "timeout",
+  "status": "timeout",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "The future invocation timed out before producing a usable result.",
+  "humanNextStep": "Review timeout limits and preserve any worktree/report for human inspection.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "limit": {
+    "timeoutMs": 300000
+  }
+}

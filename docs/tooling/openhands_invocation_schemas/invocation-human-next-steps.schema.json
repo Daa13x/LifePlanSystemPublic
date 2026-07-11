@@ -1,0 +1,13 @@
+{
+  "kind": "openhands-invocation-schema-spec",
+  "name": "invocation-human-next-steps",
+  "description": "Human next-step wording shape. Text must never instruct automatic execution or autonomy.",
+  "requiredFields": ["humanNextStep"],
+  "allowedStatusValues": ["setup-gated", "blocked", "refused", "validation-failed", "timeout", "output-capped", "invalid-response", "not-implemented", "disabled"],
+  "safetyBooleansMustBeFalse": ["patchApproved", "commitAllowed", "pushAllowed", "mergeAllowed", "branchDeletionAllowed", "resetAllowed", "stashPopAllowed", "mainMasterWriteAllowed", "privateMemoryAccessAllowed", "dependencyProvisioningAllowed"],
+  "humanReviewFieldsMustBeTrue": ["requiresHumanReview", "requiresSeparatePostRunApproval"],
+  "forbiddenSecretFields": ["apiKey", "apiKeyValue", "secret", "token", "password", "privateKey"],
+  "forbiddenHumanStepPhrases": ["auto-commit", "auto-push", "auto-merge", "delete branch", "reset", "stash-pop", "enable invocation"],
+  "allowedEndpointPatterns": ["^http://localhost(:[0-9]+)?(/.*)?$", "^http://127\\.0\\.0\\.1(:[0-9]+)?(/.*)?$", "^http://example\\.invalid(:[0-9]+)?(/.*)?$"],
+  "nonAuthorizing": true
+}

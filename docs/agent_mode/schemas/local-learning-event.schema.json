@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/lifeplansystem/local-learning-event.schema.json",
+  "title": "Local Learning Event",
+  "description": "Docs/test-first local learning event shape. Not wired to runtime and not authorizing durable writes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_type",
+    "selected_skills",
+    "agent_target",
+    "result_quality",
+    "mistakes",
+    "lesson",
+    "skill_update_candidate",
+    "memory_route",
+    "approval_required"
+  ],
+  "properties": {
+    "task_type": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Classification of the original work."
+    },
+    "selected_skills": {
+      "type": "array",
+      "description": "LifeSkills used or proposed.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "agent_target": {
+      "type": "string",
+      "enum": ["chatgpt", "claude", "codex", "fable", "human"],
+      "description": "Intended agent or surface."
+    },
+    "result_quality": {
+      "type": "string",
+      "enum": ["success", "partial", "blocked", "unsafe", "unknown"],
+      "description": "Quality outcome of the work."
+    },
+    "mistakes": {
+      "type": "array",
+      "description": "Mistakes, risks, or failure modes observed.",
+      "items": {
+        "type": "string"
+      }
+    },
+    "lesson": {
+      "type": "string",
+      "description": "Short lesson learned."
+    },
+    "skill_update_candidate": {
+      "description": "Proposed LifeSkill change as a closed object with exactly `skill` and `change` (both non-empty strings), or the empty string when none is proposed.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["skill", "change"],
+          "properties": {
+            "skill": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Stable skill name or identifier the change applies to."
+            },
+            "change": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Proposed wording or metadata change, for human review only."
+            }
+          }
+        },
+        {
+          "type": "string",
+          "const": ""
+        }
+      ]
+    },
+    "memory_route": {
+      "type": "string",
+      "enum": [
+        "ignore",
+        "temporary_handoff",
+        "mistake_warning",
+        "skill_improvement_candidate",
+        "memory_inbox_candidate",
+        "source_of_truth_candidate_requires_approval"
+      ],
+      "description": "Review route only; no write is performed."
+    },
+    "approval_required": {
+      "type": "boolean",
+      "description": "Whether human approval is required before any durable write or action."
+    }
+  },
+  "if": {
+    "properties": {
+      "memory_route": {
+        "const": "source_of_truth_candidate_requires_approval"
+      }
+    },
+    "required": ["memory_route"]
+  },
+  "then": {
+    "properties": {
+      "approval_required": {
+        "const": true
+      }
+    }
+  },
+  "nonAuthorizing": true,
+  "runtimeEnabled": false
+}

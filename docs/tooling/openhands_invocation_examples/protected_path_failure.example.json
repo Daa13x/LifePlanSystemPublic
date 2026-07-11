@@ -1,0 +1,23 @@
+{
+  "kind": "openhands-invocation-example",
+  "scenario": "protected path touched",
+  "status": "refused",
+  "invoked": false,
+  "realInvocationEnabled": false,
+  "reason": "The future output touched a forbidden/protected path example.",
+  "humanNextStep": "Refuse the result and inspect why the protected path was reached.",
+  "patchApproved": false,
+  "commitAllowed": false,
+  "pushAllowed": false,
+  "mergeAllowed": false,
+  "branchDeletionAllowed": false,
+  "resetAllowed": false,
+  "stashPopAllowed": false,
+  "mainMasterWriteAllowed": false,
+  "privateMemoryAccessAllowed": false,
+  "dependencyProvisioningAllowed": false,
+  "requiresHumanReview": true,
+  "requiresSeparatePostRunApproval": true,
+  "protectedPathExample": "source_of_truth/example.md",
+  "note": "source_of_truth appears here only as a forbidden/protected path example."
+}
