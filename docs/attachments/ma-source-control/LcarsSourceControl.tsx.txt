@@ -1,0 +1,721 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { MouseEvent as ReactMouseEvent } from 'react';
+import { Shell, useTheme } from './_Shell';
+import { GLYPH } from './_VisualGlyphs';
+import { SerenityTank } from './_SerenityTank';
+import { navigateToScreen } from '../../../lib/runtimeBridge';
+import { relayUrl } from '../../../lib/relayFetch';
+import './_group.css';
+
+type SCSnapshot = {
+  branch: string;
+  summary: string;
+  repoUrl: string;
+  repositoryPath: string;
+  hasChanges: boolean;
+  isAhead: boolean;
+  isBehind: boolean;
+  aheadCount: number;
+  behindCount: number;
+  generatedNoiseCount: number;
+  generatedNoisePaths?: string[];
+  changedFiles: { path: string; status: string; staged: boolean }[];
+  history: { hash: string; subject: string; author: string; date: string; refs: string[] }[];
+  branches: string[];
+  error: string;
+  patConnected: boolean;
+};
+
+type FileData = {
+  oldContent: string;
+  newContent: string;
+  loading: boolean;
+  error: string | null;
+};
+
+const FILE_ICON: Record<string, { sym: string; color: string }> = {
+  M: { sym: 'M', color: '#f9b124' },
+  A: { sym: '+', color: '#34d399' },
+  D: { sym: '-', color: '#f87171' },
+  U: { sym: '?', color: '#888' },
+};
+
+type DiffRow = { left: string | null; right: string | null; type: 'same' | 'add' | 'del' };
+
+function lineDiff(oldText: string, newText: string): DiffRow[] {
+  const a = oldText ? oldText.replace(/\r\n/g, '\n').split('\n') : [];
+  const b = newText ? newText.replace(/\r\n/g, '\n').split('\n') : [];
+  if (a.length > 1500 || b.length > 1500) {
+    const n = Math.max(a.length, b.length);
+    const rows: DiffRow[] = [];
+    for (let i = 0; i < n; i++) {
+      const l = i < a.length ? a[i] : null, r = i < b.length ? b[i] : null;
+      rows.push({ left: l, right: r, type: l === r ? 'same' : l === null ? 'add' : r === null ? 'del' : 'same' });
+    }
+    return rows;
+  }
+  const m = a.length, n = b.length;
+  const dp: Int32Array[] = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--)
+    for (let j = n - 1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const rows: DiffRow[] = []; let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) { rows.push({ left: a[i], right: b[j], type: 'same' }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ left: a[i], right: null, type: 'del' }); i++; }
+    else { rows.push({ left: null, right: b[j], type: 'add' }); j++; }
+  }
+  while (i < m) rows.push({ left: a[i++], right: null, type: 'del' });
+  while (j < n) rows.push({ left: null, right: b[j++], type: 'add' });
+  return rows;
+}
+
+const baseName = (p: string) => p.split('/').pop() || p;
+
+function SLabel({ text, accent, right }: { text: string; accent: string; right?: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, paddingBottom: 5, borderBottom: '1px solid #0d0d0d' }}>
+      <span style={{ fontSize: 10, color: accent, textTransform: 'uppercase' as const, letterSpacing: '0.18em', fontFamily: "'Antonio', sans-serif" }}>{text}</span>
+      {right}
+    </div>
+  );
+}
+
+function RefBadge({ label }: { label: string }) {
+  const color = label.includes('HEAD') ? '#34d399' : label.includes('origin') ? '#60a5fa' : '#a78bfa';
+  return (
+    <span style={{ fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', padding: '1px 5px', borderRadius: 3, border: `1px solid ${color}44`, color, background: `${color}18`, marginLeft: 4 }}>
+      {label}
+    </span>
+  );
+}
+
+function ConnPill({ ok }: { ok: boolean }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.1em', padding: '2px 9px', borderRadius: 10, border: `1px solid ${ok ? '#34d39944' : '#f8712444'}`, background: ok ? '#34d39911' : '#f8712411', color: ok ? '#34d399' : '#f87124' }}>
+      <span style={{ width: 5, height: 5, borderRadius: '50%', background: ok ? '#34d399' : '#f87124', display: 'inline-block' }} />
+      {ok ? 'PAT CONNECTED' : 'NOT CONNECTED'}
+    </span>
+  );
+}
+
+const PAT_STEPS = [
+  { label: 'Open GitHub', detail: 'GitHub -> Settings -> Developer Settings -> Personal Access Tokens -> Fine-grained tokens' },
+  { label: 'Create token', detail: 'Use a fine-grained github_pat_ token with repository write access. Classic ghp_ is legacy fallback only.' },
+  { label: 'Paste token', detail: 'Paste here or in Settings > Account > Git and GitHub. Stored encrypted locally.' },
+  { label: 'Save & connect', detail: 'Serenity stores the token in the local encrypted keystore' },
+];
+
+type PatSaveResponse = { ok?: boolean; error?: string; message?: string };
+
+async function readPatSaveResponse(response: Response): Promise<PatSaveResponse> {
+  const contentType = response.headers.get('content-type') || '';
+  const text = await response.text();
+  if (contentType.includes('application/json')) {
+    try {
+      return JSON.parse(text) as PatSaveResponse;
+    } catch {
+      return { ok: false, error: `Invalid JSON from ship relay (HTTP ${response.status}).` };
+    }
+  }
+  const clean = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  return {
+    ok: false,
+    error: clean
+      ? `Ship relay returned ${response.status}: ${clean.slice(0, 160)}`
+      : `Ship relay returned HTTP ${response.status} with no JSON body.`,
+  };
+}
+
+async function postPat(endpoint: string, body: unknown, timeoutMs = 15000): Promise<{ response: Response; payload: PatSaveResponse }> {
+  const response = await fetch(relayUrl(endpoint), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  return { response, payload: await readPatSaveResponse(response) };
+}
+
+function PatWizard({ accent, onConnected, onOpenSettings }: { accent: string; onConnected: () => void; onOpenSettings: () => void }) {
+  const [step, setStep] = useState(0);
+  const [pat, setPat] = useState('');
+  const [verifying, setVerifying] = useState(false);
+  const [err, setErr] = useState('');
+
+  const verify = async () => {
+    const token = pat.trim();
+    if (!token) return;
+    setVerifying(true); setErr('');
+    try {
+      let { response, payload } = await postPat('/api/ui/settings/update', { key: 'GITHUB_PAT', value: token });
+      if (!payload.ok && response.status === 404) {
+        ({ response, payload } = await postPat('/api/ui/source-control/pat', { token }));
+      }
+      if (payload.ok) {
+        setPat('');
+        onConnected();
+      } else {
+        setErr(payload.error || payload.message || `GitHub token save failed (HTTP ${response.status}). Use a fine-grained github_pat_ token with repository write access.`);
+      }
+    } catch (error) {
+      setErr(error instanceof Error
+        ? `GitHub token save failed: ${error.message}. Open Source Control > GitHub Connection or Settings > Account > Git and GitHub after the relay is online.`
+        : 'GitHub token save failed before the ship relay answered. Open Source Control > GitHub Connection or Settings > Account > Git and GitHub after the relay is online.');
+    }
+    finally { setVerifying(false); }
+  };
+
+  return (
+    <div>
+      {PAT_STEPS.map((s, idx) => {
+        const done = idx < step;
+        const active = idx === step;
+        const col = done ? accent : active ? accent : '#333';
+        return (
+          <div key={idx} style={{ display: 'flex', gap: 9, padding: '7px 0', opacity: done ? 0.55 : active ? 1 : 0.3 }}>
+            <div style={{ display: 'flex', flexDirection: 'column' as const, alignItems: 'center', flexShrink: 0 }}>
+              <div style={{ width: 18, height: 18, borderRadius: '50%', background: done ? accent : 'transparent', border: `1px solid ${col}`, color: done ? '#000' : active ? accent : '#444', fontSize: 10, fontFamily: "'Antonio', sans-serif", display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>
+                {done ? GLYPH.check : idx + 1}
+              </div>
+              {idx < PAT_STEPS.length - 1 && <div style={{ width: 1, flex: 1, minHeight: 8, background: '#1a1a1a', marginTop: 2 }} />}
+            </div>
+            <div style={{ flex: 1, paddingBottom: 6 }}>
+              <div style={{ fontSize: 11, color: active ? '#ddd' : '#777', fontFamily: "'Antonio', sans-serif", letterSpacing: '0.06em' }}>{s.label}</div>
+              <div style={{ fontSize: 10, color: '#d0d0d0', marginTop: 2, lineHeight: 1.5 }}>{s.detail}</div>
+              {active && idx === 0 && (
+                <button onClick={() => { window.open('https://github.com/settings/personal-access-tokens/new', '_blank'); setStep(1); }}
+                  style={{ marginTop: 6, padding: '4px 12px', borderRadius: 3, background: accent, color: '#000', border: 'none', fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', cursor: 'pointer' }}>
+                  OPEN GITHUB
+                </button>
+              )}
+              {active && idx === 1 && (
+                <button onClick={() => setStep(2)}
+                  style={{ marginTop: 6, padding: '4px 12px', borderRadius: 3, background: 'none', border: `1px solid ${accent}`, color: accent, fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', cursor: 'pointer' }}>
+                  TOKEN CREATED
+                </button>
+              )}
+              {active && idx === 2 && (
+                <div style={{ marginTop: 6 }}>
+                  <input type="password" value={pat} onChange={e => setPat(e.target.value)} placeholder="github_pat_... or ghp_..."
+                    style={{ width: '100%', background: '#060608', border: `1px solid ${accent}44`, borderRadius: 3, color: '#cdd', fontSize: 10, padding: '5px 8px', boxSizing: 'border-box' as const, fontFamily: 'Consolas, monospace', outline: 'none' }} />
+                  <button onClick={onOpenSettings}
+                    style={{ marginTop: 5, marginRight: 5, padding: '4px 12px', borderRadius: 3, background: 'none', color: accent, border: `1px solid ${accent}55`, fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', cursor: 'pointer' }}>
+                    OPEN LCARS SETTINGS
+                  </button>
+                  <button onClick={() => { if (pat.trim()) setStep(3); }} disabled={!pat.trim()}
+                    style={{ marginTop: 5, padding: '4px 12px', borderRadius: 3, background: pat.trim() ? accent : '#111', color: pat.trim() ? '#000' : '#444', border: 'none', fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', cursor: pat.trim() ? 'pointer' : 'default' }}>
+                    NEXT
+                  </button>
+                </div>
+              )}
+              {active && idx === 3 && (
+                <div style={{ marginTop: 6 }}>
+                  <button onClick={verify} disabled={verifying}
+                    style={{ padding: '4px 14px', borderRadius: 3, background: accent, color: '#000', border: 'none', fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', cursor: 'pointer' }}>
+                    {verifying ? 'SAVING...' : 'SAVE + CONNECT'}
+                  </button>
+                  {err && <div style={{ marginTop: 4, fontSize: 10, color: '#f87171', fontFamily: 'Consolas, monospace' }}>{err}</div>}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const PULL_UI_CMDS = [
+  'git fetch origin replit-ui',
+  'git checkout origin/replit-ui -- ui/src ui/public ui/index.html',
+];
+
+function SyncBlock({ label, sub, busy, accent, color, onClick, cmds }: {
+  label: string; sub: string; busy: boolean; accent: string; color: string;
+  onClick: () => void; cmds?: string[];
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ marginBottom: 5 }}>
+      <div style={{ display: 'flex', gap: 4 }}>
+        <button onClick={onClick} disabled={busy}
+          style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: busy ? '#080808' : '#0b0b10', border: `1px solid ${color}2a`, borderRadius: 4, cursor: busy ? 'default' : 'pointer', textAlign: 'left' as const }}>
+          <div style={{ width: 6, height: 6, borderRadius: '50%', background: busy ? color : color + '55', flexShrink: 0, boxShadow: busy ? `0 0 6px ${color}` : 'none', transition: 'all 0.3s' }} />
+          <div>
+            <div style={{ fontSize: 11, color: busy ? color : '#bbb', fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em' }}>{busy ? label + '...' : label}</div>
+            <div style={{ fontSize: 10, color: '#d0d0d0', marginTop: 1 }}>{sub}</div>
+          </div>
+        </button>
+        {cmds && (
+          <button onClick={() => setOpen(v => !v)} title={open ? 'Hide commands' : 'Show commands'}
+            style={{ width: 22, background: 'none', border: '1px solid #1a1a1a', borderRadius: 3, color: open ? accent : '#444', fontSize: 10, cursor: 'pointer', flexShrink: 0 }}>
+            {open ? '-' : '+'}
+          </button>
+        )}
+      </div>
+      {open && cmds && (
+        <div style={{ marginTop: 3, padding: '6px 10px', background: '#030306', borderRadius: 3, border: '1px solid #141414' }}>
+          {cmds.map((c, i) => <div key={i} style={{ fontFamily: 'Consolas, monospace', fontSize: 10, color: '#6dbf8a', lineHeight: 1.9 }}>{c}</div>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function LcarsSourceControl() {
+  const { theme } = useTheme();
+  const G = theme.base;
+
+  const [snapshot, setSnapshot] = useState<SCSnapshot | null>(null);
+  const [commitMsg, setCommitMsg] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [gitBusy, setGitBusy] = useState<string | null>(null);
+  const [gitMsg, setGitMsg] = useState<string | null>(null);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const [patConnected, setPatConnected] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
+
+  const [openTabs, setOpenTabs] = useState<string[]>([]);
+  const [activeTab, setActiveTab] = useState<string | null>(null);
+  const [fileData, setFileData] = useState<Record<string, FileData>>({});
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const fileDataRef = useRef(fileData);
+  fileDataRef.current = fileData;
+
+  const load = useCallback(async () => {
+    try {
+      setIsLoading(true); setLoadError(null);
+      const r = await fetch('/api/ui/source-control', { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json() as SCSnapshot;
+      setSnapshot(data);
+      if (data.patConnected) setPatConnected(true);
+    } catch (e) {
+      setSnapshot(null);
+      setLoadError(e instanceof Error ? e.message : 'Source control unavailable');
+    } finally { setIsLoading(false); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const changedFiles = snapshot?.changedFiles ?? [];
+  const history = snapshot?.history ?? [];
+  const branches = snapshot?.branches ?? [];
+  const sourceStatusLabel = loadError ? 'Runtime unavailable' : !snapshot ? 'No snapshot' : changedFiles.length > 0 ? `${changedFiles.length} source changes` : 'Clean';
+  const sourceStatusColor = loadError || !snapshot ? '#f87171' : changedFiles.length > 0 ? '#f9b124' : G;
+  const sourceStatusBg = loadError || !snapshot ? '#f8717111' : changedFiles.length > 0 ? '#f9b12411' : G + '11';
+  const sourceStatusBorder = loadError || !snapshot ? '#f8717144' : changedFiles.length > 0 ? '#f9b12444' : G + '44';
+  const ignoredArtifactPreview = snapshot?.generatedNoisePaths?.length
+    ? snapshot.generatedNoisePaths.join('\n')
+    : 'Generated/runtime artifacts are hidden from source review.';
+  const localBranches = branches.filter(branch => !branch.startsWith('origin/'));
+  const remoteBranches = branches.filter(branch => branch.startsWith('origin/'));
+
+  const fetchFile = useCallback(async (path: string) => {
+    setFileData(d => ({ ...d, [path]: { oldContent: '', newContent: '', loading: true, error: null } }));
+    try {
+      const r = await fetch(`/api/ui/source-control/file?path=${encodeURIComponent(path)}`, { signal: AbortSignal.timeout(8000) });
+      const j = await r.json() as { oldContent?: string; newContent?: string; error?: string };
+      if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+      setFileData(d => ({ ...d, [path]: { oldContent: j.oldContent ?? '', newContent: j.newContent ?? '', loading: false, error: null } }));
+      setEdits(e => ({ ...e, [path]: j.newContent ?? '' }));
+    } catch (err) {
+      setFileData(d => ({ ...d, [path]: { oldContent: '', newContent: '', loading: false, error: err instanceof Error ? err.message : 'load failed' } }));
+    }
+  }, []);
+
+  const openFile = useCallback((path: string) => {
+    setOpenTabs(t => t.includes(path) ? t : [...t, path]);
+    setActiveTab(path);
+    if (!fileDataRef.current[path]) void fetchFile(path);
+  }, [fetchFile]);
+
+  const closeTab = useCallback((path: string, e: ReactMouseEvent) => {
+    e.stopPropagation();
+    setOpenTabs(t => {
+      const next = t.filter(p => p !== path);
+      setActiveTab(a => (a === path ? (next[next.length - 1] ?? null) : a));
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!activeTab && openTabs.length === 0 && changedFiles.length > 0) openFile(changedFiles[0].path);
+  }, [changedFiles, activeTab, openTabs.length, openFile]);
+
+  const runGit = useCallback(async (action: 'commit' | 'push' | 'pull') => {
+    setGitBusy(action); setGitMsg(null);
+    try {
+      const body = action === 'commit' ? JSON.stringify({ message: commitMsg }) : undefined;
+      const r = await fetch(`/api/ui/source-control/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+        signal: AbortSignal.timeout(130000),
+      });
+      const j = await r.json() as { ok?: boolean; message?: string; snapshot?: SCSnapshot; error?: string };
+      setGitMsg(j.message || j.error || (r.ok ? 'Done.' : 'Failed.'));
+      if (j.snapshot) setSnapshot(j.snapshot);
+      if (action === 'commit' && r.ok) setCommitMsg('');
+    } catch (err) {
+      setGitMsg(err instanceof Error ? err.message : `${action} failed`);
+    } finally { setGitBusy(null); }
+  }, [commitMsg]);
+
+  const runSync = useCallback(async (action: 'push-replit-ui' | 'pull-ui' | 'sync-screenshots') => {
+    setGitBusy(action); setSyncMsg(null);
+    try {
+      const r = await fetch(`/api/ui/source-control/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(130000),
+      });
+      const j = await r.json() as { ok?: boolean; message?: string; snapshot?: SCSnapshot; error?: string };
+      setSyncMsg(j.message || j.error || (r.ok ? 'Done.' : 'Failed.'));
+      if (j.snapshot) setSnapshot(j.snapshot);
+    } catch (err) {
+      setSyncMsg(err instanceof Error ? err.message : `${action} failed`);
+    } finally { setGitBusy(null); }
+  }, []);
+
+  const saveFile = useCallback(async (path: string) => {
+    setSaveMsg(null);
+    try {
+      const r = await fetch('/api/ui/source-control/save', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, content: edits[path] ?? '' }), signal: AbortSignal.timeout(8000),
+      });
+      const j = await r.json() as { ok?: boolean; message?: string; error?: string };
+      setSaveMsg(j.message || j.error || (r.ok ? 'Saved.' : 'Save failed.'));
+      if (r.ok) { void fetchFile(path); void load(); }
+    } catch (err) {
+      setSaveMsg(err instanceof Error ? err.message : 'save failed');
+    }
+  }, [edits, fetchFile, load]);
+
+  const active = activeTab;
+  const activeData = active ? fileData[active] : null;
+  const dirty = active != null && activeData != null && (edits[active] ?? activeData.newContent) !== activeData.newContent;
+  const diffRows = useMemo(
+    () => activeData && !activeData.loading ? lineDiff(activeData.oldContent, activeData.newContent) : [],
+    [activeData],
+  );
+
+  const canCommit = snapshot != null && changedFiles.length > 0 && commitMsg.trim().length > 0 && !gitBusy;
+
+  return (
+    <Shell activePage="source-control">
+      <div style={{ height: '100%', display: 'flex', background: '#060606', overflow: 'hidden' }}>
+
+        {/* ── COL 1 · Connection + Serenity Sync (240px) ──────────────── */}
+        <div style={{ width: 240, flexShrink: 0, borderRight: '1px solid #111', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+          <div style={{ height: 44, flexShrink: 0, borderBottom: '1px solid #0d0d0d' }}>
+            <SerenityTank variant="strip" themeP={G} themeGlow="52,211,153" corners={false} label="SERENITY · GIT SUITE" />
+          </div>
+
+          <div style={{ flex: 1, overflow: 'auto', padding: '12px 13px' }}>
+
+            <div style={{ marginBottom: 16 }}>
+              <SLabel text="GitHub Connection" accent={G} />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <ConnPill ok={patConnected} />
+                <button onClick={() => setShowWizard(v => !v)}
+                  style={{ fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', color: '#d0d0d0', background: 'none', border: '1px solid #1e1e1e', borderRadius: 3, padding: '2px 7px', cursor: 'pointer' }}>
+                  {patConnected ? 'RECONFIG' : 'SETUP'}
+                </button>
+              </div>
+              {(!patConnected || showWizard) && (
+                <PatWizard accent={G} onConnected={() => { setPatConnected(true); setShowWizard(false); }} onOpenSettings={() => navigateToScreen('settings')} />
+              )}
+              {patConnected && !showWizard && (
+                <div style={{ fontSize: 10, color: '#444', fontFamily: 'Consolas, monospace', lineHeight: 1.6 }}>
+                  neuro-1977/Serenity<br />
+                  <span style={{ color: '#5c76b9' }}>github.com</span>
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: 16 }}>
+              <SLabel text="Branches" accent={G} />
+              {branches.length > 0 && (
+                <>
+                  {branches.map(name => {
+                    const isCurrent = name === snapshot?.branch;
+                    const isRemote = name.startsWith('origin/');
+                    const color = isCurrent ? G : isRemote ? '#60a5fa' : '#d0d0d0';
+                    const tag = isCurrent ? 'ACTIVE' : isRemote ? 'REMOTE' : 'LOCAL';
+                    return (
+                      <div key={name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid #090909' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0, boxShadow: `0 0 4px ${color}66` }} />
+                          <span style={{ fontSize: 10, color: isCurrent ? '#e8ffe8' : '#888', fontFamily: 'Consolas, monospace' }}>{name}</span>
+                        </div>
+                        <span style={{ fontSize: 10, color, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.05em' }}>{tag}</span>
+                      </div>
+                    );
+                  })}
+                  <div style={{ marginTop: 5, fontSize: 10, color: '#777', fontFamily: "'Antonio', sans-serif", letterSpacing: '0.06em' }}>
+                    {localBranches.length} local · {remoteBranches.length} remote
+                  </div>
+                </>
+              )}
+              {branches.length === 0 && (
+                <div style={{ padding: '6px 0', fontSize: 10, color: loadError ? '#f87171' : '#a8a8a8', fontFamily: 'Consolas, monospace', lineHeight: 1.5 }}>
+                  {loadError ? `Source-control runtime unavailable: ${loadError}` : snapshot?.error || 'No branch snapshot returned by the runtime.'}
+                </div>
+              )}
+              {(snapshot?.isAhead || snapshot?.isBehind) && (
+                <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                  {snapshot?.isAhead && <span style={{ fontSize: 10, color: '#f9b124', fontFamily: "'Antonio', sans-serif" }}>{snapshot.aheadCount ?? 0} unpushed commit{(snapshot.aheadCount ?? 0) === 1 ? '' : 's'}</span>}
+                  {snapshot?.isBehind && <span style={{ fontSize: 10, color: '#60a5fa', fontFamily: "'Antonio', sans-serif" }}>{snapshot.behindCount ?? 0} remote commit{(snapshot.behindCount ?? 0) === 1 ? '' : 's'} waiting</span>}
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <SLabel text="Serenity Sync" accent={G} right={
+                <span style={{ fontSize: 10, color: '#777', fontFamily: "'Antonio', sans-serif" }}>main ↔ replit-ui</span>
+              } />
+              <SyncBlock
+                label="Push to replit-ui" sub="Sends current main to Replit sandbox"
+                busy={gitBusy === 'push-replit-ui'} accent={G} color={G}
+                onClick={() => void runSync('push-replit-ui')}
+                cmds={['git push origin HEAD:replit-ui --force-with-lease']}
+              />
+              <SyncBlock
+                label="Pull UI from replit-ui" sub="Checks out UI source only — no C# conflicts"
+                busy={gitBusy === 'pull-ui'} accent={G} color="#60a5fa"
+                onClick={() => void runSync('pull-ui')}
+                cmds={PULL_UI_CMDS}
+              />
+              <div style={{ marginTop: 7, padding: '7px 9px', background: '#050508', border: '1px solid #1a1a1a', borderRadius: 4 }}>
+                <div style={{ fontSize: 10, color: '#a78bfa', fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em' }}>SCREENSHOT SYNC NOT WIRED</div>
+                <div style={{ fontSize: 10, color: '#d0d0d0', marginTop: 2, lineHeight: 1.45 }}>No button is exposed until a verified capture routine exists.</div>
+              </div>
+              {syncMsg && (
+                <div style={{ marginTop: 6, padding: '5px 8px', background: '#030306', borderRadius: 3, fontSize: 10, color: '#7d9', fontFamily: 'Consolas, monospace', whiteSpace: 'pre-wrap' as const }}>
+                  {syncMsg}
+                </div>
+              )}
+            </div>
+
+            {snapshot?.repoUrl && (
+              <a href={snapshot.repoUrl} target="_blank" rel="noopener noreferrer"
+                style={{ display: 'block', fontSize: 10, color: '#75adff', textDecoration: 'none', fontFamily: "'Antonio', sans-serif", letterSpacing: '0.06em' }}>
+                OPEN ON GITHUB
+              </a>
+            )}
+          </div>
+        </div>
+
+        {/* ── COL 2 · Changes + Commit + History (350px) ──────────────── */}
+        <div style={{ width: 350, flexShrink: 0, borderRight: '1px solid #111', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 100px 10px 14px', borderBottom: '1px solid #111', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontFamily: 'Consolas, monospace', fontSize: 12, color: snapshot ? '#bbb' : '#f87171' }}>{snapshot?.branch || 'runtime offline'}</span>
+              <span title="Editable source files only. This is the commit-ready review queue." style={{ fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', padding: '2px 8px', borderRadius: 10, border: `1px solid ${sourceStatusBorder}`, background: sourceStatusBg, color: sourceStatusColor }}>
+                {sourceStatusLabel}
+              </span>
+              {(snapshot?.generatedNoiseCount ?? 0) > 0 && (
+                <span
+                  title={ignoredArtifactPreview}
+                  style={{ fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', padding: '2px 8px', borderRadius: 10, border: '1px solid #4b556344', background: '#4b556311', color: '#cbd5e1' }}
+                >
+                  {snapshot?.generatedNoiseCount} ignored artifacts
+                </span>
+              )}
+            </div>
+            <button onClick={() => void load()} disabled={isLoading} aria-label="Refresh"
+              style={{ width: 26, height: 26, padding: 0, borderRadius: 3, cursor: isLoading ? 'default' : 'pointer', background: 'none', border: '1px solid #1e1e1e', color: '#555', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {isLoading ? '·' : '↺'}
+            </button>
+          </div>
+
+          <div style={{ flex: 1, overflow: 'auto' }}>
+
+            {/* Captain Commit */}
+            <div style={{ padding: '12px 14px', borderBottom: '1px solid #0d0d0d' }}>
+              <SLabel text="Captain's Commit" accent={G} />
+              <textarea rows={2} value={commitMsg} onChange={e => setCommitMsg(e.target.value)}
+                placeholder="Commit message..."
+                aria-label="Commit message"
+                style={{ width: '100%', background: '#070709', border: `1px solid ${commitMsg.trim() ? G + '55' : '#181818'}`, borderRadius: 3, color: '#ccc', fontSize: 11, padding: '7px 10px', resize: 'none' as const, boxSizing: 'border-box' as const, fontFamily: "'Oswald', sans-serif", outline: 'none', transition: 'border-color 0.15s' }} />
+              <button
+                onClick={() => void runGit('commit')}
+                disabled={!canCommit}
+                aria-label="Captain Commit"
+                data-testid="captain-commit-btn"
+                style={{
+                  marginTop: 8, width: '100%', padding: '11px', borderRadius: 4,
+                  cursor: canCommit ? 'pointer' : 'default',
+                  background: canCommit ? G : '#0a0a0a',
+                  border: `1px solid ${canCommit ? G : '#1a1a1a'}`,
+                  color: canCommit ? '#000' : '#333',
+                  fontSize: 13, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.2em', fontWeight: 700, textTransform: 'uppercase' as const,
+                  transition: 'all 0.15s',
+                  boxShadow: canCommit ? `0 0 18px ${G}44` : 'none',
+                }}>
+                {gitBusy === 'commit' ? 'COMMITTING...' : 'CAPTAIN COMMIT'}
+              </button>
+              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                {(['push', 'pull'] as const).map(act => (
+                  <button key={act} onClick={() => void runGit(act)} disabled={gitBusy != null} aria-label={act}
+                    style={{ flex: 1, padding: '5px', borderRadius: 3, cursor: gitBusy ? 'default' : 'pointer', background: 'none', border: '1px solid #1c1c1c', color: '#666', fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', opacity: gitBusy && gitBusy !== act ? 0.35 : 1 }}>
+                    {gitBusy === act ? '...' : act === 'push' ? 'PUSH' : 'PULL'}
+                  </button>
+                ))}
+              </div>
+              {gitMsg && <div style={{ marginTop: 6, fontSize: 10, color: '#6dbf8a', fontFamily: 'Consolas, monospace', whiteSpace: 'pre-wrap' as const, maxHeight: 60, overflow: 'auto' }}>{gitMsg}</div>}
+              {loadError && <div style={{ marginTop: 4, fontSize: 10, color: '#f87171', fontFamily: 'Consolas, monospace' }}>{loadError}</div>}
+            </div>
+
+            {/* Changed Files */}
+            <div style={{ padding: '12px 14px', borderBottom: '1px solid #0d0d0d' }}>
+              <SLabel text={`Changed source files (${changedFiles.length})`} accent={G} />
+              {snapshot?.repositoryPath && (
+                <div style={{ marginBottom: 7, fontSize: 10, color: '#777', fontFamily: 'Consolas, monospace', lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }} title={snapshot.repositoryPath}>
+                  repo: {snapshot.repositoryPath}
+                </div>
+              )}
+              {snapshot?.summary && (
+                <div style={{ marginBottom: 7, fontSize: 10, color: '#666', fontFamily: 'Consolas, monospace', lineHeight: 1.4 }}>
+                  {snapshot.summary}
+                  {(snapshot.generatedNoiseCount ?? 0) > 0 && (
+                    <div style={{ marginTop: 4, color: '#8fa4c8' }}>
+                      Source review is clean unless files appear below. Ignored artifacts are generated/runtime churn, not pending commits.
+                    </div>
+                  )}
+                </div>
+              )}
+              {changedFiles.map(file => {
+                const icon = FILE_ICON[file.status] ?? FILE_ICON.M;
+                const isOpen = activeTab === file.path;
+                return (
+                  <button key={file.path} onClick={() => openFile(file.path)} title={file.path} aria-label={`Open ${file.path}`}
+                    style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '5px 6px', cursor: 'pointer', borderLeft: `2px solid ${isOpen ? G : 'transparent'}`, background: isOpen ? G + '0c' : 'transparent', border: 'none', borderBottom: '1px solid #090909', transition: 'all 0.1s' }}>
+                    <span style={{ width: 16, height: 16, borderRadius: 2, background: icon.color + '18', border: `1px solid ${icon.color}44`, color: icon.color, fontSize: 10, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{icon.sym}</span>
+                    <span style={{ flex: 1, fontSize: 10, color: '#999', fontFamily: 'Consolas, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, textAlign: 'left' as const }}>{file.path}</span>
+                    <span style={{ fontSize: 10, color: file.staged ? G : '#8a8a8a', fontFamily: "'Antonio', sans-serif", letterSpacing: '0.06em', flexShrink: 0 }}>{file.staged ? 'STAGED' : 'UNSTAGED'}</span>
+                  </button>
+                );
+              })}
+              {changedFiles.length === 0 && (
+                <div style={{ padding: '5px 6px', fontSize: 11, color: loadError || !snapshot ? '#f87171' : '#a8a8a8' }}>
+                  {loadError ? `Source-control runtime unavailable: ${loadError}` : !snapshot ? 'No source-control snapshot loaded.' : 'Working tree clean.'}
+                </div>
+              )}
+            </div>
+
+            {/* Git History */}
+            <div style={{ padding: '12px 14px 20px' }}>
+              <SLabel text="Commit History" accent={G} />
+              {history.map(commit => (
+                <div key={commit.hash} style={{ display: 'flex', alignItems: 'flex-start', padding: '5px 0', borderBottom: '1px solid #080808' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column' as const, alignItems: 'center', width: 14, flexShrink: 0, marginRight: 8 }}>
+                    <div style={{ width: 7, height: 7, borderRadius: '50%', background: G, boxShadow: `0 0 5px ${G}88`, flexShrink: 0 }} />
+                    <div style={{ width: 1, flex: 1, background: '#141414', minHeight: 6 }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 0, flexWrap: 'wrap' as const }}>
+                      <span style={{ fontFamily: 'Consolas, monospace', fontSize: 10, color: '#7bacff', flexShrink: 0 }}>{commit.hash}</span>
+                      {commit.refs.map(ref => <RefBadge key={`${commit.hash}-${ref}`} label={ref} />)}
+                    </div>
+                    <div style={{ fontSize: 10, color: '#787878', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, marginTop: 2 }}>{commit.subject}</div>
+                    {commit.author && <div style={{ fontSize: 10, color: '#d0d0d0', marginTop: 1 }}>{commit.author} · {commit.date}</div>}
+                  </div>
+                </div>
+              ))}
+              {history.length === 0 && <div style={{ padding: '5px 6px', fontSize: 11, color: '#a8a8a8' }}>No history available.</div>}
+            </div>
+          </div>
+        </div>
+
+        {/* ── COL 3 · Editor + Diff ────────────────────────────────────── */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+          <div style={{ display: 'flex', alignItems: 'stretch', height: 32, flexShrink: 0, background: '#040407', borderBottom: '1px solid #141414', overflowX: 'auto' }}>
+            {openTabs.length === 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', padding: '0 14px', fontSize: 10, color: '#a8a8a8', fontFamily: "'Antonio', sans-serif", letterSpacing: '0.14em', textTransform: 'uppercase' as const }}>
+                Select a changed file
+              </div>
+            )}
+            {openTabs.map(path => {
+              const act = activeTab === path;
+              return (
+                <div key={path} onClick={() => setActiveTab(path)} title={path} role="tab" aria-selected={act} tabIndex={0}
+                  style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '0 10px', cursor: 'pointer', borderRight: '1px solid #141414', background: act ? '#0b0b12' : 'transparent', borderTop: `2px solid ${act ? G : 'transparent'}`, maxWidth: 200, flexShrink: 0 }}>
+                  <span style={{ fontSize: 11, color: act ? '#ddd' : '#555', fontFamily: 'Consolas, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{baseName(path)}</span>
+                  <span onClick={e => closeTab(path, e)} role="button" aria-label={`Close ${baseName(path)}`} style={{ fontSize: 13, lineHeight: 1, color: '#555', flexShrink: 0 }}>×</span>
+                </div>
+              );
+            })}
+          </div>
+
+          {!active && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, background: '#040407' }}>
+              <div style={{ fontFamily: "'Antonio', sans-serif", fontSize: 13, letterSpacing: '0.2em', textTransform: 'uppercase' as const, color: G + '22' }}>EDITOR · DIFF</div>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 12, color: '#333', textAlign: 'center' as const, maxWidth: 260, lineHeight: 1.6 }}>
+                {loadError ? `Source-control runtime unavailable: ${loadError}` : !snapshot ? 'No source-control snapshot loaded.' : changedFiles.length > 0 ? 'Select a changed file to open editor and diff view.' : 'Working tree clean. No changes to review.'}
+              </div>
+            </div>
+          )}
+
+          {active && activeData && (
+            <>
+              <div style={{ flex: '0 0 44%', display: 'flex', flexDirection: 'column', borderBottom: '1px solid #141414', minHeight: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 12px', borderBottom: '1px solid #0d0d0d', flexShrink: 0 }}>
+                  <span style={{ fontSize: 10, color: G, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.14em', textTransform: 'uppercase' as const }}>Editor</span>
+                  <span style={{ fontSize: 10, color: '#a8a8a8', fontFamily: 'Consolas, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const, flex: 1 }}>{active}</span>
+                  {dirty && <span style={{ fontSize: 10, color: '#f9b124' }}>{GLYPH.solidDot} unsaved</span>}
+                  <button onClick={() => void saveFile(active)} disabled={!dirty} aria-label="Save file"
+                    style={{ padding: '3px 12px', borderRadius: 3, cursor: dirty ? 'pointer' : 'default', background: dirty ? G : 'none', border: dirty ? 'none' : '1px solid #1c1c1c', color: dirty ? '#000' : '#404040', fontSize: 10, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.08em', opacity: dirty ? 1 : 0.5 }}>
+                    SAVE
+                  </button>
+                </div>
+                {activeData.loading ? (
+                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#444', fontSize: 11 }}>Loading...</div>
+                ) : activeData.error ? (
+                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#f87171', fontSize: 11 }}>{activeData.error}</div>
+                ) : (
+                  <textarea value={edits[active] ?? activeData.newContent} onChange={e => setEdits(d => ({ ...d, [active]: e.target.value }))} spellCheck={false} aria-label="File editor"
+                    style={{ flex: 1, width: '100%', background: '#030306', border: 'none', color: '#cdd', fontFamily: 'Consolas, monospace', fontSize: 12, lineHeight: 1.5, padding: '8px 12px', resize: 'none' as const, outline: 'none', boxSizing: 'border-box' as const, whiteSpace: 'pre' as const, overflow: 'auto' }} />
+                )}
+                {saveMsg && <div style={{ flexShrink: 0, padding: '3px 12px', fontSize: 10, color: '#6dbf8a', fontFamily: 'Consolas, monospace' }}>{saveMsg}</div>}
+              </div>
+
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 12px', borderBottom: '1px solid #0d0d0d', flexShrink: 0 }}>
+                  <span style={{ fontSize: 10, color: G, fontFamily: "'Antonio', sans-serif", letterSpacing: '0.14em', textTransform: 'uppercase' as const }}>Diff</span>
+                  <span style={{ fontSize: 10, color: '#a8a8a8' }}>HEAD ↔ working tree</span>
+                </div>
+                <div style={{ flex: 1, overflow: 'auto', background: '#030306' }}>
+                  {diffRows.length === 0 ? (
+                    <div style={{ padding: 14, color: '#a8a8a8', fontSize: 11, fontFamily: 'Consolas, monospace' }}>No differences from HEAD.</div>
+                  ) : (
+                    <table style={{ width: '100%', borderCollapse: 'collapse' as const, fontFamily: 'Consolas, monospace', fontSize: 11.5, lineHeight: 1.5 }}>
+                      <tbody>
+                        {diffRows.map((row, idx) => (
+                          <tr key={idx}>
+                            <td style={{ width: '50%', verticalAlign: 'top', padding: '0 8px', background: row.type === 'del' ? '#1c0c0c' : 'transparent', color: row.left === null ? '#1a1a1a' : row.type === 'del' ? '#f0a3a3' : '#6a7a72', whiteSpace: 'pre-wrap' as const, wordBreak: 'break-all' as const, borderRight: '1px solid #141414' }}>
+                              {row.left ?? ''}
+                            </td>
+                            <td style={{ width: '50%', verticalAlign: 'top', padding: '0 8px', background: row.type === 'add' ? '#0c1c10' : 'transparent', color: row.right === null ? '#1a1a1a' : row.type === 'add' ? '#a3f0c0' : '#6a7a72', whiteSpace: 'pre-wrap' as const, wordBreak: 'break-all' as const }}>
+                              {row.right ?? ''}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+      </div>
+    </Shell>
+  );
+}

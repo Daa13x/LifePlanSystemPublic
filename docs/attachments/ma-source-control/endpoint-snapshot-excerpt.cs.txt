@@ -1,0 +1,170 @@
+            if (path.Equals("/api/ui/source-control", StringComparison.OrdinalIgnoreCase) && method == "GET")
+            {
+                var json = JsonSerializer.Serialize(
+                    await _homeSnapshot.GetSourceControlSnapshotAsync().ConfigureAwait(false),
+                    new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                await WriteJson(response, 200, json).ConfigureAwait(false);
+                return;
+            }
+            if (path.Equals("/api/ui/projects", StringComparison.OrdinalIgnoreCase) && method == "GET")
+            {
+                var json = JsonSerializer.Serialize(
+                    new { ok = true, projects = _homeSnapshot.GetProjectsSnapshot() },
+                    new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                await WriteJson(response, 200, json).ConfigureAwait(false);
+                return;
+            }
+            if (path.Equals("/api/ui/browser/workspace", StringComparison.OrdinalIgnoreCase) && method == "GET")
+            {
+                var workspace = BrowserWorkspaceService.Instance;
+                var automation = MostlyArmless.Services.Automation.BrowserAutomationService.Instance;
+                var connector = MostlyArmless.Services.Automation.BrowserAgentConnectorService.Instance;
+                var internalBrowserActive = IsTcpPortOpen("127.0.0.1", 9223);
+                var internalControl = MostlyArmless.Services.Automation.SerenitySelfControlService.Instance;
+                var preview = HelmPreviewService.Instance;
+                var previewPort = preview?.CurrentPort;
+                var previewOnline = previewPort.HasValue && IsTcpPortOpen("127.0.0.1", previewPort.Value);
+                if (workspace != null)
+                    workspace.SetPreviewPort(previewOnline ? previewPort : null);
+                var previewUrl = workspace?.PreferPreview == true && workspace.PreviewPort.HasValue
+                    ? $"http://localhost:{workspace.PreviewPort.Value}"
+                    : string.Empty;
+                var internalState = internalControl != null
+                    ? await internalControl.GetStateAsync().ConfigureAwait(false)
+                    : new { success = false, active = false, error = "Internal browser control unavailable." };
+                var json = JsonSerializer.Serialize(
+                    new
+                    {
+                        ok = true,
+                        workspace = new
+            if (path.Equals("/api/ui/source-control/commit", StringComparison.OrdinalIgnoreCase) && method == "POST")
+            {
+                try
+                {
+                    string body;
+                    using (var r = new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8))
+                        body = await r.ReadToEndAsync().ConfigureAwait(false);
+                    using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
+                    var message = doc.RootElement.TryGetProperty("message", out var msgEl) ? msgEl.GetString() ?? string.Empty : string.Empty;
+
+                    var (ok, detail) = await _homeSnapshot.CommitWorkspaceAsync(message).ConfigureAwait(false);
+                    var json = JsonSerializer.Serialize(
+                        new { ok, message = detail, snapshot = await _homeSnapshot.GetSourceControlSnapshotAsync().ConfigureAwait(false) },
+                        new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    await WriteJson(response, ok ? 200 : 400, json).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WriteJson(response, 500, JsonSerializer.Serialize(new { ok = false, error = ex.Message })).ConfigureAwait(false);
+                }
+                return;
+            }
+            if (path.Equals("/api/ui/source-control/pat", StringComparison.OrdinalIgnoreCase) && method == "POST")
+            {
+                try
+                {
+                    string body;
+                    using (var r = new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8))
+                        body = await r.ReadToEndAsync().ConfigureAwait(false);
+                    using var doc = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
+                    var token = doc.RootElement.TryGetProperty("token", out var tokenEl) ? tokenEl.GetString() ?? string.Empty : string.Empty;
+                    var (ok, detail) = _homeSnapshot.UpdateSetting("GITHUB_PAT", token);
+                    var json = JsonSerializer.Serialize(
+                        new { ok, message = detail, snapshot = await _homeSnapshot.GetSourceControlSnapshotAsync().ConfigureAwait(false) },
+                        new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    await WriteJson(response, ok ? 200 : 400, json).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WriteJson(response, 500, JsonSerializer.Serialize(new { ok = false, error = ex.Message })).ConfigureAwait(false);
+                }
+                return;
+            }
+            if (path.Equals("/api/ui/source-control/push", StringComparison.OrdinalIgnoreCase) && method == "POST")
+            {
+                try
+                {
+                    var (ok, detail) = await _homeSnapshot.PushWorkspaceAsync().ConfigureAwait(false);
+                    var json = JsonSerializer.Serialize(
+                        new { ok, message = detail, snapshot = await _homeSnapshot.GetSourceControlSnapshotAsync().ConfigureAwait(false) },
+                        new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    await WriteJson(response, ok ? 200 : 400, json).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WriteJson(response, 500, JsonSerializer.Serialize(new { ok = false, error = ex.Message })).ConfigureAwait(false);
+                }
+                return;
+            }
+            if (path.Equals("/api/ui/source-control/pull", StringComparison.OrdinalIgnoreCase) && method == "POST")
+            {
+                try
+                {
+                    var (ok, detail) = await _homeSnapshot.PullWorkspaceAsync().ConfigureAwait(false);
+                    var json = JsonSerializer.Serialize(
+                        new { ok, message = detail, snapshot = await _homeSnapshot.GetSourceControlSnapshotAsync().ConfigureAwait(false) },
+                        new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    await WriteJson(response, ok ? 200 : 400, json).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WriteJson(response, 500, JsonSerializer.Serialize(new { ok = false, error = ex.Message })).ConfigureAwait(false);
+                }
+                return;
+            }
+            if (path.Equals("/api/ui/source-control/push-replit-ui", StringComparison.OrdinalIgnoreCase) && method == "POST")
+            {
+                try
+                {
+                    var (ok, detail) = await _homeSnapshot.PushReplitUiBranchAsync().ConfigureAwait(false);
+                    var json = JsonSerializer.Serialize(
+                        new { ok, message = detail, snapshot = await _homeSnapshot.GetSourceControlSnapshotAsync().ConfigureAwait(false) },
+                        new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    await WriteJson(response, ok ? 200 : 400, json).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WriteJson(response, 500, JsonSerializer.Serialize(new { ok = false, error = ex.Message })).ConfigureAwait(false);
+                }
+                return;
+            }
+            if (path.Equals("/api/ui/source-control/pull-ui", StringComparison.OrdinalIgnoreCase) && method == "POST")
+            {
+                try
+                {
+                    var (ok, detail) = await _homeSnapshot.PullUiFromReplitUiAsync().ConfigureAwait(false);
+                    var json = JsonSerializer.Serialize(
+                        new { ok, message = detail, snapshot = await _homeSnapshot.GetSourceControlSnapshotAsync().ConfigureAwait(false) },
+                        new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    await WriteJson(response, ok ? 200 : 400, json).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WriteJson(response, 500, JsonSerializer.Serialize(new { ok = false, error = ex.Message })).ConfigureAwait(false);
+                }
+                return;
+            }
+            if (path.Equals("/api/ui/source-control/sync-screenshots", StringComparison.OrdinalIgnoreCase) && method == "POST")
+            {
+                await WriteJson(response, 400, JsonSerializer.Serialize(new
+                {
+                    ok = false,
+                    error = "Screenshot sync is not wired to a verified capture routine yet."
+                }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase })).ConfigureAwait(false);
+                return;
+            }
+            if (path.Equals("/api/ui/source-control/file", StringComparison.OrdinalIgnoreCase) && method == "GET")
+            {
+                try
+                {
+                    var rel = request.QueryString["path"] ?? string.Empty;
+                    var dto = await _homeSnapshot.GetFileDiffAsync(rel).ConfigureAwait(false);
+                    var json = JsonSerializer.Serialize(dto, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+                    await WriteJson(response, dto.Ok ? 200 : 400, json).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WriteJson(response, 500, JsonSerializer.Serialize(new { ok = false, error = ex.Message })).ConfigureAwait(false);
+                }
+                return;
+            }
