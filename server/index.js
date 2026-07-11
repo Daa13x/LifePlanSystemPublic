@@ -39,7 +39,7 @@ async function runCli(command, args, options = {}) {
   try {
     const useShell = process.platform === 'win32' && /\.cmd$/i.test(command);
     const result = await execFileAsync(command, args, {
-      cwd: root,
+      cwd: options.cwd || root,
       timeout: options.timeout || 20000,
       windowsHide: true,
       shell: useShell,
@@ -1659,13 +1659,28 @@ app.post('/api/hf/download', async (req, res) => {
   ok(res, { id, target, size: stat.size });
 });
 
+const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken']);
+
+function readSettingsRedacted() {
+  const settings = Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)]));
+  for (const key of SECRET_SETTING_KEYS) {
+    if (Object.hasOwn(settings, key)) settings[key] = settings[key] ? '[redacted]' : '';
+  }
+  return settings;
+}
+
 app.get('/api/settings', (_req, res) => {
-  ok(res, Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)])));
+  ok(res, readSettingsRedacted());
 });
 
 app.post('/api/settings', (req, res) => {
-  for (const [key, value] of Object.entries(req.body)) setSetting(key, value);
-  ok(res, Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)])));
+  for (const [key, value] of Object.entries(req.body)) {
+    // Never clobber a stored secret with the redaction placeholder echoed back
+    // from the UI. Real secret updates go through their dedicated endpoints.
+    if (SECRET_SETTING_KEYS.has(key) && value === '[redacted]') continue;
+    setSetting(key, value);
+  }
+  ok(res, readSettingsRedacted());
 });
 
 app.get('/api/consultations', (_req, res) => ok(res, allRows('SELECT * FROM consultations ORDER BY updated_at DESC')));
@@ -2187,6 +2202,7 @@ app.get('/api/source/status', async (_req, res) => {
     github: {
       cliAvailable: ghStatus.available,
       authenticated: ghStatus.ok,
+      tokenConfigured: githubTokenConfigured(),
       detail: ghStatus.ok ? ghStatus.stdout || ghStatus.stderr : ghStatus.stderr
     },
     huggingface: {
@@ -2389,9 +2405,26 @@ app.post('/api/source/push', async (req, res) => {
   if (req.body?.confirm !== true) {
     return fail(res, 428, `Push needs explicit confirmation. Confirm to run: git push -u origin ${branchName} (no force flags).`);
   }
-  const result = await runCli('git', ['push', '-u', 'origin', branchName], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
-  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git push failed');
-  ok(res, { remote: 'origin', branch: branchName, output: result.stdout || result.stderr });
+  // Prefer the stored PAT for HTTPS github/gitlab origins so a push works even
+  // when no credential helper or gh login is present. The token is passed on the
+  // command line only for this one invocation, never persisted into the remote.
+  const token = getSetting('githubToken', '');
+  const originUrl = (await runCli('git', ['remote', 'get-url', 'origin'])).stdout;
+  const useToken = token && /^https:\/\//i.test(originUrl);
+  const pushArgs = useToken
+    ? ['push', authenticatedRemoteUrl(originUrl, token), `HEAD:${branchName}`]
+    : ['push', '-u', 'origin', branchName];
+  const result = await runCli('git', pushArgs, { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  if (!result.ok) {
+    // Scrub the token from any error text before returning it to the client.
+    const scrub = (text) => token ? String(text || '').split(token).join('***') : text;
+    return fail(res, 500, scrub(result.stderr || result.stdout || 'git push failed'));
+  }
+  if (useToken) {
+    // Set upstream separately since the tokenized URL push skips -u tracking.
+    await runCli('git', ['branch', '--set-upstream-to', `origin/${branchName}`, branchName]);
+  }
+  ok(res, { remote: 'origin', branch: branchName, authenticated: Boolean(useToken), output: result.stdout || result.stderr });
 });
 
 app.post('/api/source/remote', async (req, res) => {
@@ -2448,6 +2481,134 @@ app.post('/api/source/create/hf', async (req, res) => {
   const result = await runCli('hf', args, { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'Hugging Face repo creation failed.');
   ok(res, { message: `Hugging Face ${type} repo ${repo} created.`, output: result.stdout || result.stderr });
+});
+
+// GitHub Personal Access Token: stored in settings (redacted on read) and used
+// only to build an ephemeral authenticated push URL at push time, never written
+// into the persistent git remote config where `git remote -v` would leak it.
+const GITHUB_PAT_PREFIXES = ['ghp_', 'github_pat_'];
+
+function githubTokenConfigured() {
+  return Boolean(getSetting('githubToken', ''));
+}
+
+// Injects the token into an https github/gitlab remote as an ephemeral userinfo
+// segment. Returns the original URL for anything that is not a plain https URL
+// (ssh remotes already carry their own auth).
+function authenticatedRemoteUrl(remoteUrl, token) {
+  const url = String(remoteUrl || '').trim();
+  if (!token || !/^https:\/\//i.test(url)) return url;
+  try {
+    const parsed = new URL(url);
+    parsed.username = 'x-access-token';
+    parsed.password = token;
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+app.post('/api/source/token', (req, res) => {
+  const token = String(req.body.token || '').trim();
+  if (!token) return fail(res, 400, 'A GitHub Personal Access Token is required.');
+  if (!GITHUB_PAT_PREFIXES.some((prefix) => token.toLowerCase().startsWith(prefix))) {
+    return fail(res, 400, 'Token should start with github_pat_ (fine-grained) or ghp_ (classic).');
+  }
+  setSetting('githubToken', token);
+  ok(res, { configured: true, message: 'GitHub token saved. It is used only for authenticated pushes and never stored in the git remote.' });
+});
+
+app.post('/api/source/token/clear', (_req, res) => {
+  setSetting('githubToken', '');
+  ok(res, { configured: false, message: 'GitHub token cleared.' });
+});
+
+app.post('/api/source/rebase', async (_req, res) => {
+  const branch = await runCli('git', ['branch', '--show-current']);
+  const branchName = (branch.stdout || '').trim();
+  if (!branchName) return fail(res, 400, 'Cannot rebase from detached HEAD.');
+  const result = await runCli('git', ['pull', '--rebase', 'origin', branchName], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  const snapshot = await gitStatusSnapshot();
+  if (!result.ok && !snapshot.hasConflicts) return fail(res, 409, result.stderr || result.stdout || 'git pull --rebase failed');
+  ok(res, {
+    output: result.stdout || result.stderr || 'Rebase complete.',
+    hasConflicts: snapshot.hasConflicts,
+    conflictFiles: snapshot.conflictFiles,
+    status: snapshot.status
+  });
+});
+
+app.post('/api/source/merge', async (req, res) => {
+  const branch = String(req.body.branch || '').trim();
+  if (!branch) return fail(res, 400, 'Branch to merge is required.');
+  const current = await runCli('git', ['branch', '--show-current']);
+  if (branch === (current.stdout || '').trim()) return fail(res, 400, 'Cannot merge a branch into itself.');
+  const result = await runCli('git', ['merge', '--no-edit', branch], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  const snapshot = await gitStatusSnapshot();
+  if (!result.ok && !snapshot.hasConflicts) return fail(res, 409, result.stderr || result.stdout || 'git merge failed');
+  ok(res, {
+    branch,
+    output: result.stdout || result.stderr || `Merged ${branch}.`,
+    hasConflicts: snapshot.hasConflicts,
+    conflictFiles: snapshot.conflictFiles,
+    status: snapshot.status
+  });
+});
+
+app.post('/api/source/abort-merge', async (_req, res) => {
+  // Works for both a conflicted merge and a conflicted rebase.
+  let result = await runCli('git', ['merge', '--abort']);
+  if (!result.ok) {
+    const rebaseAbort = await runCli('git', ['rebase', '--abort']);
+    if (rebaseAbort.ok) result = rebaseAbort;
+  }
+  if (!result.ok) return fail(res, 409, result.stderr || result.stdout || 'Nothing to abort (no merge or rebase in progress).');
+  ok(res, { output: result.stdout || result.stderr || 'Aborted in-progress merge/rebase.', status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+});
+
+app.post('/api/source/delete-branch', async (req, res) => {
+  const branch = String(req.body.branch || '').trim();
+  if (!branch) return fail(res, 400, 'Branch name is required.');
+  if (['main', 'master'].includes(branch.toLowerCase())) return fail(res, 403, `Refusing to delete protected branch "${branch}".`);
+  const current = await runCli('git', ['branch', '--show-current']);
+  if (branch === (current.stdout || '').trim()) return fail(res, 409, 'Cannot delete the branch you are currently on. Switch first.');
+  const flag = req.body.force ? '-D' : '-d';
+  const result = await runCli('git', ['branch', flag, branch]);
+  if (!result.ok) {
+    if (!req.body.force && /not fully merged/i.test(result.stderr || result.stdout || '')) {
+      return fail(res, 409, `Branch "${branch}" is not fully merged. Re-run with force to delete it anyway.`);
+    }
+    return fail(res, 500, result.stderr || result.stdout || 'git branch delete failed');
+  }
+  ok(res, { branch, output: result.stdout || result.stderr || `Deleted branch ${branch}.` });
+});
+
+app.post('/api/source/discard-file', async (req, res) => {
+  try {
+    const target = safeWorkspacePath(req.body.path);
+    if (isProtectedWorkspacePath(target.normalized)) return fail(res, 409, `Protected/private file cannot be discarded here: ${target.normalized}`);
+    // Untracked files have nothing to restore from; git restore is a no-op there.
+    const tracked = await runCli('git', ['ls-files', '--error-unmatch', '--', target.normalized]);
+    if (!tracked.ok) return fail(res, 400, `"${target.normalized}" is untracked; delete it manually if unwanted.`);
+    const result = await runCli('git', ['restore', '--worktree', '--', target.normalized]);
+    if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git restore failed');
+    ok(res, { path: target.normalized, status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.get('/api/source/history', async (_req, res) => {
+  const limit = 40;
+  const sep = '\x1f';
+  const result = await runCli('git', ['log', `--pretty=format:%h${sep}%s${sep}%an${sep}%ar${sep}%D`, '--decorate', '-n', String(limit)], { maxBuffer: 2 * 1024 * 1024 });
+  if (!result.ok) return ok(res, { commits: [] });
+  const commits = result.stdout.split('\n').filter(Boolean).map((line) => {
+    const [shortHash, subject, author, relative, decorations] = line.split(sep);
+    const refs = (decorations || '').split(',').map((ref) => ref.replace(/^\s*HEAD ->\s*/, '').trim()).filter(Boolean);
+    return { shortHash, subject, author, relative, refs };
+  });
+  ok(res, { commits });
 });
 
 app.get('/api/repo/files', (req, res) => {

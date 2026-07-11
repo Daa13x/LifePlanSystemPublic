@@ -965,3 +965,55 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .commit-file-row { display: flex; gap: 10px; align-items: baseline; padding: 4px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
 .commit-file-row span { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-width: 22px; }
 .source-file-row.selected { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* Full source-control panel: tabbed git cockpit */
+.source-panel { display: flex; flex-direction: column; gap: 12px; }
+.sc-topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; padding: 12px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.sc-topbar-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sc-topbar-main h2 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.sc-repo-path { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 520px; }
+.sc-status-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.sc-branch-badge { padding: 3px 10px; border-radius: 20px; background: color-mix(in srgb, var(--accent) 20%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--text); font-size: 12px; font-weight: 600; }
+.sc-badge { padding: 3px 9px; border-radius: 20px; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.sc-badge.good { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.sc-badge.warn { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); }
+.sc-badge.bad { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+.sc-status-badges > button { padding: 4px 8px; }
+
+.sc-conflict-banner { display: flex; flex-direction: column; gap: 8px; }
+.sc-conflict-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.sc-conflict-files button { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+
+.sc-tabbar { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+.sc-tab { display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 13px; cursor: pointer; border-radius: 8px 8px 0 0; }
+.sc-tab:hover { color: var(--text); background: var(--panel-2); }
+.sc-tab.active { color: var(--accent); border-bottom-color: var(--accent); background: var(--panel-2); }
+.sc-tab-badge { padding: 1px 7px; border-radius: 10px; background: var(--accent); color: var(--bg); font-size: 10px; font-weight: 700; }
+
+.sc-tab-body { display: flex; flex-direction: column; gap: 12px; }
+.sc-changes-grid { display: grid; grid-template-columns: minmax(0, 360px) minmax(0, 1fr); gap: 12px; align-items: start; }
+.sc-branch-grid, .sc-sync-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; align-items: start; }
+
+.sc-history-list { display: flex; flex-direction: column; gap: 2px; max-height: 620px; overflow: auto; }
+.sc-commit-row { display: flex; gap: 12px; padding: 8px 4px; border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
+.sc-commit-node { flex: 0 0 10px; width: 10px; height: 10px; margin-top: 5px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.sc-commit-body { min-width: 0; }
+.sc-commit-subject { color: var(--text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-commit-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; color: var(--muted); font-size: 11px; }
+.sc-commit-hash { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--accent-2); }
+.sc-ref-badge { padding: 1px 6px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--line); font-size: 10px; }
+.sc-ref-badge.head { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--line)); }
+.sc-ref-badge.remote { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); }
+
+.sc-branch-list { display: flex; flex-direction: column; gap: 4px; max-height: 360px; overflow: auto; }
+.sc-branch-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.sc-branch-item.current { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.sc-branch-item span { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.sc-token-form { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+button.danger { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); color: var(--red); }
+button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 15%, transparent); }
+
+@media (max-width: 1180px) {
+  .sc-changes-grid { grid-template-columns: minmax(0, 1fr); }
+}
