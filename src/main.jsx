@@ -14,7 +14,11 @@ import {
   FolderKanban,
   Github,
   GitBranch,
+  GitMerge,
   Globe2,
+  History,
+  KeyRound,
+  RotateCcw,
   ListChecks,
   MessageSquareText,
   Moon,
@@ -336,7 +340,7 @@ function App() {
           </div>
         </header>
 
-        {view === 'planner' && <Planner planner={planner} refresh={reloadPlanner} runRefresh={runPlannerRefresh} />}
+        {view === 'planner' && <Planner planner={planner} refresh={reloadPlanner} runRefresh={runPlannerRefresh} setNotice={setNotice} />}
         {view === 'chat' && (
           <Chat
             sessions={sessions}
@@ -372,7 +376,71 @@ function App() {
   );
 }
 
-function Planner({ planner, refresh, runRefresh }) {
+function QuickAddItem({ refresh, setNotice }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ type: 'goal', title: '', body: '', due_at: '', next_action: '' });
+  const set = (key) => (event) => setForm((prev) => ({ ...prev, [key]: event.target.value }));
+
+  async function save() {
+    if (!form.title.trim()) return;
+    setBusy(true);
+    try {
+      await api('/api/items', { method: 'POST', body: JSON.stringify({ ...form, status: form.type === 'blocker' ? 'blocked' : 'active' }) });
+      setForm({ type: 'goal', title: '', body: '', due_at: '', next_action: '' });
+      setOpen(false);
+      setNotice?.('Item added to the planner.');
+      refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return <button className="primary subtle" onClick={() => setOpen(true)}>+ Add planner item</button>;
+  }
+  return (
+    <div className="quick-add">
+      <div className="quick-add-row">
+        <select value={form.type} onChange={set('type')} disabled={busy}>
+          {['goal', 'project', 'decision', 'reminder', 'blocker', 'waiting', 'rule', 'note'].map((t) => (
+            <option key={t} value={t}>{t}</option>
+          ))}
+        </select>
+        <input value={form.title} onChange={set('title')} placeholder="What needs tracking?" disabled={busy} autoFocus />
+      </div>
+      <textarea value={form.body} onChange={set('body')} placeholder="Detail (optional)" disabled={busy} rows={2} />
+      <div className="quick-add-row">
+        <input type="date" value={form.due_at} onChange={set('due_at')} disabled={busy} />
+        <input value={form.next_action} onChange={set('next_action')} placeholder="Next action (optional)" disabled={busy} />
+      </div>
+      <div className="quick-add-row">
+        <button className="primary" onClick={save} disabled={busy || !form.title.trim()}>{busy ? 'Saving...' : 'Save item'}</button>
+        <button className="primary subtle" onClick={() => setOpen(false)} disabled={busy}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function PlannerItemActions({ item, refresh }) {
+  const [busy, setBusy] = useState(false);
+  async function patch(body) {
+    setBusy(true);
+    try { await api(`/api/items/${item.id}`, { method: 'PATCH', body: JSON.stringify(body) }); refresh(); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="item-actions">
+      {item.status !== 'done' && (
+        <button title="Mark done" disabled={busy} onClick={() => patch({ status: 'done', reviewed: true })}>Done</button>
+      )}
+      <button title="Mark reviewed (clears stale)" disabled={busy} onClick={() => patch({ reviewed: true, status: item.status === 'stale' ? 'active' : item.status })}>Seen</button>
+      <button title="Archive" disabled={busy} onClick={() => patch({ status: 'archived' })}>Drop</button>
+    </div>
+  );
+}
+
+function Planner({ planner, refresh, runRefresh, setNotice }) {
   if (!planner) return <div className="loading">Loading planner context...</div>;
   const nextBestBody = planner.nextBest?.body
     || (planner.nextBest?.action_type ? 'Review and approve, deny, or defer this proposed change.' : 'Add goals, projects, or memory candidates to feed the planner.');
@@ -422,6 +490,7 @@ function Planner({ planner, refresh, runRefresh }) {
             {planner.candidates.map((item) => <ItemRow key={`candidate-${item.id}`} item={item} compact />)}
           </>
         )}
+        <QuickAddItem refresh={refresh} setNotice={setNotice} />
         <button className="primary subtle" onClick={runRefresh}>Run planner refresh</button>
       </div>
 
@@ -432,7 +501,11 @@ function Planner({ planner, refresh, runRefresh }) {
               <h3>{title}</h3>
               <Pill tone={tone}>{items.length}</Pill>
             </div>
-            {items.length ? items.map((item) => <ItemRow key={`${title}-${item.id}`} item={item} />) : <Empty title="Nothing here" body="The database has no matching active items." />}
+            {items.length ? items.map((item) => (
+              <ItemRow key={`${title}-${item.id}`} item={item}>
+                <PlannerItemActions item={item} refresh={refresh} />
+              </ItemRow>
+            )) : <Empty title="Nothing here" body="The database has no matching active items. Use “+ Add planner item” to put real life in here." />}
           </div>
         ))}
       </div>
@@ -2561,6 +2634,11 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [fileDiff, setFileDiff] = useState(null);
   const [diffBusy, setDiffBusy] = useState(false);
   const [pushArmed, setPushArmed] = useState(false);
+  const [tab, setTab] = useState('changes');
+  const [history, setHistory] = useState([]);
+  const [mergeBranch, setMergeBranch] = useState('');
+  const [tokenInput, setTokenInput] = useState('');
+  const [showTokenForm, setShowTokenForm] = useState(false);
 
   async function refresh(announce = false) {
     try {
@@ -2574,6 +2652,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       if (originRemote?.url) setRemoteUrl(originRemote.url);
       const originRepo = githubRepoFromRemote(originRemote?.url || '');
       if (originRepo) setGithubRepo((current) => current || originRepo);
+      try { setHistory((await api('/api/source/history')).commits || []); } catch { /* history is best-effort */ }
       if (announce) setNotice('Source status refreshed.');
     } catch (err) {
       setNotice(err.message);
@@ -2627,6 +2706,14 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
     }
   }
 
+  async function saveToken() {
+    const token = tokenInput.trim();
+    if (!token) return;
+    await action('/api/source/token', { token }, 'GitHub token saved.');
+    setTokenInput('');
+    setShowTokenForm(false);
+  }
+
   const changedFiles = source?.changedFiles || [];
   const stagedFiles = changedFiles.filter((file) => file.staged);
   const localBranches = (branches.branches || []).filter((branch) => !branch.remote);
@@ -2664,236 +2751,339 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
         ? `Hugging Face CLI is missing. ${source.installHints?.huggingFaceCli || 'Install Hugging Face CLI first or use Settings.'}`
         : '';
 
+  const tokenConfigured = Boolean(source?.github?.tokenConfigured);
+  const tabs = [
+    { id: 'changes', label: 'Changes', icon: FileText, badge: changedFiles.length || null },
+    { id: 'history', label: 'History', icon: History, badge: null },
+    { id: 'branches', label: 'Branches', icon: GitBranch, badge: null },
+    { id: 'sync', label: 'Sync & Setup', icon: Upload, badge: null }
+  ];
+
   return (
-    <section className="source-layout">
-      <div className="panel source-hero">
-        <div>
-          <h2>Repository</h2>
-          <p>{source?.repoPath || 'Reading repository state...'}</p>
+    <section className="source-panel">
+      <div className="sc-topbar">
+        <div className="sc-topbar-main">
+          <h2><GitBranch size={18} /> Source Control</h2>
+          <span className="sc-repo-path" title={source?.repoPath}>{source?.repoPath || 'Reading repository state...'}</span>
         </div>
-        <div className="source-actions">
-          <button onClick={() => refresh(true)} disabled={sourceBusy}><RefreshCcw size={16} /> Refresh</button>
-          <button onClick={() => action('/api/source/login/github')} disabled={Boolean(githubLoginDisabledReason)} title={githubLoginDisabledReason || 'Start GitHub CLI browser login'}><Github size={16} /> Login with Git</button>
-          <button onClick={() => openExternal(source?.installUrls?.githubCli || 'https://cli.github.com/', 'GitHub CLI download')} disabled={sourceBusy}><Download size={16} /> GitHub CLI</button>
-          <button onClick={() => openExternal(currentRepoWebUrl, 'current origin repository')} disabled={sourceBusy || !currentRepoWebUrl}><Github size={16} /> Open origin repo</button>
-          <button onClick={() => action('/api/source/login/hf')} disabled={Boolean(hfLoginDisabledReason)} title={hfLoginDisabledReason || 'Start Hugging Face CLI login'}>Login with HF</button>
-          <button onClick={() => openExternal(source?.installUrls?.huggingFaceCli || 'https://huggingface.co/docs/huggingface_hub/guides/cli', 'Hugging Face CLI docs')} disabled={sourceBusy}>HF CLI docs</button>
-        </div>
-      </div>
-
-      <div className="panel">
-        <h2>Connection</h2>
-        <div className={cx('source-warning', isPublicCheckout ? 'warn' : 'info')}>
-          <strong>{boundaryLabel}</strong>
-          <small>
-            This Source panel controls only the local checkout at <code>{source?.repoPath || 'unknown path'}</code>.
-            {currentRepoName ? <> Current origin is <code>{currentRepoName}</code>.</> : ' No GitHub origin repository was detected.'}
-            {isPublicCheckout ? ' Do not use this panel to move private LifePlanSystem content into the public app checkout.' : ''}
-          </small>
-        </div>
-        <div className="connection-grid">
-          <div>
-            <span>Origin</span>
-            <strong>{currentRepoName || 'Unknown remote'}</strong>
-            <small>{currentRemoteUrl || 'No origin URL configured'}</small>
-          </div>
-          <div>
-            <span>Branch</span>
-            <strong>{source?.branch || 'Unknown'}</strong>
-            <small>{source?.upstream ? `${source.ahead || 0} ahead / ${source.behind || 0} behind ${source.upstream}` : 'No upstream detected'}</small>
-          </div>
-          <div>
-            <span>Git user</span>
-            <strong>{source?.user?.name || 'Not set'}</strong>
-            <small>{source?.user?.email || 'No email configured'}</small>
-          </div>
-          <div>
-            <span>GitHub CLI</span>
-            <Pill tone={source?.github?.authenticated ? 'good' : 'warn'}>
-              {source?.github?.authenticated ? 'Logged in' : source?.github?.cliAvailable ? 'Login needed' : 'Unavailable'}
-            </Pill>
-            <small>{source?.github?.cliAvailable ? source?.github?.detail : source?.installHints?.githubCli}</small>
-          </div>
-          <div>
-            <span>Hugging Face CLI</span>
-            <Pill tone={source?.huggingface?.authenticated ? 'good' : 'warn'}>
-              {source?.huggingface?.authenticated ? 'Logged in' : source?.huggingface?.cliAvailable ? 'Login needed' : 'Unavailable'}
-            </Pill>
-            <small>{source?.huggingface?.cliAvailable ? source?.huggingface?.detail : source?.installHints?.huggingFaceCli}</small>
-          </div>
-          <div>
-            <span>Working tree</span>
-            <strong>{hasChanges ? `${changedFiles.length} changed` : 'Clean'}</strong>
-            <small>{source?.hasConflicts ? `${source.conflictFiles.length} conflict(s)` : `${protectedFiles.length} protected file(s)`}</small>
-          </div>
+        <div className="sc-status-badges">
+          <span className="sc-branch-badge">{source?.branch || 'unknown'}</span>
+          {source?.upstream && source.ahead > 0 && <span className="sc-badge good">ahead {source.ahead}</span>}
+          {source?.upstream && source.behind > 0 && <span className="sc-badge warn">behind {source.behind}</span>}
+          <span className="sc-badge">staged {stagedFiles.length}</span>
+          <span className="sc-badge">unstaged {changedFiles.length - stagedFiles.length}</span>
+          {source?.hasConflicts
+            ? <span className="sc-badge bad">{source.conflictFiles.length} conflict(s)</span>
+            : hasChanges
+              ? <span className="sc-badge warn">{changedFiles.length} changed</span>
+              : <span className="sc-badge good">Clean</span>}
+          <button onClick={() => refresh(true)} disabled={sourceBusy} title="Refresh status, branches and history"><RefreshCcw size={15} /></button>
         </div>
       </div>
 
-      <div className="panel">
-        <h2>Write</h2>
-        <p>These buttons run local Git commands in this checkout against the displayed origin. Protected runtime files are blocked from staging and commits; push is review-armed and main/master is blocked.</p>
-        {sourceBusy && <div className="source-warning info">Running source control operation...</div>}
-        {source && !source.github?.cliAvailable && <div className="source-warning warn">GitHub CLI login is unavailable because <code>gh</code> is not installed or not on PATH. Use GitHub CLI above to open the official download page, install it, restart the app terminal, then refresh.</div>}
-        {source && !source.huggingface?.cliAvailable && <div className="source-warning warn">Hugging Face CLI login is unavailable because <code>hf</code> is not installed or not on PATH. Use HF CLI docs above, or add an HF token in Settings.</div>}
-        {source && !source.winget?.available && <div className="source-warning warn">winget is not on PATH, so the app cannot run <code>winget install --id GitHub.cli</code> for you.</div>}
-        {source?.hasConflicts && <div className="source-warning bad">Resolve conflicts before staging or committing: {source.conflictFiles.join(', ')}</div>}
-        {protectedFiles.length > 0 && <div className="source-warning warn">Protected files present: {protectedFiles.map((file) => file.path).join(', ')}</div>}
-        <label>Create branch</label>
-        <div className="inline-form">
-          <input value={branchName} onChange={(event) => setBranchName(event.target.value)} disabled={sourceBusy} />
-          <button onClick={() => action('/api/source/branch', { branch: branchName }, `Created branch ${branchName}`)} disabled={sourceBusy}><GitBranch size={16} /> Create</button>
-        </div>
-        <label>Switch branch</label>
-        <div className="inline-form">
-          <select value={branchToSwitch} onChange={(event) => setBranchToSwitch(event.target.value)} disabled={sourceBusy}>
-            {localBranches.map((branch) => (
-              <option value={branch.name} key={branch.name}>{branch.name}</option>
-            ))}
-          </select>
-          <button onClick={() => action('/api/source/checkout', { branch: branchToSwitch }, `Switched to ${branchToSwitch}`)} disabled={sourceBusy || !branchToSwitch || branchToSwitch === source?.branch}><GitBranch size={16} /> Switch</button>
-        </div>
-        <label>Origin remote</label>
-        <div className="inline-form">
-          <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} disabled={sourceBusy} />
-          <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated. Review the boundary label before any fetch, pull, or push.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
-        </div>
-        <label>Create GitHub repo</label>
-        <div className="inline-form">
-          <input value={githubRepo} onChange={(event) => setGithubRepo(event.target.value)} disabled={sourceBusy} placeholder="owner/repo" />
-          <button onClick={() => action('/api/source/create/github', { repo: githubRepo, visibility: 'public' })} disabled={sourceBusy || !githubRepo.trim()}><Github size={16} /> Create public</button>
-          <button onClick={() => openExternal('https://github.com/new', 'GitHub new repository page')} disabled={sourceBusy}>Open GitHub New</button>
-        </div>
-        <label>Create Hugging Face repo</label>
-        <div className="inline-form">
-          <input value={hfRepo} onChange={(event) => setHfRepo(event.target.value)} disabled={sourceBusy} placeholder="username/life-planner-models" />
-          <select value={hfRepoType} onChange={(event) => setHfRepoType(event.target.value)} disabled={sourceBusy}>
-            <option value="model">model</option>
-            <option value="dataset">dataset</option>
-            <option value="space">space</option>
-          </select>
-          <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'public' })} disabled={sourceBusy || !hfRepo.trim()}>Create public</button>
-          <button onClick={() => openExternal('https://huggingface.co/new', 'Hugging Face new repository page')} disabled={sourceBusy}>Open HF New</button>
-        </div>
-        <label>Files to be committed ({stagedFiles.length})</label>
-        {stagedFiles.length ? (
-          <div className="commit-file-list">
-            {stagedFiles.map((file) => (
-              <div className="commit-file-row" key={file.path}>
-                <span>{file.status}</span>
-                <strong>{file.path}</strong>
-              </div>
+      <div className={cx('source-warning', isPublicCheckout ? 'warn' : 'info')}>
+        <strong>{boundaryLabel}</strong>
+        <small>
+          This Source panel controls only the local checkout at <code>{source?.repoPath || 'unknown path'}</code>.
+          {currentRepoName ? <> Current origin is <code>{currentRepoName}</code>.</> : ' No GitHub origin repository was detected.'}
+          {isPublicCheckout ? ' Do not use this panel to move private LifePlanSystem content into the public app checkout.' : ''}
+        </small>
+      </div>
+
+      {sourceBusy && <div className="source-warning info">Running source control operation...</div>}
+      {source?.hasConflicts && (
+        <div className="source-warning bad sc-conflict-banner">
+          <strong>{source.conflictFiles.length} conflict(s) need resolution before you can stage, commit, or switch.</strong>
+          <div className="sc-conflict-files">
+            {source.conflictFiles.map((file) => (
+              <button key={file} onClick={() => openFileDiff(file)} title="Open side-by-side diff">{file}</button>
             ))}
           </div>
-        ) : (
-          <div className="source-warning info">Nothing staged. Stage at least one file to commit.</div>
-        )}
-        <label>Commit message</label>
-        <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change... (required)" disabled={sourceBusy} />
-        <div className="decision-row">
-          <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!canStageAll}><Check size={16} /> Stage all</button>
-          <button onClick={() => action('/api/source/unstage-all', {}, 'Unstaged all files.')} disabled={sourceBusy || !changedFiles.some((file) => file.staged)}><X size={16} /> Unstage all</button>
-          <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')} disabled={!canCommit}><Check size={16} /> Commit</button>
-          <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest refs from the displayed origin.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch origin</button>
-          <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes for this checkout branch.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull current</button>
-          <button
-            onClick={() => setPushArmed(true)}
-            disabled={Boolean(pushDisabledReason) || pushArmed}
-            title={pushDisabledReason || 'Review the push target before confirming'}
-          >
-            <Upload size={16} /> Push...
-          </button>
-        </div>
-        {pushArmed && (
-          <div className="source-warning warn">
-            <strong>Confirm push</strong>
-            <small>
-              This will run <code>git push -u origin {currentBranch}</code> — the current review branch to remote <code>origin</code> only.
-              No force flags. Life Planner refuses to push main/master.
-            </small>
-            <div className="decision-row">
-              <button
-                className="primary"
-                disabled={sourceBusy}
-                onClick={async () => {
-                  await action('/api/source/push', { confirm: true }, `Pushed ${currentBranch} to origin.`);
-                  setPushArmed(false);
-                }}
-              >
-                <Upload size={16} /> Confirm push to origin
-              </button>
-              <button disabled={sourceBusy} onClick={() => setPushArmed(false)}><X size={16} /> Cancel</button>
-            </div>
+          <div className="decision-row">
+            <button className="danger" onClick={() => action('/api/source/abort-merge', {}, 'Aborted in-progress merge/rebase.')} disabled={sourceBusy}><RotateCcw size={15} /> Abort merge/rebase</button>
           </div>
-        )}
-        {operationOutput && <pre className="code-block compact-code">{operationOutput}</pre>}
+        </div>
+      )}
+
+      <div className="sc-tabbar">
+        {tabs.map((entry) => {
+          const Icon = entry.icon;
+          return (
+            <button key={entry.id} className={cx('sc-tab', tab === entry.id && 'active')} onClick={() => setTab(entry.id)}>
+              <Icon size={15} /> {entry.label}
+              {entry.badge ? <span className="sc-tab-badge">{entry.badge}</span> : null}
+            </button>
+          );
+        })}
       </div>
 
-      <div className="panel">
-        <h2>Status</h2>
-        <pre className="code-block">{source?.status || 'No status yet.'}</pre>
-        <h2>Changed Files</h2>
-        <div className="source-file-list">
-          {changedFiles.length === 0 ? (
-            <Empty title="Clean" body="No changed files." />
-          ) : changedFiles.map((file) => (
-            <div className={cx('source-file-row', diffPath === file.path && 'selected')} key={`${file.status}-${file.path}`}>
-              <div>
-                <strong>{file.path}</strong>
-                <span>{file.status}{file.staged ? ' staged' : ' unstaged'}</span>
-              </div>
+      {tab === 'changes' && (
+        <div className="sc-tab-body sc-changes-grid">
+          <div className="panel">
+            <div className="panel-heading">
+              <h2>Changed Files</h2>
               <div className="mini-actions">
-                {!file.protected && (
-                  <button onClick={() => openFileDiff(file.path)} disabled={diffBusy} title="Show side-by-side diff"><FileText size={14} /> Diff</button>
-                )}
-                {file.protected ? (
-                  <Pill tone="bad">Protected</Pill>
-                ) : file.staged ? (
-                  <button onClick={() => action('/api/source/unstage-file', { path: file.path }, `Unstaged ${file.path}`)} disabled={sourceBusy}><X size={14} /> Unstage</button>
-                ) : (
-                  <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>
-                )}
+                <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!canStageAll}><Check size={14} /> Stage all</button>
+                <button onClick={() => action('/api/source/unstage-all', {}, 'Unstaged all files.')} disabled={sourceBusy || !stagedFiles.length}><X size={14} /> Unstage all</button>
               </div>
             </div>
-          ))}
-        </div>
-        <h2>Remotes</h2>
-        {source?.remoteList?.length ? (
-          <div className="remote-list">
-            {source.remoteList.map((remote) => (
-              <div className="remote-row" key={remote.name}>
-                <strong>{remote.name}</strong>
-                <span>{remote.url}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <pre className="code-block">{source?.remotes || 'No Git remotes configured yet.'}</pre>
-        )}
-      </div>
+            <div className="source-file-list">
+              {changedFiles.length === 0 ? (
+                <Empty title="Clean" body="No changed files." />
+              ) : changedFiles.map((file) => (
+                <div className={cx('source-file-row', diffPath === file.path && 'selected')} key={`${file.status}-${file.path}`}>
+                  <div>
+                    <strong>{file.path}</strong>
+                    <span>{file.status}{file.staged ? ' · staged' : ' · worktree'}</span>
+                  </div>
+                  <div className="mini-actions">
+                    {!file.protected && (
+                      <button onClick={() => openFileDiff(file.path)} disabled={diffBusy} title="Side-by-side diff"><FileText size={14} /></button>
+                    )}
+                    {file.protected ? (
+                      <Pill tone="bad">Protected</Pill>
+                    ) : file.staged ? (
+                      <button onClick={() => action('/api/source/unstage-file', { path: file.path }, `Unstaged ${file.path}`)} disabled={sourceBusy}><X size={14} /> Unstage</button>
+                    ) : (
+                      <>
+                        <button onClick={() => action('/api/source/stage-file', { path: file.path }, `Staged ${file.path}`)} disabled={sourceBusy}><Check size={14} /> Stage</button>
+                        <button className="danger" onClick={() => action('/api/source/discard-file', { path: file.path }, `Discarded changes in ${file.path}`)} disabled={sourceBusy} title="Discard working-tree changes"><RotateCcw size={14} /></button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
 
-      <div className="panel wide-panel">
-        <div className="panel-heading">
-          <h2>Side-by-side Diff{diffPath ? `: ${diffPath}` : ''}</h2>
-          {diffPath && <button onClick={() => { setDiffPath(''); setFileDiff(null); }} disabled={diffBusy}><X size={14} /> Close</button>}
+            <label>Files to be committed ({stagedFiles.length})</label>
+            {stagedFiles.length ? (
+              <div className="commit-file-list">
+                {stagedFiles.map((file) => (
+                  <div className="commit-file-row" key={file.path}>
+                    <span>{file.status}</span>
+                    <strong>{file.path}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="source-warning info">Nothing staged. Stage at least one file to commit.</div>
+            )}
+            <label>Commit message</label>
+            <textarea value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="Describe the source change... (required)" disabled={sourceBusy} />
+            <div className="decision-row">
+              <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')} disabled={!canCommit}><Check size={16} /> Commit</button>
+            </div>
+            {operationOutput && <pre className="code-block compact-code">{operationOutput}</pre>}
+          </div>
+
+          <div className="panel wide-panel">
+            <div className="panel-heading">
+              <h2>Diff{diffPath ? `: ${diffPath}` : ''}</h2>
+              {diffPath && <button onClick={() => { setDiffPath(''); setFileDiff(null); }} disabled={diffBusy}><X size={14} /> Close</button>}
+            </div>
+            {diffPath ? (
+              diffBusy ? (
+                <div className="loading">Loading diff...</div>
+              ) : fileDiff ? (
+                <SideBySideDiff data={fileDiff} />
+              ) : (
+                <Empty title="No diff" body="Could not load a diff for this file." />
+              )
+            ) : (
+              <Empty title="No file selected" body="Click a file's diff icon to compare committed vs current side by side." />
+            )}
+          </div>
         </div>
-        {diffPath ? (
-          diffBusy ? (
-            <div className="loading">Loading diff...</div>
-          ) : fileDiff ? (
-            <SideBySideDiff data={fileDiff} />
-          ) : (
-            <Empty title="No diff" body="Could not load a diff for this file." />
-          )
-        ) : (
-          <Empty title="No file selected" body="Click Diff on a changed file to compare committed vs current side by side." />
-        )}
-        <h2>Recent Log</h2>
-        <pre className="code-block">{source?.log || 'No commits yet.'}</pre>
-        <h2>Aggregate Diff</h2>
-        <pre className="code-block">{diff?.stat || 'No diff stat.'}</pre>
-        <pre className="code-block diff-detail">{diff?.detail || 'No unstaged diff.'}</pre>
-        {diff?.truncated && <Pill tone="warn">Diff truncated</Pill>}
-      </div>
+      )}
+
+      {tab === 'history' && (
+        <div className="sc-tab-body">
+          <div className="panel">
+            <h2>Commit History</h2>
+            <div className="sc-history-list">
+              {history.length === 0 ? (
+                <Empty title="No history" body="No commits found or history not loaded." />
+              ) : history.map((commit) => (
+                <div className="sc-commit-row" key={commit.shortHash}>
+                  <div className="sc-commit-node" />
+                  <div className="sc-commit-body">
+                    <div className="sc-commit-subject" title={commit.subject}>{commit.subject}</div>
+                    <div className="sc-commit-meta">
+                      <span className="sc-commit-hash">{commit.shortHash}</span>
+                      <span>{commit.author}</span>
+                      <span>{commit.relative}</span>
+                      {commit.refs.map((ref) => (
+                        <span key={ref} className={cx('sc-ref-badge', ref.includes('HEAD') && 'head', ref.includes('origin') && 'remote')}>{ref}</span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === 'branches' && (
+        <div className="sc-tab-body sc-branch-grid">
+          <div className="panel">
+            <h2>Current & Switch</h2>
+            <p>On <strong>{source?.branch || 'unknown'}</strong>{source?.upstream ? ` tracking ${source.upstream}` : ' (no upstream)'}.</p>
+            <label>Switch branch</label>
+            <div className="inline-form">
+              <select value={branchToSwitch} onChange={(event) => setBranchToSwitch(event.target.value)} disabled={sourceBusy}>
+                {localBranches.map((branch) => (
+                  <option value={branch.name} key={branch.name}>{branch.name}</option>
+                ))}
+              </select>
+              <button onClick={() => action('/api/source/checkout', { branch: branchToSwitch }, `Switched to ${branchToSwitch}`)} disabled={sourceBusy || !branchToSwitch || branchToSwitch === source?.branch}><GitBranch size={16} /> Switch</button>
+            </div>
+            <label>Merge a branch into {source?.branch || 'current'}</label>
+            <div className="inline-form">
+              <select value={mergeBranch} onChange={(event) => setMergeBranch(event.target.value)} disabled={sourceBusy}>
+                <option value="">Select branch to merge...</option>
+                {(branches.branches || []).filter((branch) => branch.name !== source?.branch).map((branch) => (
+                  <option value={branch.name} key={branch.name}>{branch.name}</option>
+                ))}
+              </select>
+              <button onClick={() => action('/api/source/merge', { branch: mergeBranch }, `Merged ${mergeBranch}.`)} disabled={sourceBusy || !mergeBranch}><GitMerge size={16} /> Merge</button>
+            </div>
+            <label>Delete a local branch</label>
+            <div className="inline-form">
+              <select value={branchToSwitch} onChange={(event) => setBranchToSwitch(event.target.value)} disabled={sourceBusy}>
+                {localBranches.map((branch) => (
+                  <option value={branch.name} key={branch.name}>{branch.name}</option>
+                ))}
+              </select>
+              <button className="danger" onClick={() => action('/api/source/delete-branch', { branch: branchToSwitch }, `Deleted ${branchToSwitch}.`)} disabled={sourceBusy || !branchToSwitch || branchToSwitch === source?.branch}><Trash2 size={16} /> Delete</button>
+            </div>
+          </div>
+
+          <div className="panel">
+            <h2>Create branch</h2>
+            <div className="inline-form">
+              <input value={branchName} onChange={(event) => setBranchName(event.target.value)} disabled={sourceBusy} placeholder="feature/my-branch" />
+              <button onClick={() => action('/api/source/branch', { branch: branchName }, `Created branch ${branchName}`)} disabled={sourceBusy || !branchName.trim()}><Plus size={16} /> Create + switch</button>
+            </div>
+            <h2>All branches</h2>
+            <div className="sc-branch-list">
+              {(branches.branches || []).map((branch) => (
+                <div className={cx('sc-branch-item', branch.current && 'current')} key={`${branch.remote ? 'r' : 'l'}-${branch.name}`}>
+                  <GitBranch size={13} />
+                  <span>{branch.name}</span>
+                  {branch.current && <Pill tone="good">current</Pill>}
+                  {branch.remote && <Pill tone="warn">remote</Pill>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === 'sync' && (
+        <div className="sc-tab-body sc-sync-grid">
+          <div className="panel">
+            <h2>Sync with remote</h2>
+            <div className="decision-row">
+              <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch</button>
+              <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull (ff-only)</button>
+              <button onClick={() => action('/api/source/rebase', {}, 'Rebased onto origin.')} disabled={sourceBusy}><GitBranch size={16} /> Pull --rebase</button>
+              <button onClick={() => setPushArmed(true)} disabled={Boolean(pushDisabledReason) || pushArmed} title={pushDisabledReason || 'Review the push target before confirming'}><Upload size={16} /> Push...</button>
+            </div>
+            {pushArmed && (
+              <div className="source-warning warn">
+                <strong>Confirm push</strong>
+                <small>
+                  Runs <code>git push origin {currentBranch}</code> to remote <code>origin</code>{tokenConfigured ? ' using your saved token' : ''}. No force flags. Life Planner refuses to push main/master.
+                </small>
+                <div className="decision-row">
+                  <button className="primary" disabled={sourceBusy} onClick={async () => { await action('/api/source/push', { confirm: true }, `Pushed ${currentBranch} to origin.`); setPushArmed(false); }}>
+                    <Upload size={16} /> Confirm push to origin
+                  </button>
+                  <button disabled={sourceBusy} onClick={() => setPushArmed(false)}><X size={16} /> Cancel</button>
+                </div>
+              </div>
+            )}
+            {operationOutput && <pre className="code-block compact-code">{operationOutput}</pre>}
+          </div>
+
+          <div className="panel">
+            <h2>GitHub authentication</h2>
+            <div className="connection-grid">
+              <div>
+                <span>Personal Access Token</span>
+                <Pill tone={tokenConfigured ? 'good' : 'warn'}>{tokenConfigured ? 'Saved' : 'Not set'}</Pill>
+                <small>Used for authenticated HTTPS pushes. Never stored in the git remote.</small>
+              </div>
+              <div>
+                <span>GitHub CLI</span>
+                <Pill tone={source?.github?.authenticated ? 'good' : 'warn'}>
+                  {source?.github?.authenticated ? 'Logged in' : source?.github?.cliAvailable ? 'Login needed' : 'Unavailable'}
+                </Pill>
+                <small>{source?.github?.cliAvailable ? source?.github?.detail : source?.installHints?.githubCli}</small>
+              </div>
+              <div>
+                <span>Git user</span>
+                <strong>{source?.user?.name || 'Not set'}</strong>
+                <small>{source?.user?.email || 'No email configured'}</small>
+              </div>
+            </div>
+            <div className="decision-row">
+              <button onClick={() => setShowTokenForm((value) => !value)} disabled={sourceBusy}><KeyRound size={16} /> {tokenConfigured ? 'Replace token' : 'Login with token (PAT)'}</button>
+              <button onClick={() => openExternal('https://github.com/settings/tokens', 'GitHub token settings')} disabled={sourceBusy}><Github size={16} /> Create a PAT</button>
+              {tokenConfigured && <button className="danger" onClick={() => action('/api/source/token/clear', {}, 'GitHub token cleared.')} disabled={sourceBusy}><X size={16} /> Clear token</button>}
+              {source?.github?.cliAvailable && <button onClick={() => action('/api/source/login/github')} disabled={sourceBusy} title="Start GitHub CLI browser login"><Github size={16} /> gh login</button>}
+            </div>
+            {showTokenForm && (
+              <div className="sc-token-form">
+                <p>Create a token at GitHub → Settings → Developer settings → Tokens. Fine-grained tokens start with <code>github_pat_</code>; classic tokens start with <code>ghp_</code>. Grant this repository write access.</p>
+                <div className="inline-form">
+                  <input type="password" value={tokenInput} onChange={(event) => setTokenInput(event.target.value)} placeholder="ghp_... or github_pat_..." disabled={sourceBusy} />
+                  <button className="primary" onClick={saveToken} disabled={sourceBusy || !tokenInput.trim()}><Check size={16} /> Save token</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="panel">
+            <h2>Remotes</h2>
+            {source?.remoteList?.length ? (
+              <div className="remote-list">
+                {source.remoteList.map((remote) => (
+                  <div className="remote-row" key={remote.name}>
+                    <strong>{remote.name}</strong>
+                    <span>{remote.url}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <pre className="code-block">{source?.remotes || 'No Git remotes configured yet.'}</pre>
+            )}
+            <label>Set origin remote</label>
+            <div className="inline-form">
+              <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} disabled={sourceBusy} />
+              <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
+            </div>
+            <label>Create GitHub repo</label>
+            <div className="inline-form">
+              <input value={githubRepo} onChange={(event) => setGithubRepo(event.target.value)} disabled={sourceBusy} placeholder="owner/repo" />
+              <button onClick={() => action('/api/source/create/github', { repo: githubRepo, visibility: 'public' })} disabled={sourceBusy || !githubRepo.trim()}><Github size={16} /> Create public</button>
+              <button onClick={() => openExternal('https://github.com/new', 'GitHub new repository page')} disabled={sourceBusy}>Open GitHub New</button>
+            </div>
+            <label>Create Hugging Face repo</label>
+            <div className="inline-form">
+              <input value={hfRepo} onChange={(event) => setHfRepo(event.target.value)} disabled={sourceBusy} placeholder="username/life-planner-models" />
+              <select value={hfRepoType} onChange={(event) => setHfRepoType(event.target.value)} disabled={sourceBusy}>
+                <option value="model">model</option>
+                <option value="dataset">dataset</option>
+                <option value="space">space</option>
+              </select>
+              <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'public' })} disabled={sourceBusy || !hfRepo.trim()}>Create public</button>
+              <button onClick={() => openExternal('https://huggingface.co/new', 'Hugging Face new repository page')} disabled={sourceBusy}>Open HF New</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
