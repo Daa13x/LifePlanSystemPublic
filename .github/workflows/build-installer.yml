@@ -1,0 +1,75 @@
+# Build Installer — CI/CD pipeline for the Life Planner portable + Inno installer.
+#
+# STATUS: STARTING DRAFT (roadmap item "CI/CD + local installer build" is
+# in-progress). This has NOT yet been validated by a real GitHub Actions run.
+# A future agent must trigger it once (push to main or the manual "Run workflow"
+# button), read the logs, and fix whatever the hosted runner surfaces before
+# marking the roadmap item done. See docs/handoffs for the full scope.
+#
+# What it does: on a push to main, on a version tag, or on manual dispatch, it
+# builds the web app, packages the portable one-folder bundle, compiles the Inno
+# Setup installer, and uploads the results as downloadable artifacts. Tagged
+# builds also attach the installer to a GitHub Release, so the user can create
+# the pipeline installer "at the repo end" without a local terminal.
+
+name: Build Installer
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # needed to attach the installer to a Release on tag builds
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web app
+        run: npm run build
+
+      # package:portable downloads the bundled Node runtime and Playwright
+      # Chromium, then assembles release/LifePlannerPortable. It is a PowerShell
+      # script; windows-latest runs it directly.
+      - name: Package portable bundle
+        run: npm run package:portable
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Compile installer
+        run: ISCC.exe installer/LifePlannerPortable.iss
+
+      - name: Upload portable bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: LifePlannerPortable
+          path: release/LifePlannerPortable
+          if-no-files-found: error
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: LifePlannerPortableSetup
+          path: release/LifePlannerPortableSetup.exe
+          if-no-files-found: error
+
+      # Only tagged builds publish a Release asset the user can download.
+      - name: Attach installer to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/LifePlannerPortableSetup.exe
