@@ -952,6 +952,15 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .sc-conflict-banner { display: flex; flex-direction: column; gap: 8px; }
 .sc-conflict-files { display: flex; flex-wrap: wrap; gap: 6px; }
 .sc-conflict-files button { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+.sc-conflict-resolve { display: flex; flex-direction: column; gap: 6px; }
+.sc-conflict-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 6px 8px; background: color-mix(in srgb, var(--red) 8%, transparent); border: 1px solid color-mix(in srgb, var(--red) 30%, var(--line)); border-radius: 6px; }
+.sc-conflict-name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: transparent; border: 0; color: var(--text); text-decoration: underline; cursor: pointer; }
+
+.sc-stash-list, .sc-tag-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.sc-stash-row, .sc-tag-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.sc-stash-ref, .sc-tag-row strong { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--accent-2); white-space: nowrap; }
+.sc-stash-msg, .sc-tag-subject { color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-stash-row .mini-actions, .sc-tag-row .mini-actions { margin-left: auto; }
 
 .sc-tabbar { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
 .sc-tab { display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 13px; cursor: pointer; border-radius: 8px 8px 0 0; }

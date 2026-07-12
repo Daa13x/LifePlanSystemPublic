@@ -36,7 +36,7 @@ function seedRoadmapIfEmpty() {
   if (existing.n > 0) return;
   const seed = [
     { title: 'LPS-native Source Control panel', detail: 'Tabbed git cockpit: changes/stage/discard/commit, history graph, branches (switch/create/merge/delete), sync (fetch/pull/rebase/push), PAT login.', status: 'done', category: 'feature' },
-    { title: 'Full git management coverage', detail: 'Close remaining gaps so Source Control handles all git: stash save/list/pop, discard-all, in-app conflict resolution, tags.', status: 'planned', category: 'feature' },
+    { title: 'Full git management coverage', detail: 'Source Control handles all git: stash save/list/apply/pop/drop, discard-all (confirmed), in-app conflict resolution (ours/theirs/mark), and tags (create/list/delete/push).', status: 'done', category: 'feature' },
     { title: 'Model manager (llama.cpp + HF)', detail: 'One maintained model list showing on-disk (ready to load/assign) vs available-to-download, with load, download-from-HF, and remove-from-disk actions.', status: 'planned', category: 'feature' },
     { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', status: 'planned', category: 'feature' },
     { title: 'OpenHands real invocation', detail: 'Local-only real OpenHands executor invocation behind the existing readiness gate.', resume_notes: 'Deliberately disabled by default. Groundwork: adapter stub, contract, schemas, and safety matrix under docs/tooling/OPENHANDS_INVOCATION_*. Resume = implement the local-only call boundary per OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md acceptance criteria; keep invocation flag off until the gate + tests pass.', status: 'parked', category: 'infra' },
@@ -3997,6 +3997,147 @@ app.get('/api/source/history', async (_req, res) => {
     return { shortHash, subject, author, relative, refs };
   });
   ok(res, { commits });
+});
+
+// --- Stash ------------------------------------------------------------------
+app.get('/api/source/stash', async (_req, res) => {
+  const result = await runCli('git', ['stash', 'list', '--pretty=format:%gd%x1f%s']);
+  const entries = result.ok && result.stdout
+    ? result.stdout.split('\n').filter(Boolean).map((line, index) => {
+      const [ref, subject] = line.split('\x1f');
+      return { index, ref: ref || `stash@{${index}}`, subject: subject || '' };
+    })
+    : [];
+  ok(res, { entries });
+});
+
+app.post('/api/source/stash', async (req, res) => {
+  const message = String(req.body.message || '').trim();
+  const args = ['stash', 'push'];
+  if (req.body.includeUntracked) args.push('--include-untracked');
+  if (message) args.push('-m', message);
+  const result = await runCli('git', args, { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git stash failed');
+  if (/no local changes to save/i.test(result.stdout)) return fail(res, 400, 'No local changes to stash.');
+  ok(res, { output: result.stdout || result.stderr || 'Changes stashed.', status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+});
+
+app.post('/api/source/stash/apply', async (req, res) => {
+  const index = Number.isInteger(req.body.index) ? req.body.index : 0;
+  const subcommand = req.body.pop ? 'pop' : 'apply';
+  const result = await runCli('git', ['stash', subcommand, `stash@{${index}}`], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
+  const snapshot = await gitStatusSnapshot();
+  if (!result.ok && !snapshot.hasConflicts) return fail(res, 409, result.stderr || result.stdout || `git stash ${subcommand} failed`);
+  ok(res, { output: result.stdout || result.stderr || `Stash ${subcommand} complete.`, hasConflicts: snapshot.hasConflicts, conflictFiles: snapshot.conflictFiles });
+});
+
+app.post('/api/source/stash/drop', async (req, res) => {
+  const index = Number.isInteger(req.body.index) ? req.body.index : 0;
+  const result = await runCli('git', ['stash', 'drop', `stash@{${index}}`]);
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git stash drop failed');
+  ok(res, { output: result.stdout || result.stderr || 'Stash dropped.' });
+});
+
+// --- Discard all tracked working-tree changes -------------------------------
+// Destructive: needs explicit confirm. Restores tracked files to HEAD/index;
+// untracked files are left alone (never auto-deleted from here).
+app.post('/api/source/discard-all', async (req, res) => {
+  if (req.body?.confirm !== true) {
+    return fail(res, 428, 'Discarding all working-tree changes is destructive. Confirm to run: git restore --worktree -- . (untracked files are left untouched).');
+  }
+  const snapshot = await gitStatusSnapshot();
+  if (snapshot.hasConflicts) return fail(res, 409, 'Resolve or abort the conflict first; discard-all will not run mid-merge.');
+  const result = await runCli('git', ['restore', '--worktree', '--', '.']);
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git restore failed');
+  ok(res, { output: 'Discarded all tracked working-tree changes.', status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+});
+
+// --- In-app conflict resolution ---------------------------------------------
+// Resolve one conflicted file by taking a whole side, or mark it resolved after
+// a manual edit. All three end by staging the file so the merge can proceed.
+app.post('/api/source/resolve', async (req, res) => {
+  try {
+    const target = safeWorkspacePath(req.body.path);
+    const snapshot = await gitStatusSnapshot();
+    if (!snapshot.conflictFiles.includes(target.normalized)) {
+      return fail(res, 409, `"${target.normalized}" is not a conflicted file.`);
+    }
+    const side = req.body.side;
+    if (side === 'ours' || side === 'theirs') {
+      const checkout = await runCli('git', ['checkout', `--${side}`, '--', target.normalized]);
+      if (!checkout.ok) return fail(res, 500, checkout.stderr || checkout.stdout || `git checkout --${side} failed`);
+    } else if (side !== 'mark') {
+      return fail(res, 400, "side must be 'ours', 'theirs', or 'mark' (stage the current file contents as resolved).");
+    }
+    const add = await runCli('git', ['add', '--', target.normalized]);
+    if (!add.ok) return fail(res, 500, add.stderr || add.stdout || 'git add failed');
+    const after = await gitStatusSnapshot();
+    ok(res, {
+      path: target.normalized,
+      resolved: side,
+      remainingConflicts: after.conflictFiles,
+      hasConflicts: after.hasConflicts,
+      status: after.status
+    });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+// --- Tags -------------------------------------------------------------------
+app.get('/api/source/tags', async (_req, res) => {
+  // for-each-ref does not interpret %x1f (that is a git-log token); embed the
+  // actual unit-separator character in the format string instead.
+  const sep = '\x1f';
+  const result = await runCli('git', ['for-each-ref', '--sort=-creatordate', `--format=%(refname:short)${sep}%(objecttype)${sep}%(contents:subject)`, 'refs/tags'], { maxBuffer: 2 * 1024 * 1024 });
+  const tags = result.ok && result.stdout
+    ? result.stdout.split('\n').filter(Boolean).map((line) => {
+      const [name, objecttype, subject] = line.split(sep);
+      return { name, annotated: objecttype === 'tag', subject: subject || '' };
+    })
+    : [];
+  ok(res, { tags });
+});
+
+app.post('/api/source/tags', async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  if (!name) return fail(res, 400, 'A tag name is required.');
+  if (!/^[A-Za-z0-9._\/-]+$/.test(name)) return fail(res, 400, 'Tag name may use letters, numbers, dot, underscore, slash, and dash only.');
+  const message = String(req.body.message || '').trim();
+  const refArg = String(req.body.ref || '').trim();
+  const args = message ? ['tag', '-a', name, '-m', message] : ['tag', name];
+  if (refArg) args.push(refArg);
+  const result = await runCli('git', args);
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git tag failed');
+  ok(res, { name, output: result.stdout || result.stderr || `Created tag ${name}.` });
+});
+
+app.post('/api/source/tags/delete', async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  if (!name) return fail(res, 400, 'A tag name is required.');
+  const result = await runCli('git', ['tag', '-d', name]);
+  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git tag -d failed');
+  ok(res, { name, output: result.stdout || result.stderr || `Deleted tag ${name}.` });
+});
+
+// Pushing a tag publishes to origin; gate it behind explicit confirmation, and
+// reuse the stored PAT for HTTPS origins the same way branch push does.
+app.post('/api/source/tags/push', async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  if (!name) return fail(res, 400, 'A tag name is required.');
+  if (req.body?.confirm !== true) {
+    return fail(res, 428, `Pushing tag "${name}" publishes it to origin. Confirm to run: git push origin ${name}.`);
+  }
+  const token = getSetting('githubToken', '');
+  const originUrl = (await runCli('git', ['remote', 'get-url', 'origin'])).stdout;
+  const useToken = token && /^https:\/\//i.test(originUrl);
+  const target = useToken ? authenticatedRemoteUrl(originUrl, token) : 'origin';
+  const result = await runCli('git', ['push', target, `refs/tags/${name}`], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  if (!result.ok) {
+    const scrub = (text) => token ? String(text || '').split(token).join('***') : text;
+    return fail(res, 500, scrub(result.stderr || result.stdout || 'git push tag failed'));
+  }
+  ok(res, { name, authenticated: Boolean(useToken), output: result.stdout || result.stderr || `Pushed tag ${name} to origin.` });
 });
 
 app.get('/api/repo/files', (req, res) => {

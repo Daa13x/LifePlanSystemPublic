@@ -2731,6 +2731,11 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [mergeBranch, setMergeBranch] = useState('');
   const [tokenInput, setTokenInput] = useState('');
   const [showTokenForm, setShowTokenForm] = useState(false);
+  const [stashes, setStashes] = useState([]);
+  const [stashMessage, setStashMessage] = useState('');
+  const [discardArmed, setDiscardArmed] = useState(false);
+  const [tags, setTags] = useState([]);
+  const [tagDraft, setTagDraft] = useState({ name: '', message: '' });
 
   async function refresh(announce = false) {
     try {
@@ -2745,6 +2750,8 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       const originRepo = githubRepoFromRemote(originRemote?.url || '');
       if (originRepo) setGithubRepo((current) => current || originRepo);
       try { setHistory((await api('/api/source/history')).commits || []); } catch { /* history is best-effort */ }
+      try { setStashes((await api('/api/source/stash')).entries || []); } catch { /* stash list is best-effort */ }
+      try { setTags((await api('/api/source/tags')).tags || []); } catch { /* tags are best-effort */ }
       if (announce) setNotice('Source status refreshed.');
     } catch (err) {
       setNotice(err.message);
@@ -2805,6 +2812,22 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
     setTokenInput('');
     setShowTokenForm(false);
   }
+
+  const stashSave = (includeUntracked) => action(
+    '/api/source/stash',
+    { message: stashMessage.trim(), includeUntracked },
+    'Changes stashed.'
+  ).then(() => setStashMessage(''));
+  const stashApply = (index, pop) => action('/api/source/stash/apply', { index, pop }, pop ? 'Stash popped.' : 'Stash applied.');
+  const stashDrop = (index) => action('/api/source/stash/drop', { index }, 'Stash dropped.');
+  const resolveConflict = (path, side) => action('/api/source/resolve', { path, side }, `Resolved ${path} (${side}).`);
+  const createTag = () => {
+    if (!tagDraft.name.trim()) return;
+    action('/api/source/tags', { name: tagDraft.name.trim(), message: tagDraft.message.trim() }, `Created tag ${tagDraft.name.trim()}.`)
+      .then(() => setTagDraft({ name: '', message: '' }));
+  };
+  const deleteTag = (name) => action('/api/source/tags/delete', { name }, `Deleted tag ${name}.`);
+  const pushTag = (name) => action('/api/source/tags/push', { name, confirm: true }, `Pushed tag ${name} to origin.`);
 
   const changedFiles = source?.changedFiles || [];
   const stagedFiles = changedFiles.filter((file) => file.staged);
@@ -2886,9 +2909,16 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       {source?.hasConflicts && (
         <div className="source-warning bad sc-conflict-banner">
           <strong>{source.conflictFiles.length} conflict(s) need resolution before you can stage, commit, or switch.</strong>
-          <div className="sc-conflict-files">
+          <div className="sc-conflict-resolve">
             {source.conflictFiles.map((file) => (
-              <button key={file} onClick={() => openFileDiff(file)} title="Open side-by-side diff">{file}</button>
+              <div className="sc-conflict-row" key={file}>
+                <button className="sc-conflict-name" onClick={() => openFileDiff(file)} title="Open side-by-side diff">{file}</button>
+                <div className="mini-actions">
+                  <button onClick={() => resolveConflict(file, 'ours')} disabled={sourceBusy} title="Keep our version">Take ours</button>
+                  <button onClick={() => resolveConflict(file, 'theirs')} disabled={sourceBusy} title="Keep their version">Take theirs</button>
+                  <button onClick={() => resolveConflict(file, 'mark')} disabled={sourceBusy} title="Stage current file contents as resolved (after editing)"><Check size={13} /> Mark resolved</button>
+                </div>
+              </div>
             ))}
           </div>
           <div className="decision-row">
@@ -2917,8 +2947,19 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
               <div className="mini-actions">
                 <button onClick={() => action('/api/source/stage-all', {}, 'Staged all changes.')} disabled={!canStageAll}><Check size={14} /> Stage all</button>
                 <button onClick={() => action('/api/source/unstage-all', {}, 'Unstaged all files.')} disabled={sourceBusy || !stagedFiles.length}><X size={14} /> Unstage all</button>
+                <button className="danger" onClick={() => setDiscardArmed(true)} disabled={sourceBusy || !hasChanges || discardArmed} title="Discard ALL tracked working-tree changes"><RotateCcw size={14} /> Discard all…</button>
               </div>
             </div>
+            {discardArmed && (
+              <div className="source-warning bad">
+                <strong>Discard all tracked changes?</strong>
+                <small>Runs <code>git restore --worktree -- .</code> — every tracked file reverts to the last commit/index. Untracked files are left alone. This cannot be undone.</small>
+                <div className="decision-row">
+                  <button className="danger" disabled={sourceBusy} onClick={async () => { await action('/api/source/discard-all', { confirm: true }, 'Discarded all tracked working-tree changes.'); setDiscardArmed(false); }}><RotateCcw size={14} /> Yes, discard all</button>
+                  <button disabled={sourceBusy} onClick={() => setDiscardArmed(false)}><X size={14} /> Cancel</button>
+                </div>
+              </div>
+            )}
             <div className="source-file-list">
               {changedFiles.length === 0 ? (
                 <Empty title="Clean" body="No changed files." />
@@ -2965,6 +3006,28 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
             <div className="decision-row">
               <button className="primary" onClick={() => action('/api/source/commit', { message: commitMessage }, 'Commit created.')} disabled={!canCommit}><Check size={16} /> Commit</button>
             </div>
+
+            <label>Stash</label>
+            <div className="inline-form">
+              <input value={stashMessage} onChange={(event) => setStashMessage(event.target.value)} placeholder="Optional stash message" disabled={sourceBusy} />
+              <button onClick={() => stashSave(false)} disabled={sourceBusy || !hasChanges} title="Stash tracked changes"><Archive size={14} /> Stash</button>
+              <button onClick={() => stashSave(true)} disabled={sourceBusy || !hasChanges} title="Stash including untracked files"><Archive size={14} /> +untracked</button>
+            </div>
+            {stashes.length > 0 && (
+              <div className="sc-stash-list">
+                {stashes.map((entry) => (
+                  <div className="sc-stash-row" key={entry.ref}>
+                    <span className="sc-stash-ref">{entry.ref}</span>
+                    <span className="sc-stash-msg">{entry.subject}</span>
+                    <div className="mini-actions">
+                      <button onClick={() => stashApply(entry.index, false)} disabled={sourceBusy} title="Apply (keep stash)">Apply</button>
+                      <button onClick={() => stashApply(entry.index, true)} disabled={sourceBusy} title="Pop (apply and remove)">Pop</button>
+                      <button className="danger" onClick={() => stashDrop(entry.index)} disabled={sourceBusy} title="Drop"><Trash2 size={13} /></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
             {operationOutput && <pre className="code-block compact-code">{operationOutput}</pre>}
           </div>
 
@@ -3176,6 +3239,32 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
               <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'public' })} disabled={sourceBusy || !hfRepo.trim()}>Create public</button>
               <button onClick={() => openExternal('https://huggingface.co/new', 'Hugging Face new repository page')} disabled={sourceBusy}>Open HF New</button>
             </div>
+          </div>
+
+          <div className="panel">
+            <h2>Tags</h2>
+            <div className="inline-form">
+              <input value={tagDraft.name} onChange={(event) => setTagDraft({ ...tagDraft, name: event.target.value })} placeholder="v1.0.0" disabled={sourceBusy} />
+              <input value={tagDraft.message} onChange={(event) => setTagDraft({ ...tagDraft, message: event.target.value })} placeholder="Annotation (optional → lightweight)" disabled={sourceBusy} />
+              <button className="primary" onClick={createTag} disabled={sourceBusy || !tagDraft.name.trim()}><Plus size={16} /> Create tag</button>
+            </div>
+            {tags.length === 0 ? (
+              <div className="source-warning info">No tags yet.</div>
+            ) : (
+              <div className="sc-tag-list">
+                {tags.map((tag) => (
+                  <div className="sc-tag-row" key={tag.name}>
+                    <strong>{tag.name}</strong>
+                    <Pill tone={tag.annotated ? 'good' : 'default'}>{tag.annotated ? 'annotated' : 'light'}</Pill>
+                    <span className="sc-tag-subject">{tag.subject}</span>
+                    <div className="mini-actions">
+                      <button onClick={() => pushTag(tag.name)} disabled={sourceBusy} title="Push this tag to origin"><Upload size={13} /> Push</button>
+                      <button className="danger" onClick={() => deleteTag(tag.name)} disabled={sourceBusy} title="Delete local tag"><Trash2 size={13} /></button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
