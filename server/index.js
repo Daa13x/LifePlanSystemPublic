@@ -4058,7 +4058,13 @@ app.post('/api/repo/proposals', (req, res) => {
 
 function publicSettings(includeSecrets = false) {
   const settings = Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)]));
-  if (!includeSecrets && Object.hasOwn(settings, 'hfToken')) settings.hfToken = settings.hfToken ? '[redacted]' : '';
+  if (!includeSecrets) {
+    // Redact every known secret (hfToken, githubToken, ...) so a backup export
+    // never writes credentials in cleartext.
+    for (const key of SECRET_SETTING_KEYS) {
+      if (Object.hasOwn(settings, key)) settings[key] = settings[key] ? '[redacted]' : '';
+    }
+  }
   return settings;
 }
 

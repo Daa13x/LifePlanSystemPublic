@@ -199,42 +199,12 @@ h3 { font-size: 14px; font-weight: 700; }
   gap: 16px;
 }
 
-.source-layout,
 .tooling-grid,
 .calibration-grid {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   gap: 16px;
   align-items: start;
-}
-
-.source-hero {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.source-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.source-actions button,
-.source-link {
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  border-radius: 8px;
-  padding: 0 12px;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  text-decoration: none;
 }
 
 .connection-grid {
@@ -906,7 +876,7 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 
 @media (max-width: 1180px) {
   body { min-width: 900px; }
-  .bucket-grid, .settings-grid, .source-layout, .repo-layout, .tooling-grid, .calibration-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bucket-grid, .settings-grid, .repo-layout, .tooling-grid, .calibration-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
