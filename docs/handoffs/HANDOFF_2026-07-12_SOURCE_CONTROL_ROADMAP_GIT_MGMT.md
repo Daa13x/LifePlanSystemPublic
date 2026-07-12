@@ -84,24 +84,48 @@ Two real credential-leak fixes plus hardening. `SECRET_SETTING_KEYS = {hfToken, 
 
 ---
 
+## 6. Hardening pass (server, commit `aa8f4a3`)
+
+- **Git argument-injection guards.** `runCli` uses `execFile` (no shell), so there is no shell-injection risk, but a value beginning with `-` would be parsed by git as an option. Added `safeGitRef()` (must start alphanumeric; git ref charset; rejects `..`, `.lock`, trailing `/`, `//`, `@{`) and `safeGitUrl()` (rejects leading `-` and control chars), applied to branch create/switch, merge, delete-branch, remote name+URL, and tag create/delete/push. The old tag-name regex allowed a leading dash — a tag named `-d` could be parsed as a flag. A remote URL of `--upload-pack=<cmd>` (a real git RCE vector on fetch/push) is now rejected.
+- **Process-level safety nets.** `unhandledRejection` / `uncaughtException` handlers log instead of silently wedging the local server.
+- **Final Express error handler.** Malformed JSON bodies and synchronous handler throws now return the `{ ok:false, error }` JSON shape instead of Express's default HTML error page.
+
+## 7. Model manager — llama.cpp + HF (commit follows)
+
+Extends the local model registry so downloaded-vs-download state is explicit and files are manageable from the UI (Settings → Local Model Registry).
+
+- `model_registry` gains `hf_repo` / `hf_file` columns (CREATE + idempotent ALTER migration) so a model's Hugging Face origin is remembered.
+- `GET /api/models`, `/scan`, `/assign`, and `/api/bootstrap` all return rows enriched with `exists` (is the `.gguf` still on disk). NOTE: bootstrap previously returned raw rows without `exists`, so the list always showed "File missing" on first load — fixed to use `modelsWithExists()`.
+- `POST /api/models/:id/assign` now refuses to assign a model whose file is missing (409).
+- `DELETE /api/models/:id`:
+  - default → deletes the `.gguf` file from disk but **keeps the registry entry**, flipping it from "Downloaded" to a re-downloadable "Not downloaded" state; clears any assignment.
+  - `{ purge: true }` → removes the entry entirely (for a stale local-scanned entry with no HF origin).
+- `POST /api/models/:id/download` → re-downloads a deleted model from its stored HF origin back to its original path (guards: no origin → 400, already on disk → 409).
+- UI states per row: Downloaded (Load + Delete), Not downloaded (Download + Remove), File missing/no-origin (Remove). Delete is an armed confirm since it removes a multi-GB file.
+
+Design note: the "available to download" catalog is the HF suggestions panel above the registry; the registry itself now carries downloaded/needs-download status per the maintainer's spec ("lists should show if we have the model or if it needs downloading").
+
+---
+
 ## How it was verified (reality, not assumed)
 
 - `node --check server/index.js` and `npm run build`: pass throughout.
 - Endpoints exercised against a throwaway git repo (`LIFE_PLANNER_DB` + cwd override) so stash/discard-all/resolve were safe: tags (annotated/light, create/list/delete, push-gate 428), stash (save/list/pop, pop safely refused over a dirty tree), discard-all (confirm gate + real restore), conflict resolve (`theirs` took the right side, 409 on a non-conflicted file).
 - Full UI driven in a browser against the built app served into the scratch repo: all four Source tabs render; Dev Roadmap board + candidate scan + status changes work; a REAL merge conflict was resolved live via "Take theirs"; secret redaction confirmed (raw token appears 0× in export and bootstrap). Zero console errors.
+- Hardening: verified against a scratch repo that branch `--force` and tag `-d` are rejected 400, valid `feature/ok-1` still creates, a malformed JSON body returns JSON 400, and remote URL `--upload-pack=evil` is rejected.
+- Model manager: verified end-to-end that assign refuses a missing file (409), a default delete removes the `.gguf` from disk and flips the row to "Not downloaded" with a Download button (entry kept), purge removes the entry, and re-download guards (no origin → 400, already on disk → 409) fire. Confirmed in the browser that the row visibly flips Downloaded → Not downloaded after delete. Zero console errors.
 
 ---
 
 ## Repo state left behind
 
-- `main` = `UI` = `660258a`, pushed, 0/0 with origin.
-- `fable-latest` = `main` + brain router, pushed to its remote.
+- `main` = `UI`, pushed, 0/0 with origin (tip advances with the commits described here).
+- `fable-latest` = `main` + brain router, pushed to its remote (bring it current by merging `main` again after these commits if it is to carry them).
 - No open conflicts, no stray branches created, no tags/releases pushed to origin.
 
 ## Remaining roadmap work (tracked in-app)
 
-- **Model manager (llama.cpp + HF)** — `planned`. One maintained list showing on-disk (ready to load/assign) vs available-to-download, with load / download / remove-from-disk. Needs a new `DELETE /api/models/:id` + file removal (does not exist yet). This is the recommended next feature — most concrete spec.
-- **First-run setup / health gate** — `planned`. Guided checklist (model + git + Playwright) so a fresh launch is not inert.
+- **First-run setup / health gate** — `planned`. Guided checklist (model + git + Playwright) so a fresh launch is not inert. Recommended next feature.
 - **OpenHands real invocation** — `parked` with resume notes. Groundwork under `docs/tooling/OPENHANDS_INVOCATION_*`. Resume = implement the local-only call boundary per `OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md`; keep the invocation flag off until the gate + tests pass.
 
 Discipline note from the maintainer: build ONE roadmap item fully before starting the next. The Dev Roadmap exists to enforce this.

@@ -3363,6 +3363,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [modelSearch, setModelSearch] = useState('Qwen GGUF');
   const [hardware, setHardware] = useState(null);
   const [runtime, setRuntime] = useState(null);
+  const [modelDeleteArmed, setModelDeleteArmed] = useState(null);
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
@@ -3419,9 +3420,49 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   }
 
   async function assign(id) {
-    setModels(await api(`/api/models/${id}/assign`, { method: 'POST', body: JSON.stringify({ role: 'Planner Assistant' }) }));
-    setRuntime(await api('/api/models/runtime'));
-    setNotice('Loaded model assignment for Planner Assistant.');
+    try {
+      setModels(await api(`/api/models/${id}/assign`, { method: 'POST', body: JSON.stringify({ role: 'Planner Assistant' }) }));
+      setRuntime(await api('/api/models/runtime'));
+      setNotice('Loaded model assignment for Planner Assistant.');
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  async function deleteModelFile(model) {
+    try {
+      const result = await api(`/api/models/${model.id}`, { method: 'DELETE', body: JSON.stringify({}) });
+      setModels(result.models);
+      setModelDeleteArmed(null);
+      if (model.assigned_role) setRuntime(await api('/api/models/runtime'));
+      setNotice(result.canRedownload
+        ? `Deleted ${model.name}. It stays in the list — click Download to get it back.`
+        : `Deleted ${model.name}'s file. No download source recorded; use Remove to clear the entry.`);
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  async function purgeModel(model) {
+    try {
+      const result = await api(`/api/models/${model.id}`, { method: 'DELETE', body: JSON.stringify({ purge: true }) });
+      setModels(result.models);
+      setModelDeleteArmed(null);
+      setNotice(`Removed ${model.name} from the list.`);
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  async function redownloadModel(model) {
+    try {
+      setNotice(`Downloading ${model.name}...`);
+      const result = await api(`/api/models/${model.id}/download`, { method: 'POST', body: JSON.stringify({}) });
+      setModels(result.models);
+      setNotice(`Downloaded ${model.name}.`);
+    } catch (err) {
+      setNotice(err.message);
+    }
   }
 
   async function startServer() {
@@ -3539,15 +3580,49 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           <button onClick={stopServer} disabled={!runtime?.managedServerRunning}><X size={16} /> Stop server</button>
         </div>
         <div className="table-list">
-          {models.map((model) => (
+          {models.length === 0 ? (
+            <Empty title="No local models" body="Scan a folder for .gguf files, or download one from Hugging Face above." />
+          ) : models.map((model) => (
             <div className="model-row" key={model.id}>
               <div>
                 <strong>{model.name}</strong>
                 <span>{model.path}</span>
+                <small>
+                  {model.assigned_role
+                    ? <Pill tone="good">{model.assigned_role}</Pill>
+                    : model.exists
+                      ? <Pill tone="info">Downloaded · ready to load</Pill>
+                      : (model.hf_repo
+                        ? <Pill tone="warn">Not downloaded</Pill>
+                        : <Pill tone="bad">File missing</Pill>)}
+                  {model.size_bytes && model.exists ? ` ${(model.size_bytes / 1e9).toFixed(2)} GB` : ''}
+                  {!model.exists && model.hf_repo ? ` ${model.hf_repo}` : ''}
+                </small>
               </div>
-              <button className={model.assigned_role ? 'primary' : ''} onClick={() => assign(model.id)}>
-                {model.assigned_role || 'Load'}
-              </button>
+              <div className="mini-actions">
+                {model.exists ? (
+                  <>
+                    <button className={model.assigned_role ? 'primary' : ''} onClick={() => assign(model.id)} title="Assign as Planner Assistant">
+                      {model.assigned_role ? 'Assigned' : 'Load'}
+                    </button>
+                    {modelDeleteArmed === model.id ? (
+                      <>
+                        <button className="danger" onClick={() => deleteModelFile(model)} title="Delete the .gguf file from disk (entry stays, re-downloadable)"><Trash2 size={14} /> Delete file</button>
+                        <button onClick={() => setModelDeleteArmed(null)}><X size={14} /> Cancel</button>
+                      </>
+                    ) : (
+                      <button className="danger" onClick={() => setModelDeleteArmed(model.id)} title="Delete the file from disk"><Trash2 size={14} /> Delete</button>
+                    )}
+                  </>
+                ) : model.hf_repo ? (
+                  <>
+                    <button className="primary" onClick={() => redownloadModel(model)} title="Re-download from Hugging Face"><Download size={14} /> Download</button>
+                    <button className="danger" onClick={() => purgeModel(model)} title="Remove from list"><X size={14} /> Remove</button>
+                  </>
+                ) : (
+                  <button className="danger" onClick={() => purgeModel(model)} title="Remove this stale entry (no download source)"><Trash2 size={14} /> Remove</button>
+                )}
+              </div>
             </div>
           ))}
         </div>

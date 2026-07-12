@@ -27,6 +27,8 @@ export function migrate() {
       size_bytes INTEGER,
       assigned_role TEXT,
       source TEXT NOT NULL DEFAULT 'local',
+      hf_repo TEXT,
+      hf_file TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -165,6 +167,16 @@ export function migrate() {
   ]) {
     try {
       db.exec(`ALTER TABLE consultations ADD COLUMN ${column[0]} ${column[1]}`);
+    } catch {
+      // Column already exists.
+    }
+  }
+
+  // Remember a model's Hugging Face origin so a deleted file can be
+  // re-downloaded and the list entry can flip downloaded -> download.
+  for (const column of [['hf_repo', 'TEXT'], ['hf_file', 'TEXT']]) {
+    try {
+      db.exec(`ALTER TABLE model_registry ADD COLUMN ${column[0]} ${column[1]}`);
     } catch {
       // Column already exists.
     }

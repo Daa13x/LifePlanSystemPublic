@@ -46,7 +46,7 @@ function seedRoadmapIfEmpty() {
   const seed = [
     { title: 'LPS-native Source Control panel', detail: 'Tabbed git cockpit: changes/stage/discard/commit, history graph, branches (switch/create/merge/delete), sync (fetch/pull/rebase/push), PAT login.', status: 'done', category: 'feature' },
     { title: 'Full git management coverage', detail: 'Source Control handles all git: stash save/list/apply/pop/drop, discard-all (confirmed), in-app conflict resolution (ours/theirs/mark), and tags (create/list/delete/push).', status: 'done', category: 'feature' },
-    { title: 'Model manager (llama.cpp + HF)', detail: 'One maintained model list showing on-disk (ready to load/assign) vs available-to-download, with load, download-from-HF, and remove-from-disk actions.', status: 'planned', category: 'feature' },
+    { title: 'Model manager (llama.cpp + HF)', detail: 'Local model registry shows on-disk (ready to load/assign) vs missing, with load (assign, guarded against missing files), download-from-HF, and remove (list-only or delete-file). Downloadable catalog via HF suggestions.', status: 'done', category: 'feature' },
     { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', status: 'planned', category: 'feature' },
     { title: 'OpenHands real invocation', detail: 'Local-only real OpenHands executor invocation behind the existing readiness gate.', resume_notes: 'Deliberately disabled by default. Groundwork: adapter stub, contract, schemas, and safety matrix under docs/tooling/OPENHANDS_INVOCATION_*. Resume = implement the local-only call boundary per OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md acceptance criteria; keep invocation flag off until the gate + tests pass.', status: 'parked', category: 'infra' },
     { title: 'Brain-aware Chat provider router', detail: 'Chat routes to ChatGPT connector first with local model fallback; brain context loading foundation.', status: 'active', category: 'feature' }
@@ -1228,7 +1228,7 @@ app.get('/api/bootstrap', async (_req, res) => {
     planner: await plannerData(),
     sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC'),
     projects: allRows('SELECT * FROM projects ORDER BY updated_at DESC'),
-    models: allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')
+    models: modelsWithExists()
   });
 });
 
@@ -1810,7 +1810,38 @@ app.patch('/api/items/:id', (req, res) => {
   ok(res, row('SELECT * FROM knowledge_items WHERE id = ?', [req.params.id]));
 });
 
-app.get('/api/models', (_req, res) => ok(res, allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')));
+// Registry rows enriched with whether the .gguf is still on disk, so the UI can
+// show "ready to load" vs a stale entry whose file was moved/deleted elsewhere.
+function modelsWithExists() {
+  return allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')
+    .map((model) => ({ ...model, exists: Boolean(model.path && fs.existsSync(model.path)) }));
+}
+
+app.get('/api/models', (_req, res) => ok(res, modelsWithExists()));
+
+app.delete('/api/models/:id', (req, res) => {
+  const model = row('SELECT * FROM model_registry WHERE id = ?', [req.params.id]);
+  if (!model) return fail(res, 404, 'Model not found.');
+  // purge removes the list entry entirely (for a stale entry with no HF origin
+  // that cannot be re-downloaded). The default delete removes the file on disk
+  // but KEEPS the entry, flipping it from downloaded to a re-downloadable state.
+  if (req.body?.purge) {
+    db.prepare('DELETE FROM model_registry WHERE id = ?').run(model.id);
+    return ok(res, { id: model.id, purged: true, models: modelsWithExists() });
+  }
+  let fileRemoved = false;
+  if (model.path && /\.gguf$/i.test(model.path) && fs.existsSync(model.path) && fs.statSync(model.path).isFile()) {
+    try {
+      fs.unlinkSync(model.path);
+      fileRemoved = true;
+    } catch (error) {
+      return fail(res, 500, `Could not delete the model file: ${error.message}`);
+    }
+  }
+  // A file that is gone can no longer be the assigned Planner Assistant.
+  if (model.assigned_role) db.prepare('UPDATE model_registry SET assigned_role = NULL WHERE id = ?').run(model.id);
+  ok(res, { id: model.id, fileRemoved, canRedownload: Boolean(model.hf_repo && model.hf_file), models: modelsWithExists() });
+});
 
 app.get('/api/models/runtime', async (_req, res) => {
   ok(res, await localModelStatus());
@@ -1933,14 +1964,19 @@ app.post('/api/models/scan', (req, res) => {
     }
   }
   setSetting('modelFolders', folders);
-  ok(res, { discovered, models: allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC') });
+  ok(res, { discovered, models: modelsWithExists() });
 });
 
 app.post('/api/models/:id/assign', (req, res) => {
   const role = req.body.role || 'Planner Assistant';
+  const model = row('SELECT * FROM model_registry WHERE id = ?', [req.params.id]);
+  if (!model) return fail(res, 404, 'Model not found.');
+  if (model.path && !fs.existsSync(model.path)) {
+    return fail(res, 409, 'That model file is no longer on disk. Re-download it or remove the stale entry before assigning.');
+  }
   db.prepare('UPDATE model_registry SET assigned_role = NULL WHERE assigned_role = ?').run(role);
   db.prepare('UPDATE model_registry SET assigned_role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(role, req.params.id);
-  ok(res, allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC'));
+  ok(res, modelsWithExists());
 });
 
 app.get('/api/hf/files', async (req, res) => {
@@ -2000,13 +2036,34 @@ app.post('/api/hf/download', async (req, res) => {
   const target = path.join(folder, path.basename(file));
   await pipeline(response.body, fs.createWriteStream(target));
   const stat = fs.statSync(target);
+  // Record the HF origin so a later delete can flip the entry to "download"
+  // and re-fetch the exact same file.
   const id = db.prepare(`
-    INSERT INTO model_registry (name, path, size_bytes, source)
-    VALUES (?, ?, ?, 'huggingface')
-    ON CONFLICT(path) DO UPDATE SET size_bytes = excluded.size_bytes, updated_at = CURRENT_TIMESTAMP
-  `).run(path.basename(file), target, stat.size).lastInsertRowid;
+    INSERT INTO model_registry (name, path, size_bytes, source, hf_repo, hf_file)
+    VALUES (?, ?, ?, 'huggingface', ?, ?)
+    ON CONFLICT(path) DO UPDATE SET size_bytes = excluded.size_bytes, hf_repo = excluded.hf_repo, hf_file = excluded.hf_file, updated_at = CURRENT_TIMESTAMP
+  `).run(path.basename(file), target, stat.size, repo, file).lastInsertRowid;
   setSetting('modelDownloadFolder', folder);
   ok(res, { id, target, size: stat.size });
+});
+
+// Re-download a known model whose file was deleted, using its stored HF origin,
+// back to its original path. Flips the list entry download -> downloaded.
+app.post('/api/models/:id/download', async (req, res) => {
+  const model = row('SELECT * FROM model_registry WHERE id = ?', [req.params.id]);
+  if (!model) return fail(res, 404, 'Model not found.');
+  if (!model.hf_repo || !model.hf_file) return fail(res, 400, 'This model has no recorded Hugging Face origin, so it cannot be re-downloaded. Re-scan the folder instead.');
+  if (model.path && fs.existsSync(model.path)) return fail(res, 409, 'The model file is already on disk.');
+  const token = getSetting('hfToken', '');
+  const url = `https://huggingface.co/${model.hf_repo}/resolve/main/${model.hf_file}`;
+  const response = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (!response.ok || !response.body) return fail(res, response.status, `Download failed: ${response.statusText}`);
+  const target = model.path || path.join(getSetting('modelDownloadFolder', path.resolve('models')), path.basename(model.hf_file));
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  await pipeline(response.body, fs.createWriteStream(target));
+  const stat = fs.statSync(target);
+  db.prepare('UPDATE model_registry SET path = ?, size_bytes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(target, stat.size, model.id);
+  ok(res, { id: model.id, target, size: stat.size, models: modelsWithExists() });
 });
 
 const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken']);
