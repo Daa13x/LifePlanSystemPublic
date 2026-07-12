@@ -1193,7 +1193,7 @@ app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: path.resol
 
 app.get('/api/bootstrap', async (_req, res) => {
   ok(res, {
-    settings: Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)])),
+    settings: readSettingsRedacted(),
     planner: await plannerData(),
     sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC'),
     projects: allRows('SELECT * FROM projects ORDER BY updated_at DESC'),
