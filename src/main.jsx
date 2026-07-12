@@ -3138,7 +3138,10 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
           </div>
 
           <div className="panel">
-            <h2>Remotes</h2>
+            <div className="panel-heading">
+              <h2>Remotes</h2>
+              {currentRepoWebUrl && <button onClick={() => openExternal(currentRepoWebUrl, 'origin repository')} disabled={sourceBusy}><Github size={14} /> Open origin repo</button>}
+            </div>
             {source?.remoteList?.length ? (
               <div className="remote-list">
                 {source.remoteList.map((remote) => (

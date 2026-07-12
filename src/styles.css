@@ -190,7 +190,6 @@ h3 { font-size: 14px; font-weight: 700; }
 .icon-button { width: 36px; padding: 0; }
 .primary { color: #041511; background: var(--accent); border-color: var(--accent); font-weight: 700; }
 .primary.subtle { width: 100%; margin-top: 10px; background: var(--accent-2); }
-button:disabled { cursor: not-allowed; opacity: 0.5; }
 .danger { color: var(--red) !important; }
 .notice { color: var(--amber); font-size: 12px; }
 
