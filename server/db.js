@@ -70,6 +70,31 @@ export function migrate() {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS roadmap_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      resume_notes TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT 'feature',
+      status TEXT NOT NULL DEFAULT 'planned',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS roadmap_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT 'feature',
+      source_kind TEXT NOT NULL DEFAULT 'chat',
+      source_ref TEXT NOT NULL DEFAULT '',
+      signal TEXT NOT NULL DEFAULT '',
+      dedupe_key TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'candidate',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
     CREATE TABLE IF NOT EXISTS knowledge_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       type TEXT NOT NULL,

@@ -22,7 +22,10 @@ import {
   ListChecks,
   MessageSquareText,
   Moon,
+  Pause,
+  Play,
   Plus,
+  Route,
   RefreshCcw,
   SearchCheck,
   Settings,
@@ -43,6 +46,7 @@ const nav = [
   { id: 'memory', label: 'Memory', icon: Brain },
   { id: 'approvals', label: 'Approvals', icon: ShieldCheck },
   { id: 'projects', label: 'Projects', icon: FolderKanban },
+  { id: 'roadmap', label: 'Dev Roadmap', icon: Route },
   { id: 'repository', label: 'Repository', icon: FileText },
   { id: 'calibration', label: 'Calibration', icon: SearchCheck },
   { id: 'source', label: 'Source', icon: GitBranch },
@@ -342,6 +346,7 @@ function App() {
         {view === 'memory' && <Memory memory={memory} refresh={reloadPlanner} />}
         {view === 'approvals' && <ApprovalQueue setNotice={setNotice} refreshPlanner={reloadPlanner} />}
         {view === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
+        {view === 'roadmap' && <DevRoadmap setNotice={setNotice} refreshSignal={refreshSignal} />}
         {view === 'repository' && <RepositoryExplorer setNotice={setNotice} refreshSignal={refreshSignal} />}
         {view === 'calibration' && <Calibration setNotice={setNotice} refreshSignal={refreshSignal} />}
         {view === 'source' && <SourceControl setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -2268,6 +2273,219 @@ What needs an OS/user install:
 
 After installing CLI tools, use the Source tab login buttons and refresh status.`}
         </pre>
+      </div>
+    </section>
+  );
+}
+
+const ROADMAP_COLUMNS = [
+  { status: 'planned', label: 'Planned', hint: 'Not started yet' },
+  { status: 'active', label: 'In Progress', hint: 'Being built now — keep this short' },
+  { status: 'paused', label: 'Paused', hint: 'Stopped mid-build; resume notes kept' },
+  { status: 'parked', label: 'Parked', hint: 'Intentionally shelved; roadmapped, resumable' },
+  { status: 'done', label: 'Done', hint: 'Shipped' }
+];
+const ROADMAP_CATEGORY_TONES = { feature: 'good', fix: 'warn', infra: 'default', chore: 'default', idea: 'warn' };
+const ROADMAP_BLANK = { title: '', detail: '', resume_notes: '', category: 'feature', status: 'planned' };
+
+function DevRoadmap({ setNotice, refreshSignal = 0 }) {
+  const [items, setItems] = useState([]);
+  const [candidates, setCandidates] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState(ROADMAP_BLANK);
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState(ROADMAP_BLANK);
+
+  async function load(announce = false) {
+    try {
+      setItems(await api('/api/roadmap'));
+      setCandidates(await api('/api/roadmap/candidates').catch(() => []));
+      if (announce) setNotice('Dev roadmap refreshed.');
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  const scanNow = () => act(async () => {
+    const result = await api('/api/roadmap/scan', { method: 'POST' });
+    setCandidates(result.candidates || []);
+  }, 'Scanned chat history and files for dev tasks.');
+
+  const acceptCandidate = (candidate) => act(
+    () => api(`/api/roadmap/candidates/${candidate.id}/accept`, { method: 'POST' }),
+    `Added "${candidate.title}" to Planned.`
+  );
+
+  const dismissCandidate = (candidate) => act(
+    () => api(`/api/roadmap/candidates/${candidate.id}/dismiss`, { method: 'POST' })
+  );
+
+  useEffect(() => { load(); }, [refreshSignal]);
+
+  async function act(fn, success) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await fn();
+      await load();
+      if (success) setNotice(success);
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const addItem = () => {
+    if (!draft.title.trim()) return;
+    act(async () => {
+      await api('/api/roadmap', { method: 'POST', body: JSON.stringify(draft) });
+      setDraft(ROADMAP_BLANK);
+    }, 'Added roadmap item.');
+  };
+
+  const setStatus = (item, status) => act(
+    () => api(`/api/roadmap/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+    `"${item.title}" → ${status}.`
+  );
+
+  const move = (item, direction) => act(
+    () => api(`/api/roadmap/${item.id}/move`, { method: 'POST', body: JSON.stringify({ direction }) })
+  );
+
+  const remove = (item) => act(
+    () => api(`/api/roadmap/${item.id}`, { method: 'DELETE' }),
+    `Deleted "${item.title}".`
+  );
+
+  const startEdit = (item) => {
+    setEditingId(item.id);
+    setEditDraft({ title: item.title, detail: item.detail || '', resume_notes: item.resume_notes || '', category: item.category, status: item.status });
+  };
+
+  const saveEdit = (item) => act(async () => {
+    await api(`/api/roadmap/${item.id}`, { method: 'PATCH', body: JSON.stringify(editDraft) });
+    setEditingId(null);
+  }, 'Roadmap item updated.');
+
+  const counts = ROADMAP_COLUMNS.reduce((acc, col) => {
+    acc[col.status] = items.filter((item) => item.status === col.status).length;
+    return acc;
+  }, {});
+
+  return (
+    <section className="roadmap-panel">
+      <div className="source-warning info">
+        <strong>Development roadmap — build work only</strong>
+        <small>Features not built or partly built, dev todos, and parked work. This is separate from your life-assistant Planner, Projects, and Memory. Nothing here is a life goal.</small>
+      </div>
+
+      <div className="panel roadmap-add">
+        <div className="panel-heading">
+          <h2>Add build item</h2>
+          <button onClick={() => load(true)} disabled={busy}><RefreshCcw size={15} /> Refresh</button>
+        </div>
+        <div className="inline-form">
+          <input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Feature or todo (e.g. Model manager list)" disabled={busy} />
+          <select value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })} disabled={busy}>
+            <option value="feature">feature</option>
+            <option value="fix">fix</option>
+            <option value="infra">infra</option>
+            <option value="chore">chore</option>
+            <option value="idea">idea</option>
+          </select>
+          <select value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value })} disabled={busy}>
+            {ROADMAP_COLUMNS.map((col) => <option value={col.status} key={col.status}>{col.label}</option>)}
+          </select>
+          <button className="primary" onClick={addItem} disabled={busy || !draft.title.trim()}><Plus size={16} /> Add</button>
+        </div>
+        <textarea value={draft.detail} onChange={(event) => setDraft({ ...draft, detail: event.target.value })} placeholder="What it is / what's left to do (optional)" disabled={busy} />
+      </div>
+
+      <div className="panel roadmap-suggested">
+        <div className="panel-heading">
+          <h2>Suggested from history &amp; files {candidates.length ? `(${candidates.length})` : ''}</h2>
+          <button onClick={scanNow} disabled={busy} title="Scan chat history and repo files for dev tasks"><SearchCheck size={15} /> Scan now</button>
+        </div>
+        <small>Auto-detected dev tasks from chat and code (TODO/FIXME, unchecked checklist items, build language). Accept to add to Planned, or dismiss.</small>
+        {candidates.length === 0 ? (
+          <div className="roadmap-empty">Nothing pending. Scan finds new dev-only tasks; life-assistant content is never included.</div>
+        ) : (
+          <div className="roadmap-suggested-list">
+            {candidates.map((candidate) => (
+              <div className="roadmap-suggested-row" key={candidate.id}>
+                <div className="roadmap-suggested-main">
+                  <Pill tone={ROADMAP_CATEGORY_TONES[candidate.category] || 'default'}>{candidate.category}</Pill>
+                  <span className="roadmap-suggested-title">{candidate.title}</span>
+                  <span className="roadmap-suggested-src">{candidate.source_kind}{candidate.source_ref ? ` · ${candidate.source_ref}` : ''}</span>
+                </div>
+                <div className="mini-actions">
+                  <button onClick={() => acceptCandidate(candidate)} disabled={busy}><Plus size={14} /> Accept</button>
+                  <button onClick={() => dismissCandidate(candidate)} disabled={busy}><X size={14} /> Dismiss</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="roadmap-board">
+        {ROADMAP_COLUMNS.map((col) => (
+          <div className={cx('roadmap-column', `rm-${col.status}`)} key={col.status}>
+            <div className="roadmap-col-head">
+              <strong>{col.label}</strong>
+              <span className="sc-badge">{counts[col.status]}</span>
+            </div>
+            <small className="roadmap-col-hint">{col.hint}</small>
+            <div className="roadmap-cards">
+              {items.filter((item) => item.status === col.status).length === 0 ? (
+                <div className="roadmap-empty">—</div>
+              ) : items.filter((item) => item.status === col.status).map((item) => (
+                <div className="roadmap-card" key={item.id}>
+                  {editingId === item.id ? (
+                    <div className="roadmap-edit">
+                      <input value={editDraft.title} onChange={(event) => setEditDraft({ ...editDraft, title: event.target.value })} disabled={busy} />
+                      <textarea value={editDraft.detail} onChange={(event) => setEditDraft({ ...editDraft, detail: event.target.value })} placeholder="Detail" disabled={busy} />
+                      <textarea value={editDraft.resume_notes} onChange={(event) => setEditDraft({ ...editDraft, resume_notes: event.target.value })} placeholder="Resume notes (how to pick this back up)" disabled={busy} />
+                      <div className="roadmap-card-actions">
+                        <select value={editDraft.category} onChange={(event) => setEditDraft({ ...editDraft, category: event.target.value })} disabled={busy}>
+                          <option value="feature">feature</option>
+                          <option value="fix">fix</option>
+                          <option value="infra">infra</option>
+                          <option value="chore">chore</option>
+                          <option value="idea">idea</option>
+                        </select>
+                        <button className="primary" onClick={() => saveEdit(item)} disabled={busy}><Check size={14} /> Save</button>
+                        <button onClick={() => setEditingId(null)} disabled={busy}><X size={14} /> Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="roadmap-card-top">
+                        <strong>{item.title}</strong>
+                        <Pill tone={ROADMAP_CATEGORY_TONES[item.category] || 'default'}>{item.category}</Pill>
+                      </div>
+                      {item.detail && <p className="roadmap-detail">{item.detail}</p>}
+                      {item.resume_notes && (item.status === 'parked' || item.status === 'paused') && (
+                        <div className="roadmap-resume"><strong>Resume:</strong> {item.resume_notes}</div>
+                      )}
+                      <div className="roadmap-card-actions">
+                        {item.status !== 'active' && <button onClick={() => setStatus(item, 'active')} disabled={busy} title="Start / resume"><Play size={13} /></button>}
+                        {item.status !== 'paused' && item.status !== 'done' && <button onClick={() => setStatus(item, 'paused')} disabled={busy} title="Pause"><Pause size={13} /></button>}
+                        {item.status !== 'parked' && item.status !== 'done' && <button onClick={() => setStatus(item, 'parked')} disabled={busy} title="Park (shelve, resumable)"><Archive size={13} /></button>}
+                        {item.status !== 'done' && <button onClick={() => setStatus(item, 'done')} disabled={busy} title="Mark done"><Check size={13} /></button>}
+                        <button onClick={() => move(item, 'up')} disabled={busy} title="Move up">↑</button>
+                        <button onClick={() => move(item, 'down')} disabled={busy} title="Move down">↓</button>
+                        <button onClick={() => startEdit(item)} disabled={busy} title="Edit">Aa</button>
+                        <button className="danger" onClick={() => remove(item)} disabled={busy} title="Delete"><Trash2 size={13} /></button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );

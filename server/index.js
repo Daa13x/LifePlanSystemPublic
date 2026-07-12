@@ -1,5 +1,6 @@
 import express from 'express';
 import { execFile, spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +26,25 @@ import {
 import { resolveRunCliCwd } from './runCliCwd.js';
 
 migrate();
+seedRoadmapIfEmpty();
+
+// One-time seed so the Roadmap opens with the real current build state instead
+// of an empty board. Only runs when the table is empty, so user edits and
+// deletions are never overwritten on later starts.
+function seedRoadmapIfEmpty() {
+  const existing = db.prepare('SELECT COUNT(*) AS n FROM roadmap_items').get();
+  if (existing.n > 0) return;
+  const seed = [
+    { title: 'LPS-native Source Control panel', detail: 'Tabbed git cockpit: changes/stage/discard/commit, history graph, branches (switch/create/merge/delete), sync (fetch/pull/rebase/push), PAT login.', status: 'done', category: 'feature' },
+    { title: 'Full git management coverage', detail: 'Close remaining gaps so Source Control handles all git: stash save/list/pop, discard-all, in-app conflict resolution, tags.', status: 'planned', category: 'feature' },
+    { title: 'Model manager (llama.cpp + HF)', detail: 'One maintained model list showing on-disk (ready to load/assign) vs available-to-download, with load, download-from-HF, and remove-from-disk actions.', status: 'planned', category: 'feature' },
+    { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', status: 'planned', category: 'feature' },
+    { title: 'OpenHands real invocation', detail: 'Local-only real OpenHands executor invocation behind the existing readiness gate.', resume_notes: 'Deliberately disabled by default. Groundwork: adapter stub, contract, schemas, and safety matrix under docs/tooling/OPENHANDS_INVOCATION_*. Resume = implement the local-only call boundary per OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md acceptance criteria; keep invocation flag off until the gate + tests pass.', status: 'parked', category: 'infra' },
+    { title: 'Brain-aware Chat provider router', detail: 'Chat routes to ChatGPT connector first with local model fallback; brain context loading foundation.', status: 'active', category: 'feature' }
+  ];
+  const insert = db.prepare('INSERT INTO roadmap_items (title, detail, resume_notes, category, status, sort_order) VALUES (?, ?, ?, ?, ?, ?)');
+  seed.forEach((item, index) => insert.run(item.title, item.detail, item.resume_notes || '', item.category, item.status, index));
+}
 
 const app = express();
 const port = Number(process.env.LIFE_PLANNER_PORT || 4177);
@@ -1179,6 +1199,237 @@ app.get('/api/bootstrap', async (_req, res) => {
     projects: allRows('SELECT * FROM projects ORDER BY updated_at DESC'),
     models: allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')
   });
+});
+
+const ROADMAP_STATUSES = ['planned', 'active', 'paused', 'parked', 'done'];
+const ROADMAP_CATEGORIES = ['feature', 'fix', 'infra', 'chore', 'idea'];
+
+// --- Autonomous dev-task scanner -------------------------------------------
+// Scans chat history and repo files for development-type tasks and stages them
+// as roadmap candidates. It is deliberately dev-only: a line must carry a
+// technical signal to qualify, so life-assistant content never leaks into the
+// build roadmap. Detection is backend and autonomous; a human still accepts a
+// candidate before it becomes a live roadmap item (LPS proposes, user approves).
+
+// A qualifying line needs an intent cue (something to do) AND a dev cue (that it
+// is technical). This pairing is what keeps "call the dentist" out.
+const DEV_INTENT = /\b(todo|fixme|hack|xxx|need(s)? to|we should|let'?s|should (add|build|make|fix|wire|handle)|add|build|implement|create|refactor|wire up|hook up|fix|support|expose|gate|parked?|roadmap|next pr|future implementation|follow[- ]up)\b/i;
+const DEV_CUE = /\b(endpoint|api|route|ui|component|panel|button|server|client|db|database|schema|migration|table|git|branch|merge|commit|push|diff|build|installer|model|gguf|llama|playwright|scanner|token|auth|regex|function|module|import|export|css|jsx|react|express|sqlite|openhands|executor|worktree|bug|crash|error|test|refactor)\b/i;
+const DEV_CHECKLIST = /^\s*[-*]\s*\[\s\]\s+(.*)$/; // markdown unchecked "- [ ] ..."
+const CODE_MARKER = /(?:\/\/|#|<!--|\*)\s*(TODO|FIXME|HACK|XXX)\b[:\-\s]*(.+)$/i;
+
+function classifyDevTask(text) {
+  const lower = text.toLowerCase();
+  if (/\b(fixme|bug|crash|error|broken|regression|fix)\b/.test(lower)) return 'fix';
+  if (/\b(refactor|schema|migration|infra|deploy|pipeline|executor|worktree|openhands)\b/.test(lower)) return 'infra';
+  if (/\b(idea|maybe|consider|could|explore)\b/.test(lower)) return 'idea';
+  return 'feature';
+}
+
+function cleanTaskTitle(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[-*\s>#]+/, '')
+    .replace(/\s*(?:-->|\*\/|#\}|--\})\s*$/, '') // strip trailing comment closers
+    .trim()
+    .slice(0, 140);
+}
+
+function devTaskCandidateFrom(rawLine) {
+  const line = String(rawLine || '').trim();
+  if (line.length < 8 || line.length > 400) return null;
+  const codeHit = line.match(CODE_MARKER);
+  if (codeHit) {
+    const title = cleanTaskTitle(codeHit[2]);
+    if (title.length < 6) return null;
+    return { title, category: classifyDevTask(line) };
+  }
+  const checklistHit = line.match(DEV_CHECKLIST);
+  const candidateText = checklistHit ? checklistHit[1] : line;
+  if (!DEV_INTENT.test(candidateText) || !DEV_CUE.test(candidateText)) return null;
+  const title = cleanTaskTitle(candidateText);
+  if (title.length < 8) return null;
+  return { title, category: classifyDevTask(candidateText) };
+}
+
+function dedupeKey(sourceKind, title) {
+  return crypto.createHash('sha1').update(`${sourceKind}|${title.toLowerCase().replace(/\s+/g, ' ').trim()}`).digest('hex');
+}
+
+// Skip re-staging anything that already exists as a candidate OR as a live
+// roadmap item (so accepting then re-scanning does not resurrect it).
+function roadmapAlreadyKnows(title) {
+  const norm = title.toLowerCase().replace(/\s+/g, ' ').trim();
+  return Boolean(row('SELECT id FROM roadmap_items WHERE lower(title) = ? LIMIT 1', [norm]));
+}
+
+function stageDevCandidate({ title, category, sourceKind, sourceRef, signal }) {
+  if (roadmapAlreadyKnows(title)) return false;
+  const key = dedupeKey('roadmap', title);
+  const existing = row('SELECT id, status FROM roadmap_candidates WHERE dedupe_key = ?', [key]);
+  if (existing) return false; // already staged or previously dismissed — do not nag again
+  db.prepare(
+    'INSERT INTO roadmap_candidates (title, detail, category, source_kind, source_ref, signal, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(title, '', category, sourceKind, sourceRef, String(signal || '').slice(0, 200), key);
+  return true;
+}
+
+function scanChatForDevTasks(limitMessages = 400) {
+  const messages = allRows('SELECT id, content FROM chat_messages ORDER BY id DESC LIMIT ?', [limitMessages]);
+  let staged = 0;
+  for (const message of messages) {
+    for (const line of String(message.content || '').split('\n')) {
+      const candidate = devTaskCandidateFrom(line);
+      if (candidate && stageDevCandidate({ ...candidate, sourceKind: 'chat', sourceRef: `message:${message.id}`, signal: line })) staged += 1;
+    }
+  }
+  return staged;
+}
+
+function scanFilesForDevTasks() {
+  const roots = ['src', 'server', 'docs/todos'];
+  const includeExt = new Set(['.js', '.jsx', '.ts', '.tsx', '.css', '.md', '.mjs']);
+  const blockedDir = new Set(['node_modules', 'dist', 'data', '.git', 'release', '.cache']);
+  const files = [];
+  const stack = roots.map((rootDir) => path.join(root, rootDir)).filter((dir) => fs.existsSync(dir));
+  while (stack.length && files.length < 600) {
+    const current = stack.pop();
+    let stat;
+    try { stat = fs.statSync(current); } catch { continue; }
+    if (stat.isDirectory()) {
+      if (blockedDir.has(path.basename(current))) continue;
+      for (const entry of fs.readdirSync(current)) stack.push(path.join(current, entry));
+    } else if (includeExt.has(path.extname(current))) {
+      files.push(current);
+    }
+  }
+  let staged = 0;
+  for (const file of files) {
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    if (text.length > 400000) continue;
+    const rel = path.relative(root, file).replaceAll('\\', '/');
+    let lineNo = 0;
+    for (const line of text.split('\n')) {
+      lineNo += 1;
+      // Only comment-marker tasks and markdown checklists from files, to avoid
+      // matching ordinary prose or the scanner's own keyword lists.
+      if (!CODE_MARKER.test(line) && !DEV_CHECKLIST.test(line)) continue;
+      const candidate = devTaskCandidateFrom(line);
+      if (candidate && stageDevCandidate({ ...candidate, sourceKind: 'file', sourceRef: `${rel}:${lineNo}`, signal: line.trim() })) staged += 1;
+    }
+  }
+  return staged;
+}
+
+function scanDevTasks() {
+  try {
+    const fromChat = scanChatForDevTasks();
+    const fromFiles = scanFilesForDevTasks();
+    return { ok: true, staged: fromChat + fromFiles, fromChat, fromFiles };
+  } catch (error) {
+    return { ok: false, error: error.message, staged: 0 };
+  }
+}
+
+app.get('/api/roadmap', (_req, res) => {
+  ok(res, allRows('SELECT * FROM roadmap_items ORDER BY sort_order ASC, id ASC'));
+});
+
+app.post('/api/roadmap', (req, res) => {
+  const title = String(req.body.title || '').trim();
+  if (!title) return fail(res, 400, 'A title is required.');
+  const status = ROADMAP_STATUSES.includes(req.body.status) ? req.body.status : 'planned';
+  const category = ROADMAP_CATEGORIES.includes(req.body.category) ? req.body.category : 'feature';
+  const maxOrder = row('SELECT MAX(sort_order) AS m FROM roadmap_items')?.m ?? -1;
+  const id = db.prepare(
+    'INSERT INTO roadmap_items (title, detail, resume_notes, category, status, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(title, String(req.body.detail || ''), String(req.body.resume_notes || ''), category, status, maxOrder + 1).lastInsertRowid;
+  ok(res, row('SELECT * FROM roadmap_items WHERE id = ?', [id]));
+});
+
+app.patch('/api/roadmap/:id', (req, res) => {
+  const item = row('SELECT * FROM roadmap_items WHERE id = ?', [req.params.id]);
+  if (!item) return fail(res, 404, 'Roadmap item not found.');
+  if (req.body.status !== undefined && !ROADMAP_STATUSES.includes(req.body.status)) {
+    return fail(res, 400, `Status must be one of: ${ROADMAP_STATUSES.join(', ')}.`);
+  }
+  if (req.body.category !== undefined && !ROADMAP_CATEGORIES.includes(req.body.category)) {
+    return fail(res, 400, `Category must be one of: ${ROADMAP_CATEGORIES.join(', ')}.`);
+  }
+  const next = {
+    title: req.body.title !== undefined ? String(req.body.title).trim() || item.title : item.title,
+    detail: req.body.detail !== undefined ? String(req.body.detail) : item.detail,
+    resume_notes: req.body.resume_notes !== undefined ? String(req.body.resume_notes) : item.resume_notes,
+    category: req.body.category !== undefined ? req.body.category : item.category,
+    status: req.body.status !== undefined ? req.body.status : item.status,
+    sort_order: req.body.sort_order !== undefined ? Number(req.body.sort_order) : item.sort_order
+  };
+  db.prepare(
+    'UPDATE roadmap_items SET title = ?, detail = ?, resume_notes = ?, category = ?, status = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+  ).run(next.title, next.detail, next.resume_notes, next.category, next.status, next.sort_order, item.id);
+  ok(res, row('SELECT * FROM roadmap_items WHERE id = ?', [item.id]));
+});
+
+// Move an item one slot up or down by swapping sort_order with its neighbour in
+// the same overall ordering. Keeps reordering robust without drag-and-drop.
+app.post('/api/roadmap/:id/move', (req, res) => {
+  const item = row('SELECT * FROM roadmap_items WHERE id = ?', [req.params.id]);
+  if (!item) return fail(res, 404, 'Roadmap item not found.');
+  const direction = req.body.direction === 'up' ? 'up' : 'down';
+  const neighbour = direction === 'up'
+    ? row('SELECT * FROM roadmap_items WHERE sort_order < ? OR (sort_order = ? AND id < ?) ORDER BY sort_order DESC, id DESC LIMIT 1', [item.sort_order, item.sort_order, item.id])
+    : row('SELECT * FROM roadmap_items WHERE sort_order > ? OR (sort_order = ? AND id > ?) ORDER BY sort_order ASC, id ASC LIMIT 1', [item.sort_order, item.sort_order, item.id]);
+  if (!neighbour) return ok(res, allRows('SELECT * FROM roadmap_items ORDER BY sort_order ASC, id ASC'));
+  // node:sqlite DatabaseSync has no .transaction(); use explicit BEGIN/COMMIT.
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE roadmap_items SET sort_order = ? WHERE id = ?').run(neighbour.sort_order, item.id);
+    db.prepare('UPDATE roadmap_items SET sort_order = ? WHERE id = ?').run(item.sort_order, neighbour.id);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    return fail(res, 500, error.message || 'Reorder failed.');
+  }
+  ok(res, allRows('SELECT * FROM roadmap_items ORDER BY sort_order ASC, id ASC'));
+});
+
+app.delete('/api/roadmap/:id', (req, res) => {
+  const item = row('SELECT * FROM roadmap_items WHERE id = ?', [req.params.id]);
+  if (!item) return fail(res, 404, 'Roadmap item not found.');
+  db.prepare('DELETE FROM roadmap_items WHERE id = ?').run(item.id);
+  ok(res, { id: item.id });
+});
+
+app.get('/api/roadmap/candidates', (_req, res) => {
+  ok(res, allRows("SELECT * FROM roadmap_candidates WHERE status = 'candidate' ORDER BY created_at DESC, id DESC"));
+});
+
+// Autonomous scan trigger. Also runs once at startup; this endpoint lets the UI
+// (or a future interval) re-run it on demand.
+app.post('/api/roadmap/scan', (_req, res) => {
+  const result = scanDevTasks();
+  if (!result.ok) return fail(res, 500, result.error || 'Dev-task scan failed.');
+  ok(res, { ...result, candidates: allRows("SELECT * FROM roadmap_candidates WHERE status = 'candidate' ORDER BY created_at DESC, id DESC") });
+});
+
+app.post('/api/roadmap/candidates/:id/accept', (req, res) => {
+  const candidate = row('SELECT * FROM roadmap_candidates WHERE id = ?', [req.params.id]);
+  if (!candidate) return fail(res, 404, 'Candidate not found.');
+  const maxOrder = row('SELECT MAX(sort_order) AS m FROM roadmap_items')?.m ?? -1;
+  const detail = candidate.source_ref ? `From ${candidate.source_kind} (${candidate.source_ref}).` : '';
+  const id = db.prepare(
+    'INSERT INTO roadmap_items (title, detail, category, status, sort_order) VALUES (?, ?, ?, ?, ?)'
+  ).run(candidate.title, detail, candidate.category, 'planned', maxOrder + 1).lastInsertRowid;
+  db.prepare("UPDATE roadmap_candidates SET status = 'accepted' WHERE id = ?").run(candidate.id);
+  ok(res, row('SELECT * FROM roadmap_items WHERE id = ?', [id]));
+});
+
+app.post('/api/roadmap/candidates/:id/dismiss', (req, res) => {
+  const candidate = row('SELECT * FROM roadmap_candidates WHERE id = ?', [req.params.id]);
+  if (!candidate) return fail(res, 404, 'Candidate not found.');
+  db.prepare("UPDATE roadmap_candidates SET status = 'dismissed' WHERE id = ?").run(candidate.id);
+  ok(res, { id: candidate.id });
 });
 
 app.get('/api/planner', async (_req, res) => ok(res, await plannerData()));
@@ -3915,4 +4166,11 @@ if (fs.existsSync(distDir)) {
 
 app.listen(port, '127.0.0.1', () => {
   console.log(`Life Planner running at http://127.0.0.1:${port}`);
+  // Autonomous dev-task scan on startup, deferred so it never blocks boot.
+  setTimeout(() => {
+    const result = scanDevTasks();
+    if (result.ok && result.staged > 0) {
+      console.log(`Dev-task scan: staged ${result.staged} roadmap candidate(s) (${result.fromChat} chat, ${result.fromFiles} file).`);
+    }
+  }, 1500);
 });

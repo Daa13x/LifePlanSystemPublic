@@ -1017,3 +1017,42 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
 @media (max-width: 1180px) {
   .sc-changes-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Dev Roadmap: development-only build tracker (separate from life planner) */
+.roadmap-panel { display: flex; flex-direction: column; gap: 12px; }
+.roadmap-add textarea { min-height: 60px; margin-top: 8px; }
+.roadmap-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; align-items: start; }
+.roadmap-column { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 6px; min-height: 120px; }
+.roadmap-column.rm-active { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.roadmap-column.rm-parked { border-style: dashed; }
+.roadmap-column.rm-done { opacity: 0.85; }
+.roadmap-col-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.roadmap-col-head strong { font-size: 13px; }
+.roadmap-col-hint { color: var(--muted); font-size: 10px; min-height: 24px; }
+.roadmap-cards { display: flex; flex-direction: column; gap: 8px; }
+.roadmap-empty { color: var(--muted); text-align: center; padding: 8px 0; font-size: 12px; }
+.roadmap-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 9px; display: flex; flex-direction: column; gap: 6px; }
+.roadmap-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.roadmap-card-top strong { font-size: 12px; line-height: 1.35; color: var(--text); }
+.roadmap-detail { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.roadmap-resume { font-size: 11px; line-height: 1.4; color: var(--soft); background: color-mix(in srgb, var(--amber) 12%, transparent); border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--line)); border-radius: 6px; padding: 6px 8px; }
+.roadmap-resume strong { color: var(--amber); }
+.roadmap-card-actions { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.roadmap-card-actions button { min-height: 26px; padding: 0 7px; font-size: 11px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+.roadmap-card-actions button:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.roadmap-card-actions button.primary { color: #041511; background: var(--accent); border-color: var(--accent); }
+.roadmap-card-actions button.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--line)); }
+.roadmap-edit { display: flex; flex-direction: column; gap: 6px; }
+.roadmap-edit input, .roadmap-edit textarea { width: 100%; }
+.roadmap-edit textarea { min-height: 52px; }
+
+.roadmap-suggested-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; max-height: 260px; overflow: auto; }
+.roadmap-suggested-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
+.roadmap-suggested-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.roadmap-suggested-title { color: var(--text); font-size: 12px; }
+.roadmap-suggested-src { color: var(--muted); font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.roadmap-suggested .roadmap-empty { text-align: left; padding: 8px 0 0; }
+
+@media (max-width: 1180px) {
+  .roadmap-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
