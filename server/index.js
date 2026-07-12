@@ -1980,12 +1980,22 @@ app.post('/api/hf/download', async (req, res) => {
 
 const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken']);
 
-function readSettingsRedacted() {
+// Single source of truth for reading settings. When redactSecrets is true (the
+// default for anything client- or export-facing) every secret is replaced with
+// a [redacted] marker if present, or '' if empty, so credentials never leave
+// the server. Pass redactSecrets: false only for an explicit secrets backup.
+function readSettings({ redactSecrets = true } = {}) {
   const settings = Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)]));
-  for (const key of SECRET_SETTING_KEYS) {
-    if (Object.hasOwn(settings, key)) settings[key] = settings[key] ? '[redacted]' : '';
+  if (redactSecrets) {
+    for (const key of SECRET_SETTING_KEYS) {
+      if (Object.hasOwn(settings, key)) settings[key] = settings[key] ? '[redacted]' : '';
+    }
   }
   return settings;
+}
+
+function readSettingsRedacted() {
+  return readSettings({ redactSecrets: true });
 }
 
 app.get('/api/settings', (_req, res) => {
@@ -4057,15 +4067,7 @@ app.post('/api/repo/proposals', (req, res) => {
 });
 
 function publicSettings(includeSecrets = false) {
-  const settings = Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)]));
-  if (!includeSecrets) {
-    // Redact every known secret (hfToken, githubToken, ...) so a backup export
-    // never writes credentials in cleartext.
-    for (const key of SECRET_SETTING_KEYS) {
-      if (Object.hasOwn(settings, key)) settings[key] = settings[key] ? '[redacted]' : '';
-    }
-  }
-  return settings;
+  return readSettings({ redactSecrets: !includeSecrets });
 }
 
 function importPreview(data = {}) {
@@ -4170,13 +4172,19 @@ if (fs.existsSync(distDir)) {
   });
 }
 
+const DEV_TASK_SCAN_INTERVAL_MS = 15 * 60 * 1000;
+
+function runDevTaskScan(reason) {
+  const result = scanDevTasks();
+  if (result.ok && result.staged > 0) {
+    console.log(`Dev-task scan (${reason}): staged ${result.staged} roadmap candidate(s) (${result.fromChat} chat, ${result.fromFiles} file).`);
+  }
+}
+
 app.listen(port, '127.0.0.1', () => {
   console.log(`Life Planner running at http://127.0.0.1:${port}`);
-  // Autonomous dev-task scan on startup, deferred so it never blocks boot.
-  setTimeout(() => {
-    const result = scanDevTasks();
-    if (result.ok && result.staged > 0) {
-      console.log(`Dev-task scan: staged ${result.staged} roadmap candidate(s) (${result.fromChat} chat, ${result.fromFiles} file).`);
-    }
-  }, 1500);
+  // Autonomous dev-task scan on startup, deferred so it never blocks boot, then
+  // a light periodic re-scan. Dedupe keeps repeat runs from re-staging anything.
+  setTimeout(() => runDevTaskScan('startup'), 1500);
+  setInterval(() => runDevTaskScan('interval'), DEV_TASK_SCAN_INTERVAL_MS).unref();
 });
