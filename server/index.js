@@ -28,6 +28,15 @@ import { resolveRunCliCwd } from './runCliCwd.js';
 migrate();
 seedRoadmapIfEmpty();
 
+// Safety net: a bug in one request handler must not silently take the whole
+// local server down or leave it in a half-dead state. Log and keep serving.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+});
+
 // One-time seed so the Roadmap opens with the real current build state instead
 // of an empty board. Only runs when the table is empty, so user edits and
 // deletions are never overwritten on later starts.
@@ -819,6 +828,28 @@ function isProtectedWorkspacePath(filePath = '') {
   return protectedRoots.some((rootName) => normalized.startsWith(rootName))
     || protectedNames.includes(normalized)
     || protectedExts.some((ext) => normalized.endsWith(ext));
+}
+
+// Guards against git argument injection: runCli uses execFile (no shell), so
+// there is no shell-metacharacter risk, but a value beginning with "-" would be
+// parsed by git as an option (e.g. a branch literally named "--force"). Accept
+// only names that start alphanumeric and use git's ordinary ref characters, and
+// reject the sequences git itself forbids in ref names.
+const SAFE_GIT_REF = /^[A-Za-z0-9][A-Za-z0-9._/+-]*$/;
+
+function safeGitRef(value) {
+  const v = String(value || '').trim();
+  if (!v || v.length > 255) return null;
+  if (!SAFE_GIT_REF.test(v)) return null;
+  if (v.includes('..') || v.endsWith('.lock') || v.endsWith('/') || v.includes('//') || v.includes('@{')) return null;
+  return v;
+}
+
+// A remote URL is not a ref, but must still never be parsed as a git option.
+function safeGitUrl(value) {
+  const v = String(value || '').trim();
+  if (!v || v.startsWith('-') || /[\0\n\r]/.test(v)) return null;
+  return v;
 }
 
 function parseRemotes(remoteText = '') {
@@ -3745,8 +3776,8 @@ app.post('/api/source/commit', async (req, res) => {
 });
 
 app.post('/api/source/branch', async (req, res) => {
-  const branch = req.body.branch?.trim();
-  if (!branch) return fail(res, 400, 'Branch name is required.');
+  const branch = safeGitRef(req.body.branch);
+  if (!branch) return fail(res, 400, 'Invalid branch name. Use letters, numbers, and . _ / - (not starting with a dash).');
   const result = await runCli('git', ['switch', '-c', branch]);
   if (!result.ok) return fail(res, 500, result.stderr || 'git branch creation failed');
   ok(res, { branch, output: result.stdout || result.stderr });
@@ -3766,8 +3797,8 @@ app.get('/api/source/branches', async (_req, res) => {
 });
 
 app.post('/api/source/checkout', async (req, res) => {
-  const branch = req.body.branch?.trim();
-  if (!branch) return fail(res, 400, 'Branch name is required.');
+  const branch = safeGitRef(req.body.branch);
+  if (!branch) return fail(res, 400, 'Invalid branch name.');
   const snapshot = await gitStatusSnapshot();
   if (snapshot.hasConflicts) return fail(res, 409, `Resolve conflicts before switching branches: ${snapshot.conflictFiles.join(', ')}`);
   if (snapshot.changedFiles.length && !req.body.allowDirty) return fail(res, 409, 'Working tree has changes. Commit, stash, or explicitly allow dirty branch switch.');
@@ -3816,9 +3847,10 @@ app.post('/api/source/push', async (req, res) => {
 });
 
 app.post('/api/source/remote', async (req, res) => {
-  const url = req.body.url?.trim();
-  const name = req.body.name?.trim() || 'origin';
-  if (!url) return fail(res, 400, 'Remote URL is required.');
+  const url = safeGitUrl(req.body.url);
+  const name = req.body.name ? safeGitRef(req.body.name) : 'origin';
+  if (!url) return fail(res, 400, 'A valid remote URL is required (must not start with a dash).');
+  if (!name) return fail(res, 400, 'Invalid remote name.');
   const existing = await runCli('git', ['remote', 'get-url', name]);
   const result = existing.ok
     ? await runCli('git', ['remote', 'set-url', name, url])
@@ -3927,8 +3959,8 @@ app.post('/api/source/rebase', async (_req, res) => {
 });
 
 app.post('/api/source/merge', async (req, res) => {
-  const branch = String(req.body.branch || '').trim();
-  if (!branch) return fail(res, 400, 'Branch to merge is required.');
+  const branch = safeGitRef(req.body.branch);
+  if (!branch) return fail(res, 400, 'Invalid branch name to merge.');
   const current = await runCli('git', ['branch', '--show-current']);
   if (branch === (current.stdout || '').trim()) return fail(res, 400, 'Cannot merge a branch into itself.');
   const result = await runCli('git', ['merge', '--no-edit', branch], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
@@ -3955,8 +3987,8 @@ app.post('/api/source/abort-merge', async (_req, res) => {
 });
 
 app.post('/api/source/delete-branch', async (req, res) => {
-  const branch = String(req.body.branch || '').trim();
-  if (!branch) return fail(res, 400, 'Branch name is required.');
+  const branch = safeGitRef(req.body.branch);
+  if (!branch) return fail(res, 400, 'Invalid branch name.');
   if (['main', 'master'].includes(branch.toLowerCase())) return fail(res, 403, `Refusing to delete protected branch "${branch}".`);
   const current = await runCli('git', ['branch', '--show-current']);
   if (branch === (current.stdout || '').trim()) return fail(res, 409, 'Cannot delete the branch you are currently on. Switch first.');
@@ -4100,11 +4132,11 @@ app.get('/api/source/tags', async (_req, res) => {
 });
 
 app.post('/api/source/tags', async (req, res) => {
-  const name = String(req.body.name || '').trim();
-  if (!name) return fail(res, 400, 'A tag name is required.');
-  if (!/^[A-Za-z0-9._\/-]+$/.test(name)) return fail(res, 400, 'Tag name may use letters, numbers, dot, underscore, slash, and dash only.');
+  const name = safeGitRef(req.body.name);
+  if (!name) return fail(res, 400, 'Invalid tag name. Use letters, numbers, and . _ / - (not starting with a dash).');
   const message = String(req.body.message || '').trim();
-  const refArg = String(req.body.ref || '').trim();
+  const refArg = req.body.ref ? safeGitRef(req.body.ref) : '';
+  if (req.body.ref && !refArg) return fail(res, 400, 'Invalid target ref for the tag.');
   const args = message ? ['tag', '-a', name, '-m', message] : ['tag', name];
   if (refArg) args.push(refArg);
   const result = await runCli('git', args);
@@ -4113,8 +4145,8 @@ app.post('/api/source/tags', async (req, res) => {
 });
 
 app.post('/api/source/tags/delete', async (req, res) => {
-  const name = String(req.body.name || '').trim();
-  if (!name) return fail(res, 400, 'A tag name is required.');
+  const name = safeGitRef(req.body.name);
+  if (!name) return fail(res, 400, 'Invalid tag name.');
   const result = await runCli('git', ['tag', '-d', name]);
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git tag -d failed');
   ok(res, { name, output: result.stdout || result.stderr || `Deleted tag ${name}.` });
@@ -4123,8 +4155,8 @@ app.post('/api/source/tags/delete', async (req, res) => {
 // Pushing a tag publishes to origin; gate it behind explicit confirmation, and
 // reuse the stored PAT for HTTPS origins the same way branch push does.
 app.post('/api/source/tags/push', async (req, res) => {
-  const name = String(req.body.name || '').trim();
-  if (!name) return fail(res, 400, 'A tag name is required.');
+  const name = safeGitRef(req.body.name);
+  if (!name) return fail(res, 400, 'Invalid tag name.');
   if (req.body?.confirm !== true) {
     return fail(res, 428, `Pushing tag "${name}" publishes it to origin. Confirm to run: git push origin ${name}.`);
   }
@@ -4312,6 +4344,18 @@ if (fs.existsSync(distDir)) {
     res.sendFile(path.join(distDir, 'index.html'));
   });
 }
+
+// Final error handler: keep API responses JSON-shaped (matches fail()) even for
+// malformed request bodies or errors thrown synchronously in a handler, instead
+// of leaking Express's default HTML error page.
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  const status = err.status || err.statusCode || (err.type === 'entity.parse.failed' ? 400 : 500);
+  const message = status === 400 ? 'Invalid request body (expected valid JSON).' : (err.message || 'Internal server error.');
+  console.error('Request error:', err.message || err);
+  if (res.headersSent) return;
+  res.status(status).json({ ok: false, error: message });
+});
 
 const DEV_TASK_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 
