@@ -17,15 +17,28 @@ name: Build Installer
 on:
   push:
     branches: [main]
-    tags: ['v*']
-  workflow_dispatch: {}
+    tags: ['*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional existing release tag to attach the installer to (for example: 1.0 or v1.0.0)'
+        required: false
+        type: string
 
 permissions:
   contents: write # needed to attach the installer to a Release on tag builds
 
+concurrency:
+  group: build-installer-${{ github.event.release.tag_name || github.ref || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.release_tag || github.event.release.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,17 +54,18 @@ jobs:
       - name: Build web app
         run: npm run build
 
-      # package:portable downloads the bundled Node runtime and Playwright
-      # Chromium, then assembles release/LifePlannerPortable. It is a PowerShell
-      # script; windows-latest runs it directly.
-      - name: Package portable bundle
-        run: npm run package:portable
-
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
 
-      - name: Compile installer
-        run: ISCC.exe installer/LifePlannerPortable.iss
+      # The shared installer build script reuses the workflow's npm ci + build,
+      # installs Playwright Chromium into the packaged app, and compiles the
+      # Inno installer.
+      - name: Build portable bundle + installer
+        shell: pwsh
+        run: >
+          powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1
+          -SkipDependencyInstall
+          -SkipBuild
 
       - name: Upload portable bundle
         uses: actions/upload-artifact@v4
@@ -69,7 +83,8 @@ jobs:
 
       # Only tagged builds publish a Release asset the user can download.
       - name: Attach installer to Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: release/LifePlannerPortableSetup.exe

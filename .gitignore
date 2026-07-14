@@ -6,3 +6,4 @@ data/
 release/
 .cache/
 .lps/
+.claude/

@@ -2736,6 +2736,18 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [discardArmed, setDiscardArmed] = useState(false);
   const [tags, setTags] = useState([]);
   const [tagDraft, setTagDraft] = useState({ name: '', message: '' });
+  const [installerBuild, setInstallerBuild] = useState(null);
+  const [installerBusy, setInstallerBusy] = useState(false);
+
+  async function refreshInstallerBuild(announce = false) {
+    try {
+      const data = await api('/api/source/build-installer');
+      setInstallerBuild(data);
+      if (announce) setNotice('Installer build status refreshed.');
+    } catch (err) {
+      if (announce) setNotice(err.message);
+    }
+  }
 
   async function refresh(announce = false) {
     try {
@@ -2752,6 +2764,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       try { setHistory((await api('/api/source/history')).commits || []); } catch { /* history is best-effort */ }
       try { setStashes((await api('/api/source/stash')).entries || []); } catch { /* stash list is best-effort */ }
       try { setTags((await api('/api/source/tags')).tags || []); } catch { /* tags are best-effort */ }
+      try { setInstallerBuild(await api('/api/source/build-installer')); } catch { /* installer status is best-effort */ }
       if (announce) setNotice('Source status refreshed.');
     } catch (err) {
       setNotice(err.message);
@@ -2772,6 +2785,11 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   }
 
   useEffect(() => { refresh(); }, [refreshSignal]);
+  useEffect(() => {
+    if (!installerBuild?.running) return undefined;
+    const timer = setInterval(() => { refreshInstallerBuild(false); }, 2500);
+    return () => clearInterval(timer);
+  }, [installerBuild?.running]);
 
   async function action(path, body, success) {
     if (sourceBusy) return;
@@ -2802,6 +2820,20 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       setOperationOutput(err.message);
     } finally {
       setSourceBusy(false);
+    }
+  }
+
+  async function startInstallerBuild() {
+    if (installerBusy) return;
+    setInstallerBusy(true);
+    try {
+      const result = await api('/api/source/build-installer', { method: 'POST', body: JSON.stringify({}) });
+      setInstallerBuild(result);
+      setNotice(result.running ? 'Installer build started from the Source tab.' : 'Installer build status refreshed.');
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setInstallerBusy(false);
     }
   }
 
@@ -2867,6 +2899,13 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
         : '';
 
   const tokenConfigured = Boolean(source?.github?.tokenConfigured);
+  const installerStatusTone = installerBuild?.status === 'completed'
+    ? 'good'
+    : installerBuild?.status === 'failed'
+      ? 'bad'
+      : installerBuild?.status === 'running'
+        ? 'warn'
+        : 'default';
   const tabs = [
     { id: 'changes', label: 'Changes', icon: FileText, badge: changedFiles.length || null },
     { id: 'history', label: 'History', icon: History, badge: null },
@@ -3160,6 +3199,44 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
               </div>
             )}
             {operationOutput && <pre className="code-block compact-code">{operationOutput}</pre>}
+          </div>
+
+          <div className="panel">
+            <div className="panel-heading">
+              <h2>Installer Build</h2>
+              <button onClick={() => refreshInstallerBuild(true)} disabled={installerBusy || installerBuild?.running}><RefreshCcw size={14} /> Refresh</button>
+            </div>
+            <div className="tool-row">
+              <div>
+                <strong>Source-tab installer build</strong>
+                <span>Runs the shared local installer pipeline from this connected git system and leaves the rest of the app responsive while it works.</span>
+                <small>{installerBuild?.command || 'Starts scripts/build-installer.ps1, which packages the portable bundle and compiles the Inno installer.'}</small>
+              </div>
+              <div className="tool-actions">
+                <Pill tone={installerStatusTone}>{installerBuild?.status || 'idle'}</Pill>
+                <button className="primary" onClick={startInstallerBuild} disabled={installerBusy || installerBuild?.running}>
+                  <Upload size={16} /> {installerBuild?.running ? 'Building...' : 'Build installer'}
+                </button>
+              </div>
+            </div>
+            <div className="connection-grid">
+              <div><span>Started</span><strong>{installerBuild?.startedAt || 'Not started'}</strong></div>
+              <div><span>Finished</span><strong>{installerBuild?.finishedAt || 'Not finished'}</strong></div>
+              <div><span>Exit code</span><strong>{installerBuild?.exitCode ?? 'n/a'}</strong></div>
+            </div>
+            {installerBuild?.artifacts?.length ? (
+              <div className="remote-list">
+                {installerBuild.artifacts.map((artifact) => (
+                  <div className="remote-row" key={artifact.path}>
+                    <strong>{artifact.path}</strong>
+                    <span>{artifact.type === 'file' && artifact.size != null ? `${artifact.size} bytes` : artifact.type} · {artifact.updatedAt}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="source-warning info">No installer artifacts detected yet.</div>
+            )}
+            {installerBuild?.output && <pre className="code-block compact-code">{installerBuild.output}</pre>}
           </div>
 
           <div className="panel">

@@ -73,6 +73,129 @@ const browserExtensionState = {
   tabs: []
 };
 
+function emptyInstallerBuildState() {
+  return {
+    running: false,
+    status: 'idle',
+    command: '',
+    startedAt: '',
+    finishedAt: '',
+    exitCode: null,
+    output: '',
+    artifacts: []
+  };
+}
+
+let installerBuildState = emptyInstallerBuildState();
+
+function appendInstallerBuildOutput(chunk) {
+  if (!chunk) return;
+  installerBuildState.output = `${installerBuildState.output}${String(chunk)}`.slice(-120000);
+}
+
+function summarizeInstallerArtifacts() {
+  const targets = [
+    path.join(root, 'release', 'LifePlannerPortableSetup.exe'),
+    path.join(root, 'release', 'LifePlannerPortable')
+  ];
+  return targets
+    .filter((target) => fs.existsSync(target))
+    .map((target) => {
+      const stat = fs.statSync(target);
+      return {
+        path: path.relative(root, target).replaceAll('\\', '/'),
+        type: stat.isDirectory() ? 'directory' : 'file',
+        size: stat.isFile() ? stat.size : null,
+        updatedAt: stat.mtime.toISOString()
+      };
+    });
+}
+
+function installerBuildSnapshot() {
+  return {
+    ...installerBuildState,
+    artifacts: summarizeInstallerArtifacts()
+  };
+}
+
+function installerBuildCommand() {
+  const scriptPath = path.join(root, 'scripts', 'build-installer.ps1');
+  if (process.platform === 'win32') {
+    return { command: 'powershell.exe', args: ['-ExecutionPolicy', 'Bypass', '-File', scriptPath] };
+  }
+  return { command: 'pwsh', args: ['-ExecutionPolicy', 'Bypass', '-File', scriptPath] };
+}
+
+function startInstallerBuild() {
+  if (installerBuildState.running) return installerBuildSnapshot();
+  const scriptPath = path.join(root, 'scripts', 'build-installer.ps1');
+  if (!fs.existsSync(scriptPath)) {
+    installerBuildState = {
+      ...emptyInstallerBuildState(),
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      output: `Installer build script not found: ${scriptPath}\n`
+    };
+    return installerBuildSnapshot();
+  }
+
+  const job = installerBuildCommand();
+  installerBuildState = {
+    running: true,
+    status: 'running',
+    command: `${job.command} ${job.args.join(' ')}`,
+    startedAt: new Date().toISOString(),
+    finishedAt: '',
+    exitCode: null,
+    output: '',
+    artifacts: summarizeInstallerArtifacts()
+  };
+  appendInstallerBuildOutput(`Starting installer build at ${installerBuildState.startedAt}\n`);
+
+  let child;
+  try {
+    child = spawn(job.command, job.args, {
+      cwd: root,
+      windowsHide: true,
+      shell: false
+    });
+  } catch (error) {
+    installerBuildState = {
+      ...installerBuildState,
+      running: false,
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      output: `${installerBuildState.output}Failed to start installer build: ${error.message}\n`
+    };
+    return installerBuildSnapshot();
+  }
+
+  child.stdout?.on('data', (chunk) => appendInstallerBuildOutput(chunk));
+  child.stderr?.on('data', (chunk) => appendInstallerBuildOutput(chunk));
+  child.on('error', (error) => {
+    installerBuildState = {
+      ...installerBuildState,
+      running: false,
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      output: `${installerBuildState.output}Installer build failed to start: ${error.message}\n`
+    };
+  });
+  child.on('close', (code) => {
+    installerBuildState = {
+      ...installerBuildState,
+      running: false,
+      status: code === 0 ? 'completed' : 'failed',
+      finishedAt: new Date().toISOString(),
+      exitCode: code,
+      artifacts: summarizeInstallerArtifacts()
+    };
+    appendInstallerBuildOutput(`Installer build ${code === 0 ? 'completed' : 'failed'} with exit code ${code}\n`);
+  });
+
+  return installerBuildSnapshot();
+}
+
 app.use(express.json({ limit: '25mb' }));
 
 const ok = (res, data) => res.json({ ok: true, data });
@@ -3708,6 +3831,14 @@ app.get('/api/source/diff', async (_req, res) => {
   const diff = await runCli('git', ['diff', '--stat']);
   const detail = await runCli('git', ['diff', '--', '.'], { maxBuffer: 4 * 1024 * 1024 });
   ok(res, { stat: diff.stdout, detail: detail.stdout.slice(0, 50000), truncated: detail.stdout.length > 50000 });
+});
+
+app.get('/api/source/build-installer', async (_req, res) => {
+  ok(res, installerBuildSnapshot());
+});
+
+app.post('/api/source/build-installer', async (_req, res) => {
+  ok(res, startInstallerBuild());
 });
 
 // Per-file side-by-side diff: committed (HEAD) content vs current working-tree

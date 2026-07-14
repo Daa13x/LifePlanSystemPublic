@@ -1,6 +1,9 @@
 param(
   [string]$NodeVersion = "24.15.0",
-  [string]$Configuration = "Release"
+  [string]$Configuration = "Release",
+  [switch]$SkipDependencyInstall,
+  [switch]$SkipPlaywrightInstall,
+  [switch]$SkipBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,13 +23,21 @@ Write-Host "Repo: $repoRoot"
 
 Push-Location $repoRoot
 try {
-  npm.cmd install --no-save --package-lock=false
-  if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
-  $env:PLAYWRIGHT_BROWSERS_PATH = "0"
-  npx.cmd playwright install chromium
-  if ($LASTEXITCODE -ne 0) { throw "playwright chromium install failed with exit code $LASTEXITCODE" }
-  npm.cmd run build
-  if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
+  if (-not $SkipDependencyInstall) {
+    npm.cmd install --no-save --package-lock=false
+    if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+  }
+
+  if (-not $SkipPlaywrightInstall) {
+    $env:PLAYWRIGHT_BROWSERS_PATH = "0"
+    npx.cmd playwright install chromium
+    if ($LASTEXITCODE -ne 0) { throw "playwright chromium install failed with exit code $LASTEXITCODE" }
+  }
+
+  if (-not $SkipBuild) {
+    npm.cmd run build
+    if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
+  }
 }
 finally {
   Pop-Location
