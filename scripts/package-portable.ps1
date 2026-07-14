@@ -74,6 +74,10 @@ foreach ($item in $itemsToCopy) {
   }
 }
 
+Get-ChildItem -Path (Join-Path $appRoot "node_modules") -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+  Where-Object { $_.Name -eq ".local-browsers" } |
+  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
 $blockedPatterns = @(
   "data",
   ".env",
