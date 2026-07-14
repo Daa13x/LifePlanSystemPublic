@@ -42,4 +42,5 @@ Name: "{userdesktop}\Life Planner"; Filename: "{app}\{#MyAppExeName}"; WorkingDi
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Run]
+Filename: "{sys}\cmd.exe"; Parameters: "/c """"{app}\Install Playwright Chromium.cmd"""""; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Life Planner"; Flags: postinstall nowait skipifsilent

@@ -2,7 +2,6 @@ param(
   [string]$NodeVersion = "24.15.0",
   [string]$Configuration = "Release",
   [switch]$SkipDependencyInstall,
-  [switch]$SkipPlaywrightInstall,
   [switch]$SkipBuild
 )
 
@@ -26,12 +25,6 @@ try {
   if (-not $SkipDependencyInstall) {
     npm.cmd install --no-save --package-lock=false
     if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
-  }
-
-  if (-not $SkipPlaywrightInstall) {
-    $env:PLAYWRIGHT_BROWSERS_PATH = "0"
-    npx.cmd playwright install chromium
-    if ($LASTEXITCODE -ne 0) { throw "playwright chromium install failed with exit code $LASTEXITCODE" }
   }
 
   if (-not $SkipBuild) {
@@ -109,7 +102,8 @@ Get-ChildItem -LiteralPath $appRoot -Recurse -File |
 @echo off
 setlocal
 set LIFE_PLANNER_PORT=4177
-set PLAYWRIGHT_BROWSERS_PATH=0
+set PLAYWRIGHT_BROWSERS_PATH=%~dp0app\data\ms-playwright
+if not exist "%PLAYWRIGHT_BROWSERS_PATH%\*" call "%~dp0Install Playwright Chromium.cmd"
 cd /d "%~dp0app"
 start "Life Planner Server" /min "%~dp0node\node.exe" server\index.js
 timeout /t 2 /nobreak >nul
@@ -120,10 +114,26 @@ start "" "http://127.0.0.1:%LIFE_PLANNER_PORT%/"
 @echo off
 setlocal
 set LIFE_PLANNER_PORT=4177
-set PLAYWRIGHT_BROWSERS_PATH=0
+set PLAYWRIGHT_BROWSERS_PATH=%~dp0app\data\ms-playwright
+if not exist "%PLAYWRIGHT_BROWSERS_PATH%\*" call "%~dp0Install Playwright Chromium.cmd"
 cd /d "%~dp0app"
 "%~dp0node\node.exe" server\index.js
 "@ | Set-Content -Path (Join-Path $portableRoot "Run Server Console.cmd") -Encoding ASCII
+
+@"
+@echo off
+setlocal
+set "PORTABLE_ROOT=%~dp0"
+set "APP_ROOT=%PORTABLE_ROOT%app"
+set "PLAYWRIGHT_BROWSERS_PATH=%APP_ROOT%\data\ms-playwright"
+if exist "%PLAYWRIGHT_BROWSERS_PATH%\*" exit /b 0
+if not exist "%APP_ROOT%\data" mkdir "%APP_ROOT%\data" >nul 2>&1
+pushd "%APP_ROOT%"
+"%PORTABLE_ROOT%node\node.exe" node_modules\playwright\cli.js install chromium
+set "EXIT_CODE=%ERRORLEVEL%"
+popd
+exit /b %EXIT_CODE%
+"@ | Set-Content -Path (Join-Path $portableRoot "Install Playwright Chromium.cmd") -Encoding ASCII
 
 @'
 # Life Planner Portable
@@ -134,7 +144,10 @@ The app opens at:
 
 http://127.0.0.1:4177/
 
-Playwright Chromium is installed into the bundled app dependencies, so Browser consultation can run without a separate browser-cache setup.
+Playwright Chromium is not bundled into the installer payload. The installer and
+first app launch silently install it into:
+
+app\data\ms-playwright\
 
 The browser connector extension is bundled at:
 

@@ -588,7 +588,7 @@ async function browserAutomationStatus() {
       mode: chromiumInstalled ? 'available' : 'chromium missing',
       note: chromiumInstalled
         ? 'Playwright Chromium is installed and browser automation can run.'
-        : 'Playwright is installed, but Chromium is missing. Run npx playwright install chromium or use Tooling > Install Playwright Chromium.'
+        : 'Playwright is installed, but Chromium is missing. The packaged app can install it silently on install/first launch, or you can use Tooling > Install Playwright Chromium.'
     };
   } catch {
     return {
