@@ -1,26 +1,24 @@
 # LifePlanSystemPublic Verification Script Inventory
 
-Status: complete source-level inventory of maintained package verification entry points and their safety/test coverage. This inventory does not convert source-level checks into runtime acceptance evidence.
+Status: complete source-level inventory of maintained package verification entry points and their safety/test coverage. Source checks do not substitute for runtime acceptance.
 
 Last updated: 2026-07-16
 
 Source snapshots:
 
 ```text
-package.json                                        39205a498cf380731f947259346eb54d15ae9320
-scripts/verify-executor-enforcement.mjs             c032bbf7afa6859e04b8ef2e9f4b4439b4e1757c
-scripts/verify-openhands-invocation-adapter.mjs     2ed09110f123c7f81b8ef2e9f4b4439b4e1757c (see repository for current blob)
-scripts/verify-openhands-invocation-schemas.mjs     df47d6af1ce0f27db14b68e2edd5c578df1849c6
-scripts/verify-runcli-cwd.mjs                       98a377817164ef042e473cfa8986329898dd10c2
-scripts/verify-openhands-stop-boundary.mjs          52730b75f50a1ca7ba32f220875b3bfe16bce080
-scripts/verify-lifeskillsystem-skills.mjs           772dc8395e65434f5be4b62cb757253318bb4004
-scripts/verify-local-learning-event-schema.mjs      d9fac339136eec93602cc3cd5bc7aa71e672e890
-scripts/verify-local-learning-event-validator.mjs   2af3b2c9e677d7eaa2e1ef61fe565ccfee85080b
-scripts/verify-local-learning-event-writer.mjs      79bc2b039c845a3483166c0d5a4317e7ed853556
+package.json                                          39205a498cf380731f947259346eb54d15ae9320
+scripts/verify-executor-enforcement.mjs               c032bbf7afa6859e04b8ef2e9f4b4439b4e1757c
+scripts/verify-openhands-invocation-adapter.mjs       2ed09110f123c7f81b8c572d32c992d9ad48bbda
+scripts/verify-openhands-invocation-schemas.mjs       df47d6af1ce0f27db14b68e2edd5c578df1849c6
+scripts/verify-runcli-cwd.mjs                         98a377817164ef042e473cfa8986329898dd10c2
+scripts/verify-openhands-stop-boundary.mjs            52730b75f50a1ca7ba32f220875b3bfe16bce080
+scripts/verify-lifeskillsystem-skills.mjs             772dc8395e65434f5be4b62cb757253318bb4004
+scripts/verify-local-learning-event-schema.mjs        d9fac339136eec93602cc3cd5bc7aa71e672e890
+scripts/verify-local-learning-event-validator.mjs     2af3b2c9e677d7eaa2e1ef61fe565ccfee85080b
+scripts/verify-local-learning-event-writer.mjs        79bc2b039c845a3483166c0d5a4317e7ed853556
 scripts/verify-local-learning-review-inbox-reader.mjs 2541d19c5753c09e5244a6b20e0613f35179589d
 ```
-
-Note: the adapter verifier's authoritative path and behavior are documented below; use Git to obtain its current blob SHA when updating this document.
 
 ## 1. Package entry points
 
@@ -40,131 +38,98 @@ npm run verify:local-learning-event-writer
 npm run verify:local-learning-review-inbox-reader
 ```
 
-`npm run check` is currently an alias for `npm run build`; it is not a lint, type-check, or test suite.
+`npm run check` is only `npm run build`; it is not lint, type-check, or test execution.
 
 ## 2. Composite commands
 
-### `verify:openhands-invocation-all`
-
-Runs:
-
 ```text
-verify:openhands-invocation-adapter
-verify:openhands-invocation-schemas
-```
-
-It proves the future invocation adapter and its schema/examples remain non-authorizing and local-only.
-
-### `verify:runtime-safety`
-
-Runs:
-
-```text
-verify:runcli-cwd
-verify:executor-enforcement
 verify:openhands-invocation-all
-verify:openhands-stop-boundary
+  -> verify:openhands-invocation-adapter
+  -> verify:openhands-invocation-schemas
+
+verify:runtime-safety
+  -> verify:runcli-cwd
+  -> verify:executor-enforcement
+  -> verify:openhands-invocation-all
+  -> verify:openhands-stop-boundary
 ```
 
-It is the strongest maintained composite safety check, but it does not start Express or a browser.
+`verify:runtime-safety` is the strongest maintained safety composite, but it does not start Express, SQLite, Vite, Chrome, or the installed app.
 
 ## 3. Runtime safety verifiers
 
 ### `verify-runcli-cwd.mjs`
 
-Purpose:
-
 - imports the real `resolveRunCliCwd` helper;
-- proves missing `cwd` defaults to repository root;
-- proves in-repository caller paths are honored by a real child process;
-- rejects absolute escapes, traversal, control characters, and non-string values;
-- source-checks that `runCli` uses the resolver and the worktree path is still passed;
-- confirms OpenHands invocation remains disabled.
+- proves default root and allowed in-root working directories;
+- uses a real child process to observe the resolved directory;
+- rejects traversal, absolute escapes, control characters, and non-string values;
+- source-checks that `runCli` and the executor use the resolver/worktree path;
+- confirms real OpenHands invocation remains disabled.
 
-Capabilities used:
-
-```text
-local child process
-read-only source inspection
-no network
-no server boot
-no main-repository mutation
-```
+Local-only; no server boot, network, or main-repository mutation.
 
 ### `verify-executor-enforcement.mjs`
 
-Purpose:
-
-- creates disposable Git repositories under the OS temporary directory;
-- produces real tracked/untracked changes;
+- creates disposable Git repositories under the OS temp directory;
+- generates real tracked and untracked changes;
 - exercises the real porcelain parser and changed-file enforcement;
-- tests exact/directory allowed-path boundaries;
-- tests mandatory protected paths;
-- validates base-branch syntax and pinning helpers;
-- tests dependency setup gates and runtime/output/file-count limit helpers;
-- checks invocation constraints/readiness remain fail-closed.
+- tests exact/directory allowed-path boundaries and mandatory forbidden paths;
+- validates base-branch syntax/pinning, dependency gates, changed-file limits, and runtime/output limits;
+- checks tool constraints/readiness fail closed;
+- cleans up temporary repositories.
 
-It cleans up temporary repositories and does not enable or contact OpenHands.
+It never enables or contacts OpenHands.
 
 ### `verify-openhands-stop-boundary.mjs`
 
-Purpose:
-
-- source-checks `OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`;
-- rejects any `true` assignment;
-- confirms the adapter has no network/process/shell caller;
-- checks obvious UI files do not expose a real OpenHands invocation action;
-- checks fixtures/schemas contain no autonomy booleans set to true;
-- checks every safety-matrix row denies auto-approval;
-- confirms the design index treats real invocation as future work.
-
-This is a stop-line verification, not an executor function test.
+- requires `OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false`;
+- rejects a true assignment;
+- checks the adapter has no network/process/shell implementation;
+- checks the UI has no real invocation control;
+- checks fixtures/schemas never authorize autonomy;
+- checks the safety matrix denies auto-approval;
+- checks documentation keeps real invocation as a future reviewed milestone.
 
 ## 4. Disabled OpenHands adapter/spec verifiers
 
 ### `verify-openhands-invocation-adapter.mjs`
 
-Exercises the real disabled adapter helpers:
+Exercises the real disabled adapter helpers for:
 
 - configuration validation;
-- explicit-off invocation behavior;
-- proof that even a supplied transport is not called;
-- failure-code mapping;
-- status taxonomy;
+- explicit-off behavior;
+- proof that a supplied transport is not called;
+- failure/status mapping;
 - denied autonomy booleans;
-- human-review requirements;
+- required human review;
 - protected-path parity;
-- payload/report/UI-state helper output;
-- example fixture parsing and likely-secret scanning.
+- payload/report/UI-state generation;
+- example parsing and likely-secret scanning.
 
-It does not import the full server, call the network, or write repository files.
+No network, server boot, dependency install, or repository write.
 
 ### `verify-openhands-invocation-schemas.mjs`
 
-Checks:
+Checks all schema/spec and example JSON files for:
 
-- all JSON schema/spec and example files parse;
-- required status values exist;
-- autonomy fields must be false;
-- human-review fields must be true;
-- specs are explicitly non-authorizing;
-- endpoint patterns accept only localhost/example values;
-- fixtures contain no likely secrets or remote endpoints;
-- the adapter source contains no network/process implementation.
+- required fields and status taxonomy;
+- autonomy booleans fixed false;
+- human-review booleans fixed true;
+- `nonAuthorizing: true`;
+- localhost/example-only endpoints;
+- no likely secrets or private paths outside explicit failure examples;
+- no network/process implementation in the adapter source.
 
-This verifier performs structural/spec consistency checks. It is not JSON Schema engine conformance testing.
+It checks structural/spec consistency; it is not a general JSON Schema engine test.
 
 ## 5. LifeSkillSystem documentation verifier
 
 ### `verify-lifeskillsystem-skills.mjs`
 
-Recursively discovers files named `SKILL.md` under:
+Recursively finds `SKILL.md` files under `docs/agent_mode/skills/`.
 
-```text
-docs/agent_mode/skills/
-```
-
-For each skill it requires metadata:
+Required metadata:
 
 ```text
 name
@@ -174,7 +139,7 @@ status
 safety_level
 ```
 
-and sections:
+Required sections:
 
 ```text
 Purpose
@@ -184,116 +149,82 @@ Output format
 Escalate to Fable/Codex when
 ```
 
-It scans for selected runtime/secret/unsafe tokens. It does not execute skills or prove their practical usefulness.
+It scans for selected runtime, private-path, and secret tokens. It does not execute skills.
 
 ## 6. Local-learning contract verifiers
 
 ### `verify-local-learning-event-schema.mjs`
 
-Checks the Markdown contract, JSON schema, and examples remain aligned and non-authorizing.
-
-It verifies exact required fields, enumerations, closed nested shape for `skill_update_candidate`, approval requirement for source-of-truth candidates, example parity, and forbidden capability tokens.
+Checks the Markdown contract, JSON schema, and examples remain aligned, closed, approval-aware, and non-authorizing.
 
 ### `verify-local-learning-event-validator.mjs`
 
-Imports the pure validator and tests:
-
-- valid examples;
-- every missing field;
-- unknown fields;
-- invalid enum values;
-- approval fail-closed behavior;
-- closed `skill_update_candidate` shape;
-- malformed JSON parser behavior;
-- absence of write/network/action capabilities from validator source.
+Imports the pure validator and tests required/unknown fields, enums, source-of-truth approval behavior, closed nested candidate shape, malformed JSON, and absence of write/network capabilities.
 
 ### `verify-local-learning-event-writer.mjs`
 
-Uses temporary repository roots to test the manual review-inbox writer:
+Uses temporary roots to test:
 
-- exactly one validated candidate write;
-- approval flag preservation;
+- one validated candidate write;
 - invalid events write nothing;
-- traversal/absolute/sensitive slug rejection;
-- symlink/junction escape rejection for every inbox component;
-- no-overwrite and collision suffix behavior;
-- direct CLI/manual-only wiring;
+- path/slug/traversal/junction rejection;
+- no-overwrite collision suffixes;
+- direct manual-only CLI wiring;
 - no server startup import;
-- no network/process capabilities.
-
-This verifier intentionally writes only under OS temporary directories.
+- no network/process capability.
 
 ### `verify-local-learning-review-inbox-reader.mjs`
 
-Uses temporary roots to test the read-only reader and list CLI:
+Uses temporary roots to test:
 
-- missing inbox is empty success and creates nothing;
-- valid, malformed, and schema-invalid candidate reporting;
-- non-JSON exclusion;
+- missing inbox as empty non-creating success;
+- valid/malformed/schema-invalid listing;
 - deterministic filename order;
-- directory/file symlink escape rejection;
-- CLI output control-character escaping;
+- symlink/junction rejection;
+- control-character-safe CLI output;
 - import-time non-mutation;
-- no server startup import;
-- read-only filesystem API surface.
+- read-only filesystem calls;
+- no server startup import.
 
-## 7. Manual utilities not run by package scripts
+## 7. Manual utilities not exposed as package scripts
 
 ```text
 node scripts/write-local-learning-event.mjs <input-json> [slug]
 node scripts/list-local-learning-review-inbox.mjs
 ```
 
-These commands are deliberately absent from `package.json` scripts. They require conscious direct invocation and are not called at server startup.
-
-The writer creates an unapproved candidate under:
-
-```text
-.lps/local-learning/review-inbox/
-```
-
-The reader lists and validates candidates without promotion, movement, approval, or deletion.
+They require direct manual invocation and are not called by server startup. The writer creates an unapproved candidate only under `.lps/local-learning/review-inbox/`; the reader lists/validates without promotion, movement, approval, or deletion.
 
 ## 8. Coverage matrix
 
-| Area | Source/invariant checks | Real process/filesystem | Server/API | Browser/UI | Network/external service |
+| Area | Source/invariant | Real process/filesystem | Server/API | Browser/UI | Network/service |
 |---|---:|---:|---:|---:|---:|
-| Vite build | yes | yes | no | no | no |
+| Vite build | yes | build output | no | no | no |
 | runCli cwd | yes | child process | no | no | no |
-| executor path enforcement | yes | temp Git repos | no | no | no |
-| OpenHands disabled boundary | yes | no | no | source text only | no |
-| OpenHands adapter/schema | yes | fixture reads | no | helper output only | no |
+| executor enforcement | yes | temp Git repos | no | no | no |
+| OpenHands stop/adapter/schema | yes | fixture reads | no | helper/source only | no |
 | LifeSkillSystem docs | yes | reads docs | no | no | no |
 | local-learning schema/validator | yes | fixture reads | no | no | no |
 | local-learning writer/reader | yes | temp directories | no | no | no |
-| Planner/Chat/Memory/API | no dedicated verifier | no | no | no | no |
-| Installer/portable launch | no | no | no | no | no |
-| Browser connector | no dedicated runtime verifier | no | no | no | no |
+| Planner/Chat/Memory/Approval | no dedicated test | no | no | no | no |
+| Browser connector | no runtime test | no | no | no | no |
+| Portable/installer/CI | no acceptance test | no | no | no | no |
 
-## 9. Missing test classes
+## 9. Missing automated test classes
 
-The repository does not currently contain a maintained automated suite proving:
+- Express boot/health with isolated SQLite;
+- API request/response contracts;
+- migrations, transactions, and restart persistence;
+- Planner/Chat/Memory/Approval lifecycle and idempotency;
+- repository proposal and disposable Git-route tests;
+- Chrome-extension mock-page/job tests;
+- React interaction, accessibility, and visual-regression tests;
+- portable launch and installer install/upgrade/uninstall;
+- hosted GitHub Actions/release acceptance.
 
-- Express boot and health on an isolated database;
-- route request/response contracts;
-- SQLite migration/transaction behavior;
-- Planner CRUD and restart persistence;
-- Chat session/model fallback behavior;
-- memory/approval idempotency;
-- repository proposal application;
-- Git routes in a disposable repository;
-- browser-extension job authentication/capture;
-- React component behavior;
-- accessibility or visual regression;
-- portable launch;
-- installer install/upgrade/uninstall;
-- GitHub Actions success.
-
-These gaps must be covered by the runtime acceptance record until automated integration tests are added.
+Until these exist, use the dated runtime acceptance record.
 
 ## 10. Recommended execution order
-
-For a source change:
 
 ```powershell
 npm ci
@@ -306,16 +237,15 @@ npm run verify:local-learning-event-writer
 npm run verify:local-learning-review-inbox-reader
 ```
 
-Then perform the subsystem-specific runtime acceptance recipe.
+Then perform subsystem-specific runtime acceptance.
 
 ## 11. Maintenance rule
 
 When a safety-critical helper changes:
 
-1. update or add a verifier that imports the real helper;
-2. include a positive control and rejection/control case;
-3. use temporary locations for filesystem/Git tests;
-4. keep network and real OpenHands invocation disabled unless a separately reviewed test environment is introduced;
-5. wire the verifier into an appropriate composite package script;
-6. add the composite to CI before treating it as a release gate;
-7. record runtime evidence separately.
+1. test the real helper, not a copied reimplementation;
+2. include positive controls and rejection cases;
+3. use temporary locations for filesystem/Git effects;
+4. keep network and real OpenHands invocation disabled unless separately approved;
+5. wire the verifier into the relevant composite and CI release gate;
+6. record runtime evidence separately.
