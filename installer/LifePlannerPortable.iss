@@ -1,5 +1,5 @@
 #define MyAppName "Life Planner"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "Life Planner"
 #define MyAppExeName "Start Life Planner.cmd"
 #define PortableSource "..\release\LifePlannerPortable"
@@ -31,7 +31,7 @@ UninstallDisplayIcon={app}\{#InstalledIconName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
-Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "app\data\*,app\.env,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
+Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "app\data\*,app\.env*,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
 Source: "{#InstallerAssets}\{#InstalledIconName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

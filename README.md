@@ -231,4 +231,4 @@ npm run build
 
 ## Public-Safe Defaults
 
-This repo does not hardcode private keys, private domains, private bots, or private MostlyArmless configuration. The included `LifePlanSystem_*` folders are sanitized public-safe reference scaffolds only.
+This repo does not hardcode private keys, private domains, private bots, or private MostlyArmless configuration. The included `LifePlanSystem_*` folders are sanitized public-safe reference scaffolds only. They remain repository-only references and are intentionally excluded from portable and installer release payloads.

@@ -2605,9 +2605,9 @@ function RepositoryExplorer({ setNotice, refreshSignal = 0 }) {
 function Calibration({ setNotice, refreshSignal = 0 }) {
   const [docs, setDocs] = useState([]);
   const calibrationFiles = [
-    'LifePlanSystem_Sanitised_UI_Scaffold_2026-06-29/source_of_truth/open_questions.md',
-    'LifePlanSystem_Sanitised_UI_Scaffold_2026-06-29/source_of_truth/predictions.md',
-    'LifePlanSystem_Sanitised_UI_Scaffold_2026-06-29/docs/architecture/MUTUAL_CALIBRATION_LAYER.md'
+    'docs/architecture/MUTUAL_CALIBRATION_LAYER.md',
+    'docs/architecture/TRUE_USER_MODEL_AND_REASONING_FIDELITY.md',
+    'docs/architecture/WORKLOAD_AND_RECOVERY_MODEL.md'
   ];
 
   useEffect(() => {

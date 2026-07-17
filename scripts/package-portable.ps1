@@ -62,9 +62,7 @@ $itemsToCopy = @(
   "package.json",
   "package-lock.json",
   "README.md",
-  ".gitignore",
-  "LifePlanSystem_Public_Sanitized",
-  "LifePlanSystem_Sanitised_UI_Scaffold_2026-06-29"
+  ".gitignore"
 )
 
 foreach ($item in $itemsToCopy) {
@@ -74,13 +72,26 @@ foreach ($item in $itemsToCopy) {
   }
 }
 
+$runtimeDocsToCopy = @(
+  "docs/architecture/MUTUAL_CALIBRATION_LAYER.md",
+  "docs/architecture/TRUE_USER_MODEL_AND_REASONING_FIDELITY.md",
+  "docs/architecture/WORKLOAD_AND_RECOVERY_MODEL.md"
+)
+
+foreach ($item in $runtimeDocsToCopy) {
+  $source = Join-Path $repoRoot $item
+  $destination = Join-Path $appRoot $item
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+  Copy-Item -LiteralPath $source -Destination $destination -Force
+}
+
 Get-ChildItem -Path (Join-Path $appRoot "node_modules") -Directory -Recurse -Force -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -eq ".local-browsers" } |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 $blockedPatterns = @(
   "data",
-  ".env",
+  ".env*",
   "*.sqlite",
   "*.sqlite3",
   "*.db",
