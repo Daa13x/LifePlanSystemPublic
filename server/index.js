@@ -24,6 +24,15 @@ import {
   enforceChangedFiles
 } from './executorEnforcement.js';
 import { resolveRunCliCwd } from './runCliCwd.js';
+import {
+  authenticatedGitHubRemoteUrl,
+  canUseGitHubToken,
+  isProtectedWorkspacePath,
+  parseNullSeparatedPaths,
+  publicPolicyMarkerPath,
+  publicationBoundary,
+  validateRemoteUrl
+} from './sourceControlSafety.js';
 
 migrate();
 seedRoadmapIfEmpty();
@@ -944,16 +953,6 @@ function safeWorkspacePath(relativePath = '') {
   return { normalized, absolute };
 }
 
-function isProtectedWorkspacePath(filePath = '') {
-  const normalized = String(filePath).replaceAll('\\', '/').replace(/^\/+/, '').toLowerCase();
-  const protectedRoots = ['.git/', 'data/', 'dist/', 'node_modules/', 'release/', '.cache/', '.lps/'];
-  const protectedNames = ['.env', '.env.local', '.env.production'];
-  const protectedExts = ['.sqlite', '.sqlite3', '.db', '.gguf', '.safetensors', '.onnx', '.log'];
-  return protectedRoots.some((rootName) => normalized.startsWith(rootName))
-    || protectedNames.includes(normalized)
-    || protectedExts.some((ext) => normalized.endsWith(ext));
-}
-
 // Guards against git argument injection: runCli uses execFile (no shell), so
 // there is no shell-metacharacter risk, but a value beginning with "-" would be
 // parsed by git as an option (e.g. a branch literally named "--force"). Accept
@@ -971,9 +970,16 @@ function safeGitRef(value) {
 
 // A remote URL is not a ref, but must still never be parsed as a git option.
 function safeGitUrl(value) {
-  const v = String(value || '').trim();
-  if (!v || v.startsWith('-') || /[\0\n\r]/.test(v)) return null;
-  return v;
+  const validation = validateRemoteUrl(value);
+  return validation.ok ? validation.remote.raw : null;
+}
+
+async function sourcePublicationBoundary() {
+  const origin = await runCli('git', ['remote', 'get-url', 'origin']);
+  const boundary = publicationBoundary(origin.stdout, {
+    hasPublicPolicy: fs.existsSync(publicPolicyMarkerPath(root))
+  });
+  return { ...boundary, originUrl: origin.stdout || '' };
 }
 
 function parseRemotes(remoteText = '') {
@@ -3767,7 +3773,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
 });
 
 app.get('/api/source/status', async (_req, res) => {
-  const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami, wingetStatus] = await Promise.all([
+  const [inside, snapshot, remotes, log, userName, userEmail, ghStatus, hfWhoami, wingetStatus, publication] = await Promise.all([
     runCli('git', ['rev-parse', '--is-inside-work-tree']),
     gitStatusSnapshot(),
     runCli('git', ['remote', '-v']),
@@ -3776,7 +3782,8 @@ app.get('/api/source/status', async (_req, res) => {
     runCli('git', ['config', 'user.email']),
     runCli('gh', ['auth', 'status']),
     runCli('hf', ['auth', 'whoami']),
-    runCli('winget', ['--version'])
+    runCli('winget', ['--version']),
+    sourcePublicationBoundary()
   ]);
 
   if (!inside.ok) return fail(res, 400, 'This folder is not a Git repository.');
@@ -3794,6 +3801,7 @@ app.get('/api/source/status', async (_req, res) => {
     counts: snapshot.counts,
     remotes: remotes.stdout,
     remoteList: parseRemotes(remotes.stdout),
+    publication,
     log: log.stdout,
     user: {
       name: userName.stdout,
@@ -3828,9 +3836,25 @@ app.get('/api/source/status', async (_req, res) => {
 });
 
 app.get('/api/source/diff', async (_req, res) => {
-  const diff = await runCli('git', ['diff', '--stat']);
-  const detail = await runCli('git', ['diff', '--', '.'], { maxBuffer: 4 * 1024 * 1024 });
-  ok(res, { stat: diff.stdout, detail: detail.stdout.slice(0, 50000), truncated: detail.stdout.length > 50000 });
+  const names = await runCli('git', ['diff', '--name-only', '-z', 'HEAD', '--'], { maxBuffer: 2 * 1024 * 1024 });
+  if (!names.ok) return fail(res, 409, names.stderr || 'Unable to inspect changed paths safely.');
+  const changedPaths = parseNullSeparatedPaths(names.stdout);
+  const protectedPaths = changedPaths.filter(isProtectedWorkspacePath);
+  if (protectedPaths.length) {
+    return ok(res, {
+      stat: '',
+      detail: '',
+      truncated: false,
+      protectedOmitted: protectedPaths.length,
+      note: 'General diff hidden because protected/private files changed. Review safe files individually.'
+    });
+  }
+  if (!changedPaths.length) return ok(res, { stat: '', detail: '', truncated: false, protectedOmitted: 0, note: '' });
+  const diffArgs = ['diff', 'HEAD', '--', ...changedPaths];
+  const stat = await runCli('git', ['diff', '--stat', 'HEAD', '--', ...changedPaths], { maxBuffer: 2 * 1024 * 1024 });
+  const detail = await runCli('git', diffArgs, { maxBuffer: 4 * 1024 * 1024 });
+  if (!detail.ok) return fail(res, 409, detail.stderr || 'Unable to render the safe diff.');
+  ok(res, { stat: stat.stdout, detail: detail.stdout.slice(0, 50000), truncated: detail.stdout.length > 50000, protectedOmitted: 0, note: '' });
 });
 
 app.get('/api/source/build-installer', async (_req, res) => {
@@ -4013,14 +4037,16 @@ app.post('/api/source/push', async (req, res) => {
   if (req.body?.confirm !== true) {
     return fail(res, 428, `Push needs explicit confirmation. Confirm to run: git push -u origin ${branchName} (no force flags).`);
   }
-  // Prefer the stored PAT for HTTPS github/gitlab origins so a push works even
+  const publication = await sourcePublicationBoundary();
+  if (!publication.allowed) return fail(res, 403, publication.reason);
+  // Prefer the stored PAT only for a verified HTTPS github.com origin so a push works even
   // when no credential helper or gh login is present. The token is passed on the
   // command line only for this one invocation, never persisted into the remote.
   const token = getSetting('githubToken', '');
   const originUrl = (await runCli('git', ['remote', 'get-url', 'origin'])).stdout;
-  const useToken = token && /^https:\/\//i.test(originUrl);
+  const useToken = token && canUseGitHubToken(originUrl);
   const pushArgs = useToken
-    ? ['push', authenticatedRemoteUrl(originUrl, token), `HEAD:${branchName}`]
+    ? ['push', authenticatedGitHubRemoteUrl(originUrl, token), `HEAD:${branchName}`]
     : ['push', '-u', 'origin', branchName];
   const result = await runCli('git', pushArgs, { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
   if (!result.ok) {
@@ -4038,7 +4064,7 @@ app.post('/api/source/push', async (req, res) => {
 app.post('/api/source/remote', async (req, res) => {
   const url = safeGitUrl(req.body.url);
   const name = req.body.name ? safeGitRef(req.body.name) : 'origin';
-  if (!url) return fail(res, 400, 'A valid remote URL is required (must not start with a dash).');
+  if (!url) return fail(res, 400, 'Use an approved github.com or huggingface.co HTTPS/SSH repository URL without embedded credentials.');
   if (!name) return fail(res, 400, 'Invalid remote name.');
   const existing = await runCli('git', ['remote', 'get-url', name]);
   const result = existing.ok
@@ -4066,7 +4092,9 @@ app.post('/api/source/login/hf', async (_req, res) => {
 
 app.post('/api/source/create/github', async (req, res) => {
   const repo = String(req.body.repo || '').trim();
-  const visibility = req.body.visibility === 'private' ? '--private' : '--public';
+  const createPublic = req.body.visibility === 'public';
+  if (createPublic && req.body.confirmPublic !== true) return fail(res, 428, 'Public repository creation requires explicit confirmation.');
+  const visibility = createPublic ? '--public' : '--private';
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return fail(res, 400, 'Use owner/repo format, for example username/life-planner-app.');
   const cli = await runCli('gh', ['--version']);
   if (!cli.available) return fail(res, 404, 'GitHub CLI is not installed or not on PATH. Use the Open GitHub New button instead.');
@@ -4080,7 +4108,9 @@ app.post('/api/source/create/github', async (req, res) => {
 app.post('/api/source/create/hf', async (req, res) => {
   const repo = String(req.body.repo || '').trim();
   const type = ['model', 'dataset', 'space'].includes(req.body.type) ? req.body.type : 'model';
-  const visibility = req.body.visibility === 'private' ? '--private' : '';
+  const createPublic = req.body.visibility === 'public';
+  if (createPublic && req.body.confirmPublic !== true) return fail(res, 428, 'Public repository creation requires explicit confirmation.');
+  const visibility = createPublic ? '' : '--private';
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return fail(res, 400, 'Use owner/repo format, for example username/life-planner-models.');
   const cli = await runCli('hf', ['--version']);
   if (!cli.available) return fail(res, 404, 'Hugging Face CLI is not installed or not on PATH. Use the Open HF New button instead.');
@@ -4099,22 +4129,6 @@ const GITHUB_PAT_PREFIXES = ['ghp_', 'github_pat_'];
 
 function githubTokenConfigured() {
   return Boolean(getSetting('githubToken', ''));
-}
-
-// Injects the token into an https github/gitlab remote as an ephemeral userinfo
-// segment. Returns the original URL for anything that is not a plain https URL
-// (ssh remotes already carry their own auth).
-function authenticatedRemoteUrl(remoteUrl, token) {
-  const url = String(remoteUrl || '').trim();
-  if (!token || !/^https:\/\//i.test(url)) return url;
-  try {
-    const parsed = new URL(url);
-    parsed.username = 'x-access-token';
-    parsed.password = token;
-    return parsed.toString();
-  } catch {
-    return url;
-  }
 }
 
 app.post('/api/source/token', (req, res) => {
@@ -4279,6 +4293,9 @@ app.post('/api/source/discard-all', async (req, res) => {
 app.post('/api/source/resolve', async (req, res) => {
   try {
     const target = safeWorkspacePath(req.body.path);
+    if (isProtectedWorkspacePath(target.normalized)) {
+      return fail(res, 403, `Protected/private conflict cannot be resolved from the Source panel: ${target.normalized}`);
+    }
     const snapshot = await gitStatusSnapshot();
     if (!snapshot.conflictFiles.includes(target.normalized)) {
       return fail(res, 409, `"${target.normalized}" is not a conflicted file.`);
@@ -4349,10 +4366,12 @@ app.post('/api/source/tags/push', async (req, res) => {
   if (req.body?.confirm !== true) {
     return fail(res, 428, `Pushing tag "${name}" publishes it to origin. Confirm to run: git push origin ${name}.`);
   }
+  const publication = await sourcePublicationBoundary();
+  if (!publication.allowed) return fail(res, 403, publication.reason);
   const token = getSetting('githubToken', '');
   const originUrl = (await runCli('git', ['remote', 'get-url', 'origin'])).stdout;
-  const useToken = token && /^https:\/\//i.test(originUrl);
-  const target = useToken ? authenticatedRemoteUrl(originUrl, token) : 'origin';
+  const useToken = token && canUseGitHubToken(originUrl);
+  const target = useToken ? authenticatedGitHubRemoteUrl(originUrl, token) : 'origin';
   const result = await runCli('git', ['push', target, `refs/tags/${name}`], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
   if (!result.ok) {
     const scrub = (text) => token ? String(text || '').split(token).join('***') : text;

@@ -845,11 +845,11 @@ Life Planner does not expose reflog, reset, revert, cherry-pick, or remote branc
 
 ## 22. Recommended hardening order
 
-1. Filter or refuse the general diff when protected files are changed.
-2. Enforce repository identity/public-private boundary on every publishing route.
-3. Restrict remote URLs and token injection to approved hosts.
-4. Default external repository creation to private.
-5. Add protected-path checks to conflict resolution.
+1. **Completed 2026-07-17:** filter or refuse the general diff when protected files are changed.
+2. **Completed 2026-07-17:** enforce repository identity/public-private boundary on every publishing route.
+3. **Completed 2026-07-17:** restrict remote URLs and token injection to approved hosts.
+4. **Completed 2026-07-17:** default external repository creation to private.
+5. **Completed 2026-07-17:** add protected-path checks to conflict resolution.
 6. Parse porcelain `-z` output correctly, including both rename paths.
 7. Require explicit confirmations for rebase, merge, force branch deletion, stash drop, and remote replacement.
 8. Scan outgoing commits/tags for prohibited paths and secret patterns before publication.

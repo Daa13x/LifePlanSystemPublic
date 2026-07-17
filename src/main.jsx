@@ -2871,11 +2871,14 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const currentRepoWebUrl = githubWebUrlFromRemote(currentRemoteUrl);
   const boundaryLabel = repoBoundaryLabel(source?.repoPath || '', currentRepoName);
   const isPublicCheckout = boundaryLabel === 'Public app checkout';
+  const publicationAllowed = Boolean(source?.publication?.allowed);
   const pushProtectedBranch = ['main', 'master'].includes(currentBranch.toLowerCase());
   const pushDisabledReason = sourceBusy
     ? 'A source control operation is already running.'
     : source?.hasConflicts
       ? 'Resolve conflicts before pushing.'
+      : source && !publicationAllowed
+        ? source.publication?.reason || 'Publishing is blocked until this checkout is verified as the public app repository.'
       : pushProtectedBranch
         ? `Pushing ${currentBranch} from Life Planner is blocked. Push a review branch instead.`
         : '';
@@ -2944,6 +2947,13 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
         </small>
       </div>
 
+      {source && !publicationAllowed && (
+        <div className="source-warning bad">
+          <strong>Remote publishing blocked</strong>
+          <small>{source.publication?.reason || 'This checkout did not pass the server repository-boundary check.'}</small>
+        </div>
+      )}
+
       {sourceBusy && <div className="source-warning info">Running source control operation...</div>}
       {source?.hasConflicts && (
         <div className="source-warning bad sc-conflict-banner">
@@ -3000,6 +3010,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
               </div>
             )}
             <div className="source-file-list">
+              {diff?.note && <div className="source-warning warn">{diff.note}</div>}
               {changedFiles.length === 0 ? (
                 <Empty title="Clean" body="No changed files." />
               ) : changedFiles.map((file) => (
@@ -3302,7 +3313,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
             <label>Create GitHub repo</label>
             <div className="inline-form">
               <input value={githubRepo} onChange={(event) => setGithubRepo(event.target.value)} disabled={sourceBusy} placeholder="owner/repo" />
-              <button onClick={() => action('/api/source/create/github', { repo: githubRepo, visibility: 'public' })} disabled={sourceBusy || !githubRepo.trim()}><Github size={16} /> Create public</button>
+              <button onClick={() => action('/api/source/create/github', { repo: githubRepo, visibility: 'private' })} disabled={sourceBusy || !githubRepo.trim()}><Github size={16} /> Create private</button>
               <button onClick={() => openExternal('https://github.com/new', 'GitHub new repository page')} disabled={sourceBusy}>Open GitHub New</button>
             </div>
             <label>Create Hugging Face repo</label>
@@ -3313,7 +3324,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
                 <option value="dataset">dataset</option>
                 <option value="space">space</option>
               </select>
-              <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'public' })} disabled={sourceBusy || !hfRepo.trim()}>Create public</button>
+              <button onClick={() => action('/api/source/create/hf', { repo: hfRepo, type: hfRepoType, visibility: 'private' })} disabled={sourceBusy || !hfRepo.trim()}>Create private</button>
               <button onClick={() => openExternal('https://huggingface.co/new', 'Hugging Face new repository page')} disabled={sourceBusy}>Open HF New</button>
             </div>
           </div>
@@ -3335,7 +3346,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
                     <Pill tone={tag.annotated ? 'good' : 'default'}>{tag.annotated ? 'annotated' : 'light'}</Pill>
                     <span className="sc-tag-subject">{tag.subject}</span>
                     <div className="mini-actions">
-                      <button onClick={() => pushTag(tag.name)} disabled={sourceBusy} title="Push this tag to origin"><Upload size={13} /> Push</button>
+                      <button onClick={() => pushTag(tag.name)} disabled={sourceBusy || !publicationAllowed} title={publicationAllowed ? 'Push this tag to origin' : source?.publication?.reason}><Upload size={13} /> Push</button>
                       <button className="danger" onClick={() => deleteTag(tag.name)} disabled={sourceBusy} title="Delete local tag"><Trash2 size={13} /></button>
                     </div>
                   </div>

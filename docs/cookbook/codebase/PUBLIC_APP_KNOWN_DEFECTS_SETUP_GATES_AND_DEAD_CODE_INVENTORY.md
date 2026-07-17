@@ -20,7 +20,7 @@ An entry can have more than one status.
 
 ## 2. Critical safety and privacy findings
 
-### `UNSAFE` — general Source Control diff can expose protected content
+### `FIXED 2026-07-17` — general Source Control diff protected-content guard
 
 Route:
 
@@ -28,21 +28,15 @@ Route:
 GET /api/source/diff
 ```
 
-The route returns `git diff -- .` text without filtering protected paths. Per-file diff and stage routes reject protected files, but the general diff can still display their tracked modifications.
+The route now enumerates changed paths with null-separated Git output before rendering content. If any protected path is present, it returns no general diff detail and directs the Source tab to per-file review. Safe-only diffs pass an explicit path list to Git.
 
-Required fix: generate a path-filtered diff or refuse the general detail when protected changed files are present.
+### `FIXED 2026-07-17` — private-repository publication server boundary
 
-### `UNSAFE` — private-repository publication is not server-blocked
+Branch and tag publication now require a GitHub origin named `LifePlanSystemPublic` plus the public `SANITISATION_POLICY.md` marker. The backend reports this decision to the Source tab, which disables publication controls and displays the refusal reason when identity cannot be verified. External repository creation defaults private and requires explicit confirmation for public creation.
 
-The UI labels likely public/private checkouts, but backend remote, repository creation, branch push, tag push, and related publishing routes do not enforce repository identity or a public-safe manifest.
+### `FIXED 2026-07-17` — stored GitHub token host isolation
 
-Required fix: server-side repository identity and publication allowlist, with explicit refusal for the private brain.
-
-### `UNSAFE` — stored GitHub token can be applied to arbitrary HTTPS origin
-
-Push/tag-push use the stored `githubToken` whenever the origin starts with HTTPS. Host validation does not restrict credential injection to `github.com`/approved enterprise hosts.
-
-Required fix: parse and allowlist the remote host before constructing an authenticated URL.
+Stored GitHub credentials are now injected only into parsed HTTPS `github.com` remotes. Unknown hosts, unsupported schemes, and URLs containing embedded credentials are refused; approved non-GitHub remotes never receive the GitHub token.
 
 ### `UNSAFE` — browser extension protocol has no authentication
 
