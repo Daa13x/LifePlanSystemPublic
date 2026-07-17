@@ -8,6 +8,23 @@ Branch and push target: `main` -> `origin/main`
 
 Purpose: give the next agent a source-backed queue with implementation order, safety boundaries, and objective completion tests. The matching jobs are also stored in the app Dev Roadmap. Treat the app tracker as operational state and this file as the detailed repair contract.
 
+## Cross-app audit confirmation
+
+Serenity performed a read-only LPS audit and returned source-backed feedback through thread `019f248e-8ff9-7c51-83b8-a446de4ed437`. It reported `main` clean and synchronized at `15b4ec7` and `npm.cmd run verify:runtime-safety` passing. LPS files were not changed by Serenity.
+
+The eight Serenity findings were deduplicated into seven existing Dev Roadmap jobs:
+
+- Public export privacy (`server/index.js:4663,4666,4680`) -> job 9, repair queue section 2.
+- Cloud consultation privacy (`server/index.js:670,677,2482,2498`) -> job 10, section 3.
+- Browser capture truth (`browser-extension/lps-browser-agent/background.js:99,148,199`) -> job 10, section 3. This shares one job with cloud egress because the confirmation boundary and provider adapter fixtures must be designed together.
+- Workspace symlink/junction escape (`server/index.js:991,999,4599,4612`) -> job 12, section 5.
+- Partial durable writes (`server/index.js:4699,4711,1779,1784`) -> job 11, section 4.
+- Model lifecycle truth (`server/index.js:2298,2323,2122,2138`) -> job 13, section 6.
+- Portable startup (`scripts/package-portable.ps1:135,137,138`) -> job 14, section 7.
+- Responsive UI (`src/styles.css:43,877`) -> job 16, section 9.
+
+No duplicate roadmap jobs were created. Job 15, signed and attributable release artifacts, remains independently source-backed LPS work but was not part of Serenity's eight findings. The external confirmation changes provenance only; it does not mark any planned item complete and does not replace the acceptance tests below.
+
 ## 1. Completed foundation: DPAPI secret storage
 
 Status: complete in the current change set.
