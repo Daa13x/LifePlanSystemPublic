@@ -10,9 +10,9 @@ Remote: `origin = https://github.com/Daa13x/LifePlanSystemPublic.git`
 
 ## 1. Executive result
 
-The highest-risk local publication, governance, connector, settings, and packaging defects found in this audit are fixed and covered by executable checks. The Source tab was exercised in a real browser against the actual checkout and showed no console errors. A version `1.0.0` Inno EXE was compiled successfully from the verified portable tree.
+The highest-risk publication, governance, connector, settings, packaging, and release defects found in this audit are fixed and covered by executable checks. The Source tab was exercised in a real browser against the actual checkout and showed no console errors. Both hosted CI paths passed, Release `1.0` was updated with the resulting installer, and that exact hosted binary passed a disposable silent-install, launch, health, UI, and silent-uninstall acceptance test.
 
-Do not call the CI/CD roadmap task complete yet. Local packaging is proven, but this checkout has no authenticated GitHub CLI session, so the current hosted Actions run and Release `1.0` asset could not be inspected or dispatched. The task must remain `active` until a successful hosted run is observed and its release asset is downloaded/smoke-tested.
+The Dev Roadmap item `CI/CD + local installer build` is complete. Its seed and live connected database record carry the hosted run, release asset, hash, and acceptance evidence.
 
 ## 2. Implemented and verified
 
@@ -79,18 +79,12 @@ Additional acceptance:
 - Inno Setup 6.7.1 compiled `release\LifePlannerPortableSetup.exe` successfully.
 - Final EXE evidence: ProductVersion `1.0.0`, 39,612,758 bytes, SHA-256 `9A4822B4684E58CC6549C336FA92FC6E874AEB68AC9BC4482FC639568B7EFBCE`. The compiler was confirmed stopped and the hash was read twice consistently.
 - Production dependency audit: 0 known vulnerabilities across 217 total dependencies.
+- Hosted push run [29578272261](https://github.com/Daa13x/LifePlanSystemPublic/actions/runs/29578272261) passed all build, runtime-safety, packaging, Inno, and artifact-upload steps.
+- Hosted release-targeted run [29578538752](https://github.com/Daa13x/LifePlanSystemPublic/actions/runs/29578538752) passed and attached the installer to [Release 1.0](https://github.com/Daa13x/LifePlanSystemPublic/releases/tag/1.0).
+- Release asset evidence: `LifePlannerPortableSetup.exe`, 38,951,229 bytes, SHA-256 `4C0970D64983EC1F87CC4A165AA2A696FBC803D6ED39964521A1538E7B762D51`, published `2026-07-17T12:00:18Z`.
+- The exact release asset was downloaded to `D:\MA-Updates`, silently installed to a disposable directory, launched with bundled Node, checked at `/api/health` and `/`, silently uninstalled, and fully removed. The acceptance port was confirmed closed afterward.
 
 ## 4. Remaining work, ordered
-
-### P1: Hosted CI and Release 1.0 acceptance
-
-1. Authenticate with `gh auth login` or provide `GH_TOKEN`.
-2. Push the final audit commit to `origin/main` only after confirming no collaborator changes conflict.
-3. Run `gh workflow run build-installer.yml -f release_tag=1.0`.
-4. Watch with `gh run watch --exit-status`, then inspect all failed logs if nonzero.
-5. Confirm both Actions artifacts exist and `LifePlannerPortableSetup.exe` is attached to Release `1.0`.
-6. Download the hosted EXE, compare its package manifest expectations, install to a disposable directory, launch, check `/api/health`, then uninstall.
-7. Only after all six steps pass, update the real Dev Roadmap item `CI/CD + local installer build` from `active` to `done` with run URL, artifact hash, and test date.
 
 ### P1: Secrets and export boundaries
 
@@ -137,5 +131,7 @@ git status --short --branch
 git log --oneline --decorate -8
 npm.cmd run verify:runtime-safety
 ```
+
+Start with the remaining P1 secret/export or browser-egress boundaries above. Do not reopen the CI/CD task unless a later workflow, release attachment, or installed-binary acceptance test regresses; the run URLs and release digest above are the baseline evidence.
 
 Treat Serenity as conceptual reference only. Reimplement small patterns against LPS tests; never copy its private application state, credentials, or unrelated dirty changes.

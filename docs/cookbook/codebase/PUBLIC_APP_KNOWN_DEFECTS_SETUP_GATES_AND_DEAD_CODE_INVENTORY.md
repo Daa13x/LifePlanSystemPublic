@@ -34,9 +34,9 @@ The older source findings below remain useful historical evidence, but the follo
 - Health database metadata: reports the effective resolved `LIFE_PLANNER_DB` path and is covered by the governance verifier.
 - Inert connector port input: removed. The UI displays the running application port, and the extension reads the generated pairing config.
 - Portable package data/native-module deletion and pairing-token leak: fixed by root-scoped private-data cleanup and a required package manifest verifier.
-- Installer version and release verification gate: version is `1.0.0`; CI now runs `verify:runtime-safety`. Hosted GitHub Actions success remains setup-gated and the roadmap item must stay active until that run is observed.
+- Installer version and release verification gate: closed. Version is `1.0.0`; hosted push and release-targeted runs passed `verify:runtime-safety`, packaging, Inno compilation, and artifact publication. The exact Release `1.0` asset passed silent install, bundled-runtime health/UI checks, and silent uninstall.
 
-These closures do not resolve plaintext secret storage, public-export classification, browser content classification/selector durability, hosted CI acceptance, signed releases, full backup/restore, or the remaining transaction and accessibility findings.
+These closures do not resolve plaintext secret storage, public-export classification, browser content classification/selector durability, signed releases, full backup/restore, or the remaining transaction and accessibility findings.
 
 ## 2. Critical safety and privacy findings
 

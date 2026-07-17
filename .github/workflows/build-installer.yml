@@ -1,6 +1,6 @@
 # Build Installer — CI/CD pipeline for the Life Planner portable + Inno installer.
 #
-# Hosted completion remains gated on one successful GitHub Actions run. Local
+# Hosted push and release-targeted runs were validated on 2026-07-17. Local
 # packaging and portable-runtime verification use the same scripts as this job.
 #
 # What it does: on a push to main, on a version tag, or on manual dispatch, it

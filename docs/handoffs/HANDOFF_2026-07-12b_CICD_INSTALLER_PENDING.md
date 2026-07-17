@@ -1,10 +1,12 @@
-# Handoff 2026-07-12 (b) — CI/CD installer pipeline STARTED (pending), Serenity source-control review
+# Handoff 2026-07-12 (b) — CI/CD installer pipeline (completed 2026-07-17), Serenity source-control review
 
 Agent: Claude (Opus 4.8). Public repo only. Landed on `main`, mirrored to `UI`.
 
+> Completed 2026-07-17. Hosted push run `29578272261` and release-targeted run `29578538752` passed. Release `1.0` contains the accepted installer with SHA-256 `4C0970D64983EC1F87CC4A165AA2A696FBC803D6ED39964521A1538E7B762D51`. See `HANDOFF_2026-07-17_FULL_SYSTEM_AUDIT.md` for exact acceptance evidence and remaining priorities.
+
 This is a short follow-up to `HANDOFF_2026-07-12_SOURCE_CONTROL_ROADMAP_GIT_MGMT.md`.
 
-## CI/CD installer pipeline — STARTED, not complete (roadmap item is `active`)
+## CI/CD installer pipeline — completed (roadmap item is `done`)
 
 Goal (from the maintainer): pushing should set off GitHub installer creation via CI/CD so the user can create the pipeline installer at the repo end, AND the installer should be buildable locally without asking an agent in a terminal.
 
@@ -12,11 +14,12 @@ What was done (the "start"):
 - Added `.github/workflows/build-installer.yml` — a STARTING DRAFT. On push to `main`, on a `v*` tag, or on manual dispatch it: `npm ci` → `npm run build` → `npm run package:portable` → install Inno Setup via choco → `ISCC.exe installer/LifePlannerPortable.iss` → upload the portable bundle and the installer as artifacts; tagged builds also attach the installer to a GitHub Release.
 - Added the Dev Roadmap item **"CI/CD + local installer build"** with status `active` (in the seed in `server/index.js`), carrying resume notes.
 
-What is deliberately NOT done (future agent, this is the pending task):
-1. **Validate the workflow with a real Actions run.** It has never run on a hosted runner. Trigger it once (push to `main` or the "Run workflow" button), read the logs, and fix whatever the Windows runner surfaces. Likely friction points: `npm ci` needs the committed `package-lock.json` to match `package.json`; `choco install innosetup`; the PowerShell `package-portable.ps1` downloading Node + Playwright Chromium (size/time on the runner); artifact paths.
-2. **In-app "Build installer" button** so the user can build locally without a terminal. Suggested shape: a gated, non-blocking `POST /api/source/build-installer` that runs `scripts/package-portable.ps1` (or `npm run package:inno`) and streams status back to the Source panel. The local scripts already exist: `npm run package:portable` and `npm run package:inno`.
+Completion evidence added 2026-07-17:
+1. **Hosted workflow validated.** Push run `29578272261` and release-targeted run `29578538752` passed on GitHub's Windows runner, including both artifact uploads and the Release attachment.
+2. **In-app build control shipped.** Source provides the gated, non-blocking installer build endpoint and live status UI.
+3. **Published binary accepted.** The exact Release `1.0` installer passed silent install, bundled-runtime health/UI checks, and silent uninstall; its digest is recorded above.
 
-Only mark the roadmap item `done` after BOTH a green CI run and the local-build button ship.
+Both completion conditions passed, and the connected Dev Roadmap item is now `done`.
 
 ## Serenity source-control review (for parity / bug fixes)
 
