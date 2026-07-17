@@ -35,7 +35,42 @@ export function isProtectedWorkspacePath(filePath = '') {
 }
 
 export function parseNullSeparatedPaths(output = '') {
-  return String(output).split('\0').map((item) => item.trim()).filter(Boolean);
+  return String(output).split('\0').filter((item) => item.length > 0);
+}
+
+export function parsePorcelainStatus(output = '') {
+  const records = parseNullSeparatedPaths(output);
+  const files = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record.length < 3) continue;
+    const code = record.slice(0, 2);
+    const filePath = record.slice(3);
+    const renamed = code.includes('R') || code.includes('C');
+    const originalPath = renamed ? records[index += 1] || '' : '';
+    files.push({
+      status: code.trim() || '??',
+      path: filePath,
+      originalPath,
+      staged: code[0] !== ' ' && code[0] !== '?',
+      protected: isProtectedWorkspacePath(filePath) || isProtectedWorkspacePath(originalPath)
+    });
+  }
+  return files;
+}
+
+const HIGH_CONFIDENCE_SECRET_PATTERNS = [
+  { kind: 'GitHub token', pattern: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/ },
+  { kind: 'GitHub fine-grained token', pattern: /\bgithub_pat_[A-Za-z0-9_]{40,}\b/ },
+  { kind: 'OpenAI-style API key', pattern: /\bsk-[A-Za-z0-9]{32,}\b/ },
+  { kind: 'AWS access key', pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { kind: 'private key', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ }
+];
+
+export function detectHighConfidenceSecrets(text = '') {
+  return HIGH_CONFIDENCE_SECRET_PATTERNS
+    .filter(({ pattern }) => pattern.test(String(text)))
+    .map(({ kind }) => kind);
 }
 
 export function parseGitRemoteUrl(value = '') {
@@ -101,14 +136,6 @@ export function publicationBoundary(remoteUrl, { hasPublicPolicy = false } = {})
 export function canUseGitHubToken(remoteUrl) {
   const remote = parseGitRemoteUrl(remoteUrl);
   return Boolean(remote && remote.protocol === 'https' && remote.host === 'github.com');
-}
-
-export function authenticatedGitHubRemoteUrl(remoteUrl, token) {
-  if (!token || !canUseGitHubToken(remoteUrl)) return String(remoteUrl || '').trim();
-  const parsed = new URL(String(remoteUrl).trim());
-  parsed.username = 'x-access-token';
-  parsed.password = token;
-  return parsed.toString();
 }
 
 export function publicPolicyMarkerPath(repoRoot) {

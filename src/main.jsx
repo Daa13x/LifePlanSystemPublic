@@ -2738,6 +2738,9 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [tagDraft, setTagDraft] = useState({ name: '', message: '' });
   const [installerBuild, setInstallerBuild] = useState(null);
   const [installerBusy, setInstallerBusy] = useState(false);
+  const [sourceConfirmation, setSourceConfirmation] = useState(null);
+  const [publicationCheck, setPublicationCheck] = useState(null);
+  const [publicationCheckBusy, setPublicationCheckBusy] = useState(false);
 
   async function refreshInstallerBuild(announce = false) {
     try {
@@ -2746,6 +2749,21 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       if (announce) setNotice('Installer build status refreshed.');
     } catch (err) {
       if (announce) setNotice(err.message);
+    }
+  }
+
+  async function runPublicationCheck() {
+    if (publicationCheckBusy) return;
+    setPublicationCheckBusy(true);
+    try {
+      const result = await api('/api/source/publication-check');
+      setPublicationCheck(result);
+      setNotice(result.allowed ? 'Publication preflight passed.' : result.reason);
+    } catch (err) {
+      setPublicationCheck({ allowed: false, reason: err.message });
+      setNotice(err.message);
+    } finally {
+      setPublicationCheckBusy(false);
     }
   }
 
@@ -2823,6 +2841,17 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
     }
   }
 
+  function requestSourceConfirmation({ title, detail, path, body, success }) {
+    setSourceConfirmation({ title, detail, path, body, success });
+  }
+
+  async function runConfirmedSourceAction() {
+    if (!sourceConfirmation) return;
+    const pending = sourceConfirmation;
+    setSourceConfirmation(null);
+    await action(pending.path, { ...pending.body, confirm: true }, pending.success);
+  }
+
   async function startInstallerBuild() {
     if (installerBusy) return;
     setInstallerBusy(true);
@@ -2850,8 +2879,22 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
     { message: stashMessage.trim(), includeUntracked },
     'Changes stashed.'
   ).then(() => setStashMessage(''));
-  const stashApply = (index, pop) => action('/api/source/stash/apply', { index, pop }, pop ? 'Stash popped.' : 'Stash applied.');
-  const stashDrop = (index) => action('/api/source/stash/drop', { index }, 'Stash dropped.');
+  const stashApply = (index, pop) => pop
+    ? requestSourceConfirmation({
+      title: `Pop stash@{${index}}?`,
+      detail: 'The stash is removed after its changes are applied. Conflicts may require manual resolution.',
+      path: '/api/source/stash/apply',
+      body: { index, pop: true },
+      success: 'Stash popped.'
+    })
+    : action('/api/source/stash/apply', { index, pop: false }, 'Stash applied.');
+  const stashDrop = (index) => requestSourceConfirmation({
+    title: `Drop stash@{${index}}?`,
+    detail: 'This permanently deletes the selected stash.',
+    path: '/api/source/stash/drop',
+    body: { index },
+    success: 'Stash dropped.'
+  });
   const resolveConflict = (path, side) => action('/api/source/resolve', { path, side }, `Resolved ${path} (${side}).`);
   const createTag = () => {
     if (!tagDraft.name.trim()) return;
@@ -2955,6 +2998,16 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       )}
 
       {sourceBusy && <div className="source-warning info">Running source control operation...</div>}
+      {sourceConfirmation && (
+        <div className="source-warning warn">
+          <strong>{sourceConfirmation.title}</strong>
+          <small>{sourceConfirmation.detail}</small>
+          <div className="decision-row">
+            <button className="primary" onClick={runConfirmedSourceAction} disabled={sourceBusy}>Confirm</button>
+            <button onClick={() => setSourceConfirmation(null)} disabled={sourceBusy}>Cancel</button>
+          </div>
+        </div>
+      )}
       {source?.hasConflicts && (
         <div className="source-warning bad sc-conflict-banner">
           <strong>{source.conflictFiles.length} conflict(s) need resolution before you can stage, commit, or switch.</strong>
@@ -3016,7 +3069,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
               ) : changedFiles.map((file) => (
                 <div className={cx('source-file-row', diffPath === file.path && 'selected')} key={`${file.status}-${file.path}`}>
                   <div>
-                    <strong>{file.path}</strong>
+                    <strong>{file.originalPath ? `${file.originalPath} -> ${file.path}` : file.path}</strong>
                     <span>{file.status}{file.staged ? ' · staged' : ' · worktree'}</span>
                   </div>
                   <div className="mini-actions">
@@ -3151,7 +3204,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
                   <option value={branch.name} key={branch.name}>{branch.name}</option>
                 ))}
               </select>
-              <button onClick={() => action('/api/source/merge', { branch: mergeBranch }, `Merged ${mergeBranch}.`)} disabled={sourceBusy || !mergeBranch}><GitMerge size={16} /> Merge</button>
+              <button onClick={() => requestSourceConfirmation({ title: `Merge ${mergeBranch}?`, detail: `Merge ${mergeBranch} into ${currentBranch}. Conflicts may require manual resolution.`, path: '/api/source/merge', body: { branch: mergeBranch }, success: `Merged ${mergeBranch}.` })} disabled={sourceBusy || !mergeBranch}><GitMerge size={16} /> Merge</button>
             </div>
             <label>Delete a local branch</label>
             <div className="inline-form">
@@ -3161,6 +3214,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
                 ))}
               </select>
               <button className="danger" onClick={() => action('/api/source/delete-branch', { branch: branchToSwitch }, `Deleted ${branchToSwitch}.`)} disabled={sourceBusy || !branchToSwitch || branchToSwitch === source?.branch}><Trash2 size={16} /> Delete</button>
+              <button className="danger" onClick={() => requestSourceConfirmation({ title: `Force-delete ${branchToSwitch}?`, detail: 'This deletes the local branch even when it contains commits that are not merged.', path: '/api/source/delete-branch', body: { branch: branchToSwitch, force: true }, success: `Force-deleted ${branchToSwitch}.` })} disabled={sourceBusy || !branchToSwitch || branchToSwitch === source?.branch}><Trash2 size={16} /> Force delete...</button>
             </div>
           </div>
 
@@ -3192,9 +3246,16 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
             <div className="decision-row">
               <button onClick={() => action('/api/source/fetch', {}, 'Fetched latest remote refs.')} disabled={sourceBusy}><RefreshCcw size={16} /> Fetch</button>
               <button onClick={() => action('/api/source/pull', {}, 'Pulled latest changes.')} disabled={sourceBusy || source?.hasConflicts}><Download size={16} /> Pull (ff-only)</button>
-              <button onClick={() => action('/api/source/rebase', {}, 'Rebased onto origin.')} disabled={sourceBusy}><GitBranch size={16} /> Pull --rebase</button>
+              <button onClick={() => requestSourceConfirmation({ title: `Rebase ${currentBranch}?`, detail: `Fetch and replay local commits onto origin/${currentBranch}. Local commit IDs may change.`, path: '/api/source/rebase', body: {}, success: 'Rebased onto origin.' })} disabled={sourceBusy}><GitBranch size={16} /> Pull --rebase</button>
               <button onClick={() => setPushArmed(true)} disabled={Boolean(pushDisabledReason) || pushArmed} title={pushDisabledReason || 'Review the push target before confirming'}><Upload size={16} /> Push...</button>
+              <button onClick={runPublicationCheck} disabled={sourceBusy || publicationCheckBusy}><ShieldCheck size={16} /> {publicationCheckBusy ? 'Checking...' : 'Publication preflight'}</button>
             </div>
+            {publicationCheck && (
+              <div className={cx('source-warning', publicationCheck.allowed ? 'info' : 'bad')}>
+                <strong>{publicationCheck.allowed ? 'Publication preflight passed' : 'Publication preflight blocked'}</strong>
+                <small>{publicationCheck.reason}</small>
+              </div>
+            )}
             {pushArmed && (
               <div className="source-warning warn">
                 <strong>Confirm push</strong>
@@ -3308,7 +3369,10 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
             <label>Set origin remote</label>
             <div className="inline-form">
               <input value={remoteUrl} onChange={(event) => setRemoteUrl(event.target.value)} disabled={sourceBusy} />
-              <button onClick={() => action('/api/source/remote', { url: remoteUrl }, 'Origin remote updated.')} disabled={sourceBusy}><Github size={16} /> Set origin</button>
+              <button onClick={() => currentRemoteUrl
+                ? requestSourceConfirmation({ title: 'Replace origin remote?', detail: `Future fetch, pull, and push operations will use ${remoteUrl}.`, path: '/api/source/remote', body: { url: remoteUrl }, success: 'Origin remote updated.' })
+                : action('/api/source/remote', { url: remoteUrl }, 'Origin remote added.')}
+                disabled={sourceBusy || !remoteUrl.trim()}><Github size={16} /> Set origin</button>
             </div>
             <label>Create GitHub repo</label>
             <div className="inline-form">

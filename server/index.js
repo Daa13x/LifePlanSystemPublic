@@ -25,10 +25,11 @@ import {
 } from './executorEnforcement.js';
 import { resolveRunCliCwd } from './runCliCwd.js';
 import {
-  authenticatedGitHubRemoteUrl,
   canUseGitHubToken,
+  detectHighConfidenceSecrets,
   isProtectedWorkspacePath,
   parseNullSeparatedPaths,
+  parsePorcelainStatus,
   publicPolicyMarkerPath,
   publicationBoundary,
   validateRemoteUrl
@@ -235,9 +236,12 @@ async function runCli(command, args, options = {}) {
       timeout: timeoutMs,
       windowsHide: true,
       shell: useShell,
+      env: options.env ? { ...process.env, ...options.env } : process.env,
       maxBuffer: maxBufferBytes
     });
-    return { available: true, ok: true, stdout: result.stdout.trim(), stderr: result.stderr.trim(), timedOut: false, outputLimitHit: false, timeoutMs, maxBufferBytes };
+    const stdout = options.preserveOutput ? String(result.stdout || '') : result.stdout.trim();
+    const stderr = options.preserveOutput ? String(result.stderr || '') : result.stderr.trim();
+    return { available: true, ok: true, stdout, stderr, timedOut: false, outputLimitHit: false, timeoutMs, maxBufferBytes };
   } catch (error) {
     const missing = error.code === 'ENOENT';
     const outputLimitHit = error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || /maxBuffer/i.test(String(error.message || ''));
@@ -251,8 +255,8 @@ async function runCli(command, args, options = {}) {
       outputLimitHit,
       timeoutMs,
       maxBufferBytes,
-      stdout: error.stdout?.trim() || '',
-      stderr: error.stderr?.trim() || error.message
+      stdout: options.preserveOutput ? String(error.stdout || '') : error.stdout?.trim() || '',
+      stderr: options.preserveOutput ? String(error.stderr || '') : error.stderr?.trim() || error.message
     };
   }
 }
@@ -982,6 +986,68 @@ async function sourcePublicationBoundary() {
   return { ...boundary, originUrl: origin.stdout || '' };
 }
 
+function gitAskPassEnvironment(remoteUrl, token) {
+  if (!token || !canUseGitHubToken(remoteUrl)) return undefined;
+  const helperDir = path.join(os.tmpdir(), 'life-planner', 'git');
+  const windows = process.platform === 'win32';
+  const helperPath = path.join(helperDir, windows ? 'git-askpass.cmd' : 'git-askpass.sh');
+  const helper = windows
+    ? '@echo off\r\nsetlocal DisableDelayedExpansion\r\necho %~1 | findstr /I /C:"username" >nul\r\nif not errorlevel 1 (\r\n  echo %LPS_GIT_ASKPASS_USERNAME%\r\n  exit /b 0\r\n)\r\necho %LPS_GIT_ASKPASS_TOKEN%\r\n'
+    : '#!/bin/sh\ncase "$1" in *sername*) printf "%s\\n" "$LPS_GIT_ASKPASS_USERNAME" ;; *) printf "%s\\n" "$LPS_GIT_ASKPASS_TOKEN" ;; esac\n';
+  fs.mkdirSync(helperDir, { recursive: true });
+  if (!fs.existsSync(helperPath) || fs.readFileSync(helperPath, 'utf8') !== helper) {
+    fs.writeFileSync(helperPath, helper, 'utf8');
+    if (!windows) fs.chmodSync(helperPath, 0o700);
+  }
+  return {
+    GIT_ASKPASS: helperPath,
+    GIT_ASKPASS_REQUIRE: 'force',
+    GIT_TERMINAL_PROMPT: '0',
+    GCM_INTERACTIVE: 'Never',
+    LPS_GIT_ASKPASS_USERNAME: 'x-access-token',
+    LPS_GIT_ASKPASS_TOKEN: token
+  };
+}
+
+const PUBLICATION_SECRET_GREP = '(gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|sk-[A-Za-z0-9]{32,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)';
+
+async function scanPublicationTarget(ref) {
+  const tree = await runCli('git', ['ls-tree', '-r', '--name-only', '-z', ref], {
+    preserveOutput: true,
+    maxBuffer: 8 * 1024 * 1024
+  });
+  if (!tree.ok) return { allowed: false, reason: `Unable to inspect publication target ${ref}.` };
+  const protectedPaths = parseNullSeparatedPaths(tree.stdout).filter(isProtectedWorkspacePath);
+  if (protectedPaths.length) {
+    return { allowed: false, reason: `Publication target contains protected/private paths: ${protectedPaths.slice(0, 5).join(', ')}` };
+  }
+
+  const treeSecrets = await runCli('git', ['grep', '-I', '-n', '-E', PUBLICATION_SECRET_GREP, ref, '--', '.'], {
+    maxBuffer: 2 * 1024 * 1024
+  });
+  if (treeSecrets.ok && treeSecrets.stdout) {
+    return { allowed: false, reason: 'Publication target contains a high-confidence credential or private-key signature.' };
+  }
+  if (!treeSecrets.ok && treeSecrets.code !== 1) {
+    return { allowed: false, reason: 'Unable to complete the publication secret scan.' };
+  }
+
+  const outgoing = await runCli('git', ['log', '-p', '--format=', ref, '--not', '--remotes=origin'], {
+    maxBuffer: 8 * 1024 * 1024
+  });
+  if (!outgoing.ok) {
+    const reason = outgoing.outputLimitHit
+      ? 'Outgoing history exceeds the automatic safety-scan limit; review it manually.'
+      : 'Unable to inspect outgoing commit history.';
+    return { allowed: false, reason };
+  }
+  const secretKinds = detectHighConfidenceSecrets(outgoing.stdout);
+  if (secretKinds.length) {
+    return { allowed: false, reason: `Outgoing history contains high-confidence secret signatures: ${secretKinds.join(', ')}.` };
+  }
+  return { allowed: true, reason: 'Publication target passed protected-path and secret scans.' };
+}
+
 function parseRemotes(remoteText = '') {
   const map = new Map();
   for (const line of remoteText.split('\n')) {
@@ -1000,32 +1066,17 @@ function parseRemotes(remoteText = '') {
   }));
 }
 
-function parseGitStatus(statusText = '') {
-  return statusText.split('\n')
-    .map((line) => line.trimEnd())
-    .filter((line) => line && !line.startsWith('##'))
-    .map((line) => {
-      const status = line.slice(0, 2).trim() || '??';
-      const filePath = line.slice(3).trim();
-      return {
-        status,
-        path: filePath,
-        staged: line[0] && line[0] !== ' ' && line[0] !== '?',
-        protected: isProtectedWorkspacePath(filePath)
-      };
-    });
-}
-
 async function gitStatusSnapshot() {
-  const [status, conflicts, branch, upstream, aheadBehind] = await Promise.all([
+  const [status, porcelain, conflicts, branch, upstream, aheadBehind] = await Promise.all([
     runCli('git', ['status', '--short', '--branch']),
-    runCli('git', ['diff', '--name-only', '--diff-filter=U']),
+    runCli('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { preserveOutput: true }),
+    runCli('git', ['diff', '--name-only', '-z', '--diff-filter=U'], { preserveOutput: true }),
     runCli('git', ['branch', '--show-current']),
     runCli('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']),
     runCli('git', ['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'])
   ]);
-  const changedFiles = parseGitStatus(status.stdout);
-  const conflictFiles = conflicts.stdout ? conflicts.stdout.split('\n').filter(Boolean) : [];
+  const changedFiles = parsePorcelainStatus(porcelain.stdout);
+  const conflictFiles = parseNullSeparatedPaths(conflicts.stdout);
   const counts = { added: 0, modified: 0, deleted: 0, untracked: 0, protected: 0 };
   for (const file of changedFiles) {
     if (file.protected) counts.protected += 1;
@@ -3836,25 +3887,41 @@ app.get('/api/source/status', async (_req, res) => {
 });
 
 app.get('/api/source/diff', async (_req, res) => {
-  const names = await runCli('git', ['diff', '--name-only', '-z', 'HEAD', '--'], { maxBuffer: 2 * 1024 * 1024 });
-  if (!names.ok) return fail(res, 409, names.stderr || 'Unable to inspect changed paths safely.');
-  const changedPaths = parseNullSeparatedPaths(names.stdout);
-  const protectedPaths = changedPaths.filter(isProtectedWorkspacePath);
-  if (protectedPaths.length) {
+  const status = await runCli('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+    preserveOutput: true,
+    maxBuffer: 2 * 1024 * 1024
+  });
+  if (!status.ok) return fail(res, 409, status.stderr || 'Unable to inspect changed paths safely.');
+  const changedFiles = parsePorcelainStatus(status.stdout);
+  const protectedFiles = changedFiles.filter((file) => file.protected);
+  if (protectedFiles.length) {
     return ok(res, {
       stat: '',
       detail: '',
       truncated: false,
-      protectedOmitted: protectedPaths.length,
+      protectedOmitted: protectedFiles.length,
       note: 'General diff hidden because protected/private files changed. Review safe files individually.'
     });
   }
+  const changedPaths = changedFiles.filter((file) => file.status !== '??').map((file) => file.path);
   if (!changedPaths.length) return ok(res, { stat: '', detail: '', truncated: false, protectedOmitted: 0, note: '' });
   const diffArgs = ['diff', 'HEAD', '--', ...changedPaths];
   const stat = await runCli('git', ['diff', '--stat', 'HEAD', '--', ...changedPaths], { maxBuffer: 2 * 1024 * 1024 });
   const detail = await runCli('git', diffArgs, { maxBuffer: 4 * 1024 * 1024 });
   if (!detail.ok) return fail(res, 409, detail.stderr || 'Unable to render the safe diff.');
   ok(res, { stat: stat.stdout, detail: detail.stdout.slice(0, 50000), truncated: detail.stdout.length > 50000, protectedOmitted: 0, note: '' });
+});
+
+app.get('/api/source/publication-check', async (_req, res) => {
+  const boundary = await sourcePublicationBoundary();
+  if (!boundary.allowed) return ok(res, { allowed: false, boundary, scan: null, reason: boundary.reason });
+  const scan = await scanPublicationTarget('HEAD');
+  ok(res, {
+    allowed: scan.allowed,
+    boundary,
+    scan,
+    reason: scan.reason
+  });
 });
 
 app.get('/api/source/build-installer', async (_req, res) => {
@@ -3881,8 +3948,15 @@ app.get('/api/source/file-diff', async (req, res) => {
       return fail(res, 403, `Protected/private file cannot be diffed here: ${target.normalized}`);
     }
 
-    // OLD side: content at HEAD. Missing (new/untracked file) -> empty.
-    const head = await runCli('git', ['show', `HEAD:${target.normalized}`], { maxBuffer: 8 * 1024 * 1024 });
+    const snapshot = await gitStatusSnapshot();
+    const statusEntry = snapshot.changedFiles.find((file) => file.path === target.normalized);
+    const originalPath = statusEntry?.originalPath || target.normalized;
+    if (isProtectedWorkspacePath(originalPath)) {
+      return fail(res, 403, `Protected/private original file cannot be diffed here: ${originalPath}`);
+    }
+
+    // OLD side: content at HEAD. Renames read from their original path.
+    const head = await runCli('git', ['show', `HEAD:${originalPath}`], { maxBuffer: 8 * 1024 * 1024 });
     const oldContent = head.ok ? head.stdout : '';
     const inHead = head.ok;
 
@@ -3901,6 +3975,7 @@ app.get('/api/source/file-diff', async (req, res) => {
 
     ok(res, {
       path: target.normalized,
+      originalPath: statusEntry?.originalPath || '',
       changeType,
       binary,
       tooLarge: oldTooLarge || newTooLarge,
@@ -4039,24 +4114,24 @@ app.post('/api/source/push', async (req, res) => {
   }
   const publication = await sourcePublicationBoundary();
   if (!publication.allowed) return fail(res, 403, publication.reason);
+  const publicationScan = await scanPublicationTarget('HEAD');
+  if (!publicationScan.allowed) return fail(res, 403, publicationScan.reason);
   // Prefer the stored PAT only for a verified HTTPS github.com origin so a push works even
   // when no credential helper or gh login is present. The token is passed on the
   // command line only for this one invocation, never persisted into the remote.
   const token = getSetting('githubToken', '');
   const originUrl = (await runCli('git', ['remote', 'get-url', 'origin'])).stdout;
   const useToken = token && canUseGitHubToken(originUrl);
-  const pushArgs = useToken
-    ? ['push', authenticatedGitHubRemoteUrl(originUrl, token), `HEAD:${branchName}`]
-    : ['push', '-u', 'origin', branchName];
-  const result = await runCli('git', pushArgs, { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  const pushArgs = ['push', '-u', 'origin', branchName];
+  const result = await runCli('git', pushArgs, {
+    timeout: 120000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: gitAskPassEnvironment(originUrl, token)
+  });
   if (!result.ok) {
     // Scrub the token from any error text before returning it to the client.
     const scrub = (text) => token ? String(text || '').split(token).join('***') : text;
     return fail(res, 500, scrub(result.stderr || result.stdout || 'git push failed'));
-  }
-  if (useToken) {
-    // Set upstream separately since the tokenized URL push skips -u tracking.
-    await runCli('git', ['branch', '--set-upstream-to', `origin/${branchName}`, branchName]);
   }
   ok(res, { remote: 'origin', branch: branchName, authenticated: Boolean(useToken), output: result.stdout || result.stderr });
 });
@@ -4067,6 +4142,9 @@ app.post('/api/source/remote', async (req, res) => {
   if (!url) return fail(res, 400, 'Use an approved github.com or huggingface.co HTTPS/SSH repository URL without embedded credentials.');
   if (!name) return fail(res, 400, 'Invalid remote name.');
   const existing = await runCli('git', ['remote', 'get-url', name]);
+  if (existing.ok && req.body?.confirm !== true) {
+    return fail(res, 428, `Replacing remote "${name}" changes future fetch, pull, and push targets and requires explicit confirmation.`);
+  }
   const result = existing.ok
     ? await runCli('git', ['remote', 'set-url', name, url])
     : await runCli('git', ['remote', 'add', name, url]);
@@ -4146,7 +4224,8 @@ app.post('/api/source/token/clear', (_req, res) => {
   ok(res, { configured: false, message: 'GitHub token cleared.' });
 });
 
-app.post('/api/source/rebase', async (_req, res) => {
+app.post('/api/source/rebase', async (req, res) => {
+  if (req.body?.confirm !== true) return fail(res, 428, 'Rebase rewrites local commit history and requires explicit confirmation.');
   const branch = await runCli('git', ['branch', '--show-current']);
   const branchName = (branch.stdout || '').trim();
   if (!branchName) return fail(res, 400, 'Cannot rebase from detached HEAD.');
@@ -4162,6 +4241,7 @@ app.post('/api/source/rebase', async (_req, res) => {
 });
 
 app.post('/api/source/merge', async (req, res) => {
+  if (req.body?.confirm !== true) return fail(res, 428, 'Merging changes the current branch and requires explicit confirmation.');
   const branch = safeGitRef(req.body.branch);
   if (!branch) return fail(res, 400, 'Invalid branch name to merge.');
   const current = await runCli('git', ['branch', '--show-current']);
@@ -4195,6 +4275,7 @@ app.post('/api/source/delete-branch', async (req, res) => {
   if (['main', 'master'].includes(branch.toLowerCase())) return fail(res, 403, `Refusing to delete protected branch "${branch}".`);
   const current = await runCli('git', ['branch', '--show-current']);
   if (branch === (current.stdout || '').trim()) return fail(res, 409, 'Cannot delete the branch you are currently on. Switch first.');
+  if (req.body.force && req.body?.confirm !== true) return fail(res, 428, `Force-deleting branch "${branch}" requires explicit confirmation.`);
   const flag = req.body.force ? '-D' : '-d';
   const result = await runCli('git', ['branch', flag, branch]);
   if (!result.ok) {
@@ -4260,6 +4341,7 @@ app.post('/api/source/stash', async (req, res) => {
 app.post('/api/source/stash/apply', async (req, res) => {
   const index = Number.isInteger(req.body.index) ? req.body.index : 0;
   const subcommand = req.body.pop ? 'pop' : 'apply';
+  if (req.body.pop && req.body?.confirm !== true) return fail(res, 428, `Popping stash@{${index}} removes it after apply and requires explicit confirmation.`);
   const result = await runCli('git', ['stash', subcommand, `stash@{${index}}`], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
   const snapshot = await gitStatusSnapshot();
   if (!result.ok && !snapshot.hasConflicts) return fail(res, 409, result.stderr || result.stdout || `git stash ${subcommand} failed`);
@@ -4268,6 +4350,7 @@ app.post('/api/source/stash/apply', async (req, res) => {
 
 app.post('/api/source/stash/drop', async (req, res) => {
   const index = Number.isInteger(req.body.index) ? req.body.index : 0;
+  if (req.body?.confirm !== true) return fail(res, 428, `Dropping stash@{${index}} is destructive and requires explicit confirmation.`);
   const result = await runCli('git', ['stash', 'drop', `stash@{${index}}`]);
   if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git stash drop failed');
   ok(res, { output: result.stdout || result.stderr || 'Stash dropped.' });
@@ -4368,11 +4451,16 @@ app.post('/api/source/tags/push', async (req, res) => {
   }
   const publication = await sourcePublicationBoundary();
   if (!publication.allowed) return fail(res, 403, publication.reason);
+  const publicationScan = await scanPublicationTarget(name);
+  if (!publicationScan.allowed) return fail(res, 403, publicationScan.reason);
   const token = getSetting('githubToken', '');
   const originUrl = (await runCli('git', ['remote', 'get-url', 'origin'])).stdout;
   const useToken = token && canUseGitHubToken(originUrl);
-  const target = useToken ? authenticatedGitHubRemoteUrl(originUrl, token) : 'origin';
-  const result = await runCli('git', ['push', target, `refs/tags/${name}`], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  const result = await runCli('git', ['push', 'origin', `refs/tags/${name}`], {
+    timeout: 120000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: gitAskPassEnvironment(originUrl, token)
+  });
   if (!result.ok) {
     const scrub = (text) => token ? String(text || '').split(token).join('***') : text;
     return fail(res, 500, scrub(result.stderr || result.stdout || 'git push tag failed'));

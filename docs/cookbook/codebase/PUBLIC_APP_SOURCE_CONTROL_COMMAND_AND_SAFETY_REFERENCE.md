@@ -850,10 +850,10 @@ Life Planner does not expose reflog, reset, revert, cherry-pick, or remote branc
 3. **Completed 2026-07-17:** restrict remote URLs and token injection to approved hosts.
 4. **Completed 2026-07-17:** default external repository creation to private.
 5. **Completed 2026-07-17:** add protected-path checks to conflict resolution.
-6. Parse porcelain `-z` output correctly, including both rename paths.
-7. Require explicit confirmations for rebase, merge, force branch deletion, stash drop, and remote replacement.
-8. Scan outgoing commits/tags for prohibited paths and secret patterns before publication.
-9. Move tokens to an OS-protected credential store.
+6. **Completed 2026-07-17:** parse porcelain `-z` output correctly, including both rename paths.
+7. **Completed 2026-07-17:** require explicit confirmations for rebase, merge, force branch deletion, stash pop/drop, and remote replacement.
+8. **Completed 2026-07-17:** scan outgoing commits/tags for prohibited paths and high-confidence secret patterns before publication.
+9. **Partially completed 2026-07-17:** keep tokens out of Git command-line URLs by using an ephemeral environment-backed AskPass helper. Remaining: move plaintext-at-rest tokens to an OS-protected credential store.
 10. Link proposals/OpenHands reports to commits for auditability.
 
 ---
