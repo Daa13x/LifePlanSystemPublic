@@ -2,7 +2,6 @@ param(
   [string]$NodeVersion = "24.15.0",
   [string]$Configuration = "Release",
   [switch]$SkipDependencyInstall,
-  [switch]$SkipPlaywrightInstall,
   [switch]$SkipBuild
 )
 
@@ -25,7 +24,6 @@ $packageArgs = @{
   Configuration = $Configuration
 }
 if ($SkipDependencyInstall) { $packageArgs.SkipDependencyInstall = $true }
-if ($SkipPlaywrightInstall) { $packageArgs.SkipPlaywrightInstall = $true }
 if ($SkipBuild) { $packageArgs.SkipBuild = $true }
 
 Write-Host "Packaging portable bundle..."
@@ -42,7 +40,13 @@ if (-not $iscc) {
 }
 
 Write-Host "Compiling installer with: $iscc"
-& $iscc $issPath
+if (Test-Path -LiteralPath $setupExe) {
+  Remove-Item -LiteralPath $setupExe -Force
+}
+$compiler = Start-Process -FilePath $iscc -ArgumentList @($issPath) -Wait -PassThru -WindowStyle Hidden
+if ($compiler.ExitCode -ne 0) {
+  throw "Inno Setup compiler failed with exit code $($compiler.ExitCode)"
+}
 
 if (!(Test-Path -LiteralPath $setupExe)) {
   throw "Expected installer was not created: $setupExe"

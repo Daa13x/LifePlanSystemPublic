@@ -1,5 +1,5 @@
 #define MyAppName "Life Planner"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "1.0.0"
 #define MyAppPublisher "Life Planner"
 #define MyAppExeName "Start Life Planner.cmd"
 #define PortableSource "..\release\LifePlannerPortable"

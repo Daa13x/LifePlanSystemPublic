@@ -1,4 +1,5 @@
 const LPS = 'http://127.0.0.1:4177';
+let pairingConfigPromise;
 
 const AGENT_URLS = {
   ChatGPT: 'https://chatgpt.com/',
@@ -23,10 +24,26 @@ function hostMatches(url, hosts) {
   }
 }
 
+async function pairingConfig() {
+  if (!pairingConfigPromise) {
+    pairingConfigPromise = fetch(chrome.runtime.getURL('pairing-config.json'), { cache: 'no-store' })
+      .then((response) => {
+        if (!response.ok) throw new Error('LPS pairing config is missing. Open LPS Tooling and reinstall/reload the connector.');
+        return response.json();
+      });
+  }
+  return pairingConfigPromise;
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(`${LPS}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options
+  const config = await pairingConfig();
+  const response = await fetch(`${config.bridgeUrl || LPS}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-LPS-Connector-Token': config.token,
+      ...(options.headers || {})
+    },
   });
   return response.json();
 }
@@ -34,7 +51,7 @@ async function api(path, options = {}) {
 async function visibleTabs() {
   const tabs = await chrome.tabs.query({});
   return tabs
-    .filter((tab) => tab.url && /^https?:\/\//i.test(tab.url))
+    .filter((tab) => tab.url && Object.values(AGENT_HOSTS).some((hosts) => hostMatches(tab.url, hosts)))
     .map((tab) => ({ id: tab.id, title: tab.title || '', url: tab.url || '' }));
 }
 
@@ -225,13 +242,13 @@ async function handleJob(job) {
       const data = result?.result || { status: 'error', error: 'No content-script result.' };
       await api(`/api/browser/extension/jobs/${job.id}`, {
         method: 'POST',
-        body: JSON.stringify(data)
+        body: JSON.stringify({ ...data, claimToken: job.claimToken })
       });
     });
   } catch (error) {
     await api(`/api/browser/extension/jobs/${job.id}`, {
       method: 'POST',
-      body: JSON.stringify({ status: 'error', error: error.message || 'Chrome connector failed.' })
+      body: JSON.stringify({ status: 'error', error: error.message || 'Chrome connector failed.', claimToken: job.claimToken })
     }).catch(() => {});
   }
 }

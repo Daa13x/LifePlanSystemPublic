@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const root = process.cwd();
 const dataDir = path.join(root, 'data');
-const dbPath = process.env.LIFE_PLANNER_DB || path.join(dataDir, 'life-planner.sqlite');
+export const dbPath = path.resolve(process.env.LIFE_PLANNER_DB || path.join(dataDir, 'life-planner.sqlite'));
 
 fs.mkdirSync(dataDir, { recursive: true });
 

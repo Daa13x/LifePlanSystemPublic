@@ -857,6 +857,16 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
     }
   }
 
+  async function revalidate(id) {
+    try {
+      const result = await api(`/api/approvals/${id}/revalidate`, { method: 'POST' });
+      setChecks((current) => ({ ...current, [id]: result }));
+      setNotice(result.message);
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
   return (
     <section className="panel">
       <div className="panel-heading">
@@ -935,16 +945,6 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
       confidence: Number(project.confidence || 0.75),
       next_action: project.next_action || ''
     });
-  }
-
-  async function revalidate(id) {
-    try {
-      const result = await api(`/api/approvals/${id}/revalidate`, { method: 'POST' });
-      setChecks((current) => ({ ...current, [id]: result }));
-      setNotice(result.message);
-    } catch (err) {
-      setNotice(err.message);
-    }
   }
 
   async function createProject() {
@@ -3509,7 +3509,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
   const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 4096);
   const [browserAgentMode, setBrowserAgentMode] = useState(settings.browserAgentMode || 'myChromeConnector');
-  const [browserAgentPort, setBrowserAgentPort] = useState(settings.browserAgentPort || 4177);
+  const browserAgentPort = window.location.port || '4177';
   const [repo, setRepo] = useState('unsloth/Qwen3.5-4B-GGUF');
   const [repoTouched, setRepoTouched] = useState(false);
   const [modelSearch, setModelSearch] = useState('Qwen GGUF');
@@ -3535,10 +3535,15 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   async function saveSettings() {
     setSaveStatus('Saving settings to local SQLite...');
     try {
+      if (hfToken !== '[redacted]') {
+        await api('/api/settings/huggingface-token', {
+          method: 'POST',
+          body: JSON.stringify({ token: hfToken })
+        });
+      }
       const data = await api('/api/settings', {
         method: 'POST',
         body: JSON.stringify({
-          hfToken,
           modelFolders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean),
           modelDownloadFolder: downloadFolder,
           localModelEndpoint,
@@ -3547,8 +3552,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           llamaServerPath,
           llamaServerPort: Number(llamaServerPort),
           llamaContextSize: Number(llamaContextSize),
-          browserAgentMode,
-          browserAgentPort: Number(browserAgentPort)
+          browserAgentMode
         })
       });
       setSettings(data);
@@ -3788,14 +3792,14 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           <option value="debugChrome">Dedicated debug Chrome profile</option>
         </select>
         <label>Local connector port</label>
-        <input type="number" value={browserAgentPort} onChange={(event) => setBrowserAgentPort(event.target.value)} placeholder="4177" />
+        <code>{browserAgentPort}</code>
         <div className="source-warning info">
           <strong>Chrome connector</strong>
           <small>Load the unpacked extension from browser-extension/lps-browser-agent in the same Chrome profile where the user is logged into ChatGPT, Gemini, Grok, or Claude. It talks only to 127.0.0.1:{browserAgentPort}; no public firewall rule is needed for localhost-only use.</small>
         </div>
         <div className="source-warning warn">
           <strong>Setup-gated</strong>
-          <small>Saving this port and mode does not sign in, bypass verification, or start cloud automation. Cloud Consultant runs only after the connector is loaded and the user completes any required session or Temporary Chat steps.</small>
+          <small>Saving the mode does not sign in, bypass verification, or start cloud automation. The connector port follows the running app and its generated pairing file.</small>
         </div>
       </div>
       <div className="panel">

@@ -2,7 +2,7 @@
 
 Status: canonical source-level defect and incompleteness inventory for the runnable public app as inspected on 2026-07-16. Runtime results can add, close, or reprioritize entries; they must not silently erase source-confirmed issues.
 
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 ## 1. Status definitions
 
@@ -17,6 +17,26 @@ DESIGN DEBT  maintainability/architecture problem that is not itself an MVP bloc
 ```
 
 An entry can have more than one status.
+
+## 1.1 Verified closure addendum (2026-07-17)
+
+The older source findings below remain useful historical evidence, but the following entries are superseded by verified fixes:
+
+- Browser extension bridge authentication: fixed with a generated 256-bit pairing token, timing-safe header validation, per-job claim tokens, and 120-second reclaimable leases. Live isolated API verification rejects missing/wrong tokens and accepts the generated token.
+- Browser tab privacy: fixed in both the extension and server. Only supported cloud-agent hosts are reported or retained; the live verifier proves an unrelated banking URL is absent.
+- Secret-inclusive backup: removed. Backup exports redact all secret settings even when the legacy query flag is supplied.
+- Approval Queue Revalidate crash: fixed by moving the callback into `ApprovalQueue`; the screen was opened in a real browser with no console errors.
+- Repeated approval, memory-candidate, and roadmap-candidate decisions: fixed with fail-closed atomic status claims; roadmap acceptance wraps its database changes in a transaction. Isolated API tests prove the second request returns `409` and creates no duplicate row.
+- Unknown approval actions: rejected at creation and decision boundaries.
+- Chat attached-context leakage: fixed with protected-path, regular-file, symlink, and realpath containment checks; `.git/config` is rejected by an isolated API test.
+- Nested protected paths and database sidecars: fixed in Source Control policy and `.gitignore`, including `.env`, SQLite WAL/SHM files, pairing configs, `.claude`, and automation probe output.
+- Generic secret-setting writes: rejected before any setting mutation. Hugging Face tokens now use a dedicated validated endpoint.
+- Health database metadata: reports the effective resolved `LIFE_PLANNER_DB` path and is covered by the governance verifier.
+- Inert connector port input: removed. The UI displays the running application port, and the extension reads the generated pairing config.
+- Portable package data/native-module deletion and pairing-token leak: fixed by root-scoped private-data cleanup and a required package manifest verifier.
+- Installer version and release verification gate: version is `1.0.0`; CI now runs `verify:runtime-safety`. Hosted GitHub Actions success remains setup-gated and the roadmap item must stay active until that run is observed.
+
+These closures do not resolve plaintext secret storage, public-export classification, browser content classification/selector durability, hosted CI acceptance, signed releases, full backup/restore, or the remaining transaction and accessibility findings.
 
 ## 2. Critical safety and privacy findings
 

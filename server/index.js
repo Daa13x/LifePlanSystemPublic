@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
-import { db, getSetting, migrate, setSetting } from './db.js';
+import { db, dbPath, getSetting, migrate, setSetting } from './db.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
   normalizeRequestPath,
@@ -449,6 +449,42 @@ function chromeDebugProfileDir() {
 
 function browserAgentExtensionDir() {
   return path.join(root, 'browser-extension', 'lps-browser-agent');
+}
+
+function browserPairingConfigPath() {
+  return process.env.LIFE_PLANNER_CONNECTOR_CONFIG
+    ? path.resolve(process.env.LIFE_PLANNER_CONNECTOR_CONFIG)
+    : path.join(browserAgentExtensionDir(), 'pairing-config.json');
+}
+
+function ensureBrowserPairingConfig() {
+  let token = String(getSetting('browserConnectorToken', '') || '');
+  if (!/^[a-f0-9]{64}$/i.test(token)) {
+    token = crypto.randomBytes(32).toString('hex');
+    setSetting('browserConnectorToken', token);
+  }
+  const configPath = browserPairingConfigPath();
+  const payload = `${JSON.stringify({ bridgeUrl: `http://127.0.0.1:${port}`, token }, null, 2)}\n`;
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  if (!fs.existsSync(configPath) || fs.readFileSync(configPath, 'utf8') !== payload) {
+    fs.writeFileSync(configPath, payload, 'utf8');
+  }
+  return { token, configPath };
+}
+
+const browserPairing = ensureBrowserPairingConfig();
+
+function browserExtensionAuthorized(req) {
+  const supplied = String(req.get('X-LPS-Connector-Token') || '');
+  const expected = browserPairing.token;
+  if (!supplied || supplied.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+}
+
+function requireBrowserExtension(req, res) {
+  if (browserExtensionAuthorized(req)) return true;
+  fail(res, 401, 'Browser connector authentication failed. Reload the unpacked LPS extension to refresh pairing.');
+  return false;
 }
 
 function chromeExecutablePath() {
@@ -957,6 +993,18 @@ function safeWorkspacePath(relativePath = '') {
   return { normalized, absolute };
 }
 
+function safeExistingWorkspaceFile(relativePath = '') {
+  const target = safeWorkspacePath(relativePath);
+  if (!fs.existsSync(target.absolute)) throw new Error('File not found.');
+  const stat = fs.lstatSync(target.absolute);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Context must be a regular file, not a link or directory.');
+  const resolvedRoot = fs.realpathSync(root);
+  const resolvedFile = fs.realpathSync(target.absolute);
+  const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
+  if (!resolvedFile.startsWith(rootWithSep)) throw new Error('Resolved file must stay inside the workspace.');
+  return { ...target, absolute: resolvedFile };
+}
+
 // Guards against git argument injection: runCli uses execFile (no shell), so
 // there is no shell-metacharacter risk, but a value beginning with "-" would be
 // parsed by git as an option (e.g. a branch literally named "--force"). Accept
@@ -1147,8 +1195,8 @@ function readChatContextFiles(sessionId) {
   for (const item of contexts) {
     if (remaining <= 0) break;
     try {
-      const target = safeWorkspacePath(item.path);
-      if (!fs.existsSync(target.absolute) || !fs.statSync(target.absolute).isFile()) continue;
+      const target = safeExistingWorkspaceFile(item.path);
+      if (isProtectedWorkspacePath(target.normalized)) continue;
       const text = fs.readFileSync(target.absolute, 'utf8').slice(0, remaining);
       remaining -= text.length;
       files.push({ path: target.normalized, text });
@@ -1401,7 +1449,7 @@ async function refreshPlannerState() {
   };
 }
 
-app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: path.resolve('data/life-planner.sqlite') }));
+app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: dbPath }));
 
 app.get('/api/bootstrap', async (_req, res) => {
   ok(res, {
@@ -1628,13 +1676,23 @@ app.post('/api/roadmap/scan', (_req, res) => {
 app.post('/api/roadmap/candidates/:id/accept', (req, res) => {
   const candidate = row('SELECT * FROM roadmap_candidates WHERE id = ?', [req.params.id]);
   if (!candidate) return fail(res, 404, 'Candidate not found.');
-  const maxOrder = row('SELECT MAX(sort_order) AS m FROM roadmap_items')?.m ?? -1;
-  const detail = candidate.source_ref ? `From ${candidate.source_kind} (${candidate.source_ref}).` : '';
-  const id = db.prepare(
-    'INSERT INTO roadmap_items (title, detail, category, status, sort_order) VALUES (?, ?, ?, ?, ?)'
-  ).run(candidate.title, detail, candidate.category, 'planned', maxOrder + 1).lastInsertRowid;
-  db.prepare("UPDATE roadmap_candidates SET status = 'accepted' WHERE id = ?").run(candidate.id);
-  ok(res, row('SELECT * FROM roadmap_items WHERE id = ?', [id]));
+  if (candidate.status !== 'candidate') return fail(res, 409, `Candidate was already ${candidate.status}.`);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const claim = db.prepare("UPDATE roadmap_candidates SET status = 'processing' WHERE id = ? AND status = 'candidate'").run(candidate.id);
+    if (claim.changes !== 1) throw Object.assign(new Error('Candidate is no longer pending.'), { statusCode: 409 });
+    const maxOrder = row('SELECT MAX(sort_order) AS m FROM roadmap_items')?.m ?? -1;
+    const detail = candidate.source_ref ? `From ${candidate.source_kind} (${candidate.source_ref}).` : '';
+    const id = db.prepare(
+      'INSERT INTO roadmap_items (title, detail, category, status, sort_order) VALUES (?, ?, ?, ?, ?)'
+    ).run(candidate.title, detail, candidate.category, 'planned', maxOrder + 1).lastInsertRowid;
+    db.prepare("UPDATE roadmap_candidates SET status = 'accepted' WHERE id = ? AND status = 'processing'").run(candidate.id);
+    db.exec('COMMIT');
+    ok(res, row('SELECT * FROM roadmap_items WHERE id = ?', [id]));
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction was not active */ }
+    fail(res, error.statusCode || 400, error.message);
+  }
 });
 
 app.post('/api/roadmap/candidates/:id/dismiss', (req, res) => {
@@ -1685,8 +1743,8 @@ app.post('/api/chat/sessions/:id/context', (req, res) => {
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
   try {
-    const target = safeWorkspacePath(req.body.path);
-    if (!fs.existsSync(target.absolute) || !fs.statSync(target.absolute).isFile()) return fail(res, 404, 'Context file not found.');
+    const target = safeExistingWorkspaceFile(req.body.path);
+    if (isProtectedWorkspacePath(target.normalized)) return fail(res, 403, `Protected/private file cannot be attached to chat: ${target.normalized}`);
     db.prepare(`
       INSERT INTO chat_context_files (session_id, path)
       VALUES (?, ?)
@@ -1745,16 +1803,24 @@ app.post('/api/memory/candidates/:id/:decision', async (req, res) => {
   if (!candidate) return fail(res, 404, 'Candidate not found.');
   const decision = req.params.decision;
   if (!['approve', 'deny', 'defer'].includes(decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
-  if (decision === 'approve') {
-    const approved = normalizedMemoryCandidate(candidate);
-    db.prepare(`
-      INSERT INTO knowledge_items
-      (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action)
-      VALUES (?, ?, ?, ?, 'active', ?, date('now'), ?, 'user', ?)
-    `).run(approved.type, approved.title, approved.body, approved.source, Math.max(approved.confidence, 0.7), approved.evidence, 'Review during next planner pass.');
-    db.prepare('UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run('approved', candidate.id);
-  } else {
-    db.prepare('UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?').run(decision === 'deny' ? 'denied' : 'deferred', candidate.id);
+  if (!['candidate', 'deferred'].includes(candidate.status)) return fail(res, 409, `Memory candidate was already ${candidate.status}.`);
+  const claim = db.prepare("UPDATE memory_candidates SET status = 'processing' WHERE id = ? AND status IN ('candidate', 'deferred')").run(candidate.id);
+  if (claim.changes !== 1) return fail(res, 409, 'Memory candidate is no longer pending.');
+  try {
+    if (decision === 'approve') {
+      const approved = normalizedMemoryCandidate(candidate);
+      db.prepare(`
+        INSERT INTO knowledge_items
+        (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action)
+        VALUES (?, ?, ?, ?, 'active', ?, date('now'), ?, 'user', ?)
+      `).run(approved.type, approved.title, approved.body, approved.source, Math.max(approved.confidence, 0.7), approved.evidence, 'Review during next planner pass.');
+      db.prepare("UPDATE memory_candidates SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'").run(candidate.id);
+    } else {
+      db.prepare("UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'").run(decision === 'deny' ? 'denied' : 'deferred', candidate.id);
+    }
+  } catch (error) {
+    db.prepare("UPDATE memory_candidates SET status = ? WHERE id = ? AND status = 'processing'").run(candidate.status, candidate.id);
+    return fail(res, 500, error.message);
   }
   ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: await plannerData() });
 });
@@ -1776,11 +1842,15 @@ app.patch('/api/memory/candidates/:id', async (req, res) => {
   ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: await plannerData() });
 });
 
+const APPROVAL_ACTION_TYPES = new Set(['create_project', 'update_project', 'add_memory', 'repo_write', 'update_memory']);
+
 app.post('/api/approvals/:id/:decision', async (req, res) => {
   try {
     if (!['approve', 'deny', 'defer'].includes(req.params.decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
     const approval = row('SELECT * FROM approvals WHERE id = ?', [req.params.id]);
     if (!approval) return fail(res, 404, 'Approval not found.');
+    if (approval.status !== 'pending') return fail(res, 409, `Approval was already ${approval.status}.`);
+    if (!APPROVAL_ACTION_TYPES.has(approval.action_type)) return fail(res, 400, `Unsupported approval action: ${approval.action_type}`);
     const status = req.params.decision === 'approve' ? 'approved' : req.params.decision === 'deny' ? 'denied' : 'deferred';
     if (status === 'approved') {
       const payload = JSON.parse(approval.payload);
@@ -1880,7 +1950,8 @@ app.post('/api/approvals/:id/:decision', async (req, res) => {
         `).run(nextStatus, updates.confidence ?? null, updates.evidence ?? null, updates.next_action ?? null, target.id);
       }
     }
-    db.prepare('UPDATE approvals SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, req.params.id);
+    const transition = db.prepare("UPDATE approvals SET status = ?, decided_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'").run(status, req.params.id);
+    if (transition.changes !== 1) return fail(res, 409, 'Approval is no longer pending.');
     ok(res, await plannerData());
   } catch (error) {
     fail(res, 400, error.message);
@@ -1917,6 +1988,7 @@ app.post('/api/approvals/:id/revalidate', (req, res) => {
 app.post('/api/approvals', (req, res) => {
   const { action_type, title, payload, priority } = req.body;
   if (!action_type || !title || !payload) return fail(res, 400, 'action_type, title, and payload are required.');
+  if (!APPROVAL_ACTION_TYPES.has(action_type)) return fail(res, 400, `Unsupported approval action: ${action_type}`);
   const id = db.prepare(`
     INSERT INTO approvals (action_type, title, payload, priority)
     VALUES (?, ?, ?, ?)
@@ -2247,7 +2319,7 @@ app.post('/api/models/:id/download', async (req, res) => {
   ok(res, { id: model.id, target, size: stat.size, models: modelsWithExists() });
 });
 
-const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken']);
+const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken', 'browserConnectorToken']);
 
 // Single source of truth for reading settings. When redactSecrets is true (the
 // default for anything client- or export-facing) every secret is replaced with
@@ -2272,13 +2344,19 @@ app.get('/api/settings', (_req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
+  const secretKeys = Object.keys(req.body).filter((key) => SECRET_SETTING_KEYS.has(key));
+  if (secretKeys.length) return fail(res, 400, `Secret settings require a dedicated endpoint: ${secretKeys.join(', ')}`);
   for (const [key, value] of Object.entries(req.body)) {
-    // Never clobber a stored secret with the redaction placeholder echoed back
-    // from the UI. Real secret updates go through their dedicated endpoints.
-    if (SECRET_SETTING_KEYS.has(key) && value === '[redacted]') continue;
     setSetting(key, value);
   }
   ok(res, readSettingsRedacted());
+});
+
+app.post('/api/settings/huggingface-token', (req, res) => {
+  const token = String(req.body.token || '').trim();
+  if (token && !/^hf_[A-Za-z0-9]{20,}$/.test(token)) return fail(res, 400, 'Enter a valid Hugging Face access token or leave it blank.');
+  setSetting('hfToken', token);
+  ok(res, { configured: Boolean(token) });
 });
 
 app.get('/api/consultations', (_req, res) => ok(res, allRows('SELECT * FROM consultations ORDER BY updated_at DESC')));
@@ -2514,6 +2592,7 @@ app.get('/api/browser/extension/install-info', (_req, res) => {
   ok(res, {
     extensionPath,
     manifestPath: path.join(extensionPath, 'manifest.json'),
+    pairingConfigPath: browserPairing.configPath,
     installed: Date.now() - browserExtensionState.lastSeen < 15000,
     chromeExtensionsUrl: 'chrome://extensions',
     instructions: [
@@ -2542,10 +2621,12 @@ app.post('/api/browser/extension/install-helper', async (_req, res) => {
 });
 
 app.post('/api/browser/extension/heartbeat', (req, res) => {
+  if (!requireBrowserExtension(req, res)) return;
   const tabs = Array.isArray(req.body.tabs) ? req.body.tabs : [];
   browserExtensionState.lastSeen = Date.now();
   browserExtensionState.tabs = tabs
     .filter((tab) => tab && typeof tab.url === 'string')
+    .filter((tab) => Object.values(cloudAgentHosts).some((hosts) => tabMatchesAgent(tab.url, hosts)))
     .map((tab) => ({ id: tab.id, title: tab.title || '', url: tab.url || '' }))
     .slice(0, 100);
   ok(res, {
@@ -2554,26 +2635,42 @@ app.post('/api/browser/extension/heartbeat', (req, res) => {
   });
 });
 
-app.get('/api/browser/extension/next', (_req, res) => {
+app.get('/api/browser/extension/next', (req, res) => {
+  if (!requireBrowserExtension(req, res)) return;
+  const now = Date.now();
+  for (const item of browserAgentJobs.values()) {
+    if (item.status === 'claimed' && item.leaseExpiresAt < now) {
+      item.status = 'pending';
+      item.claimToken = '';
+      item.leaseExpiresAt = 0;
+    }
+  }
   const job = [...browserAgentJobs.values()]
     .filter((item) => item.status === 'pending')
     .sort((a, b) => a.createdAt - b.createdAt)[0];
   if (!job) return ok(res, { job: null });
   job.status = 'claimed';
-  job.updatedAt = Date.now();
+  job.updatedAt = now;
+  job.claimToken = crypto.randomBytes(24).toString('hex');
+  job.leaseExpiresAt = now + 120000;
   ok(res, {
     job: {
       id: job.id,
       targetAgent: job.targetAgent,
       url: job.url,
-      prompt: job.prompt
+      prompt: job.prompt,
+      claimToken: job.claimToken,
+      leaseExpiresAt: job.leaseExpiresAt
     }
   });
 });
 
 app.post('/api/browser/extension/jobs/:id', (req, res) => {
+  if (!requireBrowserExtension(req, res)) return;
   const job = browserAgentJobs.get(Number(req.params.id));
   if (!job) return fail(res, 404, 'Browser-agent job not found.');
+  if (!job.claimToken || req.body.claimToken !== job.claimToken) return fail(res, 403, 'Browser-agent job claim token is invalid.');
+  if (Date.now() > job.leaseExpiresAt) return fail(res, 409, 'Browser-agent job claim expired; request the job again.');
   const status = ['pending', 'claimed', 'sent', 'answered', 'blocked', 'error'].includes(req.body.status)
     ? req.body.status
     : 'error';
@@ -2586,6 +2683,10 @@ app.post('/api/browser/extension/jobs/:id', (req, res) => {
     answer: req.body.answer || '',
     message: req.body.message || ''
   };
+  if (['answered', 'blocked', 'error'].includes(status)) {
+    job.claimToken = '';
+    job.leaseExpiresAt = 0;
+  }
   ok(res, { job });
 });
 
@@ -4555,7 +4656,6 @@ function importPreview(data = {}) {
 
 app.get('/api/export/json', (req, res) => {
   const mode = req.query.mode === 'backup' ? 'backup' : 'public';
-  const includeSecrets = req.query.includeSecrets === '1';
   const data = {
     exported_at: new Date().toISOString(),
     mode,
@@ -4569,7 +4669,7 @@ app.get('/api/export/json', (req, res) => {
     data.chat_sessions = allRows('SELECT * FROM chat_sessions WHERE deleted = 0');
     data.chat_messages = allRows('SELECT * FROM chat_messages');
     data.consultations = allRows('SELECT * FROM consultations');
-    data.settings = publicSettings(includeSecrets);
+    data.settings = publicSettings(false);
   }
   res.setHeader('Content-Disposition', `attachment; filename="life-planner-${mode}-export.json"`);
   res.json(data);

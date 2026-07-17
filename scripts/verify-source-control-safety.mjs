@@ -20,6 +20,11 @@ const protectedFixtures = [
   'nested/data/private.json',
   'project/.claude/settings.json',
   'project/.git/config',
+  '.safety-probe/ui-audit.sqlite-wal',
+  'runtime/private.sqlite-shm',
+  'runtime/private.db-wal',
+  'connector/pairing-config.json',
+  '.playwright-cli/page.yml',
   'models/brain.gguf',
   'logs/server.log'
 ];

@@ -4,13 +4,15 @@ const PROTECTED_DIRECTORY_SEGMENTS = new Set([
   '.git',
   '.cache',
   '.claude',
+  '.playwright-cli',
+  '.safety-probe',
   '.lps',
   'data',
   'dist',
   'node_modules',
   'release'
 ]);
-const PROTECTED_FILE_NAMES = new Set(['.env', '.env.local', '.env.production']);
+const PROTECTED_FILE_NAMES = new Set(['.env', '.env.local', '.env.production', 'pairing-config.json']);
 const PROTECTED_EXTENSIONS = ['.sqlite', '.sqlite3', '.db', '.gguf', '.safetensors', '.onnx', '.log'];
 const APPROVED_GIT_HOSTS = new Set(['github.com', 'huggingface.co']);
 
@@ -31,7 +33,7 @@ export function isProtectedWorkspacePath(filePath = '') {
   return segments.some((segment) => PROTECTED_DIRECTORY_SEGMENTS.has(segment))
     || PROTECTED_FILE_NAMES.has(fileName)
     || fileName.startsWith('.env.')
-    || PROTECTED_EXTENSIONS.some((extension) => fileName.endsWith(extension));
+    || PROTECTED_EXTENSIONS.some((extension) => fileName.endsWith(extension) || fileName.includes(`${extension}-`));
 }
 
 export function parseNullSeparatedPaths(output = '') {

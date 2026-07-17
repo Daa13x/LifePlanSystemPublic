@@ -7,3 +7,12 @@ release/
 .cache/
 .lps/
 .claude/
+.playwright-cli/
+.safety-probe/
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.db-*
+pairing-config.json

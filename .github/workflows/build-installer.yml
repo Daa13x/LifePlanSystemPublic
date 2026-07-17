@@ -1,10 +1,7 @@
 # Build Installer — CI/CD pipeline for the Life Planner portable + Inno installer.
 #
-# STATUS: STARTING DRAFT (roadmap item "CI/CD + local installer build" is
-# in-progress). This has NOT yet been validated by a real GitHub Actions run.
-# A future agent must trigger it once (push to main or the manual "Run workflow"
-# button), read the logs, and fix whatever the hosted runner surfaces before
-# marking the roadmap item done. See docs/handoffs for the full scope.
+# Hosted completion remains gated on one successful GitHub Actions run. Local
+# packaging and portable-runtime verification use the same scripts as this job.
 #
 # What it does: on a push to main, on a version tag, or on manual dispatch, it
 # builds the web app, packages the portable one-folder bundle, compiles the Inno
@@ -37,6 +34,7 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 45
     env:
       RELEASE_TAG: ${{ github.event.inputs.release_tag || github.event.release.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
     steps:
@@ -53,6 +51,9 @@ jobs:
 
       - name: Build web app
         run: npm run build
+
+      - name: Verify runtime safety
+        run: npm run verify:runtime-safety
 
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress

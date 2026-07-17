@@ -2,7 +2,7 @@
 
 Status: complete source-level inventory of maintained package verification entry points and their safety/test coverage. Source checks do not substitute for runtime acceptance.
 
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 Source snapshots:
 
@@ -55,6 +55,24 @@ verify:runtime-safety
 ```
 
 `verify:runtime-safety` is the strongest maintained safety composite, but it does not start Express, SQLite, Vite, Chrome, or the installed app.
+
+Update 2026-07-17: the composite now also runs `verify:source-control-safety`, `verify:governance-safety`, and `verify:browser-connector-safety`. The latter two start an isolated Express server with a temporary SQLite database and temporary connector config. Packaging runs `verify-portable-package` against the generated tree, and CI executes the complete runtime-safety composite before packaging.
+
+New maintained entry points:
+
+```text
+npm run verify:source-control-safety
+npm run verify:governance-safety
+npm run verify:browser-connector-safety
+npm run verify:portable-package
+```
+
+Coverage added:
+
+- disposable Git parsing, protected-path, remote-host, publication-boundary, and secret-scan checks;
+- live approval/memory/roadmap idempotency, protected context, backup redaction, settings, and health API checks;
+- live browser bridge authentication, pairing generation, tab minimization, and settings redaction checks;
+- portable required-file, native dependency, source rebuild, and forbidden-private-path checks.
 
 ## 3. Runtime safety verifiers
 

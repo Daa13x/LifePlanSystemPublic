@@ -16,6 +16,17 @@ $cacheRoot = Join-Path $repoRoot ".cache"
 $nodeZip = Join-Path $cacheRoot "node-v$NodeVersion-win-x64.zip"
 $nodeExtract = Join-Path $cacheRoot "node-v$NodeVersion-win-x64"
 $nodeUrl = "https://nodejs.org/dist/v$NodeVersion/node-v$NodeVersion-win-x64.zip"
+$bundledNodeRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "..\node"))
+$nodeCommand = if (Test-Path -LiteralPath (Join-Path $bundledNodeRoot "node.exe")) {
+  Join-Path $bundledNodeRoot "node.exe"
+} else {
+  "node"
+}
+$npmCommand = if (Test-Path -LiteralPath (Join-Path $bundledNodeRoot "npm.cmd")) {
+  Join-Path $bundledNodeRoot "npm.cmd"
+} else {
+  "npm.cmd"
+}
 
 Write-Host "Preparing Life Planner portable bundle ($Configuration)"
 Write-Host "Repo: $repoRoot"
@@ -23,12 +34,12 @@ Write-Host "Repo: $repoRoot"
 Push-Location $repoRoot
 try {
   if (-not $SkipDependencyInstall) {
-    npm.cmd install --no-save --package-lock=false
+    & $npmCommand install --no-save --package-lock=false
     if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
   }
 
   if (-not $SkipBuild) {
-    npm.cmd run build
+    & $npmCommand run build
     if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE" }
   }
 }
@@ -57,8 +68,14 @@ Copy-Item -Path (Join-Path $nodeExtract "*") -Destination $nodeRoot -Recurse -Fo
 $itemsToCopy = @(
   "dist",
   "browser-extension",
+  "installer",
+  "scripts",
   "server",
+  "src",
+  "public",
   "node_modules",
+  "index.html",
+  "vite.config.js",
   "package.json",
   "package-lock.json",
   "README.md",
@@ -78,18 +95,26 @@ Get-ChildItem -Path (Join-Path $appRoot "node_modules") -Directory -Recurse -For
   Where-Object { $_.Name -eq ".local-browsers" } |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
+$privateRoots = @(
+  (Join-Path $appRoot "data"),
+  (Join-Path $appRoot ".env"),
+  (Join-Path $appRoot "browser-extension\lps-browser-agent\pairing-config.json")
+)
+
+foreach ($privateRoot in $privateRoots) {
+  if (Test-Path -LiteralPath $privateRoot) {
+    Remove-Item -LiteralPath $privateRoot -Recurse -Force
+  }
+}
+
 $blockedPatterns = @(
-  "data",
-  ".env",
   "*.sqlite",
   "*.sqlite3",
   "*.db",
   "*.gguf",
   "*.safetensors",
   "*.onnx",
-  "*.log",
-  ".win32-*",
-  ".rollup-*"
+  "*.log"
 )
 
 foreach ($pattern in $blockedPatterns) {
@@ -163,6 +188,9 @@ app\data\
 
 Do not sync or publish `app\data` unless you intentionally want to move local private state.
 '@ | Set-Content -Path (Join-Path $portableRoot "PORTABLE_README.md") -Encoding UTF8
+
+& $nodeCommand (Join-Path $PSScriptRoot "verify-portable-package.mjs") $portableRoot
+if ($LASTEXITCODE -ne 0) { throw "Portable package verification failed with exit code $LASTEXITCODE" }
 
 Write-Host "Portable bundle ready:"
 Write-Host $portableRoot
