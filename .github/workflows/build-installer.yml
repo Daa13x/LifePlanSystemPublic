@@ -39,10 +39,10 @@ jobs:
       RELEASE_TAG: ${{ github.event.inputs.release_tag || github.event.release.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '24.15.0'
 
@@ -69,14 +69,14 @@ jobs:
           -SkipBuild
 
       - name: Upload portable bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: LifePlannerPortable
           path: release/LifePlannerPortable
           if-no-files-found: error
 
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: LifePlannerPortableSetup
           path: release/LifePlannerPortableSetup.exe
