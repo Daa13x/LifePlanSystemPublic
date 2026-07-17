@@ -9,6 +9,19 @@ import { DatabaseSync } from 'node:sqlite';
 const repoRoot = path.resolve(new URL('..', import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (match) => match.slice(1)));
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-governance-'));
 const dbPath = path.join(probeRoot, 'governance.sqlite');
+const legacyGithubToken = 'ghp_legacy_plaintext_verifier_secret';
+
+const seedDatabase = new DatabaseSync(dbPath);
+seedDatabase.exec(`
+  CREATE TABLE settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+seedDatabase.prepare('INSERT INTO settings (key, value) VALUES (?, ?)')
+  .run('githubToken', JSON.stringify(legacyGithubToken));
+seedDatabase.close();
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -67,6 +80,19 @@ try {
   await waitForServer(baseUrl, child, output);
   database = new DatabaseSync(dbPath);
 
+  const migratedGithubValue = JSON.parse(database.prepare("SELECT value FROM settings WHERE key = 'githubToken'").get().value);
+  assert.match(migratedGithubValue, /^dpapi:v1:[A-Za-z0-9+/=]+$/);
+  assert.equal(migratedGithubValue.includes(legacyGithubToken), false);
+  for (const suffix of ['', '-wal', '-shm']) {
+    const candidate = `${dbPath}${suffix}`;
+    if (fs.existsSync(candidate)) {
+      assert.equal(fs.readFileSync(candidate).includes(Buffer.from(legacyGithubToken)), false, `legacy plaintext survived in ${candidate}`);
+    }
+  }
+  const migratedSettings = await request(baseUrl, '/api/settings');
+  assert.equal(migratedSettings.status, 200);
+  assert.equal(migratedSettings.body.data.githubToken, '[redacted]');
+
   const health = await request(baseUrl, '/api/health');
   assert.equal(health.status, 200);
   assert.equal(path.resolve(health.body.data.storage), path.resolve(dbPath));
@@ -81,6 +107,14 @@ try {
     method: 'POST',
     body: JSON.stringify({ token: `hf_${'A'.repeat(30)}` })
   })).status, 200);
+  const encryptedHfToken = JSON.parse(database.prepare("SELECT value FROM settings WHERE key = 'hfToken'").get().value);
+  assert.match(encryptedHfToken, /^dpapi:v1:[A-Za-z0-9+/=]+$/);
+  assert.equal(encryptedHfToken.includes(`hf_${'A'.repeat(30)}`), false);
+
+  const pairingConfig = JSON.parse(fs.readFileSync(path.join(probeRoot, 'pairing-config.json'), 'utf8'));
+  const encryptedConnectorToken = JSON.parse(database.prepare("SELECT value FROM settings WHERE key = 'browserConnectorToken'").get().value);
+  assert.match(encryptedConnectorToken, /^dpapi:v1:[A-Za-z0-9+/=]+$/);
+  assert.equal(encryptedConnectorToken.includes(pairingConfig.token), false);
 
   const approvalId = database.prepare(`
     INSERT INTO approvals (action_type, title, payload)
@@ -120,13 +154,29 @@ try {
   assert.equal(protectedContext.status, 403);
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM chat_context_files WHERE session_id = ?').get(sessionId).count, 0);
 
-  database.prepare(`
-    INSERT INTO settings (key, value) VALUES ('githubToken', ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(JSON.stringify('ghp_isolated_verifier_secret'));
+  const replacementGithubToken = 'ghp_replacement_verifier_secret';
+  assert.equal((await request(baseUrl, '/api/source/token', {
+    method: 'POST',
+    body: JSON.stringify({ token: replacementGithubToken })
+  })).status, 200);
+  const encryptedGithubToken = JSON.parse(database.prepare("SELECT value FROM settings WHERE key = 'githubToken'").get().value);
+  assert.match(encryptedGithubToken, /^dpapi:v1:[A-Za-z0-9+/=]+$/);
+  assert.equal(encryptedGithubToken.includes(replacementGithubToken), false);
+  assert.equal((await request(baseUrl, '/api/settings')).body.data.githubToken, '[redacted]');
+
   const backup = await request(baseUrl, '/api/export/json?mode=backup&includeSecrets=1');
   assert.equal(backup.status, 200);
   assert.equal(backup.body.settings.githubToken, '[redacted]');
+  assert.equal(JSON.stringify(backup.body).includes(replacementGithubToken), false);
+
+  assert.equal((await request(baseUrl, '/api/source/token/clear', { method: 'POST', body: '{}' })).status, 200);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM settings WHERE key = 'githubToken'").get().count, 0);
+  assert.equal((await request(baseUrl, '/api/settings')).body.data.githubToken, undefined);
+  assert.equal((await request(baseUrl, '/api/settings/huggingface-token', {
+    method: 'POST',
+    body: JSON.stringify({ token: '' })
+  })).status, 200);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM settings WHERE key = 'hfToken'").get().count, 0);
 
   console.log('Governance and privacy API verification passed.');
 } finally {

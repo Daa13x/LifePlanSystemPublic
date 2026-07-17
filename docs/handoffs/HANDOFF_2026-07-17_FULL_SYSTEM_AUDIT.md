@@ -34,6 +34,7 @@ The Dev Roadmap item `CI/CD + local installer build` is complete. Its seed and l
 - Chat context attachment accepts only existing regular files whose real path remains in the workspace and which are not protected.
 - Backup output always redacts GitHub, Hugging Face, and connector tokens.
 - Generic settings writes reject secret keys before writing anything. Hugging Face tokens use `/api/settings/huggingface-token` with format validation.
+- GitHub, Hugging Face, and connector tokens are encrypted at rest with current-user Windows DPAPI. Startup migrates and purges legacy plaintext rows; clear removes the row.
 - `/api/health` reports the resolved effective database path.
 
 ### Browser connector
@@ -88,7 +89,6 @@ Additional acceptance:
 
 ### P1: Secrets and export boundaries
 
-- Move stored tokens from plaintext SQLite to Windows Credential Manager/DPAPI with migration and deletion behavior.
 - Add explicit shareability classification and preview to public exports. Current public export still cannot distinguish private health/therapy/personal content.
 - Rename or redesign Local Backup: it is not a complete recovery artifact and import is not transactional.
 
@@ -135,3 +135,5 @@ npm.cmd run verify:runtime-safety
 Start with the remaining P1 secret/export or browser-egress boundaries above. Do not reopen the CI/CD task unless a later workflow, release attachment, or installed-binary acceptance test regresses; the run URLs and release digest above are the baseline evidence.
 
 Treat Serenity as conceptual reference only. Reimplement small patterns against LPS tests; never copy its private application state, credentials, or unrelated dirty changes.
+
+The expanded repair queue is `docs/handoffs/HANDOFF_2026-07-17_NEXT_AGENT_REPAIR_QUEUE.md`. On 2026-07-17 it was mirrored into the connected Dev Roadmap as one completed DPAPI job and eight planned repair jobs; the existing first-run setup job also received executable resume notes. Future agents must update both the tracker job and its source-backed handoff evidence when status changes.

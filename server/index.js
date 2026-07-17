@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
-import { db, dbPath, getSetting, migrate, setSetting } from './db.js';
+import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
   normalizeRequestPath,
@@ -58,9 +58,18 @@ function seedRoadmapIfEmpty() {
     { title: 'Full git management coverage', detail: 'Source Control handles all git: stash save/list/apply/pop/drop, discard-all (confirmed), in-app conflict resolution (ours/theirs/mark), and tags (create/list/delete/push).', status: 'done', category: 'feature' },
     { title: 'Model manager (llama.cpp + HF)', detail: 'Local model registry shows on-disk (ready to load/assign) vs missing, with load (assign, guarded against missing files), download-from-HF, and remove (list-only or delete-file). Downloadable catalog via HF suggestions.', status: 'done', category: 'feature' },
     { title: 'CI/CD + local installer build', detail: 'On push, GitHub Actions builds the portable bundle + Inno installer and uploads both artifacts. A release-targeted dispatch attaches the installer to an existing GitHub Release. The Source tab can also build the installer locally with live status.', resume_notes: 'COMPLETED 2026-07-17: hosted push run 29578272261 and release-targeted run 29578538752 both passed every required build, runtime-safety, packaging, Inno, and artifact step. Release 1.0 now carries LifePlannerPortableSetup.exe (38,951,229 bytes; SHA-256 4C0970D64983EC1F87CC4A165AA2A696FBC803D6ED39964521A1538E7B762D51). The exact hosted asset was downloaded, silently installed, launched with its bundled Node runtime, verified through /api/health and the web UI, silently uninstalled, and copied to D:\\MA-Updates. Source provides the local non-blocking installer build endpoint and status UI.', status: 'done', category: 'infra' },
-    { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', status: 'planned', category: 'feature' },
+    { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', resume_notes: 'P1 setup gate. Build one guided first-run checklist for database health, Git identity/publication readiness, local model runtime, Playwright Chromium, Chrome connector pairing, and installer/runtime version. Each check needs live evidence, a repair action, refresh, and a clear distinction between optional and blocking prerequisites. Add fresh-install and offline acceptance tests.', status: 'planned', category: 'feature' },
     { title: 'OpenHands real invocation', detail: 'Local-only real OpenHands executor invocation behind the existing readiness gate.', resume_notes: 'Deliberately disabled by default. Groundwork: adapter stub, contract, schemas, and safety matrix under docs/tooling/OPENHANDS_INVOCATION_*. Resume = implement the local-only call boundary per OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md acceptance criteria; keep invocation flag off until the gate + tests pass.', status: 'parked', category: 'infra' },
-    { title: 'Brain-aware Chat provider router', detail: 'Chat routes to ChatGPT connector first with local model fallback; brain context loading foundation.', status: 'active', category: 'feature' }
+    { title: 'Brain-aware Chat provider router', detail: 'Chat routes to ChatGPT connector first with local model fallback; brain context loading foundation.', status: 'active', category: 'feature' },
+    { title: 'Encrypt stored credentials with Windows DPAPI', detail: 'Keep GitHub, Hugging Face, and browser connector tokens out of plaintext SQLite while preserving redacted APIs and normal Source/browser behavior.', resume_notes: 'COMPLETED 2026-07-17: current-user Windows DPAPI encryption is enforced in server/db.js. Startup migrates legacy plaintext rows, secure-delete plus WAL truncation and VACUUM remove recoverable plaintext, empty values delete rows, and decrypt failures fail closed. verify:governance-safety proves migration, ciphertext-at-rest, redaction, replacement, and clearing. The live database was migrated and inspected without exposing values.', status: 'done', category: 'fix' },
+    { title: 'Classified exports and transactional recovery', detail: 'Require explicit shareability classification and preview for public exports, then redesign Local Backup as a documented, transactional recovery format.', resume_notes: 'P1. Follow docs/handoffs/HANDOFF_2026-07-17_NEXT_AGENT_REPAIR_QUEUE.md section 2. Do not infer public safety from active/stable status. Add a persisted classification, blocked/unknown preview, format version and manifest, dry-run import, one transaction, rollback tests, and truthful UI naming.', status: 'planned', category: 'fix' },
+    { title: 'Cloud egress classification and provider-aware completion', detail: 'Block sensitive prose and file content from browser-agent egress until reviewed, and replace generic DOM/stability capture with provider-specific completion evidence.', resume_notes: 'P1. Follow repair queue section 3. Add a server-side egress decision before job creation, user preview/confirmation, provider adapters for ChatGPT/Gemini/Grok/Claude, deterministic DOM fixtures, bounded fallback, cancellation, terminal-job pruning, and extension reload/port-change acceptance.', status: 'planned', category: 'fix' },
+    { title: 'Transactional chat consultation and import writes', detail: 'Make multi-row chat, consultation-candidate, model, and JSON import operations atomic with recoverable failure states and durable idempotency.', resume_notes: 'P1/P2. Follow repair queue section 4. Start with POST /api/import/json and chat send. Validate the complete payload before BEGIN IMMEDIATE, commit all rows together, roll back injected mid-operation failures, and add request/provenance keys for retry safety.', status: 'planned', category: 'fix' },
+    { title: 'Repository Explorer realpath containment', detail: 'Apply canonical realpath and junction/symlink containment to every Repository Explorer read, list, preview, and proposal path.', resume_notes: 'P2. Follow repair queue section 5. Centralize an operation-aware resolver, reject protected paths before and after canonicalization, constrain parent realpaths for creates, and test symlink/junction escapes plus TOCTOU-sensitive cases.', status: 'planned', category: 'fix' },
+    { title: 'Verified atomic downloads and llama readiness', detail: 'Download models and runtimes through temporary files with integrity checks, and only report llama-server ready after a bounded health probe.', resume_notes: 'P2. Follow repair queue section 6. Stream to same-volume .partial files, enforce size/hash when published, fsync/close then atomic rename, clean every failure, capture llama logs, poll its endpoint, and terminate timed-out child processes.', status: 'planned', category: 'infra' },
+    { title: 'Installer launch health and process lifecycle', detail: 'Replace fixed launch sleeps with health polling and add single-instance, useful failure output, and controlled shutdown behavior.', resume_notes: 'P2. Follow repair queue section 7. The generated Start Life Planner.cmd currently waits two seconds then opens a browser. Add a launcher helper with port ownership checks, bounded /api/health polling, log path/error display, duplicate-launch handling, and installer acceptance tests.', status: 'planned', category: 'fix' },
+    { title: 'Signed attributable release artifacts', detail: 'Add checksums, SBOM, provenance, and code signing to release outputs without silently publishing unsigned binaries as trusted.', resume_notes: 'P2. Follow repair queue section 8. Generate SHA256SUMS and CycloneDX/SPDX output in CI, attach attestations, make signing conditional on an explicitly configured protected secret, verify signatures after download, and document unsigned-development behavior.', status: 'planned', category: 'infra' },
+    { title: 'Responsive and keyboard accessible UI', detail: 'Remove desktop-only layout constraints and establish keyboard, focus, contrast, and automated accessibility acceptance.', resume_notes: 'P2. Follow repair queue section 9. Remove the 900px body minimum, define mobile Source/Settings behavior, add visible focus states and accessible names, run axe plus keyboard smoke tests, and capture desktop/mobile screenshots before completion.', status: 'planned', category: 'feature' }
   ];
   const insert = db.prepare('INSERT INTO roadmap_items (title, detail, resume_notes, category, status, sort_order) VALUES (?, ?, ?, ?, ?, ?)');
   seed.forEach((item, index) => insert.run(item.title, item.detail, item.resume_notes || '', item.category, item.status, index));
@@ -2319,24 +2328,17 @@ app.post('/api/models/:id/download', async (req, res) => {
   ok(res, { id: model.id, target, size: stat.size, models: modelsWithExists() });
 });
 
-const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken', 'browserConnectorToken']);
-
-// Single source of truth for reading settings. When redactSecrets is true (the
-// default for anything client- or export-facing) every secret is replaced with
-// a [redacted] marker if present, or '' if empty, so credentials never leave
-// the server. Pass redactSecrets: false only for an explicit secrets backup.
-function readSettings({ redactSecrets = true } = {}) {
+// Single source of truth for client- and export-facing settings. There is no
+// unredacted mode: code that needs a credential must request its known key
+// directly through getSetting, which performs DPAPI decryption server-side.
+function readSettingsRedacted() {
   const settings = Object.fromEntries(allRows('SELECT key, value FROM settings').map((r) => [r.key, JSON.parse(r.value)]));
-  if (redactSecrets) {
-    for (const key of SECRET_SETTING_KEYS) {
-      if (Object.hasOwn(settings, key)) settings[key] = settings[key] ? '[redacted]' : '';
+  for (const key of SECRET_SETTING_KEYS) {
+    if (Object.hasOwn(settings, key)) {
+      settings[key] = getSetting(key, '') ? '[redacted]' : '';
     }
   }
   return settings;
-}
-
-function readSettingsRedacted() {
-  return readSettings({ redactSecrets: true });
 }
 
 app.get('/api/settings', (_req, res) => {
@@ -4301,9 +4303,8 @@ app.post('/api/source/create/hf', async (req, res) => {
   ok(res, { message: `Hugging Face ${type} repo ${repo} created.`, output: result.stdout || result.stderr });
 });
 
-// GitHub Personal Access Token: stored in settings (redacted on read) and used
-// only to build an ephemeral authenticated push URL at push time, never written
-// into the persistent git remote config where `git remote -v` would leak it.
+// GitHub Personal Access Token: encrypted with current-user Windows DPAPI,
+// redacted on read, and supplied to Git through ephemeral AskPass transport.
 const GITHUB_PAT_PREFIXES = ['ghp_', 'github_pat_'];
 
 function githubTokenConfigured() {
@@ -4636,8 +4637,8 @@ app.post('/api/repo/proposals', (req, res) => {
   }
 });
 
-function publicSettings(includeSecrets = false) {
-  return readSettings({ redactSecrets: !includeSecrets });
+function publicSettings() {
+  return readSettingsRedacted();
 }
 
 function importPreview(data = {}) {

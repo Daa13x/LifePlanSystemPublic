@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 
 const root = process.cwd();
@@ -11,6 +12,75 @@ fs.mkdirSync(dataDir, { recursive: true });
 export const db = new DatabaseSync(dbPath);
 db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
+db.exec('PRAGMA secure_delete = ON');
+
+export const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken', 'browserConnectorToken']);
+const DPAPI_PREFIX = 'dpapi:v1:';
+const warnedSecretDecryptions = new Set();
+const secretCache = new Map();
+
+function runDpapi(operation, input) {
+  if (process.platform !== 'win32') {
+    throw new Error('Secure secret storage requires Windows DPAPI.');
+  }
+  const script = operation === 'protect'
+    ? 'Add-Type -AssemblyName System.Security;$plain=[Console]::In.ReadToEnd();$bytes=[Text.Encoding]::UTF8.GetBytes($plain);$cipher=[System.Security.Cryptography.ProtectedData]::Protect($bytes,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Convert]::ToBase64String($cipher))'
+    : 'Add-Type -AssemblyName System.Security;$encoded=[Console]::In.ReadToEnd();$cipher=[Convert]::FromBase64String($encoded);$bytes=[System.Security.Cryptography.ProtectedData]::Unprotect($cipher,$null,[System.Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Text.Encoding]::UTF8.GetString($bytes))';
+  return execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+    input,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 1024 * 1024
+  });
+}
+
+function protectSecret(value) {
+  return `${DPAPI_PREFIX}${runDpapi('protect', value)}`;
+}
+
+function unprotectSecret(value) {
+  return runDpapi('unprotect', value.slice(DPAPI_PREFIX.length));
+}
+
+function parseStoredValue(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function migratePlaintextSecretSettings() {
+  const rows = db.prepare(`
+    SELECT key, value FROM settings
+    WHERE key IN ('hfToken', 'githubToken', 'browserConnectorToken')
+  `).all();
+  const plaintextRows = rows.filter((row) => {
+    const value = String(parseStoredValue(row.value) || '');
+    return value && !value.startsWith(DPAPI_PREFIX);
+  });
+  const emptyRows = rows.filter((row) => !String(parseStoredValue(row.value) || ''));
+  if (!plaintextRows.length && !emptyRows.length) return;
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const update = db.prepare('UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?');
+    for (const row of plaintextRows) {
+      update.run(JSON.stringify(protectSecret(String(parseStoredValue(row.value)))), row.key);
+    }
+    const remove = db.prepare('DELETE FROM settings WHERE key = ?');
+    for (const row of emptyRows) remove.run(row.key);
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction was not active */ }
+    throw error;
+  }
+
+  // Remove recoverable copies of the legacy plaintext from both the database
+  // file and its WAL after the encrypted replacement is durable.
+  db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  db.exec('VACUUM');
+}
 
 export function migrate() {
   db.exec(`
@@ -208,22 +278,60 @@ export function migrate() {
     const sessionId = db.prepare('INSERT INTO chat_sessions (title, pinned) VALUES (?, 1)').run('Life Planner kickoff').lastInsertRowid;
     db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'assistant', 'Life Planner is ready to collect context. I will treat chat as candidate memory until you approve it.');
   }
+
+  migratePlaintextSecretSettings();
 }
 
 export function getSetting(key, fallback = null) {
+  if (SECRET_SETTING_KEYS.has(key) && secretCache.has(key)) return secretCache.get(key);
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
   if (!row) return fallback;
-  try {
-    return JSON.parse(row.value);
-  } catch {
-    return row.value;
+  const value = parseStoredValue(row.value);
+  if (SECRET_SETTING_KEYS.has(key)) {
+    if (!value) return fallback;
+    if (typeof value !== 'string' || !value.startsWith(DPAPI_PREFIX)) return fallback;
+    try {
+      const plaintext = unprotectSecret(value);
+      secretCache.set(key, plaintext);
+      return plaintext;
+    } catch {
+      if (!warnedSecretDecryptions.has(key)) {
+        warnedSecretDecryptions.add(key);
+        console.warn(`Stored ${key} could not be decrypted for this Windows user. Replace or clear it in the app.`);
+      }
+      secretCache.set(key, fallback);
+      return fallback;
+    }
   }
+  return value;
 }
 
-export function setSetting(key, value) {
+function setRegularSetting(key, value) {
   db.prepare(`
     INSERT INTO settings (key, value, updated_at)
     VALUES (?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
   `).run(key, JSON.stringify(value));
+}
+
+function setSecretSetting(key, value) {
+  const plaintext = String(value || '');
+  if (!plaintext) {
+    db.prepare('DELETE FROM settings WHERE key = ?').run(key);
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    warnedSecretDecryptions.delete(key);
+    secretCache.delete(key);
+    return;
+  }
+  setRegularSetting(key, protectSecret(plaintext));
+  warnedSecretDecryptions.delete(key);
+  secretCache.set(key, plaintext);
+}
+
+export function setSetting(key, value) {
+  if (SECRET_SETTING_KEYS.has(key)) {
+    setSecretSetting(key, value);
+    return;
+  }
+  setRegularSetting(key, value);
 }
