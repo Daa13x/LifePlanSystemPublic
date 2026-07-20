@@ -206,7 +206,9 @@ function Start-LifePlannerServer {
       if ($script:serverProcess.HasExited) { $exitDetail = " Server exit code: $($script:serverProcess.ExitCode)." }
     }
     catch {}
-    throw "Life Planner did not become healthy within 30 seconds.$exitDetail Check $stderrLog"
+    $failureMessage = "Life Planner did not become healthy within 30 seconds.$exitDetail Check $stderrLog"
+    Stop-LifePlannerServer
+    throw $failureMessage
   }
 
   Set-TrayState 'running'

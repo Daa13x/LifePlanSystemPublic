@@ -20,6 +20,7 @@ assert.match(tray, /\/api\/health/);
 assert.match(tray, /taskkill\.exe \/PID \$processId \/T \/F/);
 assert.match(tray, /RedirectStandardOutput/);
 assert.match(tray, /RedirectStandardError/);
+assert.match(tray, /Stop-LifePlannerServer\s*\n\s*throw \$failureMessage/);
 
 assert.match(packaging, /LifePlannerTray\.ps1/);
 assert.match(packaging, /Start Life Planner\.vbs/);
