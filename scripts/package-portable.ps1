@@ -27,6 +27,8 @@ $npmCommand = if (Test-Path -LiteralPath (Join-Path $bundledNodeRoot "npm.cmd"))
 } else {
   "npm.cmd"
 }
+$trayScriptSource = Join-Path $repoRoot "scripts\windows\LifePlannerTray.ps1"
+$trayIconSource = Join-Path $repoRoot "installer\assets\life-planner-app.ico"
 
 Write-Host "Preparing Life Planner portable bundle ($Configuration)"
 Write-Host "Repo: $repoRoot"
@@ -122,6 +124,15 @@ foreach ($pattern in $blockedPatterns) {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+if (-not (Test-Path -LiteralPath $trayScriptSource)) {
+  throw "Tray launcher source is missing: $trayScriptSource"
+}
+if (-not (Test-Path -LiteralPath $trayIconSource)) {
+  throw "Tray icon is missing: $trayIconSource"
+}
+Copy-Item -LiteralPath $trayScriptSource -Destination (Join-Path $portableRoot "LifePlannerTray.ps1") -Force
+Copy-Item -LiteralPath $trayIconSource -Destination (Join-Path $portableRoot "life-planner-app.ico") -Force
+
 Get-ChildItem -LiteralPath $appRoot -Recurse -File |
   ForEach-Object { $_.FullName.Substring($appRoot.Length + 1) -replace '\\', '/' } |
   Sort-Object |
@@ -130,14 +141,20 @@ Get-ChildItem -LiteralPath $appRoot -Recurse -File |
 @"
 @echo off
 setlocal
-set LIFE_PLANNER_PORT=4177
-set PLAYWRIGHT_BROWSERS_PATH=%~dp0app\data\ms-playwright
-if not exist "%PLAYWRIGHT_BROWSERS_PATH%\*" call "%~dp0Install Playwright Chromium.cmd"
-cd /d "%~dp0app"
-start "Life Planner Server" /min "%~dp0node\node.exe" server\index.js
-timeout /t 2 /nobreak >nul
-start "" "http://127.0.0.1:%LIFE_PLANNER_PORT%/"
+start "" wscript.exe "%~dp0Start Life Planner.vbs"
+exit /b 0
 "@ | Set-Content -Path (Join-Path $portableRoot "Start Life Planner.cmd") -Encoding ASCII
+
+@'
+Option Explicit
+Dim shell, fso, root, scriptPath, command
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+root = fso.GetParentFolderName(WScript.ScriptFullName)
+scriptPath = fso.BuildPath(root, "LifePlannerTray.ps1")
+command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & scriptPath & Chr(34)
+shell.Run command, 0, False
+'@ | Set-Content -Path (Join-Path $portableRoot "Start Life Planner.vbs") -Encoding ASCII
 
 @"
 @echo off
@@ -167,14 +184,26 @@ exit /b %EXIT_CODE%
 @'
 # Life Planner Portable
 
-Run `Start Life Planner.cmd`.
+Run `Start Life Planner.vbs` (or the compatibility `Start Life Planner.cmd`).
+
+Life Planner starts without a Node terminal and remains available from its app icon in the Windows notification area. The tray menu provides:
+
+- Open Life Planner
+- Pause environment
+- Resume environment
+- Exit environment
 
 The app opens at:
 
 http://127.0.0.1:4177/
 
-Playwright Chromium is not bundled into the installer payload. The installer and
-first app launch silently install it into:
+Server output is written under:
+
+app\data\logs\
+
+Use `Run Server Console.cmd` only for manual debugging when you intentionally want to see the Node console.
+
+Playwright Chromium is not bundled into the installer payload. The installer and first app launch silently install it into:
 
 app\data\ms-playwright\
 
