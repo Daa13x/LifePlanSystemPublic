@@ -130,6 +130,18 @@ if (-not (Test-Path -LiteralPath $trayScriptSource)) {
 if (-not (Test-Path -LiteralPath $trayIconSource)) {
   throw "Tray icon is missing: $trayIconSource"
 }
+
+$parseTokens = $null
+$parseErrors = $null
+[System.Management.Automation.Language.Parser]::ParseFile($trayScriptSource, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+if ($parseErrors.Count -gt 0) {
+  $details = ($parseErrors | ForEach-Object { $_.Message }) -join "; "
+  throw "Tray launcher PowerShell syntax check failed: $details"
+}
+
+& $nodeCommand (Join-Path $PSScriptRoot "verify-tray-launcher.mjs")
+if ($LASTEXITCODE -ne 0) { throw "Tray launcher static verification failed with exit code $LASTEXITCODE" }
+
 Copy-Item -LiteralPath $trayScriptSource -Destination (Join-Path $portableRoot "LifePlannerTray.ps1") -Force
 Copy-Item -LiteralPath $trayIconSource -Destination (Join-Path $portableRoot "life-planner-app.ico") -Force
 
