@@ -1,7 +1,7 @@
 #define MyAppName "Life Planner"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Life Planner"
-#define MyAppExeName "Start Life Planner.cmd"
+#define TrayLauncherName "Start Life Planner.vbs"
 #define PortableSource "..\release\LifePlannerPortable"
 #define InstallerAssets "assets"
 #define InstalledIconName "life-planner-app.ico"
@@ -35,12 +35,12 @@ Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesub
 Source: "{#InstallerAssets}\{#InstalledIconName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Life Planner"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#InstalledIconName}"
-Name: "{userdesktop}\Life Planner"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#InstalledIconName}"; Tasks: desktopicon
+Name: "{group}\Life Planner"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; WorkingDir: "{app}"; IconFilename: "{app}\{#InstalledIconName}"
+Name: "{userdesktop}\Life Planner"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; WorkingDir: "{app}"; IconFilename: "{app}\{#InstalledIconName}"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Run]
 Filename: "{sys}\cmd.exe"; Parameters: "/c """"{app}\Install Playwright Chromium.cmd"""""; Flags: runhidden waituntilterminated
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch Life Planner"; Flags: postinstall nowait skipifsilent
+Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; Description: "Launch Life Planner"; Flags: postinstall nowait skipifsilent
