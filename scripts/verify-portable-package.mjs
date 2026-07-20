@@ -5,6 +5,9 @@ import path from 'node:path';
 const portableRoot = path.resolve(process.argv[2] || 'release/LifePlannerPortable');
 const required = [
   'Start Life Planner.cmd',
+  'Start Life Planner.vbs',
+  'LifePlannerTray.ps1',
+  'life-planner-app.ico',
   'Install Playwright Chromium.cmd',
   'node/node.exe',
   'app/dist/index.html',
@@ -15,6 +18,7 @@ const required = [
   'app/node_modules/@babel/compat-data/data/corejs2-built-ins.json',
   'app/scripts/build-installer.ps1',
   'app/scripts/package-portable.ps1',
+  'app/scripts/windows/LifePlannerTray.ps1',
   'app/installer/LifePlannerPortable.iss',
   'app/installer/assets/life-planner-app.ico',
   'app/src/main.jsx',
@@ -46,8 +50,17 @@ assert.doesNotMatch(manifest, /(^|\/)data\/life-planner\.sqlite$/im);
 
 const buildScript = fs.readFileSync(path.join(portableRoot, 'app/scripts/build-installer.ps1'), 'utf8');
 const packageScript = fs.readFileSync(path.join(portableRoot, 'app/scripts/package-portable.ps1'), 'utf8');
+const trayScript = fs.readFileSync(path.join(portableRoot, 'LifePlannerTray.ps1'), 'utf8');
+const vbsLauncher = fs.readFileSync(path.join(portableRoot, 'Start Life Planner.vbs'), 'utf8');
 assert.match(buildScript, /Start-Process[\s\S]*-Wait[\s\S]*ExitCode/);
 assert.match(packageScript, /bundledNodeRoot/);
 assert.match(packageScript, /npmCommand/);
+assert.match(packageScript, /LifePlannerTray\.ps1/);
+assert.doesNotMatch(packageScript, /timeout\s+\/t\s+2/i);
+assert.match(trayScript, /System\.Windows\.Forms\.NotifyIcon/);
+assert.match(trayScript, /Pause environment/);
+assert.match(trayScript, /Resume environment/);
+assert.match(trayScript, /Exit environment/);
+assert.match(vbsLauncher, /WindowStyle Hidden/);
 
 console.log(`Portable package verification passed: ${portableRoot}`);
