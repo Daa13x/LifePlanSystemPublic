@@ -2182,6 +2182,21 @@ function Tooling({ setNotice, refreshSignal = 0 }) {
     }
   ];
 
+  const connectorLabel = connector?.connected
+    ? 'Connected'
+    : connector?.requiresEnable
+      ? 'Disabled'
+      : connector?.requiresReload
+        ? 'Reload required'
+        : connector?.waitingForHeartbeat
+          ? 'Waiting for heartbeat'
+          : connector?.installedInChrome
+            ? 'Registered'
+            : 'Not installed';
+  const connectorDetail = connector?.connected
+    ? 'Connected to this LPS session from the detected Chrome profile.'
+    : connector?.recommendedAction || 'Load the unpacked extension in the Chrome profile that runs LPS.';
+
   return (
     <section className="tooling-grid">
       <div className="panel source-hero">
@@ -2225,16 +2240,21 @@ function Tooling({ setNotice, refreshSignal = 0 }) {
         <div className="tool-row">
           <div>
             <strong>Chrome connector</strong>
-            <span>{connector?.installed ? 'Connected to this LPS session.' : 'Load the unpacked extension in the Chrome profile that runs LPS.'}</span>
+            <span>{connectorDetail}</span>
             <small>{connector?.extensionPath || 'browser-extension/lps-browser-agent'}</small>
+            {connector?.detectedProfilePath && <small>Detected profile: {connector.detectedProfilePath}</small>}
+            {connector?.installedPath && connector.installedPath !== connector.extensionPath && <small>Chrome loaded: {connector.installedPath}</small>}
           </div>
           <div className="tool-actions">
-            <Pill tone={connector?.installed ? 'good' : 'warn'}>{connector?.installed ? 'Connected' : 'Not loaded'}</Pill>
+            <Pill tone={connector?.connected ? 'good' : 'warn'}>{connectorLabel}</Pill>
             <button disabled={Boolean(busy)} onClick={installBrowserAgent}>
-              {busy === 'browserAgent' ? 'Opening...' : 'Install connector'}
+              {busy === 'browserAgent' ? 'Opening...' : connector?.installedInChrome ? 'Repair connector' : 'Install connector'}
             </button>
           </div>
         </div>
+        {connector?.manualChromeStepRequired && (
+          <div className="source-warning warn">{connector.manualChromeBoundary}</div>
+        )}
         <div className="tool-list">
           {rows.map((row) => (
             <div className="tool-row" key={row.id}>

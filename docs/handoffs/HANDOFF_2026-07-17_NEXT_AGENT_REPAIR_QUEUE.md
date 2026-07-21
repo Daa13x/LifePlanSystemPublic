@@ -183,7 +183,16 @@ Acceptance tests:
 - Hash mismatch deletes the partial and reports the expected/actual digest safely.
 - Slow successful startup transitions to ready; timeout and crash clean up the owned process.
 
-## 7. P2: installer launch health and process lifecycle
+## 7. P2: installer launch health and process lifecycle - completed 2026-07-22
+
+Completion note:
+
+- Tray support is now an application feature on `main`; do not split it back into a long-lived tray-only branch.
+- Installed and portable shortcuts launch `Start Life Planner.vbs`, which starts `LifePlannerTray.ps1` with no visible Node or PowerShell terminal.
+- The notification-area icon keeps the local environment alive when the browser closes and provides Open, Pause, Resume, and Exit actions. Exit stops only the owned bundled Node process tree.
+- Startup uses a per-install/port mutex, exact bundled-runtime ownership checks, bounded `/api/health` polling, port-collision reporting, log capture, and failed-start cleanup.
+- Packaging validates the PowerShell syntax and tray contract, copies the app icon and launchers, and portable-package verification proves the files are present. `verify:tray-launcher` is also part of the standard `verify:runtime-safety` gate.
+- The implementation was compared with the native tray lifecycles in `D:\_Code_\Serenity` and `D:\_Code_\KeepHerFlying`; LPS retains their owned-process shutdown pattern and adds HTTP health proof before reporting ready.
 
 Source evidence:
 

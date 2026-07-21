@@ -24,6 +24,7 @@ import {
   enforceChangedFiles
 } from './executorEnforcement.js';
 import { resolveRunCliCwd } from './runCliCwd.js';
+import { chromeProfileArgument, probeChromeExtension } from './browserExtensionInstall.js';
 import {
   canUseGitHubToken,
   detectHighConfidenceSecrets,
@@ -58,16 +59,16 @@ function seedRoadmapIfEmpty() {
     { title: 'Full git management coverage', detail: 'Source Control handles all git: stash save/list/apply/pop/drop, discard-all (confirmed), in-app conflict resolution (ours/theirs/mark), and tags (create/list/delete/push).', status: 'done', category: 'feature' },
     { title: 'Model manager (llama.cpp + HF)', detail: 'Local model registry shows on-disk (ready to load/assign) vs missing, with load (assign, guarded against missing files), download-from-HF, and remove (list-only or delete-file). Downloadable catalog via HF suggestions.', status: 'done', category: 'feature' },
     { title: 'CI/CD + local installer build', detail: 'On push, GitHub Actions builds the portable bundle + Inno installer and uploads both artifacts. A release-targeted dispatch attaches the installer to an existing GitHub Release. The Source tab can also build the installer locally with live status.', resume_notes: 'COMPLETED 2026-07-17: hosted push run 29578272261 and release-targeted run 29578538752 both passed every required build, runtime-safety, packaging, Inno, and artifact step. Release 1.0 now carries LifePlannerPortableSetup.exe (38,951,229 bytes; SHA-256 4C0970D64983EC1F87CC4A165AA2A696FBC803D6ED39964521A1538E7B762D51). The exact hosted asset was downloaded, silently installed, launched with its bundled Node runtime, verified through /api/health and the web UI, silently uninstalled, and copied to D:\\MA-Updates. Source provides the local non-blocking installer build endpoint and status UI.', status: 'done', category: 'infra' },
-    { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', resume_notes: 'P1 setup gate. Build one guided first-run checklist for database health, Git identity/publication readiness, local model runtime, Playwright Chromium, Chrome connector pairing, and installer/runtime version. Each check needs live evidence, a repair action, refresh, and a clear distinction between optional and blocking prerequisites. Add fresh-install and offline acceptance tests.', status: 'planned', category: 'feature' },
+    { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', resume_notes: 'P1 setup gate. Browser connector diagnostics advanced on 2026-07-22: Tooling now distinguishes files, Chrome registration, enabled state, current path/content, and live heartbeat, and opens the detected profile plus exact folder. See docs/handoffs/HANDOFF_2026-07-22_SERENITY_BROWSER_CONTROL_PARITY.md. The overall job remains planned: build one guided first-run checklist for database health, Git identity/publication readiness, local model runtime, Playwright Chromium, Chrome connector pairing, and installer/runtime version. Each check needs live evidence, a repair action, refresh, and a clear distinction between optional and blocking prerequisites. Add fresh-install and offline acceptance tests.', status: 'planned', category: 'feature' },
     { title: 'OpenHands real invocation', detail: 'Local-only real OpenHands executor invocation behind the existing readiness gate.', resume_notes: 'Deliberately disabled by default. Groundwork: adapter stub, contract, schemas, and safety matrix under docs/tooling/OPENHANDS_INVOCATION_*. Resume = implement the local-only call boundary per OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md acceptance criteria; keep invocation flag off until the gate + tests pass.', status: 'parked', category: 'infra' },
     { title: 'Brain-aware Chat provider router', detail: 'Chat routes to ChatGPT connector first with local model fallback; brain context loading foundation.', status: 'active', category: 'feature' },
     { title: 'Encrypt stored credentials with Windows DPAPI', detail: 'Keep GitHub, Hugging Face, and browser connector tokens out of plaintext SQLite while preserving redacted APIs and normal Source/browser behavior.', resume_notes: 'COMPLETED 2026-07-17: current-user Windows DPAPI encryption is enforced in server/db.js. Startup migrates legacy plaintext rows, secure-delete plus WAL truncation and VACUUM remove recoverable plaintext, empty values delete rows, and decrypt failures fail closed. verify:governance-safety proves migration, ciphertext-at-rest, redaction, replacement, and clearing. The live database was migrated and inspected without exposing values.', status: 'done', category: 'fix' },
     { title: 'Classified exports and transactional recovery', detail: 'Require explicit shareability classification and preview for public exports, then redesign Local Backup as a documented, transactional recovery format.', resume_notes: 'P1. Follow docs/handoffs/HANDOFF_2026-07-17_NEXT_AGENT_REPAIR_QUEUE.md section 2. Do not infer public safety from active/stable status. Add a persisted classification, blocked/unknown preview, format version and manifest, dry-run import, one transaction, rollback tests, and truthful UI naming. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4663,4666,4680.', status: 'planned', category: 'fix' },
-    { title: 'Cloud egress classification and provider-aware completion', detail: 'Block sensitive prose and file content from browser-agent egress until reviewed, and replace generic DOM/stability capture with provider-specific completion evidence.', resume_notes: 'P1. Follow repair queue section 3. Add a server-side egress decision before job creation, user preview/confirmation, provider adapters for ChatGPT/Gemini/Grok/Claude, deterministic DOM fixtures, bounded fallback, cancellation, terminal-job pruning, and extension reload/port-change acceptance. Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 independently confirmed both egress risk (server/index.js:670,677,2482,2498) and stale generic capture risk (background.js:99,148,199).', status: 'planned', category: 'fix' },
+    { title: 'Cloud egress classification and provider-aware completion', detail: 'Block sensitive prose and file content from browser-agent egress until reviewed, and replace generic DOM/stability capture with provider-specific completion evidence.', resume_notes: 'P1. Follow repair queue section 3. Add a server-side egress decision before job creation, user preview/confirmation, provider adapters for ChatGPT/Gemini/Grok/Claude, deterministic DOM fixtures, bounded fallback, cancellation, terminal-job pruning, and extension reload/port-change acceptance. Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 independently confirmed both egress risk (server/index.js:670,677,2482,2498) and stale generic capture risk (background.js:99,148,199). Current Serenity reference implementations are data/native/extensions/browser-agent/conversation-capture.js and conversation-capture.test.cjs; review the privacy and stale-turn gaps in docs/handoffs/HANDOFF_2026-07-22_SERENITY_BROWSER_CONTROL_PARITY.md before porting.', status: 'planned', category: 'fix' },
     { title: 'Transactional chat consultation and import writes', detail: 'Make multi-row chat, consultation-candidate, model, and JSON import operations atomic with recoverable failure states and durable idempotency.', resume_notes: 'P1/P2. Follow repair queue section 4. Start with POST /api/import/json and chat send. Validate the complete payload before BEGIN IMMEDIATE, commit all rows together, roll back injected mid-operation failures, and add request/provenance keys for retry safety. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4699,4711,1779,1784.', status: 'planned', category: 'fix' },
     { title: 'Repository Explorer realpath containment', detail: 'Apply canonical realpath and junction/symlink containment to every Repository Explorer read, list, preview, and proposal path.', resume_notes: 'P2. Follow repair queue section 5. Centralize an operation-aware resolver, reject protected paths before and after canonicalization, constrain parent realpaths for creates, and test symlink/junction escapes plus TOCTOU-sensitive cases. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:991,999,4599,4612.', status: 'planned', category: 'fix' },
     { title: 'Verified atomic downloads and llama readiness', detail: 'Download models and runtimes through temporary files with integrity checks, and only report llama-server ready after a bounded health probe.', resume_notes: 'P2. Follow repair queue section 6. Stream to same-volume .partial files, enforce size/hash when published, fsync/close then atomic rename, clean every failure, capture llama logs, poll its endpoint, and terminate timed-out child processes. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:2298,2323,2122,2138.', status: 'planned', category: 'infra' },
-    { title: 'Installer launch health and process lifecycle', detail: 'Replace fixed launch sleeps with health polling and add single-instance, useful failure output, and controlled shutdown behavior.', resume_notes: 'P2. Follow repair queue section 7. The generated Start Life Planner.cmd currently waits two seconds then opens a browser. Add a launcher helper with port ownership checks, bounded /api/health polling, log path/error display, duplicate-launch handling, and installer acceptance tests. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at scripts/package-portable.ps1:135,137,138.', status: 'planned', category: 'fix' },
+    { title: 'Installer launch health and process lifecycle', detail: 'Launch the installed app through a hidden, single-instance Windows tray host with health polling, useful failure output, pause/resume, and owned-process shutdown.', resume_notes: 'COMPLETED 2026-07-22: Windows tray support is part of main, not a separate product branch. Start Life Planner.vbs launches LifePlannerTray.ps1 without a visible Node or PowerShell terminal. The tray host uses a per-install/port mutex, rejects unrelated port owners, waits for /api/health, captures server logs, keeps the app alive after the browser closes, and exposes Open, Pause, Resume, and Exit. Exit terminates only the owned bundled Node process tree. Packaging and Inno shortcuts include the app icon and tray files; verify:tray-launcher is part of verify:runtime-safety. Compared against the native Serenity and KeepHerFlying tray lifecycles before acceptance.', status: 'done', category: 'fix' },
     { title: 'Signed attributable release artifacts', detail: 'Add checksums, SBOM, provenance, and code signing to release outputs without silently publishing unsigned binaries as trusted.', resume_notes: 'P2. Follow repair queue section 8. Generate SHA256SUMS and CycloneDX/SPDX output in CI, attach attestations, make signing conditional on an explicitly configured protected secret, verify signatures after download, and document unsigned-development behavior.', status: 'planned', category: 'infra' },
     { title: 'Responsive and keyboard accessible UI', detail: 'Remove desktop-only layout constraints and establish keyboard, focus, contrast, and automated accessibility acceptance.', resume_notes: 'P2. Follow repair queue section 9. Remove the 900px body minimum, define mobile Source/Settings behavior, add visible focus states and accessible names, run axe plus keyboard smoke tests, and capture desktop/mobile screenshots before completion. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at src/styles.css:43,877.', status: 'planned', category: 'feature' }
   ];
@@ -504,6 +505,19 @@ function chromeExecutablePath() {
     process.env['ProgramFiles(x86)'] && path.join(process.env['ProgramFiles(x86)'], 'Google', 'Chrome', 'Application', 'chrome.exe')
   ].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) || '';
+}
+
+function chromeUserDataRoot() {
+  return process.platform === 'win32' && process.env.LOCALAPPDATA
+    ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'User Data')
+    : '';
+}
+
+function browserExtensionProbe() {
+  return probeChromeExtension({
+    userDataRoot: chromeUserDataRoot(),
+    extensionPath: browserAgentExtensionDir()
+  });
 }
 
 async function chromeDebugEndpointAvailable(endpoint = 'http://127.0.0.1:9222') {
@@ -958,11 +972,12 @@ async function openExternalBrowser(url) {
   await execFileAsync('xdg-open', [url], options);
 }
 
-async function openChromeBrowser(url) {
+async function openChromeBrowser(url, detectedProfilePath = '') {
   if (process.platform === 'win32') {
     const chromePath = chromeExecutablePath();
     if (chromePath) {
-      const launched = spawnCli(chromePath, [url]);
+      const profileArgument = chromeProfileArgument(chromeUserDataRoot(), detectedProfilePath);
+      const launched = spawnCli(chromePath, [...(profileArgument ? [profileArgument] : []), url]);
       if (!launched.started) throw new Error(launched.error || 'Chrome launch failed.');
       return { launcher: chromePath };
     }
@@ -2591,12 +2606,41 @@ app.get('/api/browser/agent-tabs', async (_req, res) => {
 
 app.get('/api/browser/extension/install-info', (_req, res) => {
   const extensionPath = browserAgentExtensionDir();
+  const probe = browserExtensionProbe();
+  const connected = Date.now() - browserExtensionState.lastSeen < 15000;
+  const currentCopyLoaded = probe.chromeLoaded && (probe.exactPathMatch || probe.currentContentMatch);
+  const recommendedAction = connected
+    ? 'The connector heartbeat is live.'
+    : probe.installedInChrome && !probe.chromeLoaded
+      ? 'Enable the Life Planner Browser Agent in the detected Chrome profile.'
+      : probe.chromeLoaded && !currentCopyLoaded
+        ? 'Chrome loaded an older or different extension folder. Reload the current LPS copy.'
+        : probe.chromeLoaded
+          ? 'Keep Chrome open and reload the extension if the heartbeat does not return.'
+          : 'Enable Developer mode and load the current unpacked extension folder.';
   ok(res, {
     extensionPath,
     manifestPath: path.join(extensionPath, 'manifest.json'),
     pairingConfigPath: browserPairing.configPath,
-    installed: Date.now() - browserExtensionState.lastSeen < 15000,
+    installed: connected,
+    connected,
+    filesPresent: fs.existsSync(path.join(extensionPath, 'manifest.json')),
+    installedInChrome: probe.installedInChrome,
+    chromeLoaded: probe.chromeLoaded,
+    detectedProfilePath: probe.detectedProfilePath,
+    installedExtensionId: probe.installedExtensionId,
+    installedPath: probe.installedPath,
+    otherBrowserAgentPaths: probe.otherBrowserAgentPaths,
+    exactPathMatch: probe.exactPathMatch,
+    currentContentMatch: probe.currentContentMatch,
+    requiresInstall: !probe.installedInChrome,
+    requiresEnable: probe.installedInChrome && !probe.chromeLoaded,
+    requiresReload: probe.chromeLoaded && !currentCopyLoaded,
+    waitingForHeartbeat: currentCopyLoaded && !connected,
+    recommendedAction,
     chromeExtensionsUrl: 'chrome://extensions',
+    manualChromeStepRequired: !connected,
+    manualChromeBoundary: 'Chrome requires your own click for Developer mode, Load unpacked, Enable, and Reload. LPS opens the correct screen and folder but does not automate protected extension controls.',
     instructions: [
       'Open chrome://extensions in the Chrome profile that runs LPS.',
       'Enable Developer mode.',
@@ -2609,13 +2653,28 @@ app.get('/api/browser/extension/install-info', (_req, res) => {
 app.post('/api/browser/extension/install-helper', async (_req, res) => {
   const extensionPath = browserAgentExtensionDir();
   try {
+    const probe = browserExtensionProbe();
     await copyTextToSystemClipboard(extensionPath);
-    await openChromeBrowser('chrome://extensions');
+    await openChromeBrowser('chrome://extensions', probe.detectedProfilePath);
+    let folderOpened = false;
+    if (process.platform === 'win32') {
+      await execFileAsync('explorer.exe', [extensionPath], { cwd: root, timeout: 10000, windowsHide: true });
+      folderOpened = true;
+    }
     ok(res, {
       extensionPath,
       copied: true,
       opened: true,
-      message: 'Extension folder copied and Chrome extensions page opened. Enable Developer mode, click Load unpacked, then paste/select the copied folder.'
+      folderOpened,
+      detectedProfilePath: probe.detectedProfilePath,
+      installedInChrome: probe.installedInChrome,
+      chromeLoaded: probe.chromeLoaded,
+      exactPathMatch: probe.exactPathMatch,
+      currentContentMatch: probe.currentContentMatch,
+      manualChromeStepRequired: true,
+      message: probe.installedInChrome
+        ? 'The detected Chrome profile and exact LPS extension folder are open. Enable or Reload the extension yourself, then wait for the heartbeat.'
+        : 'The detected Chrome profile and exact LPS extension folder are open. Enable Developer mode and click Load unpacked yourself.'
     });
   } catch (error) {
     fail(res, 500, error.message || 'Browser-agent install helper failed.');

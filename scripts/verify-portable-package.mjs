@@ -12,6 +12,7 @@ const required = [
   'node/node.exe',
   'app/dist/index.html',
   'app/server/index.js',
+  'app/server/browserExtensionInstall.js',
   'app/node_modules/express/package.json',
   'app/node_modules/playwright-core/lib/serverRegistry.js',
   'app/node_modules/@rollup/rollup-win32-x64-msvc/package.json',
