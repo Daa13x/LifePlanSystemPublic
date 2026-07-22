@@ -28,6 +28,7 @@ $npmCommand = if (Test-Path -LiteralPath (Join-Path $bundledNodeRoot "npm.cmd"))
   "npm.cmd"
 }
 $trayScriptSource = Join-Path $repoRoot "scripts\windows\LifePlannerTray.ps1"
+$llamaProvisionerSource = Join-Path $repoRoot "scripts\windows\Install-LlamaRuntime.ps1"
 $trayIconSource = Join-Path $repoRoot "installer\assets\life-planner-app.ico"
 
 Write-Host "Preparing Life Planner portable bundle ($Configuration)"
@@ -130,6 +131,9 @@ if (-not (Test-Path -LiteralPath $trayScriptSource)) {
 if (-not (Test-Path -LiteralPath $trayIconSource)) {
   throw "Tray icon is missing: $trayIconSource"
 }
+if (-not (Test-Path -LiteralPath $llamaProvisionerSource)) {
+  throw "llama.cpp provisioner is missing: $llamaProvisionerSource"
+}
 
 $parseTokens = $null
 $parseErrors = $null
@@ -139,11 +143,25 @@ if ($parseErrors.Count -gt 0) {
   throw "Tray launcher PowerShell syntax check failed: $details"
 }
 
+$parseTokens = $null
+$parseErrors = $null
+[System.Management.Automation.Language.Parser]::ParseFile($llamaProvisionerSource, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+if ($parseErrors.Count -gt 0) {
+  $details = ($parseErrors | ForEach-Object { $_.Message }) -join "; "
+  throw "llama.cpp provisioner PowerShell syntax check failed: $details"
+}
+
 & $nodeCommand (Join-Path $PSScriptRoot "verify-tray-launcher.mjs")
 if ($LASTEXITCODE -ne 0) { throw "Tray launcher static verification failed with exit code $LASTEXITCODE" }
 
 Copy-Item -LiteralPath $trayScriptSource -Destination (Join-Path $portableRoot "LifePlannerTray.ps1") -Force
 Copy-Item -LiteralPath $trayIconSource -Destination (Join-Path $portableRoot "life-planner-app.ico") -Force
+
+# llama.cpp is a small runtime dependency and belongs in the bundle. The much
+# larger starter model is fetched by Inno/first launch instead of inflating Git
+# or the installer payload.
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $llamaProvisionerSource -PortableRoot $portableRoot -RuntimeOnly
+if ($LASTEXITCODE -ne 0) { throw "llama.cpp runtime provisioning failed with exit code $LASTEXITCODE" }
 
 Get-ChildItem -LiteralPath $appRoot -Recurse -File |
   ForEach-Object { $_.FullName.Substring($appRoot.Length + 1) -replace '\\', '/' } |
@@ -193,6 +211,13 @@ popd
 exit /b %EXIT_CODE%
 "@ | Set-Content -Path (Join-Path $portableRoot "Install Playwright Chromium.cmd") -Encoding ASCII
 
+@"
+@echo off
+setlocal
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0app\scripts\windows\Install-LlamaRuntime.ps1" -PortableRoot "%~dp0"
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Path (Join-Path $portableRoot "Install Local Model Runtime.cmd") -Encoding ASCII
+
 @'
 # Life Planner Portable
 
@@ -218,6 +243,10 @@ Use `Run Server Console.cmd` only for manual debugging when you intentionally wa
 Playwright Chromium is not bundled into the installer payload. The installer and first app launch silently install it into:
 
 app\data\ms-playwright\
+
+The verified llama.cpp CPU runtime is bundled under `llama\`. The installer
+silently downloads a verified compact starter GGUF into `app\data\models\`.
+Models selected later in Settings use the same bundled OpenAI-compatible server.
 
 The browser connector extension is bundled at:
 

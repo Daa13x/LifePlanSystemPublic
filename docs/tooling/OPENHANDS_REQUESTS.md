@@ -53,8 +53,16 @@ run tests/build; must produce a report before any commit/push is considered.
 - Installing or updating OpenHands.
 - Any commit/push on behalf of a request.
 
-## Model wiring (for the OpenHands GUI)
+## Model wiring (for a future OpenHands worker)
 
-- Model: `openai/qwen2.5-coder:14b-gpu`
-- Base URL: `http://host.docker.internal:11434/v1`
-- API key: `dummy` (Ollama ignores it; never store real keys in requests)
+OpenHands is optional, disabled by default, and does not trigger Docker or model
+probes until explicitly enabled. Its future model configuration is derived by
+the server from LPS settings in this order:
+
+1. `localCodeModelEndpoint` and `localCodeModelName`;
+2. the configured chat endpoint and model;
+3. the healthy bundled llama.cpp OpenAI-compatible endpoint.
+
+Loopback hosts are translated to `host.docker.internal` only when producing a
+container-facing configuration. Requests cannot supply or override the model,
+endpoint, or credential. Do not reintroduce an Ollama-specific dependency.

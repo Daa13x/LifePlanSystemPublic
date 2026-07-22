@@ -57,17 +57,18 @@ function seedRoadmapIfEmpty() {
   const seed = [
     { title: 'LPS-native Source Control panel', detail: 'Tabbed git cockpit: changes/stage/discard/commit, history graph, branches (switch/create/merge/delete), sync (fetch/pull/rebase/push), PAT login.', status: 'done', category: 'feature' },
     { title: 'Full git management coverage', detail: 'Source Control handles all git: stash save/list/apply/pop/drop, discard-all (confirmed), in-app conflict resolution (ours/theirs/mark), and tags (create/list/delete/push).', status: 'done', category: 'feature' },
-    { title: 'Model manager (llama.cpp + HF)', detail: 'Local model registry shows on-disk (ready to load/assign) vs missing, with load (assign, guarded against missing files), download-from-HF, and remove (list-only or delete-file). Downloadable catalog via HF suggestions.', status: 'done', category: 'feature' },
+    { title: 'Model manager (llama.cpp + HF)', detail: 'The installer ships verified llama.cpp, provisions a verified starter GGUF, and model download/load performs atomic download, assignment, hidden server launch, log capture, and health proof.', resume_notes: 'COMPLETED 2026-07-22: pinned llama.cpp b8354 and Qwen2.5 starter digests are enforced. A real Windows /health and /v1/chat/completions acceptance returned LPS LOCAL READY. Later GGUF choices follow the same verified load path. See docs/LOCAL_AI_BROWSER_AND_DOCUMENT_GUIDE.md.', status: 'done', category: 'feature' },
     { title: 'CI/CD + local installer build', detail: 'On push, GitHub Actions builds the portable bundle + Inno installer and uploads both artifacts. A release-targeted dispatch attaches the installer to an existing GitHub Release. The Source tab can also build the installer locally with live status.', resume_notes: 'COMPLETED 2026-07-17: hosted push run 29578272261 and release-targeted run 29578538752 both passed every required build, runtime-safety, packaging, Inno, and artifact step. Release 1.0 now carries LifePlannerPortableSetup.exe (38,951,229 bytes; SHA-256 4C0970D64983EC1F87CC4A165AA2A696FBC803D6ED39964521A1538E7B762D51). The exact hosted asset was downloaded, silently installed, launched with its bundled Node runtime, verified through /api/health and the web UI, silently uninstalled, and copied to D:\\MA-Updates. Source provides the local non-blocking installer build endpoint and status UI.', status: 'done', category: 'infra' },
     { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', resume_notes: 'P1 setup gate. Browser connector diagnostics advanced on 2026-07-22: Tooling now distinguishes files, Chrome registration, enabled state, current path/content, and live heartbeat, and opens the detected profile plus exact folder. See docs/handoffs/HANDOFF_2026-07-22_SERENITY_BROWSER_CONTROL_PARITY.md. The overall job remains planned: build one guided first-run checklist for database health, Git identity/publication readiness, local model runtime, Playwright Chromium, Chrome connector pairing, and installer/runtime version. Each check needs live evidence, a repair action, refresh, and a clear distinction between optional and blocking prerequisites. Add fresh-install and offline acceptance tests.', status: 'planned', category: 'feature' },
-    { title: 'OpenHands real invocation', detail: 'Local-only real OpenHands executor invocation behind the existing readiness gate.', resume_notes: 'Deliberately disabled by default. Groundwork: adapter stub, contract, schemas, and safety matrix under docs/tooling/OPENHANDS_INVOCATION_*. Resume = implement the local-only call boundary per OPENHANDS_REAL_INVOCATION_ENABLEMENT_PLAN.md acceptance criteria; keep invocation flag off until the gate + tests pass.', status: 'parked', category: 'infra' },
+    { title: 'OpenHands real invocation', detail: 'Optional local-only OpenHands executor invocation behind the existing readiness gate.', resume_notes: 'PARKED/INACTIVE 2026-07-22: OpenHands is explicitly disabled by default and performs no automatic Docker/model probes. Ollama-specific routes/config were removed. Any future worker inherits LPS localCodeModelEndpoint/localCodeModelName, then the chat endpoint, then healthy bundled llama.cpp. Real invocation flag remains off until the existing safety design and runtime acceptance pass.', status: 'parked', category: 'infra' },
     { title: 'Brain-aware Chat provider router', detail: 'Chat routes to ChatGPT connector first with local model fallback; brain context loading foundation.', status: 'active', category: 'feature' },
     { title: 'Encrypt stored credentials with Windows DPAPI', detail: 'Keep GitHub, Hugging Face, and browser connector tokens out of plaintext SQLite while preserving redacted APIs and normal Source/browser behavior.', resume_notes: 'COMPLETED 2026-07-17: current-user Windows DPAPI encryption is enforced in server/db.js. Startup migrates legacy plaintext rows, secure-delete plus WAL truncation and VACUUM remove recoverable plaintext, empty values delete rows, and decrypt failures fail closed. verify:governance-safety proves migration, ciphertext-at-rest, redaction, replacement, and clearing. The live database was migrated and inspected without exposing values.', status: 'done', category: 'fix' },
     { title: 'Classified exports and transactional recovery', detail: 'Require explicit shareability classification and preview for public exports, then redesign Local Backup as a documented, transactional recovery format.', resume_notes: 'P1. Follow docs/handoffs/HANDOFF_2026-07-17_NEXT_AGENT_REPAIR_QUEUE.md section 2. Do not infer public safety from active/stable status. Add a persisted classification, blocked/unknown preview, format version and manifest, dry-run import, one transaction, rollback tests, and truthful UI naming. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4663,4666,4680.', status: 'planned', category: 'fix' },
     { title: 'Cloud egress classification and provider-aware completion', detail: 'Block sensitive prose and file content from browser-agent egress until reviewed, and replace generic DOM/stability capture with provider-specific completion evidence.', resume_notes: 'P1. Follow repair queue section 3. Add a server-side egress decision before job creation, user preview/confirmation, provider adapters for ChatGPT/Gemini/Grok/Claude, deterministic DOM fixtures, bounded fallback, cancellation, terminal-job pruning, and extension reload/port-change acceptance. Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 independently confirmed both egress risk (server/index.js:670,677,2482,2498) and stale generic capture risk (background.js:99,148,199). Current Serenity reference implementations are data/native/extensions/browser-agent/conversation-capture.js and conversation-capture.test.cjs; review the privacy and stale-turn gaps in docs/handoffs/HANDOFF_2026-07-22_SERENITY_BROWSER_CONTROL_PARITY.md before porting.', status: 'planned', category: 'fix' },
     { title: 'Transactional chat consultation and import writes', detail: 'Make multi-row chat, consultation-candidate, model, and JSON import operations atomic with recoverable failure states and durable idempotency.', resume_notes: 'P1/P2. Follow repair queue section 4. Start with POST /api/import/json and chat send. Validate the complete payload before BEGIN IMMEDIATE, commit all rows together, roll back injected mid-operation failures, and add request/provenance keys for retry safety. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4699,4711,1779,1784.', status: 'planned', category: 'fix' },
     { title: 'Repository Explorer realpath containment', detail: 'Apply canonical realpath and junction/symlink containment to every Repository Explorer read, list, preview, and proposal path.', resume_notes: 'P2. Follow repair queue section 5. Centralize an operation-aware resolver, reject protected paths before and after canonicalization, constrain parent realpaths for creates, and test symlink/junction escapes plus TOCTOU-sensitive cases. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:991,999,4599,4612.', status: 'planned', category: 'fix' },
-    { title: 'Verified atomic downloads and llama readiness', detail: 'Download models and runtimes through temporary files with integrity checks, and only report llama-server ready after a bounded health probe.', resume_notes: 'P2. Follow repair queue section 6. Stream to same-volume .partial files, enforce size/hash when published, fsync/close then atomic rename, clean every failure, capture llama logs, poll its endpoint, and terminate timed-out child processes. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:2298,2323,2122,2138.', status: 'planned', category: 'infra' },
+    { title: 'Verified atomic downloads and llama readiness', detail: 'Download models and runtimes through temporary files with published integrity checks, and report llama-server ready only after bounded health proof.', resume_notes: 'COMPLETED 2026-07-22: same-volume partial downloads, published size/SHA-256 checks, fsync, atomic rename, cleanup, captured logs, bounded health polling, failed-child termination, installer provisioning, and real completion acceptance all pass. verify:local-ai-docs protects the contract.', status: 'done', category: 'infra' },
+    { title: 'Portable PDF and context documents', detail: 'Import local PDFs and export selected Life Planner context as PDF, interactive HTML, Markdown, text, or JSON.', resume_notes: 'COMPLETED 2026-07-22: PDF.js extraction is local and bounded with SHA-256 provenance/pending review. PDF export uses local Chromium. Interactive HTML is self-contained, searchable, and CSP-restricted. Export scopes cover all, projects, knowledge, roadmap, and chat. Public export remains separately classification-gated.', status: 'done', category: 'feature' },
     { title: 'Installer launch health and process lifecycle', detail: 'Launch the installed app through a hidden, single-instance Windows tray host with health polling, useful failure output, pause/resume, and owned-process shutdown.', resume_notes: 'COMPLETED 2026-07-22: Windows tray support is part of main, not a separate product branch. Start Life Planner.vbs launches LifePlannerTray.ps1 without a visible Node or PowerShell terminal. The tray host uses a per-install/port mutex, rejects unrelated port owners, waits for /api/health, captures server logs, keeps the app alive after the browser closes, and exposes Open, Pause, Resume, and Exit. Exit terminates only the owned bundled Node process tree. Packaging and Inno shortcuts include the app icon and tray files; verify:tray-launcher is part of verify:runtime-safety. Compared against the native Serenity and KeepHerFlying tray lifecycles before acceptance.', status: 'done', category: 'fix' },
     { title: 'Signed attributable release artifacts', detail: 'Add checksums, SBOM, provenance, and code signing to release outputs without silently publishing unsigned binaries as trusted.', resume_notes: 'P2. Follow repair queue section 8. Generate SHA256SUMS and CycloneDX/SPDX output in CI, attach attestations, make signing conditional on an explicitly configured protected secret, verify signatures after download, and document unsigned-development behavior.', status: 'planned', category: 'infra' },
     { title: 'Responsive and keyboard accessible UI', detail: 'Remove desktop-only layout constraints and establish keyboard, focus, contrast, and automated accessibility acceptance.', resume_notes: 'P2. Follow repair queue section 9. Remove the 900px body minimum, define mobile Source/Settings behavior, add visible focus states and accessible names, run axe plus keyboard smoke tests, and capture desktop/mobile screenshots before completion. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at src/styles.css:43,877.', status: 'planned', category: 'feature' }
@@ -81,6 +82,8 @@ const port = Number(process.env.LIFE_PLANNER_PORT || 4177);
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
 let managedLlamaServer = null;
+let managedLlamaServerReady = false;
+let managedLlamaServerStartPromise = null;
 let browserContext = null;
 let browserPage = null;
 let browserMode = '';
@@ -730,6 +733,37 @@ function buildCloudConsultationPrompt({ targetAgent = 'ChatGPT', localDraft = ''
   ].join('\n');
 }
 
+function classifyAndRedactCloudPrompt(prompt) {
+  const findings = [];
+  let redacted = String(prompt || '');
+  const rules = [
+    { type: 'private key', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, replacement: '[REDACTED PRIVATE KEY]' },
+    { type: 'secret assignment', pattern: /\b(api[_ -]?key|token|password|secret)\s*[:=]\s*[^\s,;]{6,}/gi, replacement: (_match, label) => `${label}=[REDACTED]` },
+    { type: 'credential', pattern: /\b(?:sk|hf|ghp|github_pat)_[A-Za-z0-9_-]{16,}\b/g, replacement: '[REDACTED CREDENTIAL]' },
+    { type: 'email address', pattern: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, replacement: '[REDACTED EMAIL]' },
+    { type: 'phone number', pattern: /(?<!\w)(?:\+?\d[\d ()-]{8,}\d)(?!\w)/g, replacement: '[REDACTED PHONE]' }
+  ];
+  for (const rule of rules) {
+    let count = 0;
+    redacted = redacted.replace(rule.pattern, (...args) => {
+      count += 1;
+      return typeof rule.replacement === 'function' ? rule.replacement(...args) : rule.replacement;
+    });
+    if (count) findings.push({ type: rule.type, count, action: 'redacted' });
+  }
+  return { prompt: redacted, findings, changed: redacted !== prompt };
+}
+
+function prepareCloudEgress(req) {
+  const targetAgent = String(req.body.target_agent || 'ChatGPT').trim();
+  const localDraft = String(req.body.local_draft || '').trim();
+  const contexts = selectedContextFiles(req.body.context_paths || []);
+  const assembled = req.body.prompt?.trim() || buildCloudConsultationPrompt({ targetAgent, localDraft, contexts });
+  const classified = classifyAndRedactCloudPrompt(assembled);
+  const promptHash = crypto.createHash('sha256').update(`${targetAgent}\0${classified.prompt}`, 'utf8').digest('hex');
+  return { targetAgent, localDraft, contexts, prompt: classified.prompt, promptHash, findings: classified.findings, changed: classified.changed };
+}
+
 function buildBrowserAgentAssistPrompt({ targetAgent = 'ChatGPT', localDraft = '', contexts = [] }) {
   const contextList = contexts.length
     ? contexts.map((item, index) => `${index + 1}. ${item.path}${item.truncated ? ' (truncated)' : ''}\n${item.content.slice(0, 2200)}`).join('\n\n')
@@ -1212,6 +1246,45 @@ function assignedPlannerModel() {
   return row("SELECT * FROM model_registry WHERE assigned_role = 'Planner Assistant' ORDER BY updated_at DESC LIMIT 1");
 }
 
+function bundledLocalRuntime() {
+  const portableRoot = path.resolve(root, '..');
+  return {
+    serverPath: path.join(portableRoot, 'llama', 'llama-server.exe'),
+    cliPath: path.join(portableRoot, 'llama', 'llama-cli.exe'),
+    starterModelPath: path.join(root, 'data', 'models', 'Qwen2.5-1.5B-Instruct-Q4_K_M.gguf'),
+    starterRepo: 'bartowski/Qwen2.5-1.5B-Instruct-GGUF',
+    starterFile: 'Qwen2.5-1.5B-Instruct-Q4_K_M.gguf'
+  };
+}
+
+function ensureBundledLocalRuntimeDefaults() {
+  const bundled = bundledLocalRuntime();
+  const configuredServer = String(getSetting('llamaServerPath', '') || '').trim();
+  if (fs.existsSync(bundled.serverPath) && (!configuredServer || !fs.existsSync(configuredServer))) {
+    setSetting('llamaServerPath', bundled.serverPath);
+  }
+  const configuredCli = String(getSetting('llamaCliPath', '') || '').trim();
+  if (fs.existsSync(bundled.cliPath) && (!configuredCli || !fs.existsSync(configuredCli))) {
+    setSetting('llamaCliPath', bundled.cliPath);
+  }
+  if (!fs.existsSync(bundled.starterModelPath)) return;
+
+  const stat = fs.statSync(bundled.starterModelPath);
+  db.prepare(`
+    INSERT INTO model_registry (name, path, size_bytes, source, hf_repo, hf_file, updated_at)
+    VALUES (?, ?, ?, 'bundled-starter', ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(path) DO UPDATE SET size_bytes = excluded.size_bytes, hf_repo = excluded.hf_repo, hf_file = excluded.hf_file, updated_at = CURRENT_TIMESTAMP
+  `).run(bundled.starterFile, bundled.starterModelPath, stat.size, bundled.starterRepo, bundled.starterFile);
+  if (!assignedPlannerModel()) {
+    db.prepare("UPDATE model_registry SET assigned_role = 'Planner Assistant', updated_at = CURRENT_TIMESTAMP WHERE path = ?").run(bundled.starterModelPath);
+  }
+  const folders = getSetting('modelFolders', []);
+  const modelFolder = path.dirname(bundled.starterModelPath);
+  if (Array.isArray(folders) && !folders.some((folder) => path.resolve(folder) === path.resolve(modelFolder))) {
+    setSetting('modelFolders', [...folders, modelFolder]);
+  }
+}
+
 function readChatContextFiles(sessionId) {
   const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
   let remaining = 10000;
@@ -1293,9 +1366,83 @@ async function localModelStatus() {
     llamaServerExists: Boolean(llamaServerPath && fs.existsSync(llamaServerPath)),
     llamaServerPort,
     managedServerRunning: Boolean(managedLlamaServer && !managedLlamaServer.killed),
-    managedEndpoint: managedLlamaServer && !managedLlamaServer.killed ? `http://127.0.0.1:${llamaServerPort}` : ''
+    managedServerReady: Boolean(managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady),
+    managedEndpoint: managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady ? `http://127.0.0.1:${llamaServerPort}` : '',
+    bundledRuntime: fs.existsSync(bundledLocalRuntime().serverPath)
   };
 }
+
+async function stopManagedLlamaServer() {
+  if (managedLlamaServer && !managedLlamaServer.killed) managedLlamaServer.kill();
+  managedLlamaServer = null;
+  managedLlamaServerReady = false;
+}
+
+async function waitForLlamaServer(endpoint, child, timeoutMs = 90000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.killed) throw new Error(`llama-server exited before becoming ready (exit ${child.exitCode ?? 'unknown'}).`);
+    try {
+      const response = await fetch(`${endpoint}/health`, { signal: AbortSignal.timeout(2000) });
+      if (response.ok) return;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  throw new Error(`llama-server did not become healthy within ${Math.round(timeoutMs / 1000)} seconds.`);
+}
+
+async function startManagedLlamaServer(options = {}) {
+  if (managedLlamaServerStartPromise) return managedLlamaServerStartPromise;
+  managedLlamaServerStartPromise = (async () => {
+    const status = await localModelStatus();
+    if (!status.assigned || !status.model?.path || !fs.existsSync(status.model.path)) throw new Error('Assign a downloaded Planner Assistant GGUF before starting llama-server.');
+    const serverPath = String(options.serverPath || status.llamaServerPath || '').trim();
+    const port = Number(options.port || status.llamaServerPort || 8080);
+    const contextSize = Number(options.contextSize || getSetting('llamaContextSize', 4096) || 4096);
+    if (!serverPath || !fs.existsSync(serverPath)) throw new Error('The bundled llama-server runtime is missing. Repair the local model runtime from Settings.');
+    const endpoint = `http://127.0.0.1:${port}`;
+    if (managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady) return localModelStatus();
+    await stopManagedLlamaServer();
+
+    const logDir = path.join(root, 'data', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const stdoutFd = fs.openSync(path.join(logDir, 'llama-server.stdout.log'), 'a');
+    const stderrFd = fs.openSync(path.join(logDir, 'llama-server.stderr.log'), 'a');
+    const args = ['-m', status.model.path, '--host', '127.0.0.1', '--port', String(port), '-c', String(contextSize)];
+    const child = spawn(serverPath, args, { cwd: path.dirname(serverPath), detached: false, stdio: ['ignore', stdoutFd, stderrFd], windowsHide: true });
+    fs.closeSync(stdoutFd);
+    fs.closeSync(stderrFd);
+    managedLlamaServer = child;
+    managedLlamaServerReady = false;
+    child.on('error', (error) => console.error('llama-server process error:', error.message));
+    child.on('exit', () => {
+      if (managedLlamaServer === child) {
+        managedLlamaServer = null;
+        managedLlamaServerReady = false;
+      }
+    });
+    try {
+      await waitForLlamaServer(endpoint, child);
+    } catch (error) {
+      if (!child.killed) child.kill();
+      if (managedLlamaServer === child) managedLlamaServer = null;
+      throw new Error(`${error.message} See data/logs/llama-server.stderr.log.`);
+    }
+    managedLlamaServerReady = true;
+    setSetting('llamaServerPath', serverPath);
+    setSetting('llamaServerPort', port);
+    setSetting('llamaContextSize', contextSize);
+    setSetting('localModelName', status.model.name || 'planner-assistant');
+    return localModelStatus();
+  })();
+  try {
+    return await managedLlamaServerStartPromise;
+  } finally {
+    managedLlamaServerStartPromise = null;
+  }
+}
+
+ensureBundledLocalRuntimeDefaults();
 
 async function runEndpointModel(endpoint, modelName, prompt) {
   const base = endpoint.replace(/\/+$/, '');
@@ -1329,23 +1476,27 @@ async function runLlamaCli(llamaCliPath, modelPath, prompt) {
 }
 
 async function runPlannerAssistant(sessionId, userMessage) {
-  const status = await localModelStatus();
+  let status = await localModelStatus();
   if (!status.assigned && !status.endpointConfigured) {
     return {
       mode: 'unavailable',
-      content: 'Saved to chat. No Planner Assistant model is assigned and no local endpoint is configured yet; use Settings to connect Ollama, LM Studio, or a GGUF runtime.'
+      content: 'Saved to chat. No Planner Assistant model is assigned and no OpenAI-compatible local endpoint is configured yet; choose a GGUF model in Settings.'
     };
   }
 
   const prompt = buildAssistantPrompt(sessionId, userMessage);
   try {
-    if (status.managedEndpoint) {
-      const content = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt);
-      if (content) return { mode: 'managed llama-server', content };
-    }
     if (status.endpointConfigured) {
       const content = await runEndpointModel(status.endpoint, status.endpointModelName, prompt);
       if (content) return { mode: `local endpoint (${status.endpointModelName})`, content };
+    }
+    if (status.assigned && status.llamaServerExists && !status.managedServerReady) {
+      await startManagedLlamaServer();
+      status = await localModelStatus();
+    }
+    if (status.managedEndpoint) {
+      const content = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt);
+      if (content) return { mode: 'bundled llama.cpp', content };
     }
     if (status.llamaCliConfigured && status.llamaCliExists) {
       const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt);
@@ -1360,7 +1511,7 @@ async function runPlannerAssistant(sessionId, userMessage) {
 
   return {
     mode: 'unavailable',
-    content: 'Saved to chat. A Planner Assistant model is assigned or endpoint is configured, but no runnable local runtime answered. Check the endpoint URL, endpoint model name, or llama-cli path in Settings.'
+    content: 'Saved to chat. A Planner Assistant model is assigned or endpoint is configured, but no local runtime answered. Check the endpoint or repair the bundled runtime in Settings.'
   };
 }
 
@@ -2125,39 +2276,20 @@ app.get('/api/models/runtime', async (_req, res) => {
 });
 
 app.post('/api/models/server/start', async (req, res) => {
-  const status = await localModelStatus();
-  if (!status.assigned) return fail(res, 400, 'Assign a Planner Assistant model before starting llama-server.');
-  const serverPath = String(req.body.llamaServerPath || status.llamaServerPath || '').trim();
-  const port = Number(req.body.port || status.llamaServerPort || 8080);
-  const contextSize = Number(req.body.contextSize || getSetting('llamaContextSize', 4096) || 4096);
-  if (!serverPath || !fs.existsSync(serverPath)) return fail(res, 400, 'Set a valid llama-server executable path first.');
-  if (managedLlamaServer && !managedLlamaServer.killed) return ok(res, await localModelStatus());
-
-  const args = ['-m', status.model.path, '--host', '127.0.0.1', '--port', String(port), '-c', String(contextSize)];
-  const child = spawn(serverPath, args, {
-    cwd: root,
-    detached: false,
-    stdio: 'ignore',
-    windowsHide: true
-  });
-  child.on('error', () => {});
-  child.on('exit', () => {
-    if (managedLlamaServer === child) managedLlamaServer = null;
-  });
-  managedLlamaServer = child;
-  setSetting('llamaServerPath', serverPath);
-  setSetting('llamaServerPort', port);
-  setSetting('llamaContextSize', contextSize);
-  setSetting('localModelEndpoint', `http://127.0.0.1:${port}`);
-  setSetting('localModelName', status.model.name || 'planner-assistant');
-  ok(res, { message: `llama-server starting on 127.0.0.1:${port}`, runtime: await localModelStatus() });
+  try {
+    const runtime = await startManagedLlamaServer({
+      serverPath: req.body.llamaServerPath,
+      port: req.body.port,
+      contextSize: req.body.contextSize
+    });
+    ok(res, { message: `llama-server is healthy at ${runtime.managedEndpoint}`, runtime });
+  } catch (error) {
+    fail(res, 503, error.message);
+  }
 });
 
 app.post('/api/models/server/stop', async (_req, res) => {
-  if (managedLlamaServer && !managedLlamaServer.killed) {
-    managedLlamaServer.kill();
-    managedLlamaServer = null;
-  }
+  await stopManagedLlamaServer();
   ok(res, { message: 'Managed llama-server stopped.', runtime: await localModelStatus() });
 });
 
@@ -2244,7 +2376,7 @@ app.post('/api/models/scan', (req, res) => {
   ok(res, { discovered, models: modelsWithExists() });
 });
 
-app.post('/api/models/:id/assign', (req, res) => {
+app.post('/api/models/:id/assign', async (req, res) => {
   const role = req.body.role || 'Planner Assistant';
   const model = row('SELECT * FROM model_registry WHERE id = ?', [req.params.id]);
   if (!model) return fail(res, 404, 'Model not found.');
@@ -2253,7 +2385,18 @@ app.post('/api/models/:id/assign', (req, res) => {
   }
   db.prepare('UPDATE model_registry SET assigned_role = NULL WHERE assigned_role = ?').run(role);
   db.prepare('UPDATE model_registry SET assigned_role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(role, req.params.id);
-  ok(res, modelsWithExists());
+  await stopManagedLlamaServer();
+  let runtime = await localModelStatus();
+  let runtimeError = '';
+  if (!runtime.endpointConfigured && runtime.llamaServerExists) {
+    try {
+      runtime = await startManagedLlamaServer();
+    } catch (error) {
+      runtimeError = error.message;
+      runtime = await localModelStatus();
+    }
+  }
+  ok(res, { models: modelsWithExists(), runtime, runtimeError, message: runtimeError ? 'Model assigned, but llama.cpp did not become ready.' : 'Model assigned and local runtime ready.' });
 });
 
 app.get('/api/hf/files', async (req, res) => {
@@ -2301,27 +2444,89 @@ app.get('/api/hf/search', async (req, res) => {
   ok(res, models);
 });
 
+function validateHfModelReference(repo, file) {
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) throw new Error('Invalid Hugging Face repository name.');
+  const normalized = String(file || '').replaceAll('\\', '/');
+  if (!normalized || normalized.startsWith('/') || normalized.split('/').includes('..') || !normalized.toLowerCase().endsWith('.gguf')) {
+    throw new Error('Invalid GGUF file path.');
+  }
+  return normalized;
+}
+
+async function publishedHfFileMetadata(repo, file, token) {
+  const response = await fetch(`https://huggingface.co/api/models/${repo}/tree/main?recursive=1&expand=1`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {}
+  });
+  if (!response.ok) throw new Error(`Hugging Face metadata lookup failed: ${response.status} ${response.statusText}`);
+  const metadata = (await response.json()).find((item) => item.type === 'file' && item.path === file);
+  if (!metadata) throw new Error('The selected GGUF was not found in the published repository tree.');
+  return { size: Number(metadata.lfs?.size || metadata.size || 0), sha256: String(metadata.lfs?.oid || '').toLowerCase() };
+}
+
+async function downloadHfModelAtomically({ repo, file, target, token }) {
+  const normalizedFile = validateHfModelReference(repo, file);
+  const metadata = await publishedHfFileMetadata(repo, normalizedFile, token);
+  if (!metadata.size || !/^[a-f0-9]{64}$/.test(metadata.sha256)) throw new Error('Hugging Face did not publish a usable size and SHA-256 for this GGUF.');
+  if (fs.existsSync(target)) throw new Error('The target model file already exists. Remove it before downloading again.');
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const partial = `${target}.${process.pid}.${Date.now()}.partial`;
+  try {
+    const url = `https://huggingface.co/${repo}/resolve/main/${normalizedFile}`;
+    const response = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!response.ok || !response.body) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    await pipeline(response.body, fs.createWriteStream(partial, { flags: 'wx' }));
+    const stat = fs.statSync(partial);
+    if (stat.size !== metadata.size) throw new Error(`Downloaded size ${stat.size} does not match published size ${metadata.size}.`);
+    const actualSha256 = await new Promise((resolve, reject) => {
+      const hash = crypto.createHash('sha256');
+      const input = fs.createReadStream(partial);
+      input.on('error', reject);
+      input.on('data', (chunk) => hash.update(chunk));
+      input.on('end', () => resolve(hash.digest('hex')));
+    });
+    if (actualSha256 !== metadata.sha256) throw new Error('Downloaded GGUF SHA-256 does not match the publisher digest.');
+    const fd = fs.openSync(partial, 'r');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fs.renameSync(partial, target);
+    return { size: stat.size, sha256: actualSha256 };
+  } catch (error) {
+    if (fs.existsSync(partial)) fs.unlinkSync(partial);
+    throw error;
+  }
+}
+
 app.post('/api/hf/download', async (req, res) => {
-  const { repo, file } = req.body;
+  const repo = String(req.body.repo || '').trim();
+  const file = String(req.body.file || '').trim();
   if (!repo || !file) return fail(res, 400, 'Repo and file are required.');
   const folder = req.body.folder || getSetting('modelDownloadFolder', path.resolve('models'));
-  fs.mkdirSync(folder, { recursive: true });
   const token = getSetting('hfToken', '');
-  const url = `https://huggingface.co/${repo}/resolve/main/${file}`;
-  const response = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-  if (!response.ok || !response.body) return fail(res, response.status, `Download failed: ${response.statusText}`);
   const target = path.join(folder, path.basename(file));
-  await pipeline(response.body, fs.createWriteStream(target));
-  const stat = fs.statSync(target);
+  let downloaded;
+  try {
+    downloaded = await downloadHfModelAtomically({ repo, file, target, token });
+  } catch (error) {
+    return fail(res, 502, error.message);
+  }
   // Record the HF origin so a later delete can flip the entry to "download"
   // and re-fetch the exact same file.
   const id = db.prepare(`
     INSERT INTO model_registry (name, path, size_bytes, source, hf_repo, hf_file)
     VALUES (?, ?, ?, 'huggingface', ?, ?)
     ON CONFLICT(path) DO UPDATE SET size_bytes = excluded.size_bytes, hf_repo = excluded.hf_repo, hf_file = excluded.hf_file, updated_at = CURRENT_TIMESTAMP
-  `).run(path.basename(file), target, stat.size, repo, file).lastInsertRowid;
+  `).run(path.basename(file), target, downloaded.size, repo, file);
+  const model = row('SELECT * FROM model_registry WHERE path = ?', [target]);
+  db.prepare("UPDATE model_registry SET assigned_role = NULL WHERE assigned_role = 'Planner Assistant'").run();
+  db.prepare("UPDATE model_registry SET assigned_role = 'Planner Assistant', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(model.id);
   setSetting('modelDownloadFolder', folder);
-  ok(res, { id, target, size: stat.size });
+  await stopManagedLlamaServer();
+  let runtime = await localModelStatus();
+  let runtimeError = '';
+  if (!runtime.endpointConfigured && runtime.llamaServerExists) {
+    try { runtime = await startManagedLlamaServer(); } catch (error) { runtimeError = error.message; runtime = await localModelStatus(); }
+  }
+  ok(res, { id: model.id, target, size: downloaded.size, sha256: downloaded.sha256, models: modelsWithExists(), runtime, runtimeError });
 });
 
 // Re-download a known model whose file was deleted, using its stored HF origin,
@@ -2332,15 +2537,15 @@ app.post('/api/models/:id/download', async (req, res) => {
   if (!model.hf_repo || !model.hf_file) return fail(res, 400, 'This model has no recorded Hugging Face origin, so it cannot be re-downloaded. Re-scan the folder instead.');
   if (model.path && fs.existsSync(model.path)) return fail(res, 409, 'The model file is already on disk.');
   const token = getSetting('hfToken', '');
-  const url = `https://huggingface.co/${model.hf_repo}/resolve/main/${model.hf_file}`;
-  const response = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
-  if (!response.ok || !response.body) return fail(res, response.status, `Download failed: ${response.statusText}`);
   const target = model.path || path.join(getSetting('modelDownloadFolder', path.resolve('models')), path.basename(model.hf_file));
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  await pipeline(response.body, fs.createWriteStream(target));
-  const stat = fs.statSync(target);
-  db.prepare('UPDATE model_registry SET path = ?, size_bytes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(target, stat.size, model.id);
-  ok(res, { id: model.id, target, size: stat.size, models: modelsWithExists() });
+  let downloaded;
+  try {
+    downloaded = await downloadHfModelAtomically({ repo: model.hf_repo, file: model.hf_file, target, token });
+  } catch (error) {
+    return fail(res, 502, error.message);
+  }
+  db.prepare('UPDATE model_registry SET path = ?, size_bytes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(target, downloaded.size, model.id);
+  ok(res, { id: model.id, target, size: downloaded.size, sha256: downloaded.sha256, models: modelsWithExists() });
 });
 
 // Single source of truth for client- and export-facing settings. There is no
@@ -2482,6 +2687,23 @@ app.post('/api/browser/open', async (req, res) => {
   }
 });
 
+app.post('/api/browser/consult/preview', (req, res) => {
+  try {
+    const prepared = prepareCloudEgress(req);
+    ok(res, {
+      targetAgent: prepared.targetAgent,
+      prompt: prepared.prompt,
+      promptHash: prepared.promptHash,
+      findings: prepared.findings,
+      changed: prepared.changed,
+      contexts: prepared.contexts.map((item) => ({ path: item.path, truncated: item.truncated })),
+      note: 'Review this exact final prompt. Confirmation is bound to its SHA-256 and cloud provider; any edit or provider change invalidates it.'
+    });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
 app.post('/api/browser/consult', async (req, res) => {
   const targetAgent = String(req.body.target_agent || 'ChatGPT').trim();
   const localDraft = String(req.body.local_draft || '').trim();
@@ -2493,12 +2715,13 @@ app.post('/api/browser/consult', async (req, res) => {
   }
 
   try {
-    const contexts = selectedContextFiles(req.body.context_paths || []);
-    const prompt = req.body.prompt?.trim() || buildCloudConsultationPrompt({
-      targetAgent,
-      localDraft,
-      contexts
-    });
+    const prepared = prepareCloudEgress(req);
+    const confirmation = req.body.egress_confirmation || {};
+    if (confirmation.promptHash !== prepared.promptHash || confirmation.targetAgent !== prepared.targetAgent) {
+      return fail(res, 428, 'Review and confirm the final redacted cloud prompt for this provider before sending. The prompt or provider changed since confirmation.');
+    }
+    const contexts = prepared.contexts;
+    const prompt = prepared.prompt;
     if (getSetting('browserAgentMode', 'myChromeConnector') === 'myChromeConnector') {
       const connectorFresh = Date.now() - browserExtensionState.lastSeen < 15000;
       if (!connectorFresh) {
@@ -2932,8 +3155,6 @@ app.post('/api/tooling/install', async (req, res) => {
 // No arbitrary commands, no automatic execution, no writes to brain locations.
 const OPENHANDS_CONTAINER = 'openhands-app';
 const OPENHANDS_URL = 'http://localhost:3000';
-const OLLAMA_URL = 'http://127.0.0.1:11434';
-const OPENHANDS_MODEL = 'qwen2.5-coder:14b-gpu';
 const LPS_TOOLING_DIR = path.join(root, '.lps', 'tooling', 'openhands');
 const OPENHANDS_REQUEST_DIR = path.join(LPS_TOOLING_DIR, 'requests');
 const OPENHANDS_REPORT_DIR = path.join(LPS_TOOLING_DIR, 'reports');
@@ -2974,7 +3195,48 @@ async function runDocker(args, options = {}) {
   return result;
 }
 
+function openHandsEnabled() {
+  return getSetting('openHandsEnabled', false) === true;
+}
+
+function dockerAccessibleEndpoint(endpoint) {
+  if (!endpoint) return '';
+  try {
+    const parsed = new URL(endpoint);
+    if (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') parsed.hostname = 'host.docker.internal';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return endpoint;
+  }
+}
+
+function openHandsExecConfig() {
+  const codeEndpoint = String(getSetting('localCodeModelEndpoint', '') || '').trim();
+  const chatEndpoint = String(getSetting('localModelEndpoint', '') || '').trim();
+  const configuredEndpoint = codeEndpoint || chatEndpoint;
+  const port = Number(getSetting('llamaServerPort', 8080) || 8080);
+  const endpoint = configuredEndpoint || (managedLlamaServerReady ? `http://127.0.0.1:${port}` : '');
+  const model = String(getSetting('localCodeModelName', '') || getSetting('localModelName', 'planner-assistant') || 'planner-assistant').trim();
+  return {
+    model: `openai/${model}`,
+    baseUrl: dockerAccessibleEndpoint(endpoint),
+    apiKeyRef: 'LPS-managed OpenAI-compatible endpoint credential',
+    source: codeEndpoint ? 'coding-worker endpoint' : chatEndpoint ? 'chat endpoint fallback' : managedLlamaServerReady ? 'bundled llama.cpp' : 'not ready'
+  };
+}
+
 app.get('/api/tooling/openhands/status', async (_req, res) => {
+  if (!openHandsEnabled()) {
+    return ok(res, {
+      enabled: false,
+      optional: true,
+      active: false,
+      installed: 'not checked',
+      url: OPENHANDS_URL,
+      model: openHandsExecConfig(),
+      note: 'OpenHands is optional and inactive. Enable it explicitly before LPS probes Docker or starts a container.'
+    });
+  }
   const [docker, container, http] = await Promise.all([
     runDocker(['--version'], { timeout: 10000 }),
     runDocker(['ps', '-a', '--filter', `name=${OPENHANDS_CONTAINER}`, '--format', '{{.Names}}|{{.State}}|{{.Status}}|{{.Image}}'], { timeout: 15000 }),
@@ -2984,6 +3246,9 @@ app.get('/api/tooling/openhands/status', async (_req, res) => {
   const [, state = '', statusText = '', image = ''] = line.split('|');
   const installed = docker.ok ? (line ? 'installed' : 'missing') : 'unknown';
   ok(res, {
+    enabled: true,
+    optional: true,
+    active: state === 'running',
     url: OPENHANDS_URL,
     docker: { available: docker.ok, version: docker.stdout || docker.stderr },
     installed,
@@ -3004,7 +3269,18 @@ app.get('/api/tooling/openhands/status', async (_req, res) => {
   });
 });
 
+app.post('/api/tooling/openhands/config', (req, res) => {
+  if (typeof req.body.enabled !== 'boolean') return fail(res, 400, 'enabled must be true or false.');
+  setSetting('openHandsEnabled', req.body.enabled);
+  ok(res, {
+    enabled: req.body.enabled,
+    optional: true,
+    note: req.body.enabled ? 'OpenHands enabled. Status checks may now probe Docker.' : 'OpenHands disabled. Automatic Docker and model probes are off.'
+  });
+});
+
 app.post('/api/tooling/openhands/start', async (_req, res) => {
+  if (!openHandsEnabled()) return fail(res, 409, 'OpenHands is optional and disabled. Enable it explicitly first.');
   // Fixed, known-safe command: start the one named container. Never docker run.
   const result = await runDocker(['start', OPENHANDS_CONTAINER], { timeout: 60000 });
   if (!result.ok) {
@@ -3022,38 +3298,18 @@ app.post('/api/tooling/openhands/stop', async (_req, res) => {
   ok(res, { stopped: true, container: OPENHANDS_CONTAINER, message: `Stopped ${OPENHANDS_CONTAINER}.` });
 });
 
-app.get('/api/tooling/ollama/status', async (_req, res) => {
-  try {
-    const response = await fetch(`${OLLAMA_URL}/api/version`, { signal: AbortSignal.timeout(3000) });
-    if (!response.ok) return ok(res, { running: false, url: OLLAMA_URL, error: `Ollama answered HTTP ${response.status}.` });
-    const data = await response.json();
-    ok(res, { running: true, url: OLLAMA_URL, version: data.version || 'unknown' });
-  } catch {
-    ok(res, { running: false, url: OLLAMA_URL, error: 'Ollama is not reachable on 127.0.0.1:11434. Start the Ollama app first.' });
-  }
-});
-
-app.get('/api/tooling/ollama/model-status', async (_req, res) => {
-  try {
-    const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: AbortSignal.timeout(5000) });
-    if (!response.ok) return fail(res, 502, `Ollama tag listing failed: HTTP ${response.status}.`);
-    const data = await response.json();
-    const models = (data.models || []).map((model) => model.name);
-    const present = models.includes(OPENHANDS_MODEL);
-    ok(res, {
-      model: OPENHANDS_MODEL,
-      present,
-      openHandsSettings: {
-        model: `openai/${OPENHANDS_MODEL}`,
-        baseUrl: 'http://host.docker.internal:11434/v1',
-        apiKey: 'dummy'
-      },
-      coderModels: models.filter((name) => name.includes('coder')),
-      note: present ? '' : `Model ${OPENHANDS_MODEL} is not in the local Ollama library. Pull it or pick an installed coder model.`
-    });
-  } catch {
-    fail(res, 502, 'Ollama is not reachable, so model status is unknown. Start the Ollama app first.');
-  }
+app.get('/api/tooling/openhands/model-status', async (_req, res) => {
+  const runtime = await localModelStatus();
+  const config = openHandsExecConfig();
+  ok(res, {
+    enabled: openHandsEnabled(),
+    configured: Boolean(config.baseUrl),
+    config,
+    runtime,
+    note: config.baseUrl
+      ? `Future coding workers use LPS's ${config.source}; no Ollama-specific dependency exists.`
+      : 'Configure an OpenAI-compatible endpoint or start the bundled llama.cpp runtime before enabling a coding worker.'
+  });
 });
 
 function readOpenHandsRequests() {
@@ -3085,6 +3341,7 @@ app.get('/api/tooling/openhands/requests', (_req, res) => {
 let openHandsRequestSeq = 1;
 
 app.post('/api/tooling/openhands/requests', (req, res) => {
+  if (!openHandsEnabled()) return fail(res, 409, 'OpenHands is optional and disabled. Enable it before creating worker requests.');
   const title = String(req.body.title || '').trim();
   const objective = String(req.body.objective || '').trim();
   if (!title) return fail(res, 400, 'Request title is required.');
@@ -3177,6 +3434,7 @@ async function changedTrackedFiles() {
 }
 
 app.post('/api/tooling/openhands/requests/:id/approve', (req, res) => {
+  if (!openHandsEnabled()) return fail(res, 409, 'OpenHands is disabled.');
   try {
     const loaded = loadOpenHandsRequest(req.params.id);
     if (!loaded) return fail(res, 404, 'Request not found.');
@@ -3203,6 +3461,7 @@ app.post('/api/tooling/openhands/requests/:id/approve', (req, res) => {
 });
 
 app.post('/api/tooling/openhands/requests/:id/run', async (req, res) => {
+  if (!openHandsEnabled()) return fail(res, 409, 'OpenHands is disabled.');
   let loaded;
   try {
     loaded = loadOpenHandsRequest(req.params.id);
@@ -3322,11 +3581,6 @@ app.get('/api/tooling/openhands/requests/:id/report', (req, res) => {
 const PROTECTED_EXEC_BRANCHES = ['main', 'master'];
 
 // Fixed OpenHands wiring — request JSON can never override any of this.
-const OPENHANDS_EXEC_CONFIG = {
-  model: 'openai/qwen2.5-coder:14b-gpu',
-  baseUrl: 'http://host.docker.internal:11434/v1',
-  apiKeyRef: 'dummy (Ollama ignores it; no real key stored)'
-};
 
 function proposedExecutionBranch(id) {
   const suffix = String(id).replace(/[^A-Za-z0-9._-]/g, '').slice(-40);
@@ -3434,7 +3688,7 @@ async function evaluateExecutionPlan(request) {
       maxFilesChanged: maxFiles,
       limits: OPENHANDS_EXECUTOR_LIMITS,
       validationCommand: validationKey,
-      openHandsConfig: OPENHANDS_EXEC_CONFIG,
+      openHandsConfig: openHandsExecConfig(),
       openHandsInvoked: false,
       filesChanged: [],
       wouldRefuse: ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'branch delete', 'force-push', 'push to main/master', 'arbitrary shell from request', 'editing protected paths', 'base branch changes after approval', 'future invocation without tool-level constraints']
@@ -3443,6 +3697,7 @@ async function evaluateExecutionPlan(request) {
 }
 
 app.post('/api/tooling/openhands/requests/:id/confirm-execution', (req, res) => {
+  if (!openHandsEnabled()) return fail(res, 409, 'OpenHands is disabled.');
   try {
     const loaded = loadOpenHandsRequest(req.params.id);
     if (!loaded) return fail(res, 404, 'Request not found.');
@@ -3470,6 +3725,7 @@ app.post('/api/tooling/openhands/requests/:id/confirm-execution', (req, res) => 
 });
 
 app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) => {
+  if (!openHandsEnabled()) return fail(res, 409, 'OpenHands is disabled.');
   let loaded;
   try {
     loaded = loadOpenHandsRequest(req.params.id);
@@ -3490,7 +3746,7 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
   const toolConstraints = buildOpenHandsInvocationConstraints({
     request,
     plan: evaluation.plan,
-    config: OPENHANDS_EXEC_CONFIG,
+    config: openHandsExecConfig(),
     limits: OPENHANDS_EXECUTOR_LIMITS,
     invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED
   });
@@ -3559,9 +3815,9 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
     `- Not executed in the plan. Post-change validation would run: \`${evaluation.plan.validationCommand}\`.`,
     '',
     '## OpenHands wiring (fixed; request JSON cannot override)',
-    `- Model: ${OPENHANDS_EXEC_CONFIG.model}`,
-    `- Base URL: ${OPENHANDS_EXEC_CONFIG.baseUrl}`,
-    `- API key: ${OPENHANDS_EXEC_CONFIG.apiKeyRef}`,
+    `- Model: ${openHandsExecConfig().model}`,
+    `- Base URL: ${openHandsExecConfig().baseUrl}`,
+    `- API key: ${openHandsExecConfig().apiKeyRef}`,
     `- Invoked in this dry run: no`,
     '',
     '## Future invocation constraints (preflight only)',
@@ -3670,6 +3926,7 @@ async function invokeOpenHandsExecutor(toolConstraints, readiness) {
 }
 
 app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
+  if (!openHandsEnabled()) return fail(res, 409, 'OpenHands is disabled.');
   let loaded;
   try {
     loaded = loadOpenHandsRequest(req.params.id);
@@ -3689,7 +3946,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
   const toolConstraints = buildOpenHandsInvocationConstraints({
     request,
     plan: evaluation.plan,
-    config: OPENHANDS_EXEC_CONFIG,
+    config: openHandsExecConfig(),
     limits: OPENHANDS_EXECUTOR_LIMITS,
     invocationEnabled: OPENHANDS_EXECUTOR_INVOCATION_ENABLED
   });
@@ -3841,7 +4098,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       '## OpenHands invocation',
       `- Invoked: ${invocation.invoked ? 'yes' : 'NO'}`,
       `- Reason: ${invocation.reason}`,
-      `- Model config (fixed; request cannot override): ${OPENHANDS_EXEC_CONFIG.model} @ ${OPENHANDS_EXEC_CONFIG.baseUrl}, key ${OPENHANDS_EXEC_CONFIG.apiKeyRef}`,
+      `- Model config (server-derived; request cannot override): ${openHandsExecConfig().model} @ ${openHandsExecConfig().baseUrl}, key ${openHandsExecConfig().apiKeyRef}`,
       '',
       '## Tool-level invocation constraints (preflight; no real invocation)',
       `- Status: ${toolConstraints.ok ? 'complete' : 'setup-gated'}`,
@@ -4091,6 +4348,9 @@ app.get('/api/source/build-installer', async (_req, res) => {
 });
 
 app.post('/api/source/build-installer', async (_req, res) => {
+  const snapshot = await gitStatusSnapshot();
+  if (snapshot.hasConflicts) return fail(res, 409, `Resolve conflicts before building an installer: ${snapshot.conflictFiles.join(', ')}`);
+  if (snapshot.changedFiles.length) return fail(res, 409, 'Commit or stash all source changes before building an installer. Release artifacts must correspond to a clean commit.');
   ok(res, startInstallerBuild());
 });
 
@@ -4194,18 +4454,42 @@ app.post('/api/source/unstage-all', async (_req, res) => {
 });
 
 app.post('/api/source/fetch', async (_req, res) => {
-  const result = await runCli('git', ['fetch', '--all', '--prune'], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
-  if (!result.ok) return fail(res, 500, result.stderr || result.stdout || 'git fetch failed');
+  const names = await runCli('git', ['remote']);
+  if (!names.ok) return fail(res, 500, names.stderr || 'Unable to list git remotes.');
+  const remotes = names.stdout.split('\n').map((name) => name.trim()).filter(Boolean);
+  if (!remotes.length) return fail(res, 400, 'No git remotes are configured.');
+  const token = getSetting('githubToken', '');
+  const outputs = [];
+  for (const remote of remotes) {
+    const remoteUrl = (await runCli('git', ['remote', 'get-url', remote])).stdout;
+    const result = await runCli('git', ['fetch', remote, '--prune'], {
+      timeout: 120000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: gitAskPassEnvironment(remoteUrl, token)
+    });
+    outputs.push(`[${remote}] ${result.stdout || result.stderr || 'Fetch complete.'}`);
+    if (!result.ok) return fail(res, 500, outputs.join('\n'));
+  }
   ok(res, {
-    output: result.stdout || result.stderr || 'Fetch complete.',
+    output: outputs.join('\n'),
     status: (await runCli('git', ['status', '--short', '--branch'])).stdout
   });
 });
 
 app.post('/api/source/pull', async (_req, res) => {
   const branch = await runCli('git', ['branch', '--show-current']);
-  if (!branch.stdout) return fail(res, 400, 'Cannot pull from detached HEAD.');
-  const result = await runCli('git', ['pull', '--ff-only', 'origin', branch.stdout], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  const branchName = branch.stdout.trim();
+  if (!branchName) return fail(res, 400, 'Cannot pull from detached HEAD.');
+  const upstream = await runCli('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
+  const remoteName = upstream.ok && upstream.stdout.includes('/') ? upstream.stdout.split('/')[0] : 'origin';
+  const remoteUrl = (await runCli('git', ['remote', 'get-url', remoteName])).stdout;
+  if (!remoteUrl) return fail(res, 400, `No ${remoteName} remote is configured for ${branchName}.`);
+  const args = upstream.ok ? ['pull', '--ff-only'] : ['pull', '--ff-only', remoteName, branchName];
+  const result = await runCli('git', args, {
+    timeout: 120000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: gitAskPassEnvironment(remoteUrl, getSetting('githubToken', ''))
+  });
   if (!result.ok) return fail(res, 409, result.stderr || result.stdout || 'git pull --ff-only failed');
   ok(res, {
     output: result.stdout || result.stderr || 'Already up to date.',
@@ -4257,6 +4541,24 @@ app.post('/api/source/checkout', async (req, res) => {
   ok(res, { branch, output: result.stdout || result.stderr, status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
 });
 
+app.post('/api/source/checkout-remote', async (req, res) => {
+  const remoteBranch = safeGitRef(req.body.branch);
+  if (!remoteBranch || !remoteBranch.includes('/')) return fail(res, 400, 'Choose a remote branch such as origin/feature-name.');
+  const [remote, ...branchParts] = remoteBranch.split('/');
+  const localBranch = safeGitRef(req.body.localBranch || branchParts.join('/'));
+  if (!safeGitRef(remote) || !localBranch) return fail(res, 400, 'Remote or local branch name is invalid.');
+  const snapshot = await gitStatusSnapshot();
+  if (snapshot.hasConflicts) return fail(res, 409, `Resolve conflicts before switching branches: ${snapshot.conflictFiles.join(', ')}`);
+  if (snapshot.changedFiles.length) return fail(res, 409, 'Commit or stash working-tree changes before tracking a remote branch.');
+  const verify = await runCli('git', ['rev-parse', '--verify', '--quiet', `refs/remotes/${remoteBranch}`]);
+  if (!verify.ok) return fail(res, 404, `Remote branch ${remoteBranch} was not found. Fetch remotes first.`);
+  const existing = await runCli('git', ['show-ref', '--verify', '--quiet', `refs/heads/${localBranch}`]);
+  const args = existing.ok ? ['switch', localBranch] : ['switch', '--track', '-c', localBranch, remoteBranch];
+  const result = await runCli('git', args);
+  if (!result.ok) return fail(res, 409, result.stderr || result.stdout || 'Unable to track remote branch.');
+  ok(res, { branch: localBranch, upstream: remoteBranch, output: result.stdout || result.stderr, status: (await runCli('git', ['status', '--short', '--branch'])).stdout });
+});
+
 // Push is deliberately narrow: current branch -> origin only, never forced,
 // never main/master, and never without explicit confirmation from the UI.
 const PROTECTED_PUSH_BRANCHES = ['main', 'master'];
@@ -4266,7 +4568,9 @@ app.post('/api/source/push', async (req, res) => {
   const branchName = (branch.stdout || '').trim();
   if (!branchName) return fail(res, 400, 'Cannot push from detached HEAD.');
   if (PROTECTED_PUSH_BRANCHES.includes(branchName.toLowerCase())) {
-    return fail(res, 403, `Refusing to push protected branch "${branchName}" from Life Planner. Push a review branch instead; updating ${branchName} stays a manual, reviewed step.`);
+    if (req.body?.confirmProtectedBranch !== branchName) {
+      return fail(res, 428, `Pushing protected branch "${branchName}" requires a second branch-bound confirmation.`);
+    }
   }
   if (req.body?.force) {
     return fail(res, 403, 'Force push is not supported from Life Planner.');
@@ -4390,7 +4694,16 @@ app.post('/api/source/rebase', async (req, res) => {
   const branch = await runCli('git', ['branch', '--show-current']);
   const branchName = (branch.stdout || '').trim();
   if (!branchName) return fail(res, 400, 'Cannot rebase from detached HEAD.');
-  const result = await runCli('git', ['pull', '--rebase', 'origin', branchName], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+  const upstream = await runCli('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
+  const remoteName = upstream.ok && upstream.stdout.includes('/') ? upstream.stdout.split('/')[0] : 'origin';
+  const remoteUrl = (await runCli('git', ['remote', 'get-url', remoteName])).stdout;
+  if (!remoteUrl) return fail(res, 400, `No ${remoteName} remote is configured for ${branchName}.`);
+  const args = upstream.ok ? ['pull', '--rebase'] : ['pull', '--rebase', remoteName, branchName];
+  const result = await runCli('git', args, {
+    timeout: 120000,
+    maxBuffer: 2 * 1024 * 1024,
+    env: gitAskPassEnvironment(remoteUrl, getSetting('githubToken', ''))
+  });
   const snapshot = await gitStatusSnapshot();
   if (!result.ok && !snapshot.hasConflicts) return fail(res, 409, result.stderr || result.stdout || 'git pull --rebase failed');
   ok(res, {
@@ -4714,8 +5027,155 @@ function importPreview(data = {}) {
   };
 }
 
+const EXPORT_SCOPES = new Set(['all', 'projects', 'knowledge', 'roadmap', 'chat']);
+
+function requestedExportScope(req) {
+  const scope = String(req.query.scope || 'all').toLowerCase();
+  if (!EXPORT_SCOPES.has(scope)) throw new Error(`Supported export scopes: ${[...EXPORT_SCOPES].join(', ')}.`);
+  return scope;
+}
+
+function buildLifePlannerExport(scope = 'all') {
+  const include = (name) => scope === 'all' || scope === name;
+  const data = { format: 'life-planner-portable-context', version: 1, exported_at: new Date().toISOString(), scope };
+  if (include('projects')) data.projects = allRows('SELECT * FROM projects ORDER BY name');
+  if (include('knowledge')) data.knowledge_items = allRows('SELECT * FROM knowledge_items ORDER BY type, title');
+  if (include('roadmap')) data.roadmap_items = allRows('SELECT * FROM roadmap_items ORDER BY sort_order, id');
+  if (include('chat')) {
+    data.chat_sessions = allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY updated_at DESC');
+    data.chat_messages = allRows('SELECT * FROM chat_messages ORDER BY session_id, created_at, id');
+  }
+  return data;
+}
+
+function exportSections(data) {
+  const sections = [];
+  for (const [name, records] of Object.entries(data)) {
+    if (!Array.isArray(records)) continue;
+    sections.push({ name, title: name.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()), records });
+  }
+  return sections;
+}
+
+function exportAsMarkdown(data) {
+  const lines = ['# Life Planner Context Export', '', `Exported: ${data.exported_at}`, `Scope: ${data.scope}`, 'Format: life-planner-portable-context/v1', ''];
+  for (const section of exportSections(data)) {
+    lines.push(`## ${section.title}`, '');
+    if (!section.records.length) lines.push('_No records._', '');
+    for (const [index, record] of section.records.entries()) {
+      const heading = record.title || record.name || record.subject || `${section.title} ${index + 1}`;
+      lines.push(`### ${String(heading).replaceAll('\n', ' ')}`, '');
+      for (const [key, value] of Object.entries(record)) {
+        if (value === null || value === undefined || value === '') continue;
+        const rendered = typeof value === 'object' ? JSON.stringify(value) : String(value);
+        lines.push(`- **${key.replaceAll('_', ' ')}:** ${rendered.replaceAll('\n', '\n  ')}`);
+      }
+      lines.push('');
+    }
+  }
+  return lines.join('\n');
+}
+
+function escapeHtml(value) {
+  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+function exportAsInteractiveHtml(data) {
+  const sections = exportSections(data).map((section) => `
+    <section data-section="${escapeHtml(section.name)}">
+      <h2>${escapeHtml(section.title)} <span>${section.records.length}</span></h2>
+      <div class="records">${section.records.map((record, index) => {
+        const heading = record.title || record.name || record.subject || `${section.title} ${index + 1}`;
+        const search = JSON.stringify(record).toLowerCase();
+        return `<article data-search="${escapeHtml(search)}"><h3>${escapeHtml(heading)}</h3><dl>${Object.entries(record).filter(([, value]) => value !== null && value !== '').map(([key, value]) => `<dt>${escapeHtml(key.replaceAll('_', ' '))}</dt><dd>${escapeHtml(typeof value === 'object' ? JSON.stringify(value, null, 2) : value)}</dd>`).join('')}</dl></article>`;
+      }).join('')}</div>
+    </section>`).join('');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"><title>Life Planner Context</title><style>
+  :root{--ink:#17211d;--paper:#f6f0e4;--accent:#cb4b16;--line:#c9bea9}*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#eee4d2,#faf7ef);color:var(--ink);font:16px Georgia,serif}header{padding:3rem clamp(1rem,5vw,5rem);background:#17352d;color:#fff}header h1{font-size:clamp(2rem,6vw,4.5rem);margin:0}header p{max-width:70ch}.tools{position:sticky;top:0;padding:1rem clamp(1rem,5vw,5rem);background:#f6f0e4ee;border-bottom:1px solid var(--line);backdrop-filter:blur(10px)}input{width:min(720px,100%);padding:.8rem 1rem;border:2px solid #17352d;background:#fff;font:inherit}main{padding:2rem clamp(1rem,5vw,5rem)}section{margin:0 0 3rem}h2{font-size:2rem;border-bottom:3px solid var(--accent);padding-bottom:.35rem}h2 span{font:1rem sans-serif;background:var(--accent);color:#fff;padding:.2rem .5rem}article{background:#fff;border:1px solid var(--line);border-left:6px solid #17352d;padding:1rem 1.25rem;margin:1rem 0;box-shadow:0 5px 18px #3b30251a}dt{font:700 .75rem sans-serif;text-transform:uppercase;letter-spacing:.08em;color:#765}dd{white-space:pre-wrap;margin:.2rem 0 1rem;overflow-wrap:anywhere}.hidden{display:none}@media print{.tools{display:none}body{background:#fff}header{padding:1rem 0;background:#fff;color:#000}main{padding:0}article{break-inside:avoid;box-shadow:none}}
+  </style></head><body><header><h1>Life Planner Context</h1><p>Portable, searchable export. Generated ${escapeHtml(data.exported_at)}. Scope: ${escapeHtml(data.scope)}. This artifact is a snapshot; SQLite remains canonical.</p></header><div class="tools"><label for="search">Search this export</label><br><input id="search" type="search" placeholder="Type to filter records" autofocus></div><main>${sections}</main><script>const q=document.querySelector('#search');q.addEventListener('input',()=>{const v=q.value.toLowerCase().trim();document.querySelectorAll('article').forEach(x=>x.classList.toggle('hidden',v&&!x.dataset.search.includes(v)));document.querySelectorAll('section').forEach(x=>x.classList.toggle('hidden',![...x.querySelectorAll('article')].some(a=>!a.classList.contains('hidden'))));});</script></body></html>`;
+}
+
+app.get('/api/export/context.:format', async (req, res) => {
+  let scope;
+  try { scope = requestedExportScope(req); } catch (error) { return fail(res, 400, error.message); }
+  const format = String(req.params.format || '').toLowerCase();
+  const data = buildLifePlannerExport(scope);
+  const baseName = `life-planner-${scope}-context`;
+  if (format === 'json') {
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}.json"`);
+    return res.json(data);
+  }
+  const markdown = exportAsMarkdown(data);
+  if (format === 'md' || format === 'txt') {
+    res.setHeader('Content-Type', `${format === 'md' ? 'text/markdown' : 'text/plain'}; charset=utf-8`);
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}.${format}"`);
+    return res.send(markdown);
+  }
+  const html = exportAsInteractiveHtml(data);
+  if (format === 'html') {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}.html"`);
+    return res.send(html);
+  }
+  if (format !== 'pdf') return fail(res, 400, 'Supported formats: json, md, txt, html, pdf.');
+  let browser;
+  try {
+    const { chromium } = await import('playwright');
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext();
+    await context.route('**/*', (route) => route.request().url() === 'about:blank' ? route.continue() : route.abort());
+    const page = await context.newPage();
+    await page.setContent(html, { waitUntil: 'domcontentloaded' });
+    const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: { top: '14mm', right: '12mm', bottom: '14mm', left: '12mm' } });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}.pdf"`);
+    return res.send(pdf);
+  } catch (error) {
+    return fail(res, 503, `PDF rendering failed: ${error.message}. Install Playwright Chromium from Tooling and retry.`);
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+});
+
+app.post('/api/import/pdf', async (req, res) => {
+  const name = path.basename(String(req.body.name || 'Imported document.pdf'));
+  const base64 = String(req.body.base64 || '');
+  if (!base64) return fail(res, 400, 'PDF data is required.');
+  let bytes;
+  try { bytes = Buffer.from(base64, 'base64'); } catch { return fail(res, 400, 'PDF data is not valid base64.'); }
+  if (bytes.length < 5 || bytes.subarray(0, 5).toString('ascii') !== '%PDF-') return fail(res, 400, 'The selected file is not a PDF.');
+  if (bytes.length > 15 * 1024 * 1024) return fail(res, 413, 'PDF imports are limited to 15 MB.');
+  try {
+    const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+    const loading = getDocument({ data: new Uint8Array(bytes), disableWorker: true, isEvalSupported: false, useSystemFonts: true });
+    const document = await loading.promise;
+    const pageCount = document.numPages;
+    if (pageCount > 500) throw new Error('PDF imports are limited to 500 pages.');
+    const pages = [];
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      pages.push(content.items.map((item) => String(item.str || '')).join(' ').replace(/\s+/g, ' ').trim());
+      if (pages.join('\n').length > 2_000_000) throw new Error('Extracted PDF text exceeds the 2,000,000 character safety limit.');
+    }
+    await loading.destroy();
+    const text = pages.map((pageText, index) => `## Page ${index + 1}\n\n${pageText || '[No extractable text]'}`).join('\n\n');
+    const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+    const id = db.prepare(`
+      INSERT INTO knowledge_items (type, title, body, source, status, confidence, evidence, owner, next_action)
+      VALUES ('source document', ?, ?, 'local PDF import', 'pending review', 0.5, ?, 'user', 'Review extracted text and classify any durable knowledge.')
+    `).run(name, text, `${pageCount} page PDF; SHA-256 ${sha256}`).lastInsertRowid;
+    ok(res, { item: row('SELECT * FROM knowledge_items WHERE id = ?', [id]), pages: pageCount, sha256, characters: text.length });
+  } catch (error) {
+    fail(res, 422, `PDF extraction failed: ${error.message}`);
+  }
+});
+
 app.get('/api/export/json', (req, res) => {
   const mode = req.query.mode === 'backup' ? 'backup' : 'public';
+  if (mode === 'public') {
+    return fail(res, 409, 'Public export is disabled until every included record has an explicit shareability classification and the final preview is confirmed. Use a local context export instead.');
+  }
   const data = {
     exported_at: new Date().toISOString(),
     mode,

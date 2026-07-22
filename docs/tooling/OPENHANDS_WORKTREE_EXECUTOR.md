@@ -39,13 +39,15 @@ or edited in this build.
 7. Write a report to `.lps/tooling/openhands/reports/<id>.md`.
 8. Teardown removes the throwaway worktree (never deletes the branch).
 
-## Fixed OpenHands wiring (request JSON can never override)
+## Server-derived OpenHands wiring (request JSON can never override)
 
-- model `openai/qwen2.5-coder:14b-gpu`
-- base URL `http://host.docker.internal:11434/v1`
-- key `dummy`
+The server derives the future worker model from LPS's configured local code
+endpoint, then its chat endpoint, then a healthy bundled llama.cpp endpoint.
+Only the Docker-facing boundary translates loopback hosts to
+`host.docker.internal`. OpenHands remains optional and disabled by default; no
+Ollama-specific endpoint, model, or API key is hard-coded.
 
-The request cannot override the model, endpoint, shell commands, git
+The request cannot override the server-derived model, endpoint, shell commands, git
 operations, protected paths, runtime/output limits, tool-level invocation
 constraints, or the validation allowlist.
 

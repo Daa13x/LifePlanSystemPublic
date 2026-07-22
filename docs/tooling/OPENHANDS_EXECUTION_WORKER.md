@@ -39,11 +39,13 @@ every safety gate before any real code-editing executor is built.
   pushes to `main`/`master`.
 - Never runs arbitrary request-supplied shell commands.
 
-## OpenHands wiring (fixed; request JSON can never override)
+## OpenHands wiring (server-derived; request JSON can never override)
 
-- Model: `openai/qwen2.5-coder:14b-gpu`
-- Base URL: `http://host.docker.internal:11434/v1`
-- API key: `dummy` (Ollama ignores it; no real key is stored)
+The future worker inherits LPS's configured local code endpoint, then its chat
+endpoint, then a healthy bundled llama.cpp OpenAI-compatible endpoint. A
+loopback hostname is translated to `host.docker.internal` only for a container.
+OpenHands is optional and disabled by default; no Ollama-specific dependency or
+credential is hard-coded.
 
 The request cannot override the model endpoint, shell commands, protected
 paths, or any Git operation.

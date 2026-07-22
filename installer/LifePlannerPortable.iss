@@ -41,5 +41,6 @@ Name: "{userdesktop}\Life Planner"; Filename: "{sys}\wscript.exe"; Parameters: "
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Run]
+Filename: "{sys}\cmd.exe"; Parameters: "/c """"{app}\Install Local Model Runtime.cmd"""""; Flags: runhidden waituntilterminated
 Filename: "{sys}\cmd.exe"; Parameters: "/c """"{app}\Install Playwright Chromium.cmd"""""; Flags: runhidden waituntilterminated
 Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; Description: "Launch Life Planner"; Flags: postinstall nowait skipifsilent

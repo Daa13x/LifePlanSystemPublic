@@ -1074,6 +1074,8 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   const [activeConsultationId, setActiveConsultationId] = useState(null);
   const [temporaryChatRequired, setTemporaryChatRequired] = useState(true);
   const [temporaryChatConfirmed, setTemporaryChatConfirmed] = useState(false);
+  const [egressPreview, setEgressPreview] = useState(null);
+  const [egressConfirmed, setEgressConfirmed] = useState(false);
   const browserReady = Boolean(cap?.playwright && cap?.chromium);
   const connectorReady = Boolean(agentTabs.connectorAvailable);
   const controlledBrowserWarning = controlledBrowserWarningForUrl(browserUrl);
@@ -1165,6 +1167,10 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
   useEffect(() => {
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
   }, []);
+  useEffect(() => {
+    setEgressPreview(null);
+    setEgressConfirmed(false);
+  }, [draft, contextPaths, targetAgent]);
 
   function addContextFile() {
     if (!selectedContextFile || contextPaths.includes(selectedContextFile)) return;
@@ -1279,6 +1285,17 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
     setConsultStatus('Preparing prompt and selected LifePlanSystem context...');
     try {
       const prompt = consultPrompt || buildConsultPrompt();
+      if (!egressPreview || !egressConfirmed) {
+        const preview = await api('/api/browser/consult/preview', {
+          method: 'POST',
+          body: JSON.stringify({ local_draft: draft, target_agent: targetAgent, prompt, context_paths: contextPaths })
+        });
+        setEgressPreview(preview);
+        setConsultPrompt(preview.prompt);
+        setConsultStatus('Final cloud prompt prepared. Review redactions and confirm this exact provider-bound prompt before sending.');
+        setNotice('Cloud prompt is ready for review. Nothing was sent.');
+        return;
+      }
       const result = await api('/api/browser/consult', {
         method: 'POST',
         body: JSON.stringify({
@@ -1289,7 +1306,8 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           prompt,
           context_paths: contextPaths,
           temporary_chat_required: temporaryChatRequired,
-          temporary_chat_confirmed: temporaryChatConfirmed
+          temporary_chat_confirmed: temporaryChatConfirmed,
+          egress_confirmation: { promptHash: egressPreview.promptHash, targetAgent: egressPreview.targetAgent }
         })
       });
       setConsultPrompt(result.prompt || '');
@@ -1661,9 +1679,21 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
             </button>
           ))}
         </div>
+        {egressPreview && (
+          <div className={cx('source-warning', egressPreview.changed ? 'warn' : 'info')}>
+            <strong>Final cloud egress preview</strong>
+            <small>{egressPreview.note}</small>
+            <small>{egressPreview.findings.length ? egressPreview.findings.map((item) => `${item.count} ${item.type}`).join(', ') : 'No automatic sensitive-pattern redactions were required.'}</small>
+            <textarea value={egressPreview.prompt} readOnly rows={8} />
+            <label className="temporary-chat-option">
+              <input type="checkbox" checked={egressConfirmed} onChange={(event) => setEgressConfirmed(event.target.checked)} />
+              I reviewed this exact prompt and confirm sending it to {egressPreview.targetAgent}.
+            </label>
+          </div>
+        )}
         <div className="decision-row">
           <button className="primary" onClick={runAutomaticConsultation} disabled={Boolean(automaticDisabledReason)} title={automaticDisabledReason || 'Open ChatGPT, send the browser-agent question, wait for the response, and fill the answer box'}>
-            <Sparkles size={16} /> {consultBusy ? 'Sending...' : 'Send to browser agent'}
+            <Sparkles size={16} /> {consultBusy ? 'Working...' : egressPreview && egressConfirmed ? 'Send confirmed prompt' : 'Preview before sending'}
           </button>
           {automaticDisabledReason && <span className="inline-hint">{automaticDisabledReason}</span>}
         </div>
@@ -1802,7 +1832,6 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
 
 function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
   const [status, setStatus] = useState(null);
-  const [ollama, setOllama] = useState(null);
   const [model, setModel] = useState(null);
   const [requests, setRequests] = useState([]);
   const [busy, setBusy] = useState('');
@@ -1832,8 +1861,7 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
   }
 
   const checkOpenHands = () => run('oh-status', async () => setStatus(await api('/api/tooling/openhands/status')));
-  const checkOllama = () => run('ollama', async () => setOllama(await api('/api/tooling/ollama/status')));
-  const checkModel = () => run('model', async () => setModel(await api('/api/tooling/ollama/model-status')));
+  const checkModel = () => run('model', async () => setModel(await api('/api/tooling/openhands/model-status')));
   const loadRequests = () => run('requests', async () => setRequests(await api('/api/tooling/openhands/requests')));
 
   const approveRequest = (id) => run(`approve-${id}`, async () => {
@@ -1872,10 +1900,17 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
 
   useEffect(() => {
     checkOpenHands();
-    checkOllama();
-    checkModel();
     loadRequests();
   }, [refreshSignal]);
+
+  async function setOpenHandsEnabled(enabled) {
+    await run('configure', async () => {
+      const result = await api('/api/tooling/openhands/config', { method: 'POST', body: JSON.stringify({ enabled }) });
+      setNotice(result.note);
+      setModel(null);
+      setStatus(await api('/api/tooling/openhands/status'));
+    });
+  }
 
   async function startOpenHands() {
     await run('start', async () => {
@@ -1925,7 +1960,7 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
           <h2>OpenHands Worker</h2>
           <p>Local coding worker for minor tasks. LPS is the brain and approval gate: requests are stored for review; nothing executes automatically.</p>
         </div>
-        <Pill tone="info">local worker</Pill>
+        <Pill tone={status?.enabled ? 'info' : 'warn'}>{status?.enabled ? 'optional - enabled' : 'optional - inactive'}</Pill>
       </div>
 
       <div className="connection-grid">
@@ -1945,21 +1980,21 @@ function OpenHandsPanel({ setNotice, refreshSignal = 0 }) {
           <small>{status?.url || 'http://localhost:3000'}</small>
         </div>
         <div>
-          <span>Ollama</span>
-          <Pill tone={ollama?.running ? 'good' : 'bad'}>{ollama?.running ? `running ${ollama.version}` : 'unreachable'}</Pill>
-          <small>{model ? `${model.model}: ${model.present ? 'present' : 'missing'}` : 'model unchecked'}</small>
+          <span>LPS model endpoint</span>
+          <Pill tone={(model?.configured || status?.model?.baseUrl) ? 'good' : 'warn'}>{(model?.configured || status?.model?.baseUrl) ? 'configured' : 'not ready'}</Pill>
+          <small>{model?.config ? `${model.config.model} via ${model.config.source}` : status?.model?.model || 'Uses LPS local model settings'}</small>
         </div>
       </div>
       {status?.note && <div className="source-warning warn"><small>{status.note}</small></div>}
-      {model && !model.present && <div className="source-warning warn"><small>{model.note} Installed coder models: {model.coderModels.join(', ') || 'none'}</small></div>}
+      {model?.note && <div className="source-warning info"><small>{model.note}</small></div>}
 
       <div className="decision-row">
         <button onClick={checkOpenHands} disabled={Boolean(busy)}><RefreshCcw size={16} /> {busy === 'oh-status' ? 'Checking...' : 'Check OpenHands'}</button>
-        <button onClick={startOpenHands} disabled={Boolean(busy) || !status?.container?.exists || status?.container?.running}><Bot size={16} /> {busy === 'start' ? 'Starting...' : 'Start OpenHands'}</button>
+        <button onClick={() => setOpenHandsEnabled(!status?.enabled)} disabled={Boolean(busy)}>{status?.enabled ? 'Disable OpenHands' : 'Enable OpenHands'}</button>
+        <button onClick={startOpenHands} disabled={Boolean(busy) || !status?.enabled || !status?.container?.exists || status?.container?.running}><Bot size={16} /> {busy === 'start' ? 'Starting...' : 'Start OpenHands'}</button>
         <button onClick={stopOpenHands} disabled={Boolean(busy) || !status?.container?.running}><X size={16} /> {busy === 'stop' ? 'Stopping...' : 'Stop OpenHands'}</button>
-        <button onClick={openUi} disabled={Boolean(busy)}><Globe2 size={16} /> Open OpenHands UI</button>
-        <button onClick={checkOllama} disabled={Boolean(busy)}><RefreshCcw size={16} /> Check Ollama</button>
-        <button onClick={checkModel} disabled={Boolean(busy)}><SearchCheck size={16} /> Check coding model</button>
+        <button onClick={openUi} disabled={Boolean(busy) || !status?.enabled}><Globe2 size={16} /> Open OpenHands UI</button>
+        <button onClick={checkModel} disabled={Boolean(busy) || !status?.enabled}><SearchCheck size={16} /> Check worker endpoint</button>
       </div>
 
       <h3>Request minor work</h3>
@@ -2942,9 +2977,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       ? 'Resolve conflicts before pushing.'
       : source && !publicationAllowed
         ? source.publication?.reason || 'Publishing is blocked until this checkout is verified as the public app repository.'
-      : pushProtectedBranch
-        ? `Pushing ${currentBranch} from Life Planner is blocked. Push a review branch instead.`
-        : '';
+      : '';
   const hasChanges = changedFiles.length > 0;
   const protectedFiles = changedFiles.filter((file) => file.protected);
   const canStageAll = hasChanges && !sourceBusy && !source?.hasConflicts && protectedFiles.length === 0;
@@ -3252,6 +3285,11 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
                   <span>{branch.name}</span>
                   {branch.current && <Pill tone="good">current</Pill>}
                   {branch.remote && <Pill tone="warn">remote</Pill>}
+                  {branch.remote && (
+                    <button onClick={() => action('/api/source/checkout-remote', { branch: branch.name }, `Now tracking ${branch.name}.`)} disabled={sourceBusy || hasChanges} title={hasChanges ? 'Commit or stash changes before tracking a remote branch.' : `Create/switch the matching local branch and track ${branch.name}`}>
+                      Track
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
@@ -3280,10 +3318,10 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
               <div className="source-warning warn">
                 <strong>Confirm push</strong>
                 <small>
-                  Runs <code>git push origin {currentBranch}</code> to remote <code>origin</code>{tokenConfigured ? ' using your saved token' : ''}. No force flags. Life Planner refuses to push main/master.
+                  Runs <code>git push origin {currentBranch}</code> to remote <code>origin</code>{tokenConfigured ? ' using your saved token' : ''}. No force flags. {pushProtectedBranch ? `This is protected branch ${currentBranch}; confirmation is bound to that exact branch.` : 'The current review branch is confirmed explicitly.'}
                 </small>
                 <div className="decision-row">
-                  <button className="primary" disabled={sourceBusy} onClick={async () => { await action('/api/source/push', { confirm: true }, `Pushed ${currentBranch} to origin.`); setPushArmed(false); }}>
+                  <button className="primary" disabled={sourceBusy} onClick={async () => { await action('/api/source/push', { confirm: true, confirmProtectedBranch: pushProtectedBranch ? currentBranch : undefined }, `Pushed ${currentBranch} to origin.`); setPushArmed(false); }}>
                     <Upload size={16} /> Confirm push to origin
                   </button>
                   <button disabled={sourceBusy} onClick={() => setPushArmed(false)}><X size={16} /> Cancel</button>
@@ -3524,6 +3562,8 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [hfToken, setHfToken] = useState(settings.hfToken || '');
   const [localModelEndpoint, setLocalModelEndpoint] = useState(settings.localModelEndpoint || '');
   const [localModelName, setLocalModelName] = useState(settings.localModelName || 'planner-assistant');
+  const [localCodeModelEndpoint, setLocalCodeModelEndpoint] = useState(settings.localCodeModelEndpoint || '');
+  const [localCodeModelName, setLocalCodeModelName] = useState(settings.localCodeModelName || '');
   const [llamaCliPath, setLlamaCliPath] = useState(settings.llamaCliPath || '');
   const [llamaServerPath, setLlamaServerPath] = useState(settings.llamaServerPath || '');
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
@@ -3536,6 +3576,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [hardware, setHardware] = useState(null);
   const [runtime, setRuntime] = useState(null);
   const [modelDeleteArmed, setModelDeleteArmed] = useState(null);
+  const [exportScope, setExportScope] = useState('all');
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
@@ -3544,7 +3585,11 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
 
   useEffect(() => {
     api('/api/hardware').then(setHardware).catch((err) => setNotice(err.message));
-    api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
+    api('/api/models/runtime').then((data) => {
+      setRuntime(data);
+      if (!llamaServerPath && data.llamaServerPath) setLlamaServerPath(data.llamaServerPath);
+      if (!llamaCliPath && data.llamaCliPath) setLlamaCliPath(data.llamaCliPath);
+    }).catch((err) => setNotice(err.message));
   }, []);
 
   useEffect(() => {
@@ -3568,6 +3613,8 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           modelDownloadFolder: downloadFolder,
           localModelEndpoint,
           localModelName,
+          localCodeModelEndpoint,
+          localCodeModelName,
           llamaCliPath,
           llamaServerPath,
           llamaServerPort: Number(llamaServerPort),
@@ -3597,9 +3644,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
 
   async function assign(id) {
     try {
-      setModels(await api(`/api/models/${id}/assign`, { method: 'POST', body: JSON.stringify({ role: 'Planner Assistant' }) }));
-      setRuntime(await api('/api/models/runtime'));
-      setNotice('Loaded model assignment for Planner Assistant.');
+      const result = await api(`/api/models/${id}/assign`, { method: 'POST', body: JSON.stringify({ role: 'Planner Assistant' }) });
+      setModels(result.models);
+      setRuntime(result.runtime);
+      setNotice(result.runtimeError || result.message);
     } catch (err) {
       setNotice(err.message);
     }
@@ -3674,8 +3722,9 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   async function download(file) {
     await saveSettings();
     const result = await api('/api/hf/download', { method: 'POST', body: JSON.stringify({ repo, file: file.path, folder: downloadFolder || undefined }) });
-    await scan();
-    setNotice(`Downloaded ${file.path} to ${result.target}. Use Load to assign it.`);
+    setModels(result.models);
+    setRuntime(result.runtime);
+    setNotice(result.runtimeError || `Verified, loaded, and started ${file.path}.`);
   }
 
   return (
@@ -3741,10 +3790,14 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <input value={localModelEndpoint} onChange={(event) => setLocalModelEndpoint(event.target.value)} placeholder="http://127.0.0.1:8080" />
         <label>Endpoint model name</label>
         <input value={localModelName} onChange={(event) => setLocalModelName(event.target.value)} placeholder="qwen2.5:7b-instruct" />
+        <label>Optional coding-worker endpoint</label>
+        <input value={localCodeModelEndpoint} onChange={(event) => setLocalCodeModelEndpoint(event.target.value)} placeholder="Blank uses the chat endpoint or bundled llama.cpp" />
+        <label>Optional coding-worker model name</label>
+        <input value={localCodeModelName} onChange={(event) => setLocalCodeModelName(event.target.value)} placeholder="Blank uses the selected local model" />
         <label>llama-cli path</label>
         <input value={llamaCliPath} onChange={(event) => setLlamaCliPath(event.target.value)} placeholder="C:\\llama.cpp\\build\\bin\\llama-cli.exe" />
         <label>llama-server path</label>
-        <input value={llamaServerPath} onChange={(event) => setLlamaServerPath(event.target.value)} placeholder="C:\\llama.cpp\\build\\bin\\llama-server.exe" />
+        <input value={llamaServerPath} onChange={(event) => setLlamaServerPath(event.target.value)} placeholder="Bundled automatically; override only for a custom build" />
         <div className="inline-form">
           <input type="number" value={llamaServerPort} onChange={(event) => setLlamaServerPort(event.target.value)} placeholder="8080" />
           <input type="number" value={llamaContextSize} onChange={(event) => setLlamaContextSize(event.target.value)} placeholder="4096" />
@@ -3752,7 +3805,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <div className="decision-row">
           <button onClick={saveSettings}><Check size={16} /> Save</button>
           <button className="primary" onClick={scan}><RefreshCcw size={16} /> Scan GGUF</button>
-          <button onClick={startServer} disabled={!llamaServerPath || !runtime?.assigned}><Bot size={16} /> Start server</button>
+          <button onClick={startServer} disabled={!runtime?.llamaServerExists || !runtime?.assigned}><Bot size={16} /> Start / verify server</button>
           <button onClick={stopServer} disabled={!runtime?.managedServerRunning}><X size={16} /> Stop server</button>
         </div>
         <div className="table-list">
@@ -3866,14 +3919,58 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
       </div>
       <div className="panel import-export">
         <h2>Import / Export</h2>
-        <p>Files are exchange formats. The SQLite database remains canonical.</p>
-        <a className="primary link-button" href="/api/export/json?mode=public"><Download size={16} /> Export Public JSON</a>
+        <p>Build a portable context snapshot in the format that suits the next task. Files are exchange artifacts; SQLite remains canonical.</p>
+        <label>Export scope</label>
+        <select value={exportScope} onChange={(event) => setExportScope(event.target.value)}>
+          <option value="all">Everything</option>
+          <option value="projects">Projects</option>
+          <option value="knowledge">Knowledge</option>
+          <option value="roadmap">Development roadmap</option>
+          <option value="chat">Chat history</option>
+        </select>
+        <div className="decision-row">
+          <a className="primary link-button" href={`/api/export/context.pdf?scope=${exportScope}`}><Download size={16} /> PDF</a>
+          <a className="link-button" href={`/api/export/context.html?scope=${exportScope}`}><Download size={16} /> Interactive HTML</a>
+          <a className="link-button" href={`/api/export/context.md?scope=${exportScope}`}><Download size={16} /> Markdown</a>
+          <a className="link-button" href={`/api/export/context.txt?scope=${exportScope}`}><Download size={16} /> Text</a>
+          <a className="link-button" href={`/api/export/context.json?scope=${exportScope}`}><Download size={16} /> JSON</a>
+        </div>
         <a className="link-button" href="/api/export/json?mode=backup"><Download size={16} /> Export Local Backup</a>
-        <a className="link-button" href="/api/export/markdown"><Download size={16} /> Export Markdown</a>
+        <PdfImport setNotice={setNotice} />
         <JsonImport setNotice={setNotice} />
         <MarkdownImport setNotice={setNotice} />
       </div>
     </section>
+  );
+}
+
+function PdfImport({ setNotice }) {
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  async function importPdf() {
+    if (!file || busy) return;
+    setBusy(true);
+    try {
+      if (file.size > 15 * 1024 * 1024) throw new Error('PDF imports are limited to 15 MB.');
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      const result = await api('/api/import/pdf', { method: 'POST', body: JSON.stringify({ name: file.name, base64: btoa(binary) }) });
+      setFile(null);
+      setNotice(`Imported ${file.name}: ${result.pages} page(s), ${result.characters.toLocaleString()} extracted characters. Pending review.`);
+    } catch (err) {
+      setNotice(`PDF import failed: ${err.message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="import-preview">
+      <strong>Import PDF for local processing</strong>
+      <small>Text is extracted locally, fingerprinted, and stored as a pending-review source document.</small>
+      <input type="file" accept="application/pdf,.pdf" onChange={(event) => setFile(event.target.files?.[0] || null)} />
+      <button onClick={importPdf} disabled={!file || busy}><Upload size={16} /> {busy ? 'Extracting...' : 'Import PDF'}</button>
+    </div>
   );
 }
 

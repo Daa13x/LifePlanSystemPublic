@@ -8,7 +8,10 @@ const required = [
   'Start Life Planner.vbs',
   'LifePlannerTray.ps1',
   'life-planner-app.ico',
+  'Install Local Model Runtime.cmd',
   'Install Playwright Chromium.cmd',
+  'llama/llama-server.exe',
+  'llama/runtime-manifest.json',
   'node/node.exe',
   'app/dist/index.html',
   'app/server/index.js',
@@ -57,11 +60,15 @@ assert.match(buildScript, /Start-Process[\s\S]*-Wait[\s\S]*ExitCode/);
 assert.match(packageScript, /bundledNodeRoot/);
 assert.match(packageScript, /npmCommand/);
 assert.match(packageScript, /LifePlannerTray\.ps1/);
+assert.match(packageScript, /Install-LlamaRuntime\.ps1/);
+assert.match(packageScript, /-RuntimeOnly/);
 assert.doesNotMatch(packageScript, /timeout\s+\/t\s+2/i);
 assert.match(trayScript, /System\.Windows\.Forms\.NotifyIcon/);
 assert.match(trayScript, /Pause environment/);
 assert.match(trayScript, /Resume environment/);
 assert.match(trayScript, /Exit environment/);
 assert.match(vbsLauncher, /WindowStyle Hidden/);
+const modelInstaller = fs.readFileSync(path.join(portableRoot, 'Install Local Model Runtime.cmd'), 'utf8');
+assert.match(modelInstaller, /Install-LlamaRuntime\.ps1/);
 
 console.log(`Portable package verification passed: ${portableRoot}`);

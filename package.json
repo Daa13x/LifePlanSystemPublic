@@ -18,13 +18,15 @@
     "verify:openhands-invocation-all": "npm run verify:openhands-invocation-adapter && npm run verify:openhands-invocation-schemas",
     "verify:runcli-cwd": "node scripts/verify-runcli-cwd.mjs",
     "verify:source-control-safety": "node scripts/verify-source-control-safety.mjs",
+    "verify:source-control-api": "node scripts/verify-source-control-api.mjs",
     "verify:governance-safety": "node scripts/verify-governance-safety.mjs",
     "verify:browser-connector-safety": "node scripts/verify-browser-connector-safety.mjs",
     "verify:browser-extension-install": "node scripts/verify-browser-extension-install.mjs",
     "verify:tray-launcher": "node scripts/verify-tray-launcher.mjs",
     "verify:portable-package": "node scripts/verify-portable-package.mjs",
     "verify:openhands-stop-boundary": "node scripts/verify-openhands-stop-boundary.mjs",
-    "verify:runtime-safety": "npm run verify:runcli-cwd && npm run verify:source-control-safety && npm run verify:governance-safety && npm run verify:browser-connector-safety && npm run verify:browser-extension-install && npm run verify:tray-launcher && npm run verify:executor-enforcement && npm run verify:openhands-invocation-all && npm run verify:openhands-stop-boundary",
+    "verify:local-ai-docs": "node scripts/verify-local-ai-docs.mjs",
+    "verify:runtime-safety": "npm run verify:runcli-cwd && npm run verify:source-control-safety && npm run verify:source-control-api && npm run verify:governance-safety && npm run verify:browser-connector-safety && npm run verify:browser-extension-install && npm run verify:tray-launcher && npm run verify:executor-enforcement && npm run verify:openhands-invocation-all && npm run verify:openhands-stop-boundary && npm run verify:local-ai-docs",
     "verify:lifeskillsystem-skills": "node scripts/verify-lifeskillsystem-skills.mjs",
     "verify:local-learning-event-schema": "node scripts/verify-local-learning-event-schema.mjs",
     "verify:local-learning-event-validator": "node scripts/verify-local-learning-event-validator.mjs",
@@ -35,13 +37,20 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.2",
-    "express": "^4.21.2",
+    "express": "4.22.2",
     "lucide-react": "^0.468.0",
     "marked": "^14.1.4",
+    "pdfjs-dist": "^6.1.200",
     "playwright": "^1.61.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "vite": "^6.0.7"
+  },
+  "devDependencies": {
+    "concurrently": "9.2.0"
+  },
+  "overrides": {
+    "body-parser": "1.20.6",
+    "shell-quote": "1.10.0"
   }
 }

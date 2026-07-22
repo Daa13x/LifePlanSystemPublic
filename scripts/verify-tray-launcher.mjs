@@ -21,14 +21,17 @@ assert.match(tray, /taskkill\.exe \/PID \$processId \/T \/F/);
 assert.match(tray, /RedirectStandardOutput/);
 assert.match(tray, /RedirectStandardError/);
 assert.match(tray, /Stop-LifePlannerServer\s*\n\s*throw \$failureMessage/);
+assert.match(tray, /Ensure-LocalModelRuntime/);
 
 assert.match(packaging, /LifePlannerTray\.ps1/);
 assert.match(packaging, /Start Life Planner\.vbs/);
 assert.match(packaging, /life-planner-app\.ico/);
+assert.match(packaging, /Install-LlamaRuntime\.ps1/);
 assert.doesNotMatch(packaging, /timeout\s+\/t\s+2/i);
 
 assert.match(installer, /wscript\.exe/i);
 assert.match(installer, /Start Life Planner\.vbs/);
 assert.match(installer, /life-planner-app\.ico/);
+assert.match(installer, /Install Local Model Runtime\.cmd/);
 
 console.log('Tray launcher static verification passed.');

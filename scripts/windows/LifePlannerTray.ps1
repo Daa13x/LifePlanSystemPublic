@@ -159,6 +159,19 @@ function Ensure-PlaywrightChromium {
   }
 }
 
+function Ensure-LocalModelRuntime {
+  $installer = Join-Path $PortableRoot 'Install Local Model Runtime.cmd'
+  $starterModel = Join-Path $appRoot 'data\models\Qwen2.5-1.5B-Instruct-Q4_K_M.gguf'
+  if ((Test-Path -LiteralPath $starterModel) -or -not (Test-Path -LiteralPath $installer)) { return }
+
+  Set-TrayState 'preparing-model'
+  $arguments = '/d /s /c ""{0}""' -f $installer
+  $installProcess = Start-Process -FilePath $env:ComSpec -ArgumentList $arguments -WorkingDirectory $PortableRoot -WindowStyle Hidden -Wait -PassThru
+  if ($installProcess.ExitCode -ne 0) {
+    throw "Local model provisioning failed with exit code $($installProcess.ExitCode). The app will still open; retry from Settings when internet access is available."
+  }
+}
+
 function Start-LifePlannerServer {
   if ($script:serverProcess) {
     try {
@@ -269,6 +282,12 @@ function Set-TrayState([string]$State) {
     'preparing' {
       $statusItem.Text = 'Status: Preparing browser tools'
       $notifyIcon.Text = 'Life Planner - Preparing'
+      $pauseItem.Enabled = $false
+      $resumeItem.Enabled = $false
+    }
+    'preparing-model' {
+      $statusItem.Text = 'Status: Preparing local model'
+      $notifyIcon.Text = 'Life Planner - Preparing model'
       $pauseItem.Enabled = $false
       $resumeItem.Enabled = $false
     }
@@ -390,6 +409,12 @@ Set-TrayState 'starting'
 [System.Windows.Forms.Application]::DoEvents()
 
 try {
+  try {
+    Ensure-LocalModelRuntime
+  }
+  catch {
+    $notifyIcon.ShowBalloonTip(5000, 'Local model setup needs attention', $_.Exception.Message, [System.Windows.Forms.ToolTipIcon]::Warning)
+  }
   Ensure-PlaywrightChromium
   Start-LifePlannerServer
   $notifyIcon.ShowBalloonTip(2200, 'Life Planner is running', 'Use the tray icon to open, pause, resume, or exit the local environment.', [System.Windows.Forms.ToolTipIcon]::Info)
