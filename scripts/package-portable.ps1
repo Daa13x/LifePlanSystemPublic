@@ -34,11 +34,16 @@ $trayIconSource = Join-Path $repoRoot "installer\assets\life-planner-app.ico"
 Write-Host "Preparing Life Planner portable bundle ($Configuration)"
 Write-Host "Repo: $repoRoot"
 
+New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
+$npmCacheRoot = Join-Path $cacheRoot "npm"
+
 Push-Location $repoRoot
 try {
   if (-not $SkipDependencyInstall) {
-    & $npmCommand install --no-save --package-lock=false
-    if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+    # Source-tab builds cannot assume the interactive user's global npm cache is
+    # writable. Use the committed lockfile and a repository-owned cache instead.
+    & $npmCommand ci --include=dev --cache $npmCacheRoot --prefer-offline --no-audit --fund=false
+    if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
   }
 
   if (-not $SkipBuild) {
@@ -49,8 +54,6 @@ try {
 finally {
   Pop-Location
 }
-
-New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
 
 if (!(Test-Path $nodeExtract)) {
   if (!(Test-Path $nodeZip)) {
@@ -160,7 +163,7 @@ Copy-Item -LiteralPath $trayIconSource -Destination (Join-Path $portableRoot "li
 # llama.cpp is a small runtime dependency and belongs in the bundle. The much
 # larger starter model is fetched by Inno/first launch instead of inflating Git
 # or the installer payload.
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $llamaProvisionerSource -PortableRoot $portableRoot -RuntimeOnly
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $llamaProvisionerSource -PortableRoot $portableRoot -CacheRoot (Join-Path $cacheRoot 'llama') -RuntimeOnly
 if ($LASTEXITCODE -ne 0) { throw "llama.cpp runtime provisioning failed with exit code $LASTEXITCODE" }
 
 Get-ChildItem -LiteralPath $appRoot -Recurse -File |

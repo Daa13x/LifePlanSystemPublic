@@ -6,6 +6,8 @@
 
 - The portable package downloads and embeds pinned llama.cpp Windows CPU build
   `b8354`; the archive SHA-256 is pinned and verified before extraction.
+- Packaging retains that verified archive under `.cache/llama` and retries
+  transient downloads up to three times; every reuse still rechecks SHA-256.
 - The installer/first launch downloads a pinned Qwen2.5 1.5B Q4_K_M starter
   GGUF outside the installer payload, verifies published size/SHA-256, then
   atomically promotes the `.partial` file.
@@ -54,6 +56,8 @@
   branch-bound second field; force push remains unavailable.
 - Publication preflight crash from an undefined variable was fixed.
 - Installer build refuses dirty/conflicted source and reports async status/logs.
+- Packaging uses lockfile-based `npm ci` with repository-local `.cache/npm`, so
+  Source-tab builds do not depend on permission to the user's global npm cache.
 - Disposable bare-remote acceptance proves fetch, behind, pull-to-disk, remote
   tracking, publication preflight, push gate, and installer status behavior.
 

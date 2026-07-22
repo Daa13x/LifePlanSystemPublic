@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 const appRoot = path.resolve(import.meta.dirname, '..');
+const packageSource = fs.readFileSync(path.join(appRoot, 'scripts', 'package-portable.ps1'), 'utf8');
+assert.match(packageSource, /npmCommand ci --include=dev --cache \$npmCacheRoot/);
+assert.doesNotMatch(packageSource, /npmCommand install --no-save/);
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-source-api-'));
 const bare = path.join(probeRoot, 'remote.git');
 const seed = path.join(probeRoot, 'seed');
