@@ -3,6 +3,15 @@ import path from 'node:path';
 
 export const LPS_BROWSER_EXTENSION_NAME = 'Life Planner Browser Agent';
 
+export function chromeExtensionEnabled(setting) {
+  if (!setting || typeof setting !== 'object') return false;
+  if (Object.hasOwn(setting, 'state')) return Number(setting.state) === 1;
+  if (Array.isArray(setting.disable_reasons) && setting.disable_reasons.length > 0) return false;
+  return setting.has_started_service_worker === true
+    || Boolean(setting.service_worker_registration_info)
+    || Boolean(setting.active_permissions && Object.keys(setting.active_permissions).length > 0);
+}
+
 function normalizePath(value) {
   if (!value) return '';
   try {
@@ -83,7 +92,7 @@ export function probeChromeExtension({ userDataRoot, extensionPath }) {
       const exactPathMatch = Boolean(normalizedInstalled && normalizedInstalled === targetPath);
       const result = {
         installedInChrome: true,
-        chromeLoaded: Number(setting.state) === 1,
+        chromeLoaded: chromeExtensionEnabled(setting),
         detectedProfilePath: profilePath,
         installedExtensionId: extensionId,
         installedPath,

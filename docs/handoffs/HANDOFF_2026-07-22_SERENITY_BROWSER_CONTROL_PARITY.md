@@ -28,6 +28,11 @@ The install/repair helper now:
 
 Chrome still requires the user's own click for Developer mode, Load unpacked, Enable, and Reload. LPS intentionally does not use `--load-extension`, edit `Secure Preferences`, or automate Chrome's protected settings UI.
 
+Chrome 150 compatibility was added on 2026-07-22: records without the legacy
+numeric `state` field are treated as enabled only when service-worker or active
+permission evidence exists and `disable_reasons` is empty. This prevents an
+already registered connector from being falsely labelled disabled.
+
 ## Why this is better
 
 The previous LPS status reduced installation truth to a 15-second heartbeat. A missing extension, disabled extension, stale unpacked path, and correct extension waiting for heartbeat all appeared as "Not loaded." That made repair instructions guesswork.

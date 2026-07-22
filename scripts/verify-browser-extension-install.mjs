@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { chromeProfileArgument, probeChromeExtension } from '../server/browserExtensionInstall.js';
+import { chromeExtensionEnabled, chromeProfileArgument, probeChromeExtension } from '../server/browserExtensionInstall.js';
 
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-extension-install-'));
 try {
@@ -15,7 +15,14 @@ try {
   fs.writeFileSync(path.join(currentPath, 'manifest.json'), JSON.stringify({ name: 'Life Planner Browser Agent', version: '0.2.0' }));
   fs.writeFileSync(path.join(currentPath, 'background.js'), '');
   fs.writeFileSync(path.join(profilePath, 'Secure Preferences'), JSON.stringify({
-    extensions: { settings: { exact: { state: 1, path: currentPath, manifest: { name: 'Life Planner Browser Agent' } } } }
+    extensions: { settings: { exact: {
+      path: currentPath,
+      manifest: { name: 'Life Planner Browser Agent' },
+      disable_reasons: [],
+      has_started_service_worker: true,
+      service_worker_registration_info: { version: '0.2.0' },
+      active_permissions: { api: ['tabs'] }
+    } } }
   }));
 
   let result = probeChromeExtension({ userDataRoot, extensionPath: currentPath });
@@ -24,6 +31,10 @@ try {
   assert.equal(result.exactPathMatch, true);
   assert.equal(result.detectedProfilePath, profilePath);
   assert.equal(chromeProfileArgument(userDataRoot, profilePath), '--profile-directory=Profile 2');
+  assert.equal(chromeExtensionEnabled({ state: 1 }), true);
+  assert.equal(chromeExtensionEnabled({ state: 0 }), false);
+  assert.equal(chromeExtensionEnabled({ disable_reasons: [], has_started_service_worker: true }), true);
+  assert.equal(chromeExtensionEnabled({ disable_reasons: [1], has_started_service_worker: true }), false);
 
   const stalePath = path.join(probeRoot, 'stale', 'lps-browser-agent');
   fs.mkdirSync(stalePath, { recursive: true });
