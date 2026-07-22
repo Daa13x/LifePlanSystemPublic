@@ -1,0 +1,141 @@
+# Native Coding Worker and Regulus Reference Review
+
+## Shipped LPS contract
+
+LPS now has an OpenHands-independent local coding loop in **Source > Local Coding**. It routes through `localCodeModelEndpoint` / `localCodeModelName`, then the configured chat endpoint, then a healthy bundled llama.cpp runtime. The worker requires a loopback endpoint (`localhost`, `127.0.0.1`, or `::1`) and refuses remote endpoints before source context is assembled. It never checks Ollama, invokes OpenHands, controls a browser, or silently selects a cloud model.
+
+The durable lifecycle is:
+
+1. **Coordinator** stores a bounded task with objective, approved repository paths, validation profile, and file limit.
+2. **Governor** hashes that complete scope. A run approval is valid only for that exact SHA-256.
+3. **Context Reader** creates a detached Git worktree and reads only bounded text from approved paths. Symlinks/junctions and protected paths are rejected.
+4. **Local Coder** receives a role-specific system prompt and strict JSON output schema. It can propose complete text-file replacements only; commands, deletes, renames, binaries, Git actions, and extra paths are forbidden.
+5. **Checker** compares NUL-delimited actual worktree status to the proposal, runs `git diff --check` plus the selected validation, and stores a hash of the evidence. The default frontend profile permits actual changes under `src/` only before running the production build; the syntax profile is honest about checking Node-supported JavaScript and JSON rather than pretending to parse JSX.
+6. **Reviewer** sees the summary, changed files, validation output, full patch, model route, task hash, patch hash, and governor audit evidence in Source.
+7. **Apply** requires a second approval bound to the exact patch SHA-256, a clean live checkout, and the unchanged base commit. The patch is applied unstaged. Commit and push remain separate Source actions.
+8. **Reject/cancel** prevents model output from being accepted and removes the isolated worktree. Failures preserve a durable terminal task record but never touch the live checkout. Startup marks any stale `running` record `interrupted`; it cannot be mistaken for completed work and must be explicitly rerun or rejected.
+
+`scripts/verify-native-coding-worker.mjs` creates a real temporary Git repository and worktree. It proves embedded traversal is rejected, concurrent starts are single-flight, wrong task hashes are refused, tracked and new-file model edits remain isolated, validation evidence is hashed, wrong patch hashes are refused, explicit apply changes only the intended live file, stale running state becomes interrupted after restart, and out-of-scope model output is rejected.
+
+## Mostly Armless delegation skeleton used as reference
+
+Read-only Serenity references:
+
+- `data/source/Services/Agents/AgentService.Delegation.cs`: role/model routing and delegation result recording.
+- `data/source/Services/Agents/MultiAgentTaskManager.cs`: explicit pending/in-progress/completed/failed phases and per-agent serialization.
+- `data/source/Services/Agents/WorkflowEngine.cs`: coordinator-owned steps and dependency ordering.
+- `data/source/Services/Agents/AgentGateway.cs`: compact role/system-prompt boundary.
+- `data/source/Services/Automation/WorkboardBrowserCodingLoopService.cs`: implementation, independent review, bounded attempts, terminal blocked state, and durable milestone handoff.
+- `data/source/Services/Core/SelfImprovementLoopService.cs`: pre-run Git snapshot, bounded writes, validation, rollback, and prohibition on commit/push/package/deploy.
+- `data/source/Services/Planning/PlanExecutionService.cs`: resumable persisted mission phases and cancellation.
+
+LPS adapted the lifecycle separation and evidence handoff, but improved isolation with a dedicated Git worktree and approval hashes. LPS does not recursively hand failed work to another model, accept a literal `VERIFIED` string as proof, or claim an agent identity that differs from the recorded endpoint/model.
+
+## Regulus security patterns used
+
+Read-only Serenity references:
+
+- `data/source/Services/Core/SecurityGovernor.cs`
+- `data/source/Services/Core/SecurityGovernor.Rules.cs`
+- `data/source/Services/Core/SecurityGovernor.Audit.cs`
+- `data/source/Services/Core/GovernorService.cs`
+- `data/source/Services/Core/ExecApprovalService.cs`
+- `data/source/Services/Core/RegulusElevationBridge.cs`
+- `data/source/Services/Planning/PreflightIntentService.cs`
+- `data/source/Services/Agents/ToolRegistry.FileTools.Part1.cs`
+- `data/source/Services/Agents/ToolRegistry.FileTools.Part2.cs`
+- `data/source/Services/Core/EmbeddedWebServerService.cs`
+- `data/source/Services/Core/BrainSystemCatalog.cs`
+
+Useful Regulus ideas retained:
+
+- The governor runs before any mutation or process action, not as a post-run review.
+- `Allow`, `Deny`, and `Ask` are distinct outcomes; an unresolved `Ask` must stop.
+- Approval is a separate UI/server capability, not text generated by a model.
+- One canonical API relay exposes pending decisions and resolves them for every connected surface.
+- Risk decisions emit durable evidence and repeated unsafe behavior can stop further action.
+- Structured executable-plus-argument calls are safer than model-supplied shell strings.
+- System prompts state the real security boundary, but server enforcement remains authoritative.
+
+Regulus weaknesses deliberately not copied:
+
+- Dev-build and training-mode security bypasses.
+- Time-wide `ApproveAllFor` grants and persistent broad command allowlists.
+- Lexical `StartsWith` path trust without realpath/reparse containment.
+- An `Ask` path that callers can accidentally treat as allowed.
+- Command substring blocklists as the primary control; LPS has no model-command execution surface.
+- In-memory-only pending approvals, unbound request IDs, or approvals not tied to content hashes.
+- Raw prompts, secrets, or full sensitive payloads in audit logs.
+
+## Deep Regulus audit findings
+
+The read-only audit found that Serenity's Regulus documentation is stronger than several current runtime boundaries. These are reference findings, not claims that LPS imported those weaknesses:
+
+1. **No single authoritative policy service.** `Program.Services.cs`, `SecurityGovernor.cs`, `GovernorService.cs`, and `ExecApprovalService.cs` combine DI registrations with replaceable static `Instance` ownership. Unknown governor actions default to allow. LPS must keep one server-owned worker instance and deny unknown routes, states, validations, and effects.
+2. **Tool profiles are prompt visibility, not dispatch enforcement.** `ToolRegistry.Execution.cs` filters what the model sees, but direct dispatch can still resolve registered hidden tools. LPS's coding worker exposes no model-callable tool registry; it accepts only a strict file-replacement JSON schema and server-owned validation profiles.
+3. **Approval IDs are not capabilities.** Serenity approvals are not consistently bound to action, canonical arguments, workspace, base commit, principal, expiry, or content hash. LPS binds run approval to the full task hash and apply approval to the patch hash, then rechecks clean status and exact base commit at mutation time.
+4. **Loopback alone is not authentication.** Serenity's embedded relay trusts loopback while broad CORS and local approval endpoints can allow cross-origin local requests. LPS should add authenticated same-origin sessions and CSRF tokens to the whole local app as a separate governance job; task/patch hashes prevent substitution but do not replace web-session authentication.
+5. **Bounded coding must constrain every effect.** Serenity blocks a named terminal tool while other registered process, Git, browser, network, installer, or deployment tools can remain reachable. LPS has no model command execution, no model Git API, no browser consultation, no network fallback, and no automatic commit/push/package/deploy.
+6. **Cancellation must stop acceptance, not merely stop waiting.** Serenity tool/build calls do not consistently carry cancellation and rollback is best-effort text restoration. LPS aborts model fetch acceptance, performs edits only in a disposable worktree, and applies nothing to the live checkout until a later approval. A future process-based validator should add process-tree cancellation and bounded reap evidence.
+7. **Lexical path checks are insufficient.** Serenity contains sibling-prefix and reparse gaps in governor/file tools. LPS uses separator-safe relative containment plus existing-target/nearest-parent realpath checks, skips symlink context traversal, and rechecks the actual Git change set. Handle-based final-path verification remains a worthwhile Windows hardening follow-up.
+8. **Git must remain a separate governed system.** Some Serenity tool handlers commit/stage broadly or push every remote and some UI paths block only `Deny`, allowing `Ask` to continue. LPS's worker cannot stage, commit, pull, push, tag, merge, reset, stash, or change remotes. Those remain explicit Source actions with existing branch, remote, publication, conflict, and confirmation checks.
+9. **Permissive modes rot the boundary.** Serenity dev builds, disabled governor state, training mode, autonomous ask approval, and permissive execution defaults can bypass intended checks. LPS has no dev/training bypass in the worker and unknown validation/state/path/model conditions stop closed.
+10. **Audit logs need content binding and redaction.** Serenity stores commands, prompts, replies, and diffs without a complete evidence chain. LPS stores hashes for task scope, validator result, patch, and decisions, while limiting audit detail. A chained HMAC/append-only database ledger is still stronger than local JSON and remains follow-up work.
+11. **Cloud routing must be one policy.** Serenity has separate normal, force-cloud, and browser-hardwired paths. LPS's worker refuses non-loopback endpoints and has no cloud/browser fallback. If remote coding is ever designed, source-context classification, redaction preview, provider-bound consent, retention rules, and prompt hashes are prerequisites.
+12. **Documentation must follow executable proof.** Serenity catalogs overstate universal gating. LPS completion is tied to `verify:native-coding-worker`, the full runtime-safety suite, production build, real Source API staging/rejection, clean-commit installer build, and hosted release evidence.
+
+## Independent LPS worker review and closure
+
+A separate review agent found no P0 issue and reported nine findings before release. The implementation was held back from commit until these were addressed:
+
+- **Embedded traversal context escape (P1): fixed.** Every approved path rejects any `..` segment and is checked lexically and by realpath before traversal. The acceptance test exercises `src/../../secret.txt`.
+- **Broad build-time execution (P1): fixed.** The former generic build profile was removed. `frontend` refuses any actual changed file outside `src/` before invoking the fixed production build; package/config/server work uses non-executing syntax/diff checks unless a future server-owned profile is designed.
+- **Concurrent authorization-scope race (P1): fixed.** A synchronous reservation is acquired before the first await, and path checks receive their task explicitly instead of reading shared `currentTask` state. A concurrent-run acceptance proves exactly one start wins.
+- **Misleading JSX validation (P1): fixed.** Source defaults `src` tasks to the real frontend production build. The syntax profile name and output now state its narrower JavaScript/JSON coverage.
+- **Unsafe porcelain parsing (P2): fixed.** Actual paths use `git status --porcelain=v1 -z` with rename/copy extra-record handling.
+- **Orphaned restart worktrees (P2): fixed for known safe cases.** Startup marks stale running/applying tasks interrupted, and Source status removes worktrees whose task state cannot authorize preservation. Applying interruptions are surfaced as ambiguous and never guessed complete.
+- **Apply succeeds but API reports failure (P2): hardened.** Applying is durably recorded before mutation. A post-apply persistence failure attempts immediate reverse-apply; cleanup failure preserves truthful applied state and marks cleanup pending.
+- **Unbounded endpoint JSON buffering (P2): fixed.** Coding responses are streamed with a 1 MB transport cap before JSON parsing; model content retains its tighter worker cap.
+- **Verifier gaps (P2): materially expanded.** Traversal, concurrent starts, new files, restart recovery, hash substitution, isolation, apply, and out-of-scope refusal are executable. Production frontend validation still receives an additional real Source/API fake-endpoint acceptance after the commit is clean.
+
+Additional useful Serenity references:
+
+- `data/source/Services/Console/NativeProcessRunner.cs`: structured argument execution, linked cancellation, process-tree termination, and reaping. Do not copy silent fallback across security boundaries.
+- `data/source/Services/Core/NativeWindowsInstallerOrchestratorService.cs` and `NativeWorkspaceInstallerOrchestratorService.cs`: separator-safe relative containment and ancestor reparse walking.
+- `data/source/Services/Infrastructure/GitService.cs`: child-only askpass environment isolation.
+- `data/source/Services/Core/VoiceCalibrationService.cs`: SHA-256 source/transcript provenance that can generalize to task, diff, validation, approval, and artifact evidence.
+- `data/tests/Serenity.Agent.Tests/WorkboardBrowserCodingLoopTests.cs`: useful timeout/order/terminal-state behavioral tests. Prefer these over source-text contract assertions.
+
+Security follow-up priority for LPS:
+
+1. Add same-origin authenticated local sessions and CSRF protection to mutation endpoints; do not trust loopback alone.
+2. Add Windows handle-based final-path/reparse verification immediately before each file mutation.
+3. Move coding task state to transactional SQLite with single-use approval nonce, expiry, compare-and-swap lease, and append-only chained evidence.
+4. Add validator process-tree cancellation/reaping and record timeout/output-limit evidence.
+5. Add adversarial tests for junction swaps, sibling prefixes, approval replay/substitution/expiry, CSRF, source prompt injection, secret canaries, restart at every phase, cancellation at every await, and rollback/cleanup failure.
+6. Preserve Source's separate Git approvals and never add stage-all, force, reset, remote mutation, installer, or deployment tools to a coding model.
+
+## Connected-system rule
+
+Serenity's `BrainSystemCatalog` and embedded relay establish an important rule: do not add a second transport or disconnected state store for an existing contract. LPS follows that rule by placing this worker under `/api/source/coding/*` and Source Control. Source owns task creation, model readiness, phase truth, diff/validation review, patch apply, later staging/commit/push, and installer build.
+
+Task JSON and temporary worktrees live under ignored `.lps/native-code`. They are local operational evidence, never packaged, committed, exported as life context, or sent to cloud consultation. The live Dev Roadmap must carry the completed `Native local coding worker` item; future work belongs there rather than in an untracked chat promise.
+
+## Follow-up queue
+
+1. Move task persistence from atomic JSON to a database lease/CAS if concurrent remote Source clients are added. The current service intentionally permits one active mutation-capable worker per process.
+2. Add a restart recovery pass that marks stale `running` tasks interrupted and prunes orphaned worktrees only after proving they belong to a recorded task.
+3. Add optional Checker model critique only after local deterministic validation; bind its structured verdict to the patch and validation hashes. Never make model opinion the acceptance gate.
+4. Add per-task context preview and sensitivity classification before inference if non-local endpoints are ever permitted. Current coding endpoints are expected to be local and have no browser/cloud fallback.
+5. Add validation profiles through server-owned executable/argument definitions only. Never accept a command string from the model or task form.
+6. Add model capability guidance: the bundled 1.5B starter proves runtime readiness but a dedicated coding GGUF should be selected for useful multi-file work.
+
+## Acceptance commands
+
+```powershell
+npm.cmd run verify:native-coding-worker
+npm.cmd run verify:runtime-safety
+npm.cmd run build
+```
+
+Do not mark hosted release work complete from these local checks. After commit and push, require the Windows GitHub Actions installer run, Release `1.0` asset replacement, downloaded-asset hash verification, and final copy to `D:\MA-Updates`.

@@ -25,6 +25,7 @@ import {
 } from './executorEnforcement.js';
 import { resolveRunCliCwd } from './runCliCwd.js';
 import { chromeProfileArgument, probeChromeExtension } from './browserExtensionInstall.js';
+import { NativeCodingWorker, NATIVE_CODING_VALIDATIONS } from './nativeCodingWorker.js';
 import {
   canUseGitHubToken,
   detectHighConfidenceSecrets,
@@ -61,6 +62,8 @@ function seedRoadmapIfEmpty() {
     { title: 'CI/CD + local installer build', detail: 'On push, GitHub Actions builds the portable bundle + Inno installer and uploads both artifacts. A release-targeted dispatch attaches the installer to an existing GitHub Release. The Source tab can also build the installer locally with live status.', resume_notes: 'COMPLETED 2026-07-17: hosted push run 29578272261 and release-targeted run 29578538752 both passed every required build, runtime-safety, packaging, Inno, and artifact step. Release 1.0 now carries LifePlannerPortableSetup.exe (38,951,229 bytes; SHA-256 4C0970D64983EC1F87CC4A165AA2A696FBC803D6ED39964521A1538E7B762D51). The exact hosted asset was downloaded, silently installed, launched with its bundled Node runtime, verified through /api/health and the web UI, silently uninstalled, and copied to D:\\MA-Updates. Source provides the local non-blocking installer build endpoint and status UI.', status: 'done', category: 'infra' },
     { title: 'First-run setup / health gate', detail: 'Guided checklist for model + git + Playwright so a fresh launch is not inert. Turns scattered setup into one gated flow with live status.', resume_notes: 'P1 setup gate. Browser connector diagnostics advanced on 2026-07-22: Tooling now distinguishes files, Chrome registration, enabled state, current path/content, and live heartbeat, and opens the detected profile plus exact folder. See docs/handoffs/HANDOFF_2026-07-22_SERENITY_BROWSER_CONTROL_PARITY.md. The overall job remains planned: build one guided first-run checklist for database health, Git identity/publication readiness, local model runtime, Playwright Chromium, Chrome connector pairing, and installer/runtime version. Each check needs live evidence, a repair action, refresh, and a clear distinction between optional and blocking prerequisites. Add fresh-install and offline acceptance tests.', status: 'planned', category: 'feature' },
     { title: 'OpenHands real invocation', detail: 'Optional local-only OpenHands executor invocation behind the existing readiness gate.', resume_notes: 'PARKED/INACTIVE 2026-07-22: OpenHands is explicitly disabled by default and performs no automatic Docker/model probes. Ollama-specific routes/config were removed. Any future worker inherits LPS localCodeModelEndpoint/localCodeModelName, then the chat endpoint, then healthy bundled llama.cpp. Real invocation flag remains off until the existing safety design and runtime acceptance pass.', status: 'parked', category: 'infra' },
+    { title: 'Native local coding worker', detail: 'Run bounded coding tasks through the configured OpenAI-compatible local endpoint in an isolated Git worktree, with sealed scope, independent validation, review, and explicit patch apply.', resume_notes: 'COMPLETED 2026-07-22: Source > Local Coding is the canonical connected surface. The worker persists task phases and hashed governor evidence, sends only approved bounded text context, rejects protected/out-of-scope/junction traversal, runs one worker at a time, validates before review, binds run/apply approvals to task/patch SHA-256, and never commits, pushes, merges, deletes, executes model commands, invokes OpenHands, or falls back to a browser/cloud model. verify:native-coding-worker proves live-checkout isolation and rejection behavior.', status: 'done', category: 'feature' },
+    { title: 'Local API sessions and coding approval durability', detail: 'Authenticate local mutation APIs and move coding leases/approvals/evidence to transactional durable state.', resume_notes: 'P1 follow-up from the 2026-07-22 Regulus audit. Add same-origin authenticated sessions and CSRF protection instead of trusting loopback alone. Move .lps native-coding JSON state to transactional SQLite with compare-and-swap lease/heartbeat, single-use nonce bound to principal/action/workspace/base/hash/expiry, append-only chained evidence, stale-run recovery, process-tree cancellation/reaping, handle-based final-path checks, and adversarial replay/substitution/junction/CSRF/restart tests. Preserve the current no-command/no-Git/no-browser worker boundary. See docs/handoffs/HANDOFF_2026-07-22_NATIVE_CODING_WORKER_AND_REGULUS_REVIEW.md.', status: 'planned', category: 'fix' },
     { title: 'Brain-aware Chat provider router', detail: 'Chat routes to ChatGPT connector first with local model fallback; brain context loading foundation.', status: 'active', category: 'feature' },
     { title: 'Encrypt stored credentials with Windows DPAPI', detail: 'Keep GitHub, Hugging Face, and browser connector tokens out of plaintext SQLite while preserving redacted APIs and normal Source/browser behavior.', resume_notes: 'COMPLETED 2026-07-17: current-user Windows DPAPI encryption is enforced in server/db.js. Startup migrates legacy plaintext rows, secure-delete plus WAL truncation and VACUUM remove recoverable plaintext, empty values delete rows, and decrypt failures fail closed. verify:governance-safety proves migration, ciphertext-at-rest, redaction, replacement, and clearing. The live database was migrated and inspected without exposing values.', status: 'done', category: 'fix' },
     { title: 'Classified exports and transactional recovery', detail: 'Require explicit shareability classification and preview for public exports, then redesign Local Backup as a documented, transactional recovery format.', resume_notes: 'P1. Follow docs/handoffs/HANDOFF_2026-07-17_NEXT_AGENT_REPAIR_QUEUE.md section 2. Do not infer public safety from active/stable status. Add a persisted classification, blocked/unknown preview, format version and manifest, dry-run import, one transaction, rollback tests, and truthful UI naming. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4663,4666,4680.', status: 'planned', category: 'fix' },
@@ -2453,6 +2456,115 @@ function validateHfModelReference(repo, file) {
   return normalized;
 }
 
+function isLoopbackEndpoint(endpoint) {
+  try {
+    const hostname = new URL(endpoint).hostname.toLowerCase();
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
+
+async function nativeCodingModelConfig(startIfNeeded = false) {
+  const codeEndpoint = String(getSetting('localCodeModelEndpoint', '') || '').trim();
+  const chatEndpoint = String(getSetting('localModelEndpoint', '') || '').trim();
+  let runtime = await localModelStatus();
+  if (startIfNeeded && !codeEndpoint && !chatEndpoint && runtime.assigned && runtime.llamaServerExists && !runtime.managedServerReady) {
+    runtime = await startManagedLlamaServer();
+  }
+  const candidate = codeEndpoint || chatEndpoint || runtime.managedEndpoint || '';
+  const endpoint = candidate && isLoopbackEndpoint(candidate) ? candidate : '';
+  const model = String(getSetting('localCodeModelName', '') || getSetting('localModelName', '') || runtime.model?.name || 'planner-coder').trim();
+  return { endpoint: endpoint.replace(/\/+$/, ''), model, source: endpoint ? (codeEndpoint ? 'coding endpoint' : chatEndpoint ? 'chat endpoint fallback' : 'bundled llama.cpp') : 'unavailable', rejectedRemoteEndpoint: Boolean(candidate && !endpoint) };
+}
+
+async function invokeNativeCodingModel({ systemPrompt, prompt, signal }) {
+  const config = await nativeCodingModelConfig(true);
+  if (!config.endpoint) throw new Error(config.rejectedRemoteEndpoint ? 'Coding worker refused a non-loopback endpoint. Source code is sent only to localhost.' : 'No OpenAI-compatible coding endpoint is ready. Configure a coding model or start the bundled llama.cpp runtime.');
+  const url = config.endpoint.endsWith('/v1/chat/completions')
+    ? config.endpoint
+    : config.endpoint.endsWith('/v1') ? `${config.endpoint}/chat/completions` : `${config.endpoint}/v1/chat/completions`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.any([signal, AbortSignal.timeout(10 * 60 * 1000)]),
+    body: JSON.stringify({
+      model: config.model,
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
+      temperature: 0.1,
+      max_tokens: 8192,
+      response_format: { type: 'json_object' }
+    })
+  });
+  if (!response.ok) throw new Error(`Coding endpoint failed: ${response.status} ${response.statusText}`);
+  const declaredLength = Number(response.headers.get('content-length') || 0);
+  const responseLimit = 1024 * 1024;
+  if (declaredLength > responseLimit) throw new Error('Coding endpoint response exceeded the 1 MB transport limit.');
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Coding endpoint returned no readable response body.');
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > responseLimit) {
+      await reader.cancel();
+      throw new Error('Coding endpoint response exceeded the 1 MB transport limit.');
+    }
+    chunks.push(value);
+  }
+  const body = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+  let data;
+  try { data = JSON.parse(body); } catch { throw new Error('Coding endpoint returned invalid JSON transport data.'); }
+  const content = data.choices?.[0]?.message?.content || data.choices?.[0]?.text || '';
+  if (!String(content).trim()) throw new Error('Coding endpoint returned an empty response.');
+  return { content, model: { name: config.model, endpoint: config.endpoint, source: config.source } };
+}
+
+async function validateNativeCodingWorktree({ worktree, validation, changedFiles }) {
+  const checks = [];
+  const diffCheck = await runCli('git', ['-C', worktree, 'diff', '--check'], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
+  checks.push({ name: 'git diff --check', ok: diffCheck.ok, output: diffCheck.stdout || diffCheck.stderr });
+  if (validation === 'syntax') {
+    for (const file of changedFiles.filter((name) => /\.(?:c?js|mjs)$/i.test(name))) {
+      const result = await runCli('node', ['--check', file], { cwd: worktree, timeout: 60000, maxBuffer: 1024 * 1024 });
+      checks.push({ name: `node --check ${file}`, ok: result.ok, output: result.stdout || result.stderr });
+    }
+    for (const file of changedFiles.filter((name) => /\.json$/i.test(name))) {
+      try {
+        JSON.parse(fs.readFileSync(path.join(worktree, file), 'utf8'));
+        checks.push({ name: `JSON parse ${file}`, ok: true, output: '' });
+      } catch (error) {
+        checks.push({ name: `JSON parse ${file}`, ok: false, output: error.message });
+      }
+    }
+  } else if (validation === 'frontend') {
+    if (!changedFiles.length || changedFiles.some((name) => name !== 'src' && !name.startsWith('src/'))) {
+      checks.push({ name: 'frontend scope gate', ok: false, output: 'Frontend build validation permits changed files under src/ only.' });
+      return { ok: false, checks, output: checks.map((check) => `FAIL ${check.name}\n${check.output}`).join('\n\n') };
+    }
+    const sourceModules = path.join(root, 'node_modules');
+    const worktreeModules = path.join(worktree, 'node_modules');
+    if (!fs.existsSync(sourceModules)) checks.push({ name: 'npm dependency gate', ok: false, output: 'Run npm ci in the main checkout before build validation.' });
+    else {
+      if (!fs.existsSync(worktreeModules)) fs.symlinkSync(sourceModules, worktreeModules, process.platform === 'win32' ? 'junction' : 'dir');
+      const result = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { cwd: worktree, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+      checks.push({ name: 'npm run build (src-only proposal)', ok: result.ok, output: result.stdout || result.stderr });
+    }
+  }
+  const ok = checks.every((check) => check.ok);
+  return { ok, checks, output: checks.map((check) => `${check.ok ? 'PASS' : 'FAIL'} ${check.name}${check.output ? `\n${String(check.output).slice(0, 3000)}` : ''}`).join('\n\n').slice(0, 12000) };
+}
+
+const nativeCodingWorker = new NativeCodingWorker({
+  root,
+  runGit: (args) => runCli('git', args, { timeout: 2 * 60 * 1000, maxBuffer: 16 * 1024 * 1024, preserveOutput: true }),
+  runValidation: validateNativeCodingWorktree,
+  invokeModel: invokeNativeCodingModel,
+  forbiddenPath: (candidate) => violatesMandatoryForbidden(candidate) || isProtectedWorkspacePath(candidate)
+});
+
 async function publishedHfFileMetadata(repo, file, token) {
   const response = await fetch(`https://huggingface.co/api/models/${repo}/tree/main?recursive=1&expand=1`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {}
@@ -4352,6 +4464,64 @@ app.post('/api/source/build-installer', async (_req, res) => {
   if (snapshot.hasConflicts) return fail(res, 409, `Resolve conflicts before building an installer: ${snapshot.conflictFiles.join(', ')}`);
   if (snapshot.changedFiles.length) return fail(res, 409, 'Commit or stash all source changes before building an installer. Release artifacts must correspond to a clean commit.');
   ok(res, startInstallerBuild());
+});
+
+app.get('/api/source/coding/status', async (_req, res) => {
+  const model = await nativeCodingModelConfig();
+  const recoveredWorktrees = await nativeCodingWorker.cleanupOrphanedWorktrees();
+  ok(res, {
+    tasks: nativeCodingWorker.list(),
+    validations: NATIVE_CODING_VALIDATIONS,
+    model: { ...model, configured: Boolean(model.endpoint) },
+    activeTaskIds: [...nativeCodingWorker.active.keys()],
+    recoveredWorktrees,
+    policy: 'One isolated local worker; sealed scope and patch approvals; no commit, push, merge, delete, arbitrary command, browser, or cloud fallback.'
+  });
+});
+
+app.post('/api/source/coding/tasks', (req, res) => {
+  try {
+    const task = nativeCodingWorker.create(req.body || {});
+    ok(res, { task, note: 'Coding task staged. Nothing runs until the sealed task scope is explicitly approved.' });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.post('/api/source/coding/tasks/:id/run', async (req, res) => {
+  try {
+    const task = await nativeCodingWorker.run(req.params.id, req.body || {});
+    ok(res, { task, note: 'Local coding finished in an isolated worktree. Review the patch and validation evidence before applying it.' });
+  } catch (error) {
+    fail(res, 409, error.message);
+  }
+});
+
+app.post('/api/source/coding/tasks/:id/apply', async (req, res) => {
+  try {
+    const task = await nativeCodingWorker.apply(req.params.id, req.body || {});
+    ok(res, { task, note: 'Reviewed patch applied to the live checkout. It was not staged, committed, pushed, or merged.' });
+  } catch (error) {
+    fail(res, 409, error.message);
+  }
+});
+
+app.post('/api/source/coding/tasks/:id/reject', async (req, res) => {
+  try {
+    const task = await nativeCodingWorker.reject(req.params.id);
+    ok(res, { task, note: 'Proposal rejected and its isolated worktree removed.' });
+  } catch (error) {
+    fail(res, 409, error.message);
+  }
+});
+
+app.post('/api/source/coding/tasks/:id/cancel', (req, res) => {
+  try {
+    const task = nativeCodingWorker.cancel(req.params.id);
+    ok(res, { task, note: 'Cancellation requested. Model output will not be accepted.' });
+  } catch (error) {
+    fail(res, 409, error.message);
+  }
 });
 
 // Per-file side-by-side diff: committed (HEAD) content vs current working-tree

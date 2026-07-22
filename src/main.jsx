@@ -2796,6 +2796,8 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [sourceConfirmation, setSourceConfirmation] = useState(null);
   const [publicationCheck, setPublicationCheck] = useState(null);
   const [publicationCheckBusy, setPublicationCheckBusy] = useState(false);
+  const [coding, setCoding] = useState({ tasks: [], validations: {}, model: {}, activeTaskIds: [] });
+  const [codingDraft, setCodingDraft] = useState({ title: '', objective: '', allowedPaths: 'src', maxFilesChanged: 3, validation: 'frontend' });
 
   async function refreshInstallerBuild(announce = false) {
     try {
@@ -2838,6 +2840,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       try { setStashes((await api('/api/source/stash')).entries || []); } catch { /* stash list is best-effort */ }
       try { setTags((await api('/api/source/tags')).tags || []); } catch { /* tags are best-effort */ }
       try { setInstallerBuild(await api('/api/source/build-installer')); } catch { /* installer status is best-effort */ }
+      try { setCoding(await api('/api/source/coding/status')); } catch { /* coding worker status is best-effort */ }
       if (announce) setNotice('Source status refreshed.');
     } catch (err) {
       setNotice(err.message);
@@ -2918,6 +2921,21 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
       setNotice(err.message);
     } finally {
       setInstallerBusy(false);
+    }
+  }
+
+  async function createCodingTask() {
+    if (sourceBusy) return;
+    setSourceBusy(true);
+    try {
+      const result = await api('/api/source/coding/tasks', { method: 'POST', body: JSON.stringify(codingDraft) });
+      setNotice(result.note);
+      setCodingDraft((current) => ({ ...current, title: '', objective: '' }));
+      await refresh();
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setSourceBusy(false);
     }
   }
 
@@ -3009,6 +3027,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
     { id: 'changes', label: 'Changes', icon: FileText, badge: changedFiles.length || null },
     { id: 'history', label: 'History', icon: History, badge: null },
     { id: 'branches', label: 'Branches', icon: GitBranch, badge: null },
+    { id: 'coding', label: 'Local Coding', icon: Bot, badge: coding.tasks.filter((task) => task.status === 'review').length || null },
     { id: 'sync', label: 'Sync & Setup', icon: Upload, badge: null }
   ];
 
@@ -3294,6 +3313,65 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {tab === 'coding' && (
+        <div className="sc-tab-body">
+          <div className="source-warning info">
+            <strong>Native local coding worker</strong>
+            <small>{coding.policy || 'The worker edits only an isolated Git worktree, validates the result, and waits for separate patch approval.'}</small>
+          </div>
+          <div className="connection-grid">
+            <div><span>Endpoint</span><strong>{coding.model?.configured ? coding.model.source : 'Not ready'}</strong><small>{coding.model?.endpoint || 'Configure a local coding endpoint or start bundled llama.cpp.'}</small></div>
+            <div><span>Model</span><strong>{coding.model?.name || 'Not selected'}</strong><small>No Ollama or OpenHands dependency.</small></div>
+            <div><span>Active</span><strong>{coding.activeTaskIds?.length || 0}</strong><small>Single-flight mutation lock.</small></div>
+          </div>
+          <div className="panel">
+            <h2>Stage a coding task</h2>
+            <label>Title</label>
+            <input value={codingDraft.title} onChange={(event) => setCodingDraft({ ...codingDraft, title: event.target.value })} placeholder="Small, specific outcome" disabled={sourceBusy} />
+            <label>Objective and acceptance criteria</label>
+            <textarea value={codingDraft.objective} onChange={(event) => setCodingDraft({ ...codingDraft, objective: event.target.value })} placeholder="Describe the change and what must be true when it is complete." disabled={sourceBusy} />
+            <label>Allowed repository paths, one per line</label>
+            <textarea value={codingDraft.allowedPaths} onChange={(event) => setCodingDraft({ ...codingDraft, allowedPaths: event.target.value })} placeholder={'src/components\nserver/helper.js'} disabled={sourceBusy} />
+            <div className="inline-form">
+              <select value={codingDraft.validation} onChange={(event) => setCodingDraft({ ...codingDraft, validation: event.target.value })} disabled={sourceBusy}>
+                {Object.entries(coding.validations || {}).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              </select>
+              <select value={codingDraft.maxFilesChanged} onChange={(event) => setCodingDraft({ ...codingDraft, maxFilesChanged: Number(event.target.value) })} disabled={sourceBusy}>
+                {[1, 2, 3, 4, 5].map((count) => <option value={count} key={count}>Maximum {count} file{count === 1 ? '' : 's'}</option>)}
+              </select>
+              <button className="primary" onClick={createCodingTask} disabled={sourceBusy || !codingDraft.title.trim() || !codingDraft.objective.trim() || !codingDraft.allowedPaths.trim()}><Plus size={15} /> Stage task</button>
+            </div>
+          </div>
+          {(coding.tasks || []).length === 0 ? (
+            <Empty title="No local coding tasks" body="Stage a bounded task here. LPS will not run it until you approve its sealed scope." />
+          ) : (coding.tasks || []).map((task) => (
+            <div className="panel" key={task.id}>
+              <div className="panel-heading">
+                <h2>{task.title}</h2>
+                <Pill tone={task.status === 'review' ? 'warn' : task.status === 'applied' ? 'good' : ['failed', 'cancelled'].includes(task.status) ? 'bad' : 'default'}>{task.status}</Pill>
+              </div>
+              <p>{task.objective}</p>
+              <div className="connection-grid">
+                <div><span>Phase</span><strong>{task.phase}</strong></div>
+                <div><span>Scope</span><strong>{task.allowedPaths.join(', ')}</strong><small>Task hash {task.taskHash?.slice(0, 16)}</small></div>
+                <div><span>Validation</span><strong>{coding.validations?.[task.validation] || task.validation}</strong><small>Limit {task.maxFilesChanged} files</small></div>
+              </div>
+              {task.summary && <div className="source-warning info"><strong>Coder summary</strong><small>{task.summary}</small></div>}
+              {task.error && <div className="source-warning bad"><strong>Worker stopped safely</strong><small>{task.error}</small></div>}
+              {task.validationResult && <pre className="code-block compact-code">{task.validationResult.output}</pre>}
+              {task.diff && <pre className="code-block compact-code">{task.diff}</pre>}
+              <div className="decision-row">
+                {['pending', 'failed', 'interrupted', 'cancelled'].includes(task.status) && <button className="primary" onClick={() => requestSourceConfirmation({ title: `Run ${task.title}?`, detail: `Approve the sealed scope ${task.taskHash}. LPS will create an isolated worktree, send only approved file context to ${coding.model?.source || 'the configured local endpoint'}, validate the result, and stop for patch review.`, path: `/api/source/coding/tasks/${task.id}/run`, body: { taskHash: task.taskHash, approvedBy: 'user' }, success: 'Local coding task reached review or stopped safely.' })} disabled={sourceBusy || !coding.model?.configured || hasChanges}><Play size={15} /> Approve and run</button>}
+                {task.status === 'running' && <button className="danger" onClick={() => action(`/api/source/coding/tasks/${task.id}/cancel`, {}, 'Cancellation requested.')} disabled={sourceBusy}><X size={15} /> Cancel</button>}
+                {task.status === 'review' && <button className="primary" onClick={() => requestSourceConfirmation({ title: `Apply reviewed patch for ${task.title}?`, detail: `This approval is bound to patch ${task.patchHash}. The patch will be applied unstaged to the clean live checkout; LPS will not commit or push it.`, path: `/api/source/coding/tasks/${task.id}/apply`, body: { patchHash: task.patchHash, approvedBy: 'user' }, success: 'Reviewed coding patch applied unstaged.' })} disabled={sourceBusy || hasChanges}><Check size={15} /> Approve patch</button>}
+                {['pending', 'failed', 'interrupted', 'cancelled', 'review'].includes(task.status) && <button className="danger" onClick={() => requestSourceConfirmation({ title: `Reject ${task.title}?`, detail: 'The proposal and isolated worktree will be discarded. The live checkout will not change.', path: `/api/source/coding/tasks/${task.id}/reject`, body: {}, success: 'Coding proposal rejected.' })} disabled={sourceBusy}><Trash2 size={15} /> Reject</button>}
+              </div>
+              {task.audit?.length > 0 && <small>Latest governor evidence: {task.audit[task.audit.length - 1].verdict} / {task.audit[task.audit.length - 1].phase} / {task.audit[task.audit.length - 1].evidenceHash.slice(0, 16)}</small>}
+            </div>
+          ))}
         </div>
       )}
 
