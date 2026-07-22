@@ -274,9 +274,19 @@ export class NativeCodingWorker {
       task.phase = 'reading_approved_context'; this.save(task);
       const context = this.collectContext(worktree, task.allowedPaths);
       task.phase = 'local_coder_inference'; this.save(task);
+      // Optional browser/cloud advice arrives as UNTRUSTED context only. It is
+      // pre-validated by the caller (browserAssistedCoding.validateAdvice) and
+      // can never expand scope: resolveAllowed, the checker, and no-diff
+      // detection remain the only authorities. Absent advice, the prompt is
+      // byte-for-byte unchanged.
+      const adviceContext = typeof approval.adviceContext === 'string' && approval.adviceContext.trim()
+        ? approval.adviceContext.trim() : '';
+      const promptParts = [`Task: ${task.title}`, task.objective];
+      if (adviceContext) { promptParts.push('', adviceContext); task.adviceUsed = true; this.record(task, 'advice_context', 'allow', 'Untrusted browser advice attached as context; scope authority unchanged.'); }
+      promptParts.push('', 'Approved repository files:', ...context.map((file) => `\n--- ${file.path} ---\n${file.content}`));
       const response = await this.invokeModel({
         systemPrompt: buildNativeCodingSystemPrompt(task),
-        prompt: [`Task: ${task.title}`, task.objective, '', 'Approved repository files:', ...context.map((file) => `\n--- ${file.path} ---\n${file.content}`)].join('\n'),
+        prompt: promptParts.join('\n'),
         task,
         signal: controller.signal
       });
