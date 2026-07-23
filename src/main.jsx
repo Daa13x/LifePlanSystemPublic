@@ -3642,6 +3642,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [localModelName, setLocalModelName] = useState(settings.localModelName || 'planner-assistant');
   const [localCodeModelEndpoint, setLocalCodeModelEndpoint] = useState(settings.localCodeModelEndpoint || '');
   const [localCodeModelName, setLocalCodeModelName] = useState(settings.localCodeModelName || '');
+  const [localCodeModelLocalVerified, setLocalCodeModelLocalVerified] = useState(settings.localCodeModelLocalVerified === true);
   const [llamaCliPath, setLlamaCliPath] = useState(settings.llamaCliPath || '');
   const [llamaServerPath, setLlamaServerPath] = useState(settings.llamaServerPath || '');
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
@@ -3693,6 +3694,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           localModelName,
           localCodeModelEndpoint,
           localCodeModelName,
+          localCodeModelLocalVerified,
           llamaCliPath,
           llamaServerPath,
           llamaServerPort: Number(llamaServerPort),
@@ -3872,6 +3874,15 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         <input value={localCodeModelEndpoint} onChange={(event) => setLocalCodeModelEndpoint(event.target.value)} placeholder="Blank uses the chat endpoint or bundled llama.cpp" />
         <label>Optional coding-worker model name</label>
         <input value={localCodeModelName} onChange={(event) => setLocalCodeModelName(event.target.value)} placeholder="Blank uses the selected local model" />
+        <label className="temporary-chat-option">
+          <input
+            type="checkbox"
+            checked={localCodeModelLocalVerified}
+            onChange={(event) => setLocalCodeModelLocalVerified(event.target.checked)}
+          />
+          I confirm the configured coding/chat endpoint runs inference and model weights on this machine.
+        </label>
+        <small>Loopback alone is not proof. Leave this clear for a proxy or cloud-backed endpoint; branch/worktree coding authority will fail closed.</small>
         <label>llama-cli path</label>
         <input value={llamaCliPath} onChange={(event) => setLlamaCliPath(event.target.value)} placeholder="C:\\llama.cpp\\build\\bin\\llama-cli.exe" />
         <label>llama-server path</label>

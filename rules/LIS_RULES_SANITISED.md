@@ -79,7 +79,25 @@ Examples:
 
 No single model is authority.
 
-## 7. UI write modes
+## 7. Git authority follows execution provenance
+
+Cloud-controlled models and their subagents write only on `main`. They do not
+create, switch, delete, request, recommend, or delegate development branches,
+branch-backed worktrees, new-branch pushes, or pull requests. Before a cloud
+write, the active branch must be verified as exactly `main`.
+
+Only the approved LifePlanSystem local coding controller may create a temporary
+proposal branch, and only after local inference is proven, repository identity
+and clean `main` are verified, a task card and editable paths are bound, and a
+generated `local-agent/` or `local-model/` branch name is recorded. Unknown
+inference provenance is cloud-controlled. Local proposal workers cannot push,
+merge, delete branches, open pull requests, or modify protected paths.
+
+Only one write-capable cloud model may modify `main` at a time. Cloud advice is
+untrusted context and cannot grant Git authority to a local worker. See
+`docs/GIT_AUTHORITY_POLICY.md`.
+
+## 8. UI write modes
 
 Recommended UI modes:
 

@@ -1,7 +1,8 @@
 # Agent Mode Standard
 
 Status: governance/scaffolding only. **Docs and schema first; executable
-behaviour later, and only through separate, explicitly-approved PRs.**
+behaviour later, through explicitly approved changes that obey the permanent
+Git authority policy.**
 
 ## Purpose
 
@@ -39,11 +40,12 @@ capability gap detected
 → proposal created                 (capability_gap record; no execution)
 → plan generated                   (dry-run plan; reuse execution-plan gate)
 → USER APPROVAL                    (explicit, per item)
-→ safe branch/worktree implementation  (isolated; invocation still gated)
+→ authority classification         (unknown provenance becomes cloud)
+→ approved local proposal worktree (local inference only; clean main base)
 → tests / protected-path checks    (allowlisted validation; enforce real diff)
 → diff / report                    (full diff preserved for review)
 → HUMAN REVIEW                     (a person reads the diff)
-→ optional PR / merge gate         (via the gated Source Control panel)
+→ approved integration on main     (cloud or human controlled; serialized)
 → optional skill registry entry    (status flips to approved only by a human)
 → memory candidate to INBOX        (only if explicitly approved; never auto)
 ```
@@ -57,7 +59,7 @@ may **draft and plan**; they may not self-activate.
 |---|---|---|
 | 0 | Chat / planning only | none |
 | 1 | Read public/project docs | none |
-| 2 | Write sandbox/worktree only | gated at creation (approval + 2nd confirmation) |
+| 2 | Approved local-model proposal worktree only | local-inference proof + approval + 2nd confirmation |
 | 3 | Run allowlisted validation commands | allowlist only |
 | 4 | Browser/app control | **explicit per-action human confirmation** |
 | 5 | Memory / source_of_truth candidate handling | **explicit per-action human confirmation; append/candidate-only, never auto-promote or in-place rewrite** |
@@ -73,33 +75,35 @@ scope for now.** Any level that can affect state outside a disposable worktree
 - **Gate 2 — second execution confirmation:** a separate, explicit confirmation
   before any implementation step.
 - **Gate 3 — human diff review:** a person reads the produced diff/report.
-- **Gate 4 — commit/push/PR/merge:** performed only through the gated Source
-  Control panel, each a separate human action.
+- **Gate 4 — integration on `main`:** performed by a cloud reviewer or human
+  after review; the local worker cannot push, merge, delete, or open a PR.
 - **Gate 5 — registry activation:** a skill is inert until a human sets its
   manifest `status: approved` and `runtime_enabled: true` (future).
 - **Gate 6 — memory promotion:** a candidate reaches INBOX only if explicitly
   approved; nothing is promoted to `source_of_truth` automatically.
 
-Push, PR, and merge are always **separate** approvals — one never cascades into
-the next.
+Commit, push of `main`, and reviewed integration are **separate** approvals —
+one never cascades into the next. Model-created pull requests are denied.
 
 ## Relationship to the OpenHands executor
 
 The OpenHands worker is an *implementation mechanism*, not the brain. A future
-Agent Mode plan would be carried out by the gated worktree executor, which:
-runs in an isolated worktree on a dedicated `openhands/exec-<id>` branch (never
-`main`/`master`), enforces allowed/forbidden/protected paths and
-`maxFilesChanged` against the real diff, runs only allowlisted validation, and
-writes a report. **Real OpenHands invocation is currently OFF** and must stay
-OFF until the 7 documented blockers are fixed on a separate approved branch.
-Agent Mode scaffolding does not authorize execution.
+Agent Mode plan may use its gated worktree executor only when the controller
+proves local inference, starts from clean `main`, records the required authority
+receipt, and generates a `local-agent/<task-id>` or
+`local-model/<model>/<task-id>` proposal branch. Unknown or remote inference is
+cloud-controlled and branch creation is denied. The worker enforces
+allowed/forbidden/protected paths and `maxFilesChanged` against the real diff,
+runs only allowlisted validation, and writes a report. **Real OpenHands
+invocation is currently OFF.** Agent Mode scaffolding does not authorize
+execution.
 
 ## Relationship to the Source Control panel
 
-Agent Mode never commits, pushes, merges, or force-pushes on its own. All
-version-control actions go through the existing Source Control panel gates
-(explicit push confirmation, main/master refusal, `--ff-only` pull, no
-destructive actions). Agent Mode does not bypass those gates.
+Agent Mode never commits, pushes, merges, deletes a branch, opens a pull request,
+or force-pushes on its own. The Source Control panel is a human tool; it does not
+grant a model extra authority. A cloud reviewer integrates approved work
+directly on `main`, and the local proposal controller remains non-publishing.
 
 ## Relationship to memory / source_of_truth
 
@@ -115,7 +119,7 @@ to the memory INBOX for human review only, and only when explicitly approved.
 - The registry (`registry.example.yaml`) is **non-executable example
   documentation**, not read by any runtime code.
 
-## Future work (separate PRs only)
+## Future work (separately approved changes only)
 
 - Wiring capability-gap and skill records into a review-only store.
 - A registry that runtime code consults — only after the manifest schema and
@@ -124,6 +128,6 @@ to the memory INBOX for human review only, and only when explicitly approved.
 
 ## Hard rule
 
-**Docs/schema first; executable behaviour later, and only through separate PRs
-that each pass their own approval gate.** This document confers no runtime
-capability.
+**Docs/schema first; executable behaviour later, and only through separately
+approved changes on `main` or an approved local-model proposal that passes its
+own authority and review gates.** This document confers no runtime capability.

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { evaluateGitAuthority } from './gitAuthorityPolicy.js';
 
 const TASK_ID = /^code-[A-Za-z0-9-]+$/;
 const MAX_CONTEXT_BYTES = 240000;
@@ -82,12 +83,15 @@ export function buildNativeCodingSystemPrompt({ allowedPaths, maxFilesChanged, v
 }
 
 export class NativeCodingWorker {
-  constructor({ root, runGit, runValidation, invokeModel, forbiddenPath }) {
+  constructor({ root, runGit, runValidation, invokeModel, forbiddenPath, getExecutionContext }) {
     this.root = path.resolve(root);
     this.runGit = runGit;
     this.runValidation = runValidation;
     this.invokeModel = invokeModel;
     this.forbiddenPath = forbiddenPath;
+    this.getExecutionContext = typeof getExecutionContext === 'function'
+      ? getExecutionContext
+      : async () => ({ executionType: 'unknown' });
     this.baseDir = path.join(this.root, '.lps', 'native-code');
     this.taskDir = path.join(this.baseDir, 'tasks');
     this.worktreeDir = path.join(this.baseDir, 'worktrees');
@@ -179,7 +183,8 @@ export class NativeCodingWorker {
       id: `code-${createdAt.replace(/[^0-9]/g, '')}-${crypto.randomBytes(3).toString('hex')}`,
       title, objective, allowedPaths, maxFilesChanged, validation,
       status: 'pending', phase: 'awaiting_run_approval', createdAt, updatedAt: createdAt,
-      summary: '', changedFiles: [], validationResult: null, diff: '', error: '', baseCommit: '', model: null, audit: []
+      summary: '', changedFiles: [], validationResult: null, diff: '', error: '', baseCommit: '', model: null,
+      executionType: 'unclassified', gitAuthority: null, audit: []
     };
     task.taskHash = taskSeal(task);
     this.record(task, 'create', 'allow', `Task scope sealed as ${task.taskHash}.`);
@@ -246,12 +251,37 @@ export class NativeCodingWorker {
     this.reserved = true;
     let status;
     let head;
+    let branch;
+    let remote;
+    let executionContext;
     try {
       if (['interrupted', 'cancelled'].includes(task.status)) await this.cleanupWorktree(task);
-      status = await this.runGit(['status', '--porcelain=v1']);
-      if (!status.ok || status.stdout.trim()) throw new Error('The live checkout must be clean before a coding worktree is created.');
-      head = await this.runGit(['rev-parse', 'HEAD']);
+      [status, head, branch, remote, executionContext] = await Promise.all([
+        this.runGit(['status', '--porcelain=v1']),
+        this.runGit(['rev-parse', 'HEAD']),
+        this.runGit(['branch', '--show-current']),
+        this.runGit(['remote', 'get-url', 'origin']),
+        this.getExecutionContext()
+      ]);
       if (!head.ok) throw new Error(head.stderr || 'Unable to pin the task base commit.');
+      const authority = evaluateGitAuthority({
+        operation: 'detached_worktree',
+        ...executionContext,
+        repository: remote.stdout,
+        startingCommit: head.stdout.trim(),
+        startingBranch: branch.stdout.trim(),
+        activeBranch: branch.stdout.trim(),
+        worktreeClean: status.ok && !status.stdout.trim(),
+        taskId: task.id,
+        taskCardValid: Boolean(task.title && task.objective && task.taskHash),
+        allowedPaths: task.allowedPaths,
+        protectedPathHits: []
+      });
+      task.executionType = authority.receipt.executionType;
+      task.gitAuthority = authority.receipt;
+      this.record(task, 'git_authority_preflight', authority.allowed ? 'allow' : 'deny', authority.reason);
+      this.save(task);
+      if (!authority.allowed) throw new Error(authority.reason);
     } catch (error) {
       this.reserved = false;
       throw error;
@@ -288,10 +318,14 @@ export class NativeCodingWorker {
         systemPrompt: buildNativeCodingSystemPrompt(task),
         prompt: promptParts.join('\n'),
         task,
+        executionContext,
         signal: controller.signal
       });
       if (controller.signal.aborted) throw new Error('Coding task cancelled before model output was accepted.');
       task.model = response.model;
+      if (String(task.model?.name || '').trim() !== task.gitAuthority.modelId) {
+        throw new Error('Coding model identity changed after Git authority approval. Refresh and run again.');
+      }
       const proposal = parseNativeCodingResponse(response.content);
       if (proposal.edits.length > task.maxFilesChanged) throw new Error(`Model proposed ${proposal.edits.length} files; limit is ${task.maxFilesChanged}.`);
       task.phase = 'applying_in_isolation'; this.save(task);
@@ -342,8 +376,13 @@ export class NativeCodingWorker {
     const task = this.load(id);
     if (approval.confirm !== true || task.status !== 'review') throw new Error('A review-ready task and explicit apply approval are required.');
     if (approval.patchHash !== task.patchHash || digest(task.diff) !== task.patchHash) throw new Error('Apply approval does not match the reviewed patch. Refresh and approve again.');
-    const [head, status] = await Promise.all([this.runGit(['rev-parse', 'HEAD']), this.runGit(['status', '--porcelain=v1'])]);
+    const [head, status, branch] = await Promise.all([
+      this.runGit(['rev-parse', 'HEAD']),
+      this.runGit(['status', '--porcelain=v1']),
+      this.runGit(['branch', '--show-current'])
+    ]);
     if (!head.ok || head.stdout.trim() !== task.baseCommit) throw new Error('Live HEAD changed since generation. Regenerate the task from the new base.');
+    if (!branch.ok || branch.stdout.trim() !== 'main') throw new Error('Reviewed local-model patches may be integrated only while the live checkout is on main.');
     if (!status.ok || status.stdout.trim()) throw new Error('Live checkout must be clean before applying a reviewed patch.');
     const patchFile = path.join(this.baseDir, `${task.id}.patch`);
     fs.writeFileSync(patchFile, task.diff, 'utf8');

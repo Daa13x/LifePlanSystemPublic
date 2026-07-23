@@ -226,11 +226,12 @@ try {
     try { const r = await execFileAsync('git', args, { cwd: gitRepo, windowsHide: true, maxBuffer: 8 * 1024 * 1024 }); return { ok: true, stdout: String(r.stdout || ''), stderr: String(r.stderr || '') }; }
     catch (e) { return { ok: false, stdout: String(e.stdout || ''), stderr: String(e.stderr || e.message) }; }
   };
-  await git(['init']); await git(['config', 'user.name', 'v']); await git(['config', 'user.email', 'v@example.invalid']);
+  await git(['init', '-b', 'main']); await git(['config', 'user.name', 'v']); await git(['config', 'user.email', 'v@example.invalid']);
   fs.mkdirSync(path.join(gitRepo, 'src'));
   fs.writeFileSync(path.join(gitRepo, 'src', 'valueHost.js'), 'export const valueHost = 1;\n');
   fs.writeFileSync(path.join(gitRepo, '.gitignore'), '.lps/\n');
   await git(['add', '.']); await git(['commit', '-m', 'fixture']);
+  await git(['remote', 'add', 'origin', 'https://github.com/Daa13x/LifePlanSystemPublic.git']);
 
   let capturedPrompt = '';
   const bacWorker = new NativeCodingWorker({
@@ -238,7 +239,12 @@ try {
     runGit: (args) => git(args),
     runValidation: async ({ worktree, changedFiles }) => ({ ok: changedFiles.length === 1 && changedFiles.every((f) => fs.existsSync(path.join(worktree, f))), output: 'PASS', checks: [{ name: 'fixture', ok: true }] }),
     invokeModel: async ({ prompt }) => { capturedPrompt = prompt; return { model: { name: 'fake', endpoint: 'http://127.0.0.1:1', source: 'test' }, content: JSON.stringify({ summary: 'set to 2', edits: [{ path: 'src/valueHost.js', content: 'export const valueHost = 2;\n' }] }) }; },
-    forbiddenPath: forbidden
+    forbiddenPath: forbidden,
+    getExecutionContext: async () => ({
+      executionType: 'local', modelProvider: 'fixture-local-model', modelId: 'fake',
+      inferenceEndpoint: 'http://127.0.0.1:1', localInferenceVerified: true,
+      branchCreator: 'lifeplansystem-native-coding-controller'
+    })
   });
   const bacTask = bacWorker.create({ title: 'Update valueHost', objective: 'Change valueHost to 2.', allowedPaths: ['src/valueHost.js'], maxFilesChanged: 1 });
   bacTask.namedTargets = ['valueHost'];

@@ -47,6 +47,16 @@ Two rules govern the whole design:
 2. **Only the Checker may declare success.** Not the cloud assistant, not the
    coding model, and not the absence of an error.
 
+### Git authority is not transferred with advice
+
+Browser advice is cloud-originated, so it cannot create, recommend, or delegate
+a Git branch. The cloud assistant remains restricted to `main`. A local coding
+worker may use a temporary proposal branch only when the LifePlanSystem
+controller independently proves local inference and satisfies
+`docs/GIT_AUTHORITY_POLICY.md`; otherwise the workflow is classified as cloud
+and branch/worktree creation is refused. Advice can never contain authoritative
+Git commands or expand the task card, editable paths, or permissions.
+
 ---
 
 ## 2. Step 1 — Build workspace evidence before asking anything

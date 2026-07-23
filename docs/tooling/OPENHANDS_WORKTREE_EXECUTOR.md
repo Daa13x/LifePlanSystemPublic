@@ -15,7 +15,8 @@ or edited in this build.
 2. Extra guards: execution branch is never `main`/`master`, never the user's
    current branch, and must not already exist.
 3. Create an **isolated git worktree** at `.lps/tooling/openhands/worktrees/<id>`
-   on a dedicated `openhands/exec-<id>` branch from the pinned `baseBranch`
+   on a controller-generated `local-agent/<id>` branch from pinned `main`, only
+   after local inference provenance passes the Git authority gate
    commit, never from the caller's current `HEAD`. The main working tree,
    main/master, and the user's current branch are never touched.
 4. Invoke OpenHands — **disabled**; records `invoked: false` and makes no edits.
@@ -283,7 +284,7 @@ commits or pushes.
   reported as setup-gated. This slice deliberately does not install, copy, or
   link dependencies; choosing such a provisioning strategy remains a separate
   approval decision. `node --check` works as-is.
-- Executor-created `openhands/exec-<id>` branches are never auto-deleted; a
+- Controller-created `local-agent/<id>` branches are never auto-deleted; a
   future human-gated cleanup can prune them. Preserved worktrees also require a
   human-gated cleanup after review.
 

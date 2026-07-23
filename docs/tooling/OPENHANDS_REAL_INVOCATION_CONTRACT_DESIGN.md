@@ -73,7 +73,7 @@ consumed by any code in this PR:
 ```jsonc
 {
   "requestId": "oh-req-<timestamp>-<n>",
-  "branch": "openhands/exec-<requestId>",   // dedicated exec branch (never main/master)
+  "branch": "local-agent/<requestId>",     // controller-generated local proposal branch from main
   "baseBranch": "main",                      // read-only reference
   "baseCommit": "<pinned 40-hex sha>",       // resolved, recorded, never HEAD
   "worktreePath": ".lps/tooling/openhands/worktrees/<requestId>",

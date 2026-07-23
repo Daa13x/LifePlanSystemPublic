@@ -26,6 +26,7 @@ import {
 import { resolveRunCliCwd } from './runCliCwd.js';
 import { chromeProfileArgument, probeChromeExtension } from './browserExtensionInstall.js';
 import { NativeCodingWorker, NATIVE_CODING_VALIDATIONS } from './nativeCodingWorker.js';
+import { evaluateGitAuthority, generatedLocalBranch } from './gitAuthorityPolicy.js';
 import {
   canUseGitHubToken,
   detectHighConfidenceSecrets,
@@ -2475,11 +2476,23 @@ async function nativeCodingModelConfig(startIfNeeded = false) {
   const candidate = codeEndpoint || chatEndpoint || runtime.managedEndpoint || '';
   const endpoint = candidate && isLoopbackEndpoint(candidate) ? candidate : '';
   const model = String(getSetting('localCodeModelName', '') || getSetting('localModelName', '') || runtime.model?.name || 'planner-coder').trim();
-  return { endpoint: endpoint.replace(/\/+$/, ''), model, source: endpoint ? (codeEndpoint ? 'coding endpoint' : chatEndpoint ? 'chat endpoint fallback' : 'bundled llama.cpp') : 'unavailable', rejectedRemoteEndpoint: Boolean(candidate && !endpoint) };
+  const source = endpoint ? (codeEndpoint ? 'coding endpoint' : chatEndpoint ? 'chat endpoint fallback' : 'bundled llama.cpp') : 'unavailable';
+  const bundledRuntimeVerified = source === 'bundled llama.cpp' && runtime.managedServerReady === true;
+  const configuredRuntimeVerified = ['coding endpoint', 'chat endpoint fallback'].includes(source)
+    && getSetting('localCodeModelLocalVerified', false) === true;
+  return {
+    endpoint: endpoint.replace(/\/+$/, ''),
+    model,
+    source,
+    provider: bundledRuntimeVerified ? 'llama.cpp' : 'local-openai-compatible',
+    localInferenceVerified: Boolean(endpoint && (bundledRuntimeVerified || configuredRuntimeVerified)),
+    verificationSource: bundledRuntimeVerified ? 'managed bundled runtime' : configuredRuntimeVerified ? 'explicit user verification' : 'unverified',
+    rejectedRemoteEndpoint: Boolean(candidate && !endpoint)
+  };
 }
 
-async function invokeNativeCodingModel({ systemPrompt, prompt, signal }) {
-  const config = await nativeCodingModelConfig(true);
+async function invokeNativeCodingModel({ systemPrompt, prompt, signal, executionContext }) {
+  const config = executionContext?.endpoint ? executionContext : await nativeCodingModelConfig(true);
   if (!config.endpoint) throw new Error(config.rejectedRemoteEndpoint ? 'Coding worker refused a non-loopback endpoint. Source code is sent only to localhost.' : 'No OpenAI-compatible coding endpoint is ready. Configure a coding model or start the bundled llama.cpp runtime.');
   const url = config.endpoint.endsWith('/v1/chat/completions')
     ? config.endpoint
@@ -2562,7 +2575,18 @@ const nativeCodingWorker = new NativeCodingWorker({
   runGit: (args) => runCli('git', args, { timeout: 2 * 60 * 1000, maxBuffer: 16 * 1024 * 1024, preserveOutput: true }),
   runValidation: validateNativeCodingWorktree,
   invokeModel: invokeNativeCodingModel,
-  forbiddenPath: (candidate) => violatesMandatoryForbidden(candidate) || isProtectedWorkspacePath(candidate)
+  forbiddenPath: (candidate) => violatesMandatoryForbidden(candidate) || isProtectedWorkspacePath(candidate),
+  getExecutionContext: async () => {
+    const config = await nativeCodingModelConfig(true);
+    return {
+      ...config,
+      executionType: 'local',
+      modelProvider: config.provider,
+      modelId: config.model,
+      inferenceEndpoint: config.endpoint,
+      branchCreator: 'lifeplansystem-native-coding-controller'
+    };
+  }
 });
 
 async function publishedHfFileMetadata(repo, file, token) {
@@ -3329,11 +3353,21 @@ function openHandsExecConfig() {
   const port = Number(getSetting('llamaServerPort', 8080) || 8080);
   const endpoint = configuredEndpoint || (managedLlamaServerReady ? `http://127.0.0.1:${port}` : '');
   const model = String(getSetting('localCodeModelName', '') || getSetting('localModelName', 'planner-assistant') || 'planner-assistant').trim();
+  const source = codeEndpoint ? 'coding-worker endpoint' : chatEndpoint ? 'chat endpoint fallback' : managedLlamaServerReady ? 'bundled llama.cpp' : 'not ready';
+  const bundledRuntimeVerified = source === 'bundled llama.cpp' && isLoopbackEndpoint(endpoint);
+  const configuredRuntimeVerified = ['coding-worker endpoint', 'chat endpoint fallback'].includes(source)
+    && isLoopbackEndpoint(endpoint)
+    && getSetting('localCodeModelLocalVerified', false) === true;
   return {
     model: `openai/${model}`,
+    modelId: model,
+    modelProvider: bundledRuntimeVerified ? 'llama.cpp' : 'local-openai-compatible',
     baseUrl: dockerAccessibleEndpoint(endpoint),
+    inferenceEndpoint: endpoint,
+    localInferenceVerified: bundledRuntimeVerified || configuredRuntimeVerified,
+    verificationSource: bundledRuntimeVerified ? 'managed bundled runtime' : configuredRuntimeVerified ? 'explicit user verification' : 'unverified',
     apiKeyRef: 'LPS-managed OpenAI-compatible endpoint credential',
-    source: codeEndpoint ? 'coding-worker endpoint' : chatEndpoint ? 'chat endpoint fallback' : managedLlamaServerReady ? 'bundled llama.cpp' : 'not ready'
+    source
   };
 }
 
@@ -3452,17 +3486,18 @@ app.get('/api/tooling/openhands/requests', (_req, res) => {
 
 let openHandsRequestSeq = 1;
 
-app.post('/api/tooling/openhands/requests', (req, res) => {
+app.post('/api/tooling/openhands/requests', async (req, res) => {
   if (!openHandsEnabled()) return fail(res, 409, 'OpenHands is optional and disabled. Enable it before creating worker requests.');
   const title = String(req.body.title || '').trim();
   const objective = String(req.body.objective || '').trim();
   if (!title) return fail(res, 400, 'Request title is required.');
   if (!objective) return fail(res, 400, 'Request objective is required.');
 
-  const targetRepoPath = String(req.body.targetRepoPath || '').trim() || root;
+  const targetRepoPath = root;
   const baseBranchCheck = validateExecutorBaseBranch(req.body.baseBranch || 'main');
   if (!baseBranchCheck.ok) return fail(res, 400, `Request rejected: ${baseBranchCheck.reason}.`);
   const baseBranch = baseBranchCheck.baseBranch;
+  if (baseBranch !== 'main') return fail(res, 403, 'Request rejected: approved local-model proposals must start from main.');
   const allowedPaths = (Array.isArray(req.body.allowedPaths) ? req.body.allowedPaths : String(req.body.allowedPaths || '').split('\n'))
     .map((item) => String(item).trim()).filter(Boolean);
   const forbiddenPaths = (Array.isArray(req.body.forbiddenPaths) ? req.body.forbiddenPaths : String(req.body.forbiddenPaths || '').split('\n'))
@@ -3503,6 +3538,37 @@ app.post('/api/tooling/openhands/requests', (req, res) => {
     status: 'pending',
     reportPath: ''
   };
+
+  const [origin, currentBranch, startingCommit, worktreeStatus] = await Promise.all([
+    runCli('git', ['remote', 'get-url', 'origin']),
+    runCli('git', ['branch', '--show-current']),
+    runCli('git', ['rev-parse', 'HEAD']),
+    runCli('git', ['status', '--porcelain=v1'])
+  ]);
+  const modelConfig = openHandsExecConfig();
+  const gitAuthority = evaluateGitAuthority({
+    operation: 'branch_worktree',
+    executionType: 'local',
+    modelProvider: modelConfig.modelProvider,
+    modelId: modelConfig.modelId,
+    inferenceEndpoint: modelConfig.inferenceEndpoint,
+    localInferenceVerified: modelConfig.localInferenceVerified,
+    branchCreator: 'lifeplansystem-openhands-controller',
+    repository: origin.stdout,
+    startingCommit: startingCommit.stdout,
+    startingBranch: currentBranch.stdout,
+    activeBranch: currentBranch.stdout,
+    worktreeClean: worktreeStatus.ok && !worktreeStatus.stdout.trim(),
+    taskId: id,
+    taskCardValid: true,
+    allowedPaths,
+    protectedPathHits: blockedAllowed,
+    targetBranch: proposedExecutionBranch(id)
+  });
+  request.executionType = gitAuthority.receipt.executionType;
+  request.gitAuthority = gitAuthority.receipt;
+  request.gitAuthorityPolicyEligible = gitAuthority.allowed;
+  request.gitAuthorityReason = gitAuthority.reason;
 
   fs.mkdirSync(OPENHANDS_REQUEST_DIR, { recursive: true });
   fs.mkdirSync(OPENHANDS_REPORT_DIR, { recursive: true });
@@ -3695,8 +3761,7 @@ const PROTECTED_EXEC_BRANCHES = ['main', 'master'];
 // Fixed OpenHands wiring — request JSON can never override any of this.
 
 function proposedExecutionBranch(id) {
-  const suffix = String(id).replace(/[^A-Za-z0-9._-]/g, '').slice(-40);
-  return `openhands/exec-${suffix}`;
+  return generatedLocalBranch({ taskId: String(id), namespace: 'agent' });
 }
 
 async function branchExists(name) {
@@ -3746,6 +3811,8 @@ async function evaluateExecutionPlan(request) {
   const baseBranch = baseCheck.baseBranch;
   const baseSyntaxOk = pass('base_branch_ref_syntax', baseCheck.ok,
     baseCheck.ok ? `base branch "${baseBranch}" is syntactically safe` : `BLOCKED - ${baseCheck.reason}`);
+  const baseIsMain = pass('base_branch_main', baseCheck.ok && baseBranch === 'main',
+    baseBranch === 'main' ? 'approved local proposals start from main' : `BLOCKED - base branch is ${baseBranch || '(missing)'}, not main`);
   const createdBaseBranch = String(request.baseBranchAtCreation || '');
   const baseCreatedPinned = pass('base_branch_creation_pin', baseCheck.ok && createdBaseBranch === baseBranch,
     createdBaseBranch
@@ -3782,9 +3849,36 @@ async function evaluateExecutionPlan(request) {
   const validationAllowlisted = pass('validation_command_allowlisted', Boolean(RUNNER_VALIDATION_ALLOWLIST[validationKey]),
     RUNNER_VALIDATION_ALLOWLIST[validationKey] ? `post-change validation would run: ${validationKey}` : `"${requested}" is not allowlisted — arbitrary commands are refused`);
 
+  const [currentBranch, worktreeStatus, origin] = await Promise.all([
+    runCli('git', ['branch', '--show-current']),
+    runCli('git', ['status', '--porcelain=v1']),
+    runCli('git', ['remote', 'get-url', 'origin'])
+  ]);
+  const modelConfig = openHandsExecConfig();
+  const gitAuthority = evaluateGitAuthority({
+    operation: 'branch_worktree',
+    executionType: 'local',
+    modelProvider: modelConfig.modelProvider,
+    modelId: modelConfig.modelId,
+    inferenceEndpoint: modelConfig.inferenceEndpoint,
+    localInferenceVerified: modelConfig.localInferenceVerified,
+    branchCreator: 'lifeplansystem-openhands-controller',
+    repository: origin.stdout,
+    startingCommit: baseResolution.sha,
+    startingBranch: currentBranch.stdout,
+    activeBranch: currentBranch.stdout,
+    worktreeClean: worktreeStatus.ok && !worktreeStatus.stdout.trim(),
+    taskId: request.id,
+    taskCardValid: Boolean(request.title && request.objective && allowedPaths.length),
+    allowedPaths,
+    protectedPathHits: protectedHits,
+    targetBranch: execBranch
+  });
+  const gitAuthorityAllowed = pass('git_authority_policy', gitAuthority.allowed, gitAuthority.reason);
+
   const eligible = approved && confirmed && allowedNonEmpty && protectedClean && baseSyntaxOk
-    && baseCreatedPinned && baseApprovedPinned && baseConfirmedPinned && baseRefResolves
-    && execNameSafe && execBranchFree && maxFilesSane && validationAllowlisted;
+    && baseIsMain && baseCreatedPinned && baseApprovedPinned && baseConfirmedPinned && baseRefResolves
+    && execNameSafe && execBranchFree && maxFilesSane && validationAllowlisted && gitAuthorityAllowed;
 
   return {
     eligible,
@@ -3794,7 +3888,8 @@ async function evaluateExecutionPlan(request) {
       executionBranch: execBranch,
       baseBranch,
       baseCommit: baseResolution.sha,
-      isolation: 'dedicated git worktree/branch from the pinned base branch (not created in this dry run)',
+      isolation: 'approved local-model proposal worktree/branch from pinned main (not created in this dry run)',
+      gitAuthority: gitAuthority.receipt,
       allowedPaths,
       forbiddenPaths,
       maxFilesChanged: maxFiles,
@@ -3906,6 +4001,9 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
     `- Isolation: ${evaluation.plan.isolation}`,
     `- Base reference (pinned, read-only): ${evaluation.plan.baseBranch || '(invalid)'}`,
     `- Base commit: ${evaluation.plan.baseCommit || '(not resolved)'}`,
+    `- Git authority: ${evaluation.plan.gitAuthority.executionType} via ${evaluation.plan.gitAuthority.branchCreator}`,
+    `- Model: ${evaluation.plan.gitAuthority.modelProvider} / ${evaluation.plan.gitAuthority.modelId}`,
+    `- Repository: ${evaluation.plan.gitAuthority.repository}`,
     '',
     '## Safety gates',
     gateLines,
@@ -3965,6 +4063,10 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
   request.executionEligible = planEligible;
   request.executionPlannedBaseBranch = evaluation.plan.baseBranch;
   request.executionPlannedBaseCommit = evaluation.plan.baseCommit;
+  request.executionType = evaluation.plan.gitAuthority.executionType;
+  request.gitAuthority = evaluation.plan.gitAuthority;
+  request.gitAuthorityPolicyEligible = evaluation.gates.find((gate) => gate.gate === 'git_authority_policy')?.ok === true;
+  request.gitAuthorityReason = evaluation.gates.find((gate) => gate.gate === 'git_authority_policy')?.detail || '';
   request.executionToolConstraintsOk = toolConstraints.ok;
   request.executionToolConstraintsReason = toolConstraints.reason;
   request.invocationReadinessOk = readiness.ok;
@@ -3991,7 +4093,8 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
 // change-enforcement + validation + report flow, but the actual OpenHands
 // invocation is DISABLED behind this server-side constant. Nothing here edits
 // the user's working tree, main/master, or the user's current branch: all work
-// happens in a throwaway git worktree on a dedicated openhands/exec-<id> branch.
+// happens in a throwaway git worktree on a policy-generated local-agent/<id>
+// branch, and only after local inference provenance is verified.
 const OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false;
 const OPENHANDS_WORKTREE_DIR = path.join(LPS_TOOLING_DIR, 'worktrees');
 
@@ -4055,6 +4158,10 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
   if (!evaluation.eligible) {
     return fail(res, 403, `Executor refused: not eligible. Blocked gates: ${evaluation.gates.filter((g) => !g.ok).map((g) => g.gate).join(', ')}. Approve, confirm execution, and fix paths first.`);
   }
+  request.executionType = evaluation.plan.gitAuthority.executionType;
+  request.gitAuthority = evaluation.plan.gitAuthority;
+  request.gitAuthorityPolicyEligible = true;
+  request.gitAuthorityReason = evaluation.gates.find((gate) => gate.gate === 'git_authority_policy')?.detail || '';
   const toolConstraints = buildOpenHandsInvocationConstraints({
     request,
     plan: evaluation.plan,

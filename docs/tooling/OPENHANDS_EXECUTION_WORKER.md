@@ -23,8 +23,8 @@ every safety gate before any real code-editing executor is built.
 - `protected_path_scan` — no allowed/forbidden path may touch
   `source_of_truth/`, `memory/`, `.env`, `secrets/`, `data/`, `rules/`,
   `.git/`, `.lps/`, or `credentials`.
-- `execution_branch_not_main_master` — work would use a dedicated branch
-  `openhands/exec-<id>`, never `main`/`master`.
+- `execution_branch_not_main_master` — a proven-local worker would use the
+  controller-generated `local-agent/<id>` proposal branch from `main`.
 - `execution_branch_available` — that branch must not already exist.
 - `max_files_changed` — must be 1–5.
 - `validation_command_allowlisted` — post-change validation must be

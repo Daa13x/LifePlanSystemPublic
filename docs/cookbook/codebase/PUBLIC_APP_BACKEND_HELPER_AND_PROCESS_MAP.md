@@ -338,7 +338,7 @@ Request files are stored under `.lps/tooling/openhands/requests`; reports and pa
 
 | Function | Responsibility |
 |---|---|
-| `proposedExecutionBranch(id)` | Builds dedicated `openhands/exec-*` branch |
+| `proposedExecutionBranch(id)` | Builds controller-owned `local-agent/*` proposal branch |
 | `branchExists(name)` | Checks local branch ref |
 | `resolveBaseBranchCommit(baseBranch)` | Resolves validated base branch to full commit SHA |
 | `normalizeStoredBaseBranch(request)` | Revalidates and normalises stored base branch |

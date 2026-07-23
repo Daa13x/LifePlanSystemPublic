@@ -25,6 +25,10 @@ fields are blank they fall back to the chat endpoint or bundled llama.cpp.
   disabled. Future invocation remains disabled by the server safety boundary.
 - Future worker configuration is server-derived. Request JSON cannot choose an
   endpoint, model, key, branch, or protected path.
+- A configured loopback endpoint must also be explicitly verified as on-machine
+  inference before it receives local-model Git authority. Unknown provenance is
+  cloud-controlled. Cloud/browser advice never grants branch authority; see
+  `docs/GIT_AUTHORITY_POLICY.md`.
 
 ## Cloud consultation flow
 

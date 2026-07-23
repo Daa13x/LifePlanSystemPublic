@@ -18,7 +18,7 @@ const run = async (command, args, cwd = temp) => {
 };
 
 try {
-  await run('git', ['init']);
+  await run('git', ['init', '-b', 'main']);
   await run('git', ['config', 'user.name', 'LPS verifier']);
   await run('git', ['config', 'user.email', 'lps-verifier@example.invalid']);
   fs.mkdirSync(path.join(temp, 'src'));
@@ -26,6 +26,7 @@ try {
   fs.writeFileSync(path.join(temp, '.gitignore'), '.lps/\n');
   await run('git', ['add', '.']);
   await run('git', ['commit', '-m', 'fixture']);
+  await run('git', ['remote', 'add', 'origin', 'https://github.com/Daa13x/LifePlanSystemPublic.git']);
 
   let modelMode = 'valid';
   const worker = new NativeCodingWorker({
@@ -44,7 +45,15 @@ try {
           ? JSON.stringify({ summary: 'Add the fixture.', edits: [{ path: 'src/new.js', content: 'export const added = true;\n' }] })
           : JSON.stringify({ summary: 'Escape scope.', edits: [{ path: 'outside.js', content: 'bad\n' }] })
     }),
-    forbiddenPath: (candidate) => candidate.startsWith('.git') || candidate.startsWith('.lps') || candidate.startsWith('data')
+    forbiddenPath: (candidate) => candidate.startsWith('.git') || candidate.startsWith('.lps') || candidate.startsWith('data'),
+    getExecutionContext: async () => ({
+      executionType: 'local',
+      modelProvider: 'fixture-local-model',
+      modelId: 'fake-local-coder',
+      inferenceEndpoint: 'http://127.0.0.1:1',
+      localInferenceVerified: true,
+      branchCreator: 'lifeplansystem-native-coding-controller'
+    })
   });
 
   assert.throws(() => parseNativeCodingResponse('not json'), /valid JSON/);

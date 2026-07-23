@@ -408,7 +408,7 @@ validation command is allowlisted
 Proposed branch:
 
 ```text
-openhands/exec-<request-id-suffix>
+local-agent/<request-id>
 ```
 
 The plan also builds future invocation constraints and readiness checks, probes OpenHands HTTP reachability, and evaluates whether worktree validation dependencies would be present.
@@ -481,7 +481,7 @@ It refuses:
 It creates:
 
 ```text
-git worktree add -b openhands/exec-<id> <worktree-path> -- <pinned-base-commit>
+git worktree add -b local-agent/<id> <worktree-path> -- <pinned-main-commit>
 ```
 
 The worktree is under `.lps/tooling/openhands/worktrees/` and starts from the pinned commit, not the caller's current HEAD.
