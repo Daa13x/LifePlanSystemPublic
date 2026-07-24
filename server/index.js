@@ -1887,9 +1887,25 @@ async function refreshPlannerState() {
 
 app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: dbPath }));
 
+// Build provenance embedded at build time (public/build-info.json -> dist/).
+// Read from the built dist first (installed/portable app), then the source
+// public/ folder (dev). Never throws; returns unknowns if absent.
+function readBuildInfo() {
+  for (const candidate of [path.join(root, 'dist', 'build-info.json'), path.join(root, 'public', 'build-info.json')]) {
+    try {
+      const info = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+      return { source: 'embedded', ...info };
+    } catch { /* try next */ }
+  }
+  return { source: 'unavailable', version: null, commit: 'unknown', shortCommit: 'unknown', buildTime: null, repository: 'Daa13x/LifePlanSystemPublic', dirty: null };
+}
+
+app.get('/api/version', (_req, res) => ok(res, readBuildInfo()));
+
 app.get('/api/bootstrap', async (_req, res) => {
   ok(res, {
     settings: readSettingsRedacted(),
+    build: readBuildInfo(),
     planner: await plannerData(),
     sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC'),
     projects: allRows('SELECT * FROM projects ORDER BY updated_at DESC'),

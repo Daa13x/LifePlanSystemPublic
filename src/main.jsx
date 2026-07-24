@@ -548,6 +548,7 @@ function SystemStatus({ boot, planner, sessions, models, setNotice, refreshSigna
   return (
     <section className="status-grid">
       <div className="panel wide-panel"><h2>Local system status</h2><p>Reported from the current bootstrap response only; this page does not run synthetic checks.</p></div>
+      <div className="panel"><h3>About / Build</h3><Pill tone={boot?.build?.dirty ? 'warn' : boot?.build?.commit && boot.build.commit !== 'unknown' ? 'good' : 'warn'}>{boot?.build ? `v${boot.build.version || '—'}` : 'Checking'}</Pill><p>Commit <code>{boot?.build?.shortCommit || 'unknown'}</code>{boot?.build?.dirty ? ' · built from a dirty tree' : ''}<br />Built {boot?.build?.buildTime ? new Date(boot.build.buildTime).toLocaleString() : 'time unknown'}<br />{boot?.build?.repository || 'Daa13x/LifePlanSystemPublic'}</p></div>
       <div className="panel"><h3>Storage</h3><Pill tone={boot ? 'good' : 'warn'}>{boot ? 'Available' : 'Checking'}</Pill><p>{storage}</p></div>
       <div className="panel"><h3>Workboard</h3><strong>{planner?.summary?.focus ?? '—'} focus items</strong><p>{planner?.summary?.approvals ?? '—'} pending approvals · {planner?.summary?.candidates ?? '—'} memory candidates</p></div>
       <div className="panel"><h3>Chat</h3><strong>{sessions.length} active sessions</strong><p>Sessions are loaded from the local database.</p></div>

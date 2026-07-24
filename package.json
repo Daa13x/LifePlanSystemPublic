@@ -9,7 +9,7 @@
     "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "node server/index.js",
     "dev:web": "vite --host 127.0.0.1",
-    "build": "vite build",
+    "build": "node scripts/write-build-info.mjs && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "start": "node server/index.js",
     "check": "npm run verify:navigation-consolidation && npm run verify:chat-capabilities && npm run build",
@@ -46,7 +46,8 @@
     "verify:extension-icons": "node scripts/verify-extension-icons.mjs",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss",
-    "verify:installer-safety": "node scripts/verify-installer-safety.mjs"
+    "verify:installer-safety": "node scripts/verify-installer-safety.mjs",
+    "verify:build-provenance": "node scripts/verify-build-provenance.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",

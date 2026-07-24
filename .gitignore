@@ -16,3 +16,4 @@ release/
 *.db
 *.db-*
 pairing-config.json
+/public/build-info.json
