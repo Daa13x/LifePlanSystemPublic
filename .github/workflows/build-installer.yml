@@ -5,9 +5,10 @@
 #
 # What it does: on a push to main, on a version tag, or on manual dispatch, it
 # builds the web app, packages the portable one-folder bundle, compiles the Inno
-# Setup installer, and uploads the results as downloadable artifacts. Tagged
-# builds also attach the installer to a GitHub Release, so the user can create
-# the pipeline installer "at the repo end" without a local terminal.
+# Setup installer, and uploads the results as downloadable artifacts. Every
+# successful push to main also replaces the rolling latest-main Release so the
+# downloadable installer follows main automatically. Version tags continue to
+# publish immutable versioned releases.
 
 name: Build Installer
 
@@ -25,7 +26,7 @@ on:
         type: string
 
 permissions:
-  contents: write # needed to attach the installer to a Release on tag builds
+  contents: write # build artifacts plus rolling/versioned Release assets
 
 concurrency:
   group: build-installer-${{ github.event.release.tag_name || github.ref || github.run_id }}
@@ -82,8 +83,48 @@ jobs:
           path: release/LifePlannerPortableSetup.exe
           if-no-files-found: error
 
-      # Only tagged builds publish a Release asset the user can download.
-      - name: Attach installer to Release
+      # A successful main build becomes the public rolling installer. The tag is
+      # deliberately moved to the exact main commit that produced the assets.
+      - name: Publish rolling latest-main Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'latest-main'
+          $repo = $env:GITHUB_REPOSITORY
+          $sha = $env:GITHUB_SHA
+          $title = 'Latest main build'
+          $notes = "Automatically built from main commit $sha. This rolling release is replaced after every successful push to main."
+          $installer = 'release/LifePlannerPortableSetup.exe'
+          $portableZip = 'release/LifePlannerPortable.zip'
+
+          if (Test-Path -LiteralPath $portableZip) {
+            Remove-Item -LiteralPath $portableZip -Force
+          }
+          Compress-Archive -Path 'release/LifePlannerPortable/*' -DestinationPath $portableZip -CompressionLevel Optimal
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag --force $tag $sha
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to create the rolling release tag.' }
+          git push origin "refs/tags/$tag" --force
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to move the rolling release tag to main.' }
+
+          gh release view $tag --repo $repo --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag --repo $repo --target $sha --title $title --notes $notes --latest
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to update the rolling GitHub Release.' }
+            gh release upload $tag $installer $portableZip --repo $repo --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to replace the rolling Release assets.' }
+          } else {
+            gh release create $tag $installer $portableZip --repo $repo --target $sha --title $title --notes $notes --latest
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create the rolling GitHub Release.' }
+          }
+
+      # Explicit version tags remain available as permanent versioned releases.
+      - name: Attach installer to versioned Release
         if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
