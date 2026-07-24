@@ -1,0 +1,43 @@
+name: Release Attribution
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-attribution-main
+  cancel-in-progress: true
+
+jobs:
+  correct-release-notes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Set maintainer-owned Release 1.0 notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view '1.0' --repo "$GH_REPO" >/dev/null 2>&1; then
+            cat > "$RUNNER_TEMP/release-1.0-notes.md" <<'EOF'
+          # LifePlanSystem Release 1.0
+
+          **Owner and maintainer: Daa13x.**
+
+          This is the original 1.0 installer snapshot. AI systems were used only as tools and are not project authors or contributors.
+
+          For the installer built from the current `main`, use the **Latest main build** release.
+          EOF
+            # Strip YAML indentation from the here-document before publishing.
+            sed -i 's/^          //' "$RUNNER_TEMP/release-1.0-notes.md"
+            gh release edit '1.0' \
+              --repo "$GH_REPO" \
+              --title 'Release 1.0' \
+              --notes-file "$RUNNER_TEMP/release-1.0-notes.md"
+          fi
