@@ -64,6 +64,13 @@ jobs:
       - name: Build web app
         run: npm run build
 
+      # verify:runtime-safety includes verify:local-ai-docs, which renders a PDF
+      # via Playwright Chromium. Install the matching browser (and its headless
+      # shell) before the safety suite runs, otherwise browserType.launch fails
+      # with "Executable doesn't exist" and the whole installer build aborts.
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
       - name: Verify runtime safety
         run: npm run verify:runtime-safety
 
