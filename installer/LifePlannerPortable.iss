@@ -40,7 +40,14 @@ Name: "{userdesktop}\Life Planner"; Filename: "{sys}\wscript.exe"; Parameters: "
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
+; Optional runtime downloads (llama.cpp model runtime, Playwright Chromium) are
+; deliberately NOT executed here. Running network-downloading helper scripts
+; during setup — especially elevated, when the user chose "Run as administrator"
+; — triggers Microsoft Defender / SmartScreen reputation prompts for unsigned
+; downloaded binaries. The scripts ship in the payload ({app}\Install *.cmd) and
+; the app installs these optional components on demand from Tooling / Settings,
+; under the user's normal token with clear opt-in and progress.
 [Run]
-Filename: "{sys}\cmd.exe"; Parameters: "/c """"{app}\Install Local Model Runtime.cmd"""""; Flags: runhidden waituntilterminated
-Filename: "{sys}\cmd.exe"; Parameters: "/c """"{app}\Install Playwright Chromium.cmd"""""; Flags: runhidden waituntilterminated
-Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; Description: "Launch Life Planner"; Flags: postinstall nowait skipifsilent
+; runasoriginaluser ensures the app launches under the standard user token even
+; when the installer itself was run elevated, so the app never runs elevated.
+Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; Description: "Launch Life Planner"; Flags: postinstall nowait skipifsilent runasoriginaluser
