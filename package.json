@@ -43,6 +43,7 @@
     "verify:legacy-message-display": "node scripts/verify-legacy-message-display.mjs",
     "verify:chat-behavior": "node scripts/verify-chat-behavior.mjs",
     "verify:windows-path-open": "node scripts/verify-windows-path-open.mjs",
+    "verify:extension-icons": "node scripts/verify-extension-icons.mjs",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss"
   },
