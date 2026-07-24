@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
+import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
   normalizeRequestPath,
@@ -471,7 +472,9 @@ function chromeDebugProfileDir() {
 }
 
 function browserAgentExtensionDir() {
-  return path.join(root, 'browser-extension', 'lps-browser-agent');
+  // path.resolve guarantees an absolute, OS-native path so Explorer and the UI
+  // never receive a relative or malformed value regardless of the launch cwd.
+  return path.resolve(root, 'browser-extension', 'lps-browser-agent');
 }
 
 function browserPairingConfigPath() {
@@ -3653,12 +3656,15 @@ app.post('/api/browser/extension/install-helper', async (_req, res) => {
     await copyTextToSystemClipboard(extensionPath);
     await openChromeBrowser('chrome://extensions', probe.detectedProfilePath);
     let folderOpened = false;
+    let openedFolderPath = extensionPath;
     if (process.platform === 'win32') {
-      await execFileAsync('explorer.exe', [extensionPath], { cwd: root, timeout: 10000, windowsHide: true });
+      // explorer.exe exits non-zero even on success; openFolderInExplorer treats
+      // a successful spawn as success and returns the normalized folder path.
+      openedFolderPath = await openFolderInExplorer(extensionPath);
       folderOpened = true;
     }
     ok(res, {
-      extensionPath,
+      extensionPath: openedFolderPath,
       copied: true,
       opened: true,
       folderOpened,

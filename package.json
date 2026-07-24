@@ -42,6 +42,7 @@
     "verify:local-learning-review-inbox-reader": "node scripts/verify-local-learning-review-inbox-reader.mjs",
     "verify:legacy-message-display": "node scripts/verify-legacy-message-display.mjs",
     "verify:chat-behavior": "node scripts/verify-chat-behavior.mjs",
+    "verify:windows-path-open": "node scripts/verify-windows-path-open.mjs",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss"
   },
