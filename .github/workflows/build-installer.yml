@@ -136,6 +136,29 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Failed to create the rolling GitHub Release.' }
           }
 
+      # Release 1.0 was created with automatically generated notes that displayed
+      # an AI tool as a contributor. Keep the historical tag and binary unchanged,
+      # but replace that generated text with maintainer-owned release notes.
+      - name: Correct legacy 1.0 release attribution
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          gh release view '1.0' --repo $repo --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $notes = @"
+          LifePlanSystem Release 1.0
+
+          Owner and maintainer: Daa13x.
+
+          This is the original 1.0 installer snapshot. AI systems were used only as tools and are not project authors or contributors. For the current installer built from main, use the Latest main build release.
+          "@
+            gh release edit '1.0' --repo $repo --title 'Release 1.0' --notes $notes
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to correct Release 1.0 attribution notes.' }
+          }
+
       # Explicit version tags remain available as permanent versioned releases.
       # Release notes are not auto-generated, so AI contributor lists are never
       # injected by this workflow.
