@@ -33,6 +33,8 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  Volume2,
+  VolumeX,
   Wrench,
   X
 } from 'lucide-react';
@@ -743,6 +745,51 @@ function LegacyMessageDetails({ legacy, mode }) {
   return <DetailsPanel rows={buildLegacyDetailRows(legacy, mode)} mode={mode} title={mode === 'developer' ? 'Diagnostics (legacy)' : 'Details (legacy)'} />;
 }
 
+// Reduce Markdown to plain speakable text so a screen reader / TTS voice does
+// not read "asterisk asterisk" etc. Code fences are announced generically.
+function plainTextForSpeech(markdown) {
+  return String(markdown || '')
+    .replace(/```[\s\S]*?```/g, ' (code block) ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/^[>#\-*+\s]+/gm, '')
+    .replace(/[*_~]/g, '')
+    .replace(/\n{2,}/g, '. ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Text-to-speech play control for an assistant message, using the on-device Web
+// Speech API. Text generation and speech are separate states: the button only
+// reports "playing" once audio has actually started (utterance onstart), never
+// before. Renders nothing when the browser has no speech synthesis.
+function MessageVoice({ text }) {
+  const [state, setState] = useState('idle'); // idle | playing | failed
+  const supported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+  if (!supported) return null;
+
+  function toggle() {
+    const synth = window.speechSynthesis;
+    if (state === 'playing') { synth.cancel(); setState('idle'); return; }
+    const spoken = plainTextForSpeech(text);
+    if (!spoken) return;
+    synth.cancel();
+    const utterance = new SpeechSynthesisUtterance(spoken);
+    utterance.onstart = () => setState('playing');
+    utterance.onend = () => setState('idle');
+    utterance.onerror = () => setState('failed');
+    try { synth.speak(utterance); } catch { setState('failed'); }
+  }
+
+  const label = state === 'playing' ? 'Stop speaking' : state === 'failed' ? 'Voice failed — tap to retry' : 'Play as speech';
+  return (
+    <button type="button" className={cx('voice-button', state)} onClick={toggle} title={label} aria-label={label} aria-pressed={state === 'playing'}>
+      {state === 'playing' ? <VolumeX size={14} /> : <Volume2 size={14} />}
+    </button>
+  );
+}
+
 // One chat bubble. Assistant replies render their answer as Markdown and their
 // diagnostics in the Details panel. New replies use stored metadata; older
 // replies fall back to the display-only legacy-text parser, which fails safe
@@ -768,6 +815,9 @@ function MessageBubble({ message, mode }) {
     <div className={cx('message', message.role)}>
       <span>{message.role}</span>
       <div className="message-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
+      {message.role === 'assistant' && body.trim() && (
+        <div className="message-actions"><MessageVoice text={body} /></div>
+      )}
       {details}
     </div>
   );
@@ -1111,7 +1161,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
               <span>assistant</span>
-              <p>{streamingText || 'Planner Assistant is responding…'}</p>
+              {streamingText
+                ? <div className="message-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingText) }} />
+                : <p>Planner Assistant is responding…</p>}
             </div>
           )}
         </div>

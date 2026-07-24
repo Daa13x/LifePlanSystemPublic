@@ -604,6 +604,26 @@ h3 { font-size: 14px; font-weight: 700; }
 .message-details-row dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .message-details-row dd { margin: 0; color: var(--soft); font-size: 12.5px; word-break: break-word; }
 
+/* Per-message action row (text-to-speech play control). */
+.message-actions { margin-top: 6px; display: flex; gap: 6px; align-items: center; }
+.voice-button {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+}
+.voice-button:hover { color: var(--text); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.voice-button.playing { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.voice-button.failed { color: #d98a8a; }
+.message.streaming { opacity: 0.92; }
+
 .composer { padding: 14px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 10px; }
 
 input, textarea, select {

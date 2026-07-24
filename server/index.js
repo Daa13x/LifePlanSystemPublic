@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
+import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
   normalizeRequestPath,
@@ -1380,66 +1381,101 @@ function readSelectedContextRecords(sessionId) {
   return lines.join('\n');
 }
 
-async function buildAssistantPrompt(sessionId, userMessage) {
-  const model = await localModelStatus();
-  const facts = lightweightGroundingFacts();
+// Prompt for ordinary conversation. It deliberately does NOT inject the
+// application-state grounding (model name, Workboard counts, tools, runtime) or
+// ask for a "next step", so the model answers naturally instead of parroting a
+// status report. Explicit data questions are answered deterministically before
+// the model is ever called (see answerDataQuery). Attached records/files are
+// included only when the user deliberately attached them.
+async function buildConversationPrompt(sessionId, userMessage) {
   const files = readChatContextFiles(sessionId);
   const selected = readSelectedContextRecords(sessionId);
+  const hasRecords = Boolean(selected);
+  const hasFiles = files.length > 0;
 
-  const runtimeLine = model.managedServerRunning
-    ? `local llama.cpp server running (${model.managedEndpoint || 'managed'})`
-    : model.endpointConfigured
-      ? `local endpoint configured (${model.endpoint})`
-      : model.assigned
-        ? 'assigned model will load on next message'
-        : 'no model assigned';
-  const lastLine = lastRuntimeResult ? `${lastRuntimeResult.ok ? 'success' : 'error'} via ${lastRuntimeResult.mode}` : 'none yet';
-
-  const grounding = [
-    `- Assistant model: ${model.model?.name || 'none assigned'} (${model.assigned ? 'ready' : 'not ready'})`,
-    `- Local runtime: ${runtimeLine}; last result: ${lastLine}. No cloud model is ever used.`,
-    '- SQLite database: ready.',
-    `- Workboard: ${facts.projects} active project(s), ${facts.blocked} blocked, ${facts.review} awaiting review, ${facts.roadmap} roadmap item(s), ${facts.candidates} memory candidate(s).`,
-    `- Active projects: ${facts.projectNames.length ? facts.projectNames.join('; ') : 'none'}.`,
-    `- Blocked items: ${facts.blockedItems.length ? facts.blockedItems.join('; ') : 'none'}.`,
-    '- Available capabilities (tools): knowledge.search, knowledge.read, workboard.list, workboard.read, workboard.propose_create, workboard.propose_update, system.status, system.models, system.runs, conversation.search.'
-  ].join('\n');
-
-  const fileBlock = files.length
-    ? files.map((file) => `--- ${file.path} ---\n${file.text}`).join('\n\n')
-    : 'No repository/source files attached.';
-
-  const hasContext = Boolean(selected);
   const systemInstructions = [
-    'You are the local LifePlanSystem Planner Assistant — a local-first, on-device executive assistant and the central control surface of LifePlanSystem. You run entirely on this machine; no cloud model is used.',
-    'How to answer:',
-    '- The sections below contain real, authoritative data from this application. Treat every record listed under "Attached context" as available to you right now — read it and answer the user directly from it. Do not ask the user to re-select or confirm records that are already listed.',
-    '- Use the application state and attached records for any facts about the model, System, Knowledge, or Workboard. Never invent projects, tasks, Knowledge records, statuses, IDs, runs, or system facts that are not shown below.',
-    '- Only if the specific information the user needs is genuinely NOT in the sections below, say it is not attached and suggest attaching it (Use Knowledge / Use Workboard). Do not guess.',
-    '- When you use an attached record, cite it by its id and title.',
-    'Governance:',
-    '- Chat messages only become candidate memory after explicit user review. You cannot and must not promote memory or modify source-of-truth automatically.',
-    '- Any change to the Workboard is only a proposal; the user must confirm it before it is applied. Never claim a change was made unless it was confirmed.',
-    'Answer concisely with a clear next step.'
+    'You are the LifePlanSystem assistant — a local-first, on-device helper. Reply to the user naturally and directly, the way a normal chat assistant would. No cloud model is used.',
+    'Style:',
+    '- Answer only what the user asked, in a natural conversational voice. Keep it brief unless more detail is requested.',
+    '- Do NOT report system status, the model name or filename, runtime details, project or Workboard counts, attached-context status, memory policy, routing decisions, or "next steps" unless the user explicitly asks for them.',
+    '- Do NOT begin by stating that no records are attached. If you genuinely lack a specific fact the user asked for, just say so briefly and naturally (for example: "I cannot see that in the available records").',
+    '- You may use Markdown (bold, italics, headings, ordered/unordered lists, inline code, fenced code blocks, links) when it improves readability.',
+    '- Never invent projects, tasks, records, IDs, or statuses, and never claim you saved or changed anything — changes require explicit user confirmation.'
   ].join('\n');
 
-  return [
-    systemInstructions,
+  const parts = [systemInstructions, ''];
+  if (hasRecords || hasFiles) {
+    parts.push('Context the user attached for this question (use only if relevant; do not list it back unless asked):');
+    if (hasRecords) parts.push(selected);
+    if (hasFiles) parts.push(files.map((file) => `--- ${file.path} ---\n${file.text}`).join('\n\n'));
+    parts.push('');
+  }
+  parts.push(`User: ${userMessage}`);
+  return parts.join('\n');
+}
+
+// --- Explicit data queries answered deterministically (no model, no dump) ----
+// Only reached when classifyChatIntent recognises an explicit request for local
+// data, so returning structured status here is expected behaviour. Each returns
+// clean Markdown and never touches memory or concatenates diagnostics.
+function markdownList(items) {
+  return items.map((item) => `- ${item}`).join('\n');
+}
+
+async function answerDataQuery(intent) {
+  const facts = lightweightGroundingFacts();
+  if (intent === 'workboard_list') {
+    const content = facts.projectNames.length
+      ? `Your active Workboard projects are:\n\n${markdownList(facts.projectNames)}`
+      : 'You have no active Workboard projects right now.';
+    return { mode: 'workboard (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'workboard_list' } };
+  }
+  if (intent === 'blocked_query') {
+    const content = facts.blockedItems.length
+      ? `Currently blocked:\n\n${markdownList(facts.blockedItems)}`
+      : 'Nothing is currently blocked.';
+    return { mode: 'blocked (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'blocked_query' } };
+  }
+
+  const model = await localModelStatus();
+  const runtimeLine = model.managedServerRunning
+    ? `local llama.cpp server running${model.managedEndpoint ? ` (${model.managedEndpoint})` : ''}`
+    : model.endpointConfigured
+      ? `local endpoint (${model.endpoint})`
+      : model.assigned
+        ? 'assigned model, loads on next message'
+        : 'no local runtime active';
+  const modelName = model.model?.name || (model.endpointConfigured ? model.endpointModelName || 'configured endpoint model' : 'none assigned');
+
+  if (intent === 'model_query') {
+    const content = model.assigned || model.endpointConfigured
+      ? `The active model is **${modelName}** (${runtimeLine}). No cloud model is used.`
+      : 'No local model is currently assigned. Open Settings to assign a GGUF model or configure a local endpoint.';
+    return { mode: 'model (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'model_query' } };
+  }
+
+  // system_status
+  const content = [
+    '### System status',
     '',
-    '=== Authoritative application state (from live local APIs) ===',
-    grounding,
-    '',
-    hasContext
-      ? '=== Attached context (real records the user attached — use these to answer) ==='
-      : '=== Attached context ===',
-    hasContext ? selected : '- No Knowledge or Workboard records are attached to this conversation.',
-    '',
-    '=== Attached repository/source files ===',
-    fileBlock,
-    '',
-    '=== User message ===',
-    userMessage
+    `- **Model:** ${modelName} (${model.assigned || model.endpointConfigured ? 'ready' : 'not ready'})`,
+    `- **Runtime:** ${runtimeLine}`,
+    '- **Database:** ready (local SQLite)',
+    `- **Workboard:** ${facts.projects} active project(s), ${facts.blocked} blocked, ${facts.review} awaiting review, ${facts.candidates} memory candidate(s)`
   ].join('\n');
+  return { mode: 'status (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'system_status' } };
+}
+
+// Single entry point for a chat turn: explicit data questions are answered from
+// local data without the model; everything else is an ordinary conversation.
+async function generateAssistantTurn(sessionId, userMessage, signal, onToken) {
+  const intent = classifyChatIntent(userMessage);
+  if (intent !== 'conversation') {
+    const answer = await answerDataQuery(intent);
+    if (typeof onToken === 'function' && answer.content) onToken(answer.content);
+    return answer;
+  }
+  return runPlannerAssistant(sessionId, userMessage, signal, onToken);
 }
 
 async function localModelStatus() {
@@ -1668,7 +1704,7 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken) {
       : 'No Planner Assistant model is assigned and no OpenAI-compatible local endpoint is configured.');
   }
 
-  const prompt = await buildAssistantPrompt(sessionId, userMessage);
+  const prompt = await buildConversationPrompt(sessionId, userMessage);
   try {
     if (status.endpointConfigured) {
       const { content, usage } = await runEndpointModel(status.endpoint, status.endpointModelName, prompt, signal, onToken);
@@ -2164,7 +2200,9 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
   const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'user', content).lastInsertRowid;
-  const candidateId = createCandidateFromMessage(Number(req.params.id), messageId, content);
+  const candidateId = shouldCreateMemoryCandidate(content).create
+    ? createCandidateFromMessage(Number(req.params.id), messageId, content)
+    : null;
   const userMessage = row('SELECT * FROM chat_messages WHERE id = ?', [messageId]);
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
   const controller = new AbortController();
@@ -2172,7 +2210,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   const startedAt = Date.now();
   let assistant;
   try {
-    assistant = await runPlannerAssistant(Number(req.params.id), content, controller.signal);
+    assistant = await generateAssistantTurn(Number(req.params.id), content, controller.signal);
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
@@ -2211,7 +2249,9 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   if (!session) return fail(res, 404, 'Session not found.');
   const sessionId = Number(req.params.id);
   const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'user', content).lastInsertRowid;
-  const candidateId = createCandidateFromMessage(sessionId, messageId, content);
+  const candidateId = shouldCreateMemoryCandidate(content).create
+    ? createCandidateFromMessage(sessionId, messageId, content)
+    : null;
   const userMessage = row('SELECT * FROM chat_messages WHERE id = ?', [messageId]);
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
 
@@ -2234,7 +2274,7 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   const startedAt = Date.now();
   let assistant;
   try {
-    assistant = await runPlannerAssistant(sessionId, content, controller.signal, (delta) => emit('token', { delta }));
+    assistant = await generateAssistantTurn(sessionId, content, controller.signal, (delta) => emit('token', { delta }));
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
