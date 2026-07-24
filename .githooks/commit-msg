@@ -1,0 +1,21 @@
+#!/bin/sh
+
+message_file="$1"
+message="$(cat "$message_file")"
+identity="$(git config user.name 2>/dev/null)
+$(git config user.email 2>/dev/null)"
+
+ai_pattern='claude|anthropic|chatgpt|openai|codex|gemini|grok|xai|copilot|openhands|qwen|llama'
+trailer_pattern="^[[:space:]]*(Co-Authored-By|Coauthored-By|Authored-By|Contributed-By|Contributor|Signed-Off-By)[[:space:]]*:.*($ai_pattern)"
+
+if printf '%s\n' "$identity" | grep -Eiq "($ai_pattern)|noreply@anthropic\.com|@anthropic\.com|@openai\.com"; then
+  echo "Commit blocked: Git author/committer identity must belong to the LifePlanSystem maintainer, not an AI service." >&2
+  exit 1
+fi
+
+if printf '%s\n' "$message" | grep -Eiq "$trailer_pattern|noreply@anthropic\.com|@anthropic\.com|@openai\.com"; then
+  echo "Commit blocked: AI tools must not be added as authors, co-authors, contributors, or sign-offs." >&2
+  exit 1
+fi
+
+exit 0
