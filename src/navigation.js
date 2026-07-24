@@ -16,7 +16,7 @@ export const SECTION_TABS = {
   knowledge: [
     { id: 'memory', label: 'Memory' },
     { id: 'candidates', label: 'Candidates' },
-    { id: 'sources', label: 'Sources' },
+    { id: 'sources', label: 'Sources & Source Control' },
     { id: 'rules', label: 'Rules' },
     { id: 'calibration', label: 'Calibration' }
   ],

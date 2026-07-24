@@ -516,8 +516,9 @@ function KnowledgeSources({ memory, setNotice, refreshSignal }) {
   return (
     <section className="panel">
       <div className="panel-heading"><div><h2>Sources & evidence</h2><p>Live provenance from existing memory and candidate records. Source details are never invented or promoted from this view.</p></div><Pill tone="info">{records.length} records</Pill></div>
+      <div className="source-warning info"><strong>Source Control is here</strong><small>Git changes, history, branches, and safe publishing (commit / push / PR) are in the <b>Source Control</b> panel below. Local coding runs are under System → Runs.</small></div>
       {records.length ? <div className="table-list">{records.map((record) => <div className="memory-row" key={`${record.id}-${record.status}`}><ItemRow item={record} compact /><div className="candidate-meta"><span>Source: {record.source || 'not recorded'}</span><span>Evidence: {record.evidence || 'not recorded'}</span></div></div>)}</div> : <Empty title="No provenance records" body="Source and evidence details will appear when existing records provide them." />}
-      <div className="source-management"><h2>Source management</h2><p>The existing source-control workspace remains available here for repository provenance, history, and safe publication controls. Local coding runs are surfaced separately in System/Runs.</p><SourceControl setNotice={setNotice} refreshSignal={refreshSignal} initialTab="changes" availableTabs={['changes', 'history', 'branches', 'sync']} /></div>
+      <div className="source-management" id="source-control"><h2><GitBranch size={18} /> Source Control</h2><p>Git repository provenance, changes, history, branches, and safe publication controls live here. Local coding runs are surfaced separately in System → Runs.</p><SourceControl setNotice={setNotice} refreshSignal={refreshSignal} initialTab="changes" availableTabs={['changes', 'history', 'branches', 'sync']} /></div>
     </section>
   );
 }
