@@ -533,9 +533,30 @@ h3 { font-size: 14px; font-weight: 700; }
 }
 .session-row span { color: var(--muted); font-size: 11px; }
 .session-row strong { font-size: 13px; }
-.chat-panel { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; }
+.chat-panel { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; position: relative; }
 .chat-header { padding: 16px; border-bottom: 1px solid var(--line); }
-.messages { padding: 16px; overflow: auto; display: grid; gap: 12px; align-content: start; }
+.messages { padding: 16px; overflow: auto; display: grid; gap: 12px; align-content: start; scroll-behavior: auto; overflow-anchor: none; }
+
+/* Floating "Jump to latest" control, shown only when the user has scrolled up. */
+.jump-latest {
+  position: absolute;
+  right: 18px;
+  bottom: 92px;
+  z-index: 6;
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.28);
+}
+.jump-latest:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
 .message {
   max-width: 76%;
   border-radius: 8px;

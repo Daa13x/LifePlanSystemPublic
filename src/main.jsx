@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Archive,
   Bot,
   Brain,
   Check,
+  ChevronDown,
   ChevronRight,
   Circle,
   Clipboard,
@@ -840,6 +841,46 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [proposeOpen, setProposeOpen] = useState(false);
   const [proposeForm, setProposeForm] = useState({ type: 'note', title: '', next_action: '' });
 
+  // --- ChatGPT-style auto-scroll for the message container (not the window) ---
+  // autoFollow tracks whether the newest content should stick to the bottom. It
+  // is derived from the user's own scroll position: near the bottom => follow;
+  // scrolled up => stop following and offer a "Jump to latest" control. Scrolls
+  // are instant (scrollTop assignment), never animated, so streaming tokens do
+  // not cause shaking or restarting animations.
+  const messagesRef = useRef(null);
+  const [autoFollow, setAutoFollow] = useState(true);
+  const [showJump, setShowJump] = useState(false);
+  const NEAR_BOTTOM_PX = 96;
+
+  const isNearBottom = (el) => !el || (el.scrollHeight - el.scrollTop - el.clientHeight) <= NEAR_BOTTOM_PX;
+  const scrollMessagesToBottom = () => { const el = messagesRef.current; if (el) el.scrollTop = el.scrollHeight; };
+
+  function handleMessagesScroll() {
+    const near = isNearBottom(messagesRef.current);
+    setAutoFollow(near);
+    setShowJump(!near);
+  }
+  function jumpToLatest() {
+    setAutoFollow(true);
+    setShowJump(false);
+    scrollMessagesToBottom();
+  }
+
+  // Follow the newest content whenever messages or the streaming buffer change,
+  // but only while the user is at/near the bottom. useLayoutEffect positions
+  // before paint so there is no visible jump.
+  useLayoutEffect(() => {
+    if (autoFollow) scrollMessagesToBottom();
+  }, [messages, streamingText, autoFollow]);
+
+  // Opening or reloading a conversation starts pinned to the latest message.
+  useEffect(() => {
+    setAutoFollow(true);
+    setShowJump(false);
+    const id = requestAnimationFrame(scrollMessagesToBottom);
+    return () => cancelAnimationFrame(id);
+  }, [selectedSession]);
+
   async function loadConnection(sessionId = selectedSession) {
     if (!sessionId) return;
     try { setConnection(await api(`/api/chat/sessions/${sessionId}/connection`)); } catch { /* connection state is best-effort */ }
@@ -929,6 +970,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     const optimisticId = `tmp-${Date.now()}`;
     setChatBusy(true);
     setDraft('');
+    // Sending is a deliberate action: jump to the new message and follow the reply.
+    setAutoFollow(true);
+    setShowJump(false);
     setMessages((current) => [...current, { id: optimisticId, role: 'user', content: outgoing }]);
     setStreamingText('');
     let streamStarted = false;
@@ -1154,7 +1198,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
           {proposal && <ProposalCard proposal={proposal} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
         </div>
-        <div className="messages">
+        <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} mode={detailMode} />
           ))}
@@ -1167,6 +1211,11 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             </div>
           )}
         </div>
+        {showJump && (
+          <button type="button" className="jump-latest" onClick={jumpToLatest} aria-label="Jump to latest message" title="Jump to latest message">
+            <ChevronDown size={16} /> Jump to latest
+          </button>
+        )}
         <div className="composer">
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
