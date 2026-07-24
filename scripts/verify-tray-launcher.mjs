@@ -32,6 +32,13 @@ assert.doesNotMatch(packaging, /timeout\s+\/t\s+2/i);
 assert.match(installer, /wscript\.exe/i);
 assert.match(installer, /Start Life Planner\.vbs/);
 assert.match(installer, /life-planner-app\.ico/);
-assert.match(installer, /Install Local Model Runtime\.cmd/);
+// Optional runtime/browser downloads must NOT be executed during setup. Running
+// elevated network-download scripts during install triggers Defender/SmartScreen
+// prompts; the tray/app ensures the local model runtime on first launch under
+// the user token (Ensure-LocalModelRuntime, above). See verify-installer-safety.mjs.
+assert.doesNotMatch(installer, /Filename:[^\n]*Install Local Model Runtime\.cmd/i);
+assert.doesNotMatch(installer, /Filename:[^\n]*Install Playwright Chromium\.cmd/i);
+// The post-install app launch must drop to the original (non-elevated) user.
+assert.match(installer, /postinstall[^\n]*runasoriginaluser/i);
 
 console.log('Tray launcher static verification passed.');
