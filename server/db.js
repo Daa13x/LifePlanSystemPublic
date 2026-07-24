@@ -278,6 +278,19 @@ export function migrate() {
     }
   }
 
+  // Structured, non-conversational diagnostics for an assistant reply
+  // (runtime, model, endpoint type, memory-governance result, context files,
+  // tokens, timing). Stored as JSON so the answer body stays clean and the
+  // UI can surface diagnostics in a Details panel by response-detail mode.
+  // Older rows keep metadata = NULL and simply render their saved body.
+  for (const column of [['metadata', 'TEXT']]) {
+    try {
+      db.exec(`ALTER TABLE chat_messages ADD COLUMN ${column[0]} ${column[1]}`);
+    } catch {
+      // Column already exists.
+    }
+  }
+
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
   if (projectCount === 0) {
     const insertProject = db.prepare(`

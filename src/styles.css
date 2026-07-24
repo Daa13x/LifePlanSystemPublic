@@ -545,6 +545,65 @@ h3 { font-size: 14px; font-weight: 700; }
 }
 .message.user { margin-left: auto; border-color: color-mix(in srgb, var(--accent) 32%, var(--line)); }
 .message p { margin: 5px 0 0; color: var(--text); font-size: 14px; }
+
+/* Rendered Markdown body for a chat message. This setting controls diagnostic
+   visibility, not formatting: Markdown must always render correctly here. */
+.message-body { margin-top: 5px; color: var(--text); font-size: 14px; line-height: 1.5; }
+.message-body > :first-child { margin-top: 0; }
+.message-body > :last-child { margin-bottom: 0; }
+.message-body p { margin: 8px 0; color: var(--text); font-size: 14px; }
+.message-body h1, .message-body h2, .message-body h3, .message-body h4 { margin: 12px 0 6px; line-height: 1.3; color: var(--text); }
+.message-body h1 { font-size: 18px; }
+.message-body h2 { font-size: 16px; }
+.message-body h3, .message-body h4 { font-size: 14px; }
+.message-body ul, .message-body ol { margin: 8px 0; padding-left: 20px; }
+.message-body li { margin: 3px 0; color: var(--text); font-size: 14px; }
+.message-body li::marker { color: var(--muted); }
+.message-body a { color: var(--accent); text-decoration: underline; }
+.message-body strong { color: var(--text); font-weight: 650; }
+.message-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.message-body pre {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.message-body pre code { background: none; border: 0; padding: 0; }
+.message-body blockquote { margin: 8px 0; padding: 2px 12px; border-left: 3px solid var(--line); color: var(--muted); }
+.message-body table { border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto; }
+.message-body th, .message-body td { border: 1px solid var(--line); padding: 5px 9px; font-size: 13px; text-align: left; }
+.message-body th { background: var(--panel-2); }
+.message-body hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+
+/* Structured diagnostics beneath the answer — gated by response-detail mode. */
+.message-details { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.message-details summary {
+  cursor: pointer;
+  color: var(--soft);
+  font-size: 12px;
+  list-style: none;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.message-details summary::-webkit-details-marker { display: none; }
+.message-details summary::before { content: '\25B8'; color: var(--muted); font-size: 10px; }
+.message-details[open] summary::before { content: '\25BE'; }
+.message-details-grid { margin: 8px 0 0; display: grid; gap: 4px; }
+.message-details-row { display: grid; grid-template-columns: 130px 1fr; gap: 10px; align-items: start; }
+.message-details-row dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.message-details-row dd { margin: 0; color: var(--soft); font-size: 12.5px; word-break: break-word; }
+
 .composer { padding: 14px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 10px; }
 
 input, textarea, select {

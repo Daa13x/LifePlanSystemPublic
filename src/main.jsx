@@ -38,6 +38,15 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import { PRIMARY_NAVIGATION, SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
+import { renderMarkdown } from './markdown.js';
+import {
+  normalizeDetailMode,
+  parseMessageMetadata,
+  hasStructuredMetadata,
+  buildDetailRows,
+  parseLegacyAssistantMessage,
+  buildLegacyDetailRows
+} from './messageDetail.js';
 
 const API = '';
 
@@ -380,6 +389,7 @@ function App() {
             refreshAll={refreshAll}
             setNotice={setNotice}
             navigate={navigate}
+            settings={settings}
           />
         )}
         {route.section === 'knowledge' && <Knowledge route={route} navigate={navigate} memory={memory} refresh={reloadPlanner} setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -699,7 +709,72 @@ function ApprovalRow({ item, refresh }) {
   );
 }
 
-function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice, navigate }) {
+// Shared presentational shell for the diagnostics panel so new-message and
+// legacy-message details render identically.
+function DetailsPanel({ rows, mode, title }) {
+  if (!rows.length) return null;
+  return (
+    <details className="message-details" open={mode !== 'clean'}>
+      <summary>{title}</summary>
+      <dl className="message-details-grid">
+        {rows.map(([label, value]) => (
+          <div className="message-details-row" key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
+}
+
+// Structured diagnostics for a NEW assistant reply (stored metadata), shown
+// beneath the answer — never concatenated into it. Clean mode keeps it
+// collapsed; Detailed/Developer open it; Developer adds full diagnostics.
+function MessageDetails({ metadata, mode }) {
+  if (!metadata) return null;
+  return <DetailsPanel rows={buildDetailRows(metadata, mode)} mode={mode} title={mode === 'developer' ? 'Diagnostics' : 'Details'} />;
+}
+
+// Diagnostics recovered from a LEGACY reply's text (no stored metadata). Clean
+// mode hides the legacy trailer entirely so it never interrupts the answer.
+function LegacyMessageDetails({ legacy, mode }) {
+  if (mode === 'clean') return null;
+  return <DetailsPanel rows={buildLegacyDetailRows(legacy, mode)} mode={mode} title={mode === 'developer' ? 'Diagnostics (legacy)' : 'Details (legacy)'} />;
+}
+
+// One chat bubble. Assistant replies render their answer as Markdown and their
+// diagnostics in the Details panel. New replies use stored metadata; older
+// replies fall back to the display-only legacy-text parser, which fails safe
+// (shows the original message verbatim) when the structure is uncertain.
+function MessageBubble({ message, mode }) {
+  let body = message.content;
+  let details = null;
+
+  if (message.role === 'assistant') {
+    const metadata = parseMessageMetadata(message.metadata);
+    if (hasStructuredMetadata(metadata)) {
+      details = <MessageDetails metadata={metadata} mode={mode} />;
+    } else {
+      const legacy = parseLegacyAssistantMessage(message.content);
+      if (legacy) {
+        body = legacy.answer;
+        details = <LegacyMessageDetails legacy={legacy.legacy} mode={mode} />;
+      }
+    }
+  }
+
+  return (
+    <div className={cx('message', message.role)}>
+      <span>{message.role}</span>
+      <div className="message-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
+      {details}
+    </div>
+  );
+}
+
+function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice, navigate, settings }) {
+  const detailMode = normalizeDetailMode(settings?.assistantResponseDetail);
   const [draft, setDraft] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [streamingText, setStreamingText] = useState(null);
@@ -1031,10 +1106,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         </div>
         <div className="messages">
           {messages.map((message) => (
-            <div className={cx('message', message.role)} key={message.id}>
-              <span>{message.role}</span>
-              <p>{message.content}</p>
-            </div>
+            <MessageBubble key={message.id} message={message} mode={detailMode} />
           ))}
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
@@ -4157,6 +4229,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
+  const [responseDetail, setResponseDetail] = useState(normalizeDetailMode(settings.assistantResponseDetail));
   const [saveStatus, setSaveStatus] = useState('Settings load from local SQLite when the app starts. Click Save after changing model, endpoint, connector, or download values.');
   const recommendedQwen = useMemo(() => recommendedQwenForHardware(hardware), [hardware]);
 
@@ -4197,7 +4270,8 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           llamaServerPath,
           llamaServerPort: Number(llamaServerPort),
           llamaContextSize: Number(llamaContextSize),
-          browserAgentMode
+          browserAgentMode,
+          assistantResponseDetail: responseDetail
         })
       });
       setSettings(data);
@@ -4208,6 +4282,23 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
       setSaveStatus(`Save failed: ${err.message}`);
       setNotice(err.message);
       throw err;
+    }
+  }
+
+  // Persist immediately so Chat reflects the new detail level without a Save
+  // click or app restart — setSettings updates the shared state Chat reads.
+  async function changeResponseDetail(value) {
+    const next = normalizeDetailMode(value);
+    setResponseDetail(next);
+    try {
+      const data = await api('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({ assistantResponseDetail: next })
+      });
+      setSettings(data);
+      setNotice(`Assistant response detail set to ${next}.`);
+    } catch (err) {
+      setNotice(err.message);
     }
   }
 
@@ -4307,6 +4398,20 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
 
   return (
     <section className="settings-grid">
+      <div className="panel">
+        <h2>Assistant response detail</h2>
+        <p>Choose how much technical information Life Planner displays with assistant replies. Clean provides normal conversational answers. Detailed shows sources and memory actions. Developer shows full local runtime diagnostics.</p>
+        <label>Detail level</label>
+        <select value={responseDetail} onChange={(event) => changeResponseDetail(event.target.value)}>
+          <option value="clean">Clean — conversational answer only</option>
+          <option value="detailed">Detailed — answer plus sources and memory actions</option>
+          <option value="developer">Developer — answer plus full runtime diagnostics</option>
+        </select>
+        <div className="source-warning info">
+          <strong>Applies immediately</strong>
+          <small>Saved to local settings and applied to Chat right away, including how diagnostics are shown for saved replies that already carry structured metadata. Markdown always renders; this only controls diagnostic visibility. Older replies keep their original wording.</small>
+        </div>
+      </div>
       <div className="panel">
         <h2>Model Picker</h2>
         <p>Hardware-aware suggestions for local GGUF instruct models.</p>

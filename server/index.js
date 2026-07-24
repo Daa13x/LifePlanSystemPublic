@@ -807,11 +807,11 @@ async function runBrowserPromptAssistant({ targetAgent = 'ChatGPT', localDraft =
   const prompt = buildBrowserAgentAssistPrompt({ targetAgent, localDraft, contexts });
   try {
     if (status.managedEndpoint) {
-      const content = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt);
+      const { content } = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt);
       if (content) return { available: true, mode: 'managed llama-server', prompt: content };
     }
     if (status.endpointConfigured) {
-      const content = await runEndpointModel(status.endpoint, status.endpointModelName, prompt);
+      const { content } = await runEndpointModel(status.endpoint, status.endpointModelName, prompt);
       if (content) return { available: true, mode: `local endpoint (${status.endpointModelName})`, prompt: content };
     }
     if (status.llamaCliConfigured && status.llamaCliExists && status.model?.path) {
@@ -1548,6 +1548,18 @@ async function startManagedLlamaServer(options = {}) {
 
 ensureBundledLocalRuntimeDefaults();
 
+// Normalise an OpenAI-style usage object into the token fields the response-detail
+// Developer view surfaces. Returns null when the runtime reports no usage.
+function normalizeUsage(data) {
+  return data && data.usage && typeof data.usage === 'object'
+    ? {
+        promptTokens: data.usage.prompt_tokens ?? null,
+        completionTokens: data.usage.completion_tokens ?? null,
+        totalTokens: data.usage.total_tokens ?? null
+      }
+    : null;
+}
+
 async function runEndpointModel(endpoint, modelName, prompt, signal, onToken) {
   const base = endpoint.replace(/\/+$/, '');
   const url = base.endsWith('/v1/chat/completions') ? base : `${base}/v1/chat/completions`;
@@ -1574,10 +1586,11 @@ async function runEndpointModel(endpoint, modelName, prompt, signal, onToken) {
     const choice = data.choices?.[0] || {};
     // Fall back to reasoning_content so a reasoning model that returned only its
     // thinking (empty content) still surfaces a real answer instead of a hard fail.
-    return choice.message?.content?.trim()
+    const content = choice.message?.content?.trim()
       || choice.text?.trim()
       || choice.message?.reasoning_content?.trim()
       || '';
+    return { content, usage: normalizeUsage(data) };
   }
   // Parse the OpenAI-style SSE stream, forwarding visible content deltas as tokens.
   const reader = response.body.getReader();
@@ -1585,6 +1598,7 @@ async function runEndpointModel(endpoint, modelName, prompt, signal, onToken) {
   let buffer = '';
   let content = '';
   let reasoning = '';
+  let usage = null;
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1598,12 +1612,13 @@ async function runEndpointModel(endpoint, modelName, prompt, signal, onToken) {
       if (!payload || payload === '[DONE]') continue;
       let json;
       try { json = JSON.parse(payload); } catch { continue; }
+      if (json.usage) usage = normalizeUsage(json);
       const delta = json.choices?.[0]?.delta || {};
       if (delta.content) { content += delta.content; onToken(delta.content); }
       else if (delta.reasoning_content) { reasoning += delta.reasoning_content; }
     }
   }
-  return content.trim() || reasoning.trim();
+  return { content: content.trim() || reasoning.trim(), usage };
 }
 
 // Newer llama.cpp builds split single-shot generation out of the interactive
@@ -1656,22 +1671,28 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken) {
   const prompt = await buildAssistantPrompt(sessionId, userMessage);
   try {
     if (status.endpointConfigured) {
-      const content = await runEndpointModel(status.endpoint, status.endpointModelName, prompt, signal, onToken);
-      if (content) return { mode: `local endpoint (${status.endpointModelName})`, content };
+      const { content, usage } = await runEndpointModel(status.endpoint, status.endpointModelName, prompt, signal, onToken);
+      if (content) {
+        return {
+          mode: `local endpoint (${status.endpointModelName})`,
+          content,
+          diagnostics: { endpointType: 'OpenAI-compatible local endpoint', endpoint: status.endpoint, model: status.endpointModelName || null, usage }
+        };
+      }
     }
     if (status.assigned && status.llamaServerExists && !status.managedServerReady) {
       await startManagedLlamaServer();
       status = await localModelStatus();
     }
     if (status.managedEndpoint) {
-      const content = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt, signal, onToken);
-      if (content) return { mode: 'bundled llama.cpp', content };
+      const { content, usage } = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt, signal, onToken);
+      if (content) return { mode: 'bundled llama.cpp', content, diagnostics: { endpointType: 'bundled llama.cpp', endpoint: status.managedEndpoint, model: status.endpointModelName || status.model?.name || null, usage } };
     }
     if (status.llamaCliConfigured && status.llamaCliExists) {
       // llama-cli/llama-completion runs as a buffered subprocess; deliver its
       // output as a single chunk so streaming clients still render the answer.
       const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt, signal);
-      if (content) { if (typeof onToken === 'function') onToken(content); return { mode: 'llama-cli', content }; }
+      if (content) { if (typeof onToken === 'function') onToken(content); return { mode: 'llama-cli', content, diagnostics: { endpointType: 'llama-cli', model: status.model?.name || null, modelPath: status.model?.path || null } }; }
     }
   } catch (error) {
     if (signal?.aborted) throw new Error('Local model generation was cancelled.');
@@ -1681,18 +1702,39 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken) {
   throw new Error('No local runtime produced a response. Check the endpoint or repair the bundled llama.cpp runtime in Settings.');
 }
 
-// Builds the persisted assistant message text (generated answer + memory
-// governance note + attached-context note + runtime label). Shared by the JSON
-// and streaming chat endpoints so both persist identical content.
-function composeAssistantMessageText(sessionId, candidateId, content, mode) {
+// Builds the structured, non-conversational diagnostics for an assistant reply.
+// The natural answer is stored on its own; runtime, memory-governance, attached
+// context, tokens, and timing live in metadata so the UI can show them in a
+// Details panel (or hide them in Clean mode) instead of concatenating a system
+// dump into the reply. Shared by the JSON and streaming chat endpoints.
+function buildAssistantMetadata(sessionId, candidateId, assistant, elapsedMs) {
   const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
-  const contextLine = contexts.length
-    ? `\n\nFiles in context: ${contexts.map((item) => item.path).join(', ')}. Source files are context only; I am not treating inference as source-of-truth.`
-    : '';
-  const governanceLine = candidateId
-    ? '\n\nMemory governance: I saved your note as a candidate for review and will not promote it until you approve it.'
-    : '\n\nMemory governance: I saved this to chat history and did not extract a memory candidate from this short note.';
-  return `${content}${governanceLine}${contextLine}\n\nRuntime: ${mode}.`;
+  const candidate = candidateId ? row('SELECT id, type, title, confidence FROM memory_candidates WHERE id = ?', [candidateId]) : null;
+  return {
+    version: 1,
+    runtime: assistant.mode,
+    endpointType: assistant.diagnostics?.endpointType || null,
+    endpoint: assistant.diagnostics?.endpoint || null,
+    model: assistant.diagnostics?.model || null,
+    contextFiles: contexts.map((item) => item.path),
+    memoryGovernance: candidateId
+      ? {
+          created: true,
+          candidateId,
+          type: candidate?.type || null,
+          title: candidate?.title || null,
+          message: 'Saved your note as a memory candidate for review; it will not be promoted until you approve it.'
+        }
+      : {
+          created: false,
+          message: 'Saved to chat history; no memory candidate was extracted from this short note.'
+        },
+    tokens: assistant.diagnostics?.usage || null,
+    timingMs: typeof elapsedMs === 'number' ? elapsedMs : null,
+    fallback: (assistant.mode === 'unavailable' || assistant.mode === 'runtime error') ? assistant.mode : null,
+    error: assistant.diagnostics?.error || null,
+    generatedAt: new Date().toISOString()
+  };
 }
 
 function browserConnectorConnected() {
@@ -2127,6 +2169,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
   const controller = new AbortController();
   activeChatGenerations.set(String(req.params.id), controller);
+  const startedAt = Date.now();
   let assistant;
   try {
     assistant = await runPlannerAssistant(Number(req.params.id), content, controller.signal);
@@ -2143,8 +2186,11 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     if (activeChatGenerations.get(String(req.params.id)) === controller) activeChatGenerations.delete(String(req.params.id));
   }
   lastRuntimeResult = { ok: true, mode: assistant.mode, at: new Date().toISOString() };
-  const response = composeAssistantMessageText(Number(req.params.id), candidateId, assistant.content, assistant.mode);
-  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'assistant', response).lastInsertRowid;
+  // Store the natural answer only; diagnostics live in structured metadata so
+  // Clean mode stays conversational and Detailed/Developer can surface them.
+  const metadata = buildAssistantMetadata(Number(req.params.id), candidateId, assistant, Date.now() - startedAt);
+  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)')
+    .run(req.params.id, 'assistant', assistant.content, JSON.stringify(metadata)).lastInsertRowid;
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
   ok(res, {
     messages: allRows('SELECT * FROM chat_messages WHERE id IN (?, ?) ORDER BY id ASC', [messageId, assistantId]),
@@ -2185,6 +2231,7 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   // small request body is fully read, which would abort every stream instantly.)
   res.on('close', () => { if (!res.writableEnded) controller.abort(); });
 
+  const startedAt = Date.now();
   let assistant;
   try {
     assistant = await runPlannerAssistant(sessionId, content, controller.signal, (delta) => emit('token', { delta }));
@@ -2201,8 +2248,9 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
     if (activeChatGenerations.get(String(sessionId)) === controller) activeChatGenerations.delete(String(sessionId));
   }
   lastRuntimeResult = { ok: true, mode: assistant.mode, at: new Date().toISOString() };
-  const response = composeAssistantMessageText(sessionId, candidateId, assistant.content, assistant.mode);
-  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'assistant', response).lastInsertRowid;
+  // Store the natural answer only; diagnostics live in structured metadata.
+  const metadata = buildAssistantMetadata(sessionId, candidateId, assistant, Date.now() - startedAt);
+  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)').run(sessionId, 'assistant', assistant.content, JSON.stringify(metadata)).lastInsertRowid;
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
   emit('done', { message: row('SELECT * FROM chat_messages WHERE id = ?', [assistantId]), runtime: assistant.mode, candidateId });
   res.end();
