@@ -7,6 +7,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
+import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
   normalizeRequestPath,
@@ -88,6 +89,10 @@ const root = process.cwd();
 let managedLlamaServer = null;
 let managedLlamaServerReady = false;
 let managedLlamaServerStartPromise = null;
+const activeChatGenerations = new Map();
+// Last local Planner Assistant runtime outcome, surfaced through system.status
+// and the Chat connection state so the UI reflects reality (not a guess).
+let lastRuntimeResult = null;
 let browserContext = null;
 let browserPage = null;
 let browserMode = '';
@@ -1250,6 +1255,19 @@ function assignedPlannerModel() {
   return row("SELECT * FROM model_registry WHERE assigned_role = 'Planner Assistant' ORDER BY updated_at DESC LIMIT 1");
 }
 
+function modelFileState(model) {
+  if (!model?.path) return { exists: false, available: false, file_error: 'No model file path is recorded.' };
+  try {
+    const stat = fs.statSync(model.path);
+    if (!stat.isFile()) return { exists: true, available: false, file_error: 'Model path is not a file.' };
+    if (!/\.gguf$/i.test(model.path)) return { exists: true, available: false, file_error: 'Model file must use the .gguf extension.' };
+    if (stat.size < 1024) return { exists: true, available: false, file_error: 'Model file is too small to be a complete GGUF.' };
+    return { exists: true, available: true, file_error: '', file_size_bytes: stat.size };
+  } catch (error) {
+    return { exists: false, available: false, file_error: error.code === 'ENOENT' ? 'Model file is missing.' : `Model file is not readable: ${error.message}` };
+  }
+}
+
 function bundledLocalRuntime() {
   const portableRoot = path.resolve(root, '..');
   return {
@@ -1308,57 +1326,134 @@ function readChatContextFiles(sessionId) {
   return files;
 }
 
-function buildAssistantPrompt(sessionId, userMessage) {
-  const memories = allRows(`
-    SELECT type, title, body, status, confidence, owner, next_action
-    FROM knowledge_items
-    WHERE status IN ('active', 'stable')
-    ORDER BY confidence DESC, updated_at DESC
-    LIMIT 12
-  `);
-  const pending = allRows('SELECT title, type, confidence FROM memory_candidates WHERE status IN (?, ?) ORDER BY created_at DESC LIMIT 8', ['candidate', 'deferred']);
-  const files = readChatContextFiles(sessionId);
+// Lightweight, authoritative Workboard/System counts for grounding the model.
+// Fast direct queries only (no browser/CLI probes) so generation stays responsive.
+function lightweightGroundingFacts() {
+  const one = (sql) => (row(sql)?.n ?? 0);
+  return {
+    projects: one("SELECT COUNT(*) n FROM projects WHERE status NOT IN ('done','completed','archived')"),
+    blocked: one("SELECT COUNT(*) n FROM knowledge_items WHERE (type='blocker' OR status='blocked') AND status NOT IN ('archived','deprecated','superseded')"),
+    review: one("SELECT COUNT(*) n FROM approvals WHERE status='pending'"),
+    candidates: one("SELECT COUNT(*) n FROM memory_candidates WHERE status IN ('candidate','deferred')"),
+    roadmap: one("SELECT COUNT(*) n FROM roadmap_items WHERE status != 'done'"),
+    blockedItems: allRows("SELECT title FROM knowledge_items WHERE (type='blocker' OR status='blocked') AND status NOT IN ('archived','deprecated','superseded') ORDER BY updated_at DESC LIMIT 5").map((r) => r.title),
+    projectNames: allRows("SELECT name FROM projects WHERE status NOT IN ('done','completed','archived') ORDER BY updated_at DESC LIMIT 12").map((r) => r.name)
+  };
+}
 
-  const memoryBlock = memories.length
-    ? memories.map((item) => `- [${item.type}/${item.status}/${Math.round(Number(item.confidence || 0) * 100)}%] ${item.title}: ${item.body} Next: ${item.next_action || 'none'}`).join('\n')
-    : '- No approved memories yet.';
-  const pendingBlock = pending.length
-    ? pending.map((item) => `- [${item.type}/${Math.round(Number(item.confidence || 0) * 100)}%] ${item.title}`).join('\n')
-    : '- No pending memory candidates.';
+// Full content for an explicitly-attached context record, with provenance. This
+// is the ONLY path by which Knowledge/Workboard record content reaches the model,
+// and only for records the user deliberately attached.
+function resolveContextRecordContent(kind, refId) {
+  if (kind === 'knowledge-item' || kind === 'workboard-item') {
+    const r = row('SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.id = ?', [refId]);
+    if (!r) return null;
+    return { title: `${r.type}: ${r.title}`, provenance: `id=${r.id} status=${r.status} source=${r.source} confidence=${r.confidence}`, text: `${r.body || ''}${r.next_action ? ` | Next: ${r.next_action}` : ''}${r.evidence ? ` | Evidence: ${r.evidence}` : ''}` };
+  }
+  if (kind === 'knowledge-candidate') {
+    const r = row('SELECT * FROM memory_candidates WHERE id = ?', [refId]);
+    if (!r) return null;
+    return { title: `candidate: ${r.title}`, provenance: `id=${r.id} status=${r.status} source=${r.source} confidence=${r.confidence} (candidate — not promoted)`, text: `${r.body || ''}${r.evidence ? ` | Evidence: ${r.evidence}` : ''}` };
+  }
+  if (kind === 'workboard-project') {
+    const r = row('SELECT * FROM projects WHERE id = ?', [refId]);
+    if (!r) return null;
+    const items = allRows("SELECT title, status FROM knowledge_items WHERE project_id = ? AND status NOT IN ('archived','deprecated','superseded') ORDER BY updated_at DESC LIMIT 10", [refId]);
+    return { title: `project: ${r.name}`, provenance: `id=${r.id} status=${r.status} owner=${r.owner}`, text: `${r.next_action ? `Next: ${r.next_action}. ` : ''}${r.evidence ? `Evidence: ${r.evidence}. ` : ''}Items: ${items.map((i) => `${i.title} (${i.status})`).join('; ') || 'none'}` };
+  }
+  return null;
+}
+
+function readSelectedContextRecords(sessionId) {
+  const records = allRows('SELECT * FROM chat_context_records WHERE session_id = ? ORDER BY added_at ASC', [sessionId]);
+  if (!records.length) return '';
+  let budget = 6000;
+  const lines = [];
+  for (const rec of records) {
+    if (budget <= 0) { lines.push('- [context budget reached; remaining attached records omitted]'); break; }
+    const full = resolveContextRecordContent(rec.kind, rec.ref_id);
+    if (!full) { lines.push(`- [${rec.kind} id=${rec.ref_id}] (record is no longer available)`); continue; }
+    const text = full.text.slice(0, Math.min(1200, budget));
+    budget -= text.length;
+    lines.push(`- [${rec.kind} ${full.provenance}] ${full.title}: ${text}`);
+  }
+  return lines.join('\n');
+}
+
+async function buildAssistantPrompt(sessionId, userMessage) {
+  const model = await localModelStatus();
+  const facts = lightweightGroundingFacts();
+  const files = readChatContextFiles(sessionId);
+  const selected = readSelectedContextRecords(sessionId);
+
+  const runtimeLine = model.managedServerRunning
+    ? `local llama.cpp server running (${model.managedEndpoint || 'managed'})`
+    : model.endpointConfigured
+      ? `local endpoint configured (${model.endpoint})`
+      : model.assigned
+        ? 'assigned model will load on next message'
+        : 'no model assigned';
+  const lastLine = lastRuntimeResult ? `${lastRuntimeResult.ok ? 'success' : 'error'} via ${lastRuntimeResult.mode}` : 'none yet';
+
+  const grounding = [
+    `- Assistant model: ${model.model?.name || 'none assigned'} (${model.assigned ? 'ready' : 'not ready'})`,
+    `- Local runtime: ${runtimeLine}; last result: ${lastLine}. No cloud model is ever used.`,
+    '- SQLite database: ready.',
+    `- Workboard: ${facts.projects} active project(s), ${facts.blocked} blocked, ${facts.review} awaiting review, ${facts.roadmap} roadmap item(s), ${facts.candidates} memory candidate(s).`,
+    `- Active projects: ${facts.projectNames.length ? facts.projectNames.join('; ') : 'none'}.`,
+    `- Blocked items: ${facts.blockedItems.length ? facts.blockedItems.join('; ') : 'none'}.`,
+    '- Available capabilities (tools): knowledge.search, knowledge.read, workboard.list, workboard.read, workboard.propose_create, workboard.propose_update, system.status, system.models, system.runs, conversation.search.'
+  ].join('\n');
+
   const fileBlock = files.length
     ? files.map((file) => `--- ${file.path} ---\n${file.text}`).join('\n\n')
-    : 'No attached source files.';
+    : 'No repository/source files attached.';
+
+  const hasContext = Boolean(selected);
+  const systemInstructions = [
+    'You are the local LifePlanSystem Planner Assistant — a local-first, on-device executive assistant and the central control surface of LifePlanSystem. You run entirely on this machine; no cloud model is used.',
+    'How to answer:',
+    '- The sections below contain real, authoritative data from this application. Treat every record listed under "Attached context" as available to you right now — read it and answer the user directly from it. Do not ask the user to re-select or confirm records that are already listed.',
+    '- Use the application state and attached records for any facts about the model, System, Knowledge, or Workboard. Never invent projects, tasks, Knowledge records, statuses, IDs, runs, or system facts that are not shown below.',
+    '- Only if the specific information the user needs is genuinely NOT in the sections below, say it is not attached and suggest attaching it (Use Knowledge / Use Workboard). Do not guess.',
+    '- When you use an attached record, cite it by its id and title.',
+    'Governance:',
+    '- Chat messages only become candidate memory after explicit user review. You cannot and must not promote memory or modify source-of-truth automatically.',
+    '- Any change to the Workboard is only a proposal; the user must confirm it before it is applied. Never claim a change was made unless it was confirmed.',
+    'Answer concisely with a clear next step.'
+  ].join('\n');
 
   return [
-    'You are Life Planner, a local-first personal executive assistant.',
-    'Use the local database context below. Do not promote chat content to memory; mention candidate memories only as suggestions for user review.',
-    'Cloud agents are consultants only. If external critique is needed, recommend using the Browser consultation workflow.',
-    'Answer with a concise next step and any blockers or review items.',
+    systemInstructions,
     '',
-    'Approved local knowledge:',
-    memoryBlock,
+    '=== Authoritative application state (from live local APIs) ===',
+    grounding,
     '',
-    'Pending memory candidates:',
-    pendingBlock,
+    hasContext
+      ? '=== Attached context (real records the user attached — use these to answer) ==='
+      : '=== Attached context ===',
+    hasContext ? selected : '- No Knowledge or Workboard records are attached to this conversation.',
     '',
-    'Attached files:',
+    '=== Attached repository/source files ===',
     fileBlock,
     '',
-    'User message:',
+    '=== User message ===',
     userMessage
   ].join('\n');
 }
 
 async function localModelStatus() {
   const model = assignedPlannerModel();
+  const modelFile = modelFileState(model);
   const endpoint = String(getSetting('localModelEndpoint', '') || '').trim();
   const endpointModelName = String(getSetting('localModelName', 'planner-assistant') || '').trim() || 'planner-assistant';
   const llamaCliPath = String(getSetting('llamaCliPath', '') || '').trim();
   const llamaServerPath = String(getSetting('llamaServerPath', '') || '').trim();
   const llamaServerPort = Number(getSetting('llamaServerPort', 8080) || 8080);
   return {
-    assigned: Boolean(model),
+    assigned: Boolean(model && modelFile.available),
     model,
+    modelFile,
     endpointConfigured: Boolean(endpoint),
     endpoint,
     endpointModelName,
@@ -1412,7 +1507,12 @@ async function startManagedLlamaServer(options = {}) {
     fs.mkdirSync(logDir, { recursive: true });
     const stdoutFd = fs.openSync(path.join(logDir, 'llama-server.stdout.log'), 'a');
     const stderrFd = fs.openSync(path.join(logDir, 'llama-server.stderr.log'), 'a');
-    const args = ['-m', status.model.path, '--host', '127.0.0.1', '--port', String(port), '-c', String(contextSize)];
+    // --reasoning-budget 0 makes "thinking" models (e.g. Qwen3.x) end their
+    // hidden reasoning immediately and emit a real answer in message.content.
+    // Without it, a small reasoning model can spend the whole token budget inside
+    // reasoning_content and return an empty content string, which the caller would
+    // treat as "no runtime produced a response".
+    const args = ['-m', status.model.path, '--host', '127.0.0.1', '--port', String(port), '-c', String(contextSize), '--reasoning-budget', '0'];
     const child = spawn(serverPath, args, { cwd: path.dirname(serverPath), detached: false, stdio: ['ignore', stdoutFd, stderrFd], windowsHide: true });
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
@@ -1448,12 +1548,15 @@ async function startManagedLlamaServer(options = {}) {
 
 ensureBundledLocalRuntimeDefaults();
 
-async function runEndpointModel(endpoint, modelName, prompt) {
+async function runEndpointModel(endpoint, modelName, prompt, signal, onToken) {
   const base = endpoint.replace(/\/+$/, '');
   const url = base.endsWith('/v1/chat/completions') ? base : `${base}/v1/chat/completions`;
+  const streaming = typeof onToken === 'function';
+  const timeoutSignal = AbortSignal.timeout(5 * 60 * 1000);
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.any([signal, timeoutSignal].filter(Boolean)),
     body: JSON.stringify({
       model: modelName || 'planner-assistant',
       messages: [
@@ -1461,37 +1564,99 @@ async function runEndpointModel(endpoint, modelName, prompt) {
         { role: 'user', content: prompt }
       ],
       temperature: 0.3,
-      max_tokens: 700
+      max_tokens: 700,
+      stream: streaming
     })
   });
   if (!response.ok) throw new Error(`Local model endpoint failed: ${response.status} ${response.statusText}`);
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content?.trim() || data.choices?.[0]?.text?.trim() || '';
+  if (!streaming) {
+    const data = await response.json();
+    const choice = data.choices?.[0] || {};
+    // Fall back to reasoning_content so a reasoning model that returned only its
+    // thinking (empty content) still surfaces a real answer instead of a hard fail.
+    return choice.message?.content?.trim()
+      || choice.text?.trim()
+      || choice.message?.reasoning_content?.trim()
+      || '';
+  }
+  // Parse the OpenAI-style SSE stream, forwarding visible content deltas as tokens.
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let reasoning = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      let json;
+      try { json = JSON.parse(payload); } catch { continue; }
+      const delta = json.choices?.[0]?.delta || {};
+      if (delta.content) { content += delta.content; onToken(delta.content); }
+      else if (delta.reasoning_content) { reasoning += delta.reasoning_content; }
+    }
+  }
+  return content.trim() || reasoning.trim();
 }
 
-async function runLlamaCli(llamaCliPath, modelPath, prompt) {
-  const result = await execFileAsync(llamaCliPath, ['-m', modelPath, '-p', prompt, '-n', '700', '--temp', '0.3'], {
+// Newer llama.cpp builds split single-shot generation out of the interactive
+// llama-cli into a dedicated llama-completion binary; llama-cli in those builds
+// only runs a conversation loop and, in a subprocess with no stdin, never exits.
+// When the configured CLI is llama-cli, prefer a sibling llama-completion binary
+// for a clean, non-interactive single-shot run.
+function resolveCompletionBinary(configuredPath) {
+  const ext = path.extname(configuredPath);
+  const base = path.basename(configuredPath, ext).toLowerCase();
+  if (base === 'llama-cli') {
+    const sibling = path.join(path.dirname(configuredPath), `llama-completion${ext}`);
+    if (fs.existsSync(sibling)) return sibling;
+  }
+  return configuredPath;
+}
+
+function cleanLocalCliOutput(text) {
+  return String(text || '')
+    .replace(/\x1b\[[0-9;]*m/g, '') // strip ANSI colour codes
+    .replace(/<think>[\s\S]*?<\/think>/gi, '') // drop hidden reasoning blocks
+    .replace(/\s*\[end of text\]\s*$/i, '') // strip llama.cpp end marker
+    .trim();
+}
+
+async function runLlamaCli(llamaCliPath, modelPath, prompt, signal) {
+  if (signal?.aborted) throw new Error('Local model generation was cancelled.');
+  const binary = resolveCompletionBinary(llamaCliPath);
+  // -st runs a single chat turn (applies the model's chat template) and exits;
+  // --simple-io/--no-display-prompt keep stdout to the generated answer only.
+  const result = await execFileAsync(binary, ['-m', modelPath, '-p', prompt, '-n', '700', '--temp', '0.3', '-st', '--simple-io', '--no-display-prompt'], {
     cwd: root,
     timeout: 5 * 60 * 1000,
     windowsHide: true,
-    maxBuffer: 4 * 1024 * 1024
+    maxBuffer: 8 * 1024 * 1024,
+    signal
   });
-  return result.stdout.trim();
+  const cleaned = cleanLocalCliOutput(result.stdout);
+  return cleaned || result.stdout.trim();
 }
 
-async function runPlannerAssistant(sessionId, userMessage) {
+async function runPlannerAssistant(sessionId, userMessage, signal, onToken) {
   let status = await localModelStatus();
   if (!status.assigned && !status.endpointConfigured) {
-    return {
-      mode: 'unavailable',
-      content: 'Saved to chat. No Planner Assistant model is assigned and no OpenAI-compatible local endpoint is configured yet; choose a GGUF model in Settings.'
-    };
+    throw new Error(status.model && !status.modelFile.available
+      ? `Assigned Planner Assistant model is unavailable: ${status.modelFile.file_error}`
+      : 'No Planner Assistant model is assigned and no OpenAI-compatible local endpoint is configured.');
   }
 
-  const prompt = buildAssistantPrompt(sessionId, userMessage);
+  const prompt = await buildAssistantPrompt(sessionId, userMessage);
   try {
     if (status.endpointConfigured) {
-      const content = await runEndpointModel(status.endpoint, status.endpointModelName, prompt);
+      const content = await runEndpointModel(status.endpoint, status.endpointModelName, prompt, signal, onToken);
       if (content) return { mode: `local endpoint (${status.endpointModelName})`, content };
     }
     if (status.assigned && status.llamaServerExists && !status.managedServerReady) {
@@ -1499,24 +1664,35 @@ async function runPlannerAssistant(sessionId, userMessage) {
       status = await localModelStatus();
     }
     if (status.managedEndpoint) {
-      const content = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt);
+      const content = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt, signal, onToken);
       if (content) return { mode: 'bundled llama.cpp', content };
     }
     if (status.llamaCliConfigured && status.llamaCliExists) {
-      const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt);
-      if (content) return { mode: 'llama-cli', content };
+      // llama-cli/llama-completion runs as a buffered subprocess; deliver its
+      // output as a single chunk so streaming clients still render the answer.
+      const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt, signal);
+      if (content) { if (typeof onToken === 'function') onToken(content); return { mode: 'llama-cli', content }; }
     }
   } catch (error) {
-    return {
-      mode: 'runtime error',
-      content: `Saved to chat. Local model runtime failed: ${error.message}. The message remains available for memory review, and no memory was promoted automatically.`
-    };
+    if (signal?.aborted) throw new Error('Local model generation was cancelled.');
+    throw new Error(`Local model runtime failed: ${error.message}`);
   }
 
-  return {
-    mode: 'unavailable',
-    content: 'Saved to chat. A Planner Assistant model is assigned or endpoint is configured, but no local runtime answered. Check the endpoint or repair the bundled runtime in Settings.'
-  };
+  throw new Error('No local runtime produced a response. Check the endpoint or repair the bundled llama.cpp runtime in Settings.');
+}
+
+// Builds the persisted assistant message text (generated answer + memory
+// governance note + attached-context note + runtime label). Shared by the JSON
+// and streaming chat endpoints so both persist identical content.
+function composeAssistantMessageText(sessionId, candidateId, content, mode) {
+  const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
+  const contextLine = contexts.length
+    ? `\n\nFiles in context: ${contexts.map((item) => item.path).join(', ')}. Source files are context only; I am not treating inference as source-of-truth.`
+    : '';
+  const governanceLine = candidateId
+    ? '\n\nMemory governance: I saved your note as a candidate for review and will not promote it until you approve it.'
+    : '\n\nMemory governance: I saved this to chat history and did not extract a memory candidate from this short note.';
+  return `${content}${governanceLine}${contextLine}\n\nRuntime: ${mode}.`;
 }
 
 function browserConnectorConnected() {
@@ -1945,17 +2121,29 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   if (!content) return fail(res, 400, 'Message content is required.');
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
-  const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]);
   const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'user', content).lastInsertRowid;
   const candidateId = createCandidateFromMessage(Number(req.params.id), messageId, content);
-  const contextLine = contexts.length
-    ? `\n\nFiles in context: ${contexts.map((item) => item.path).join(', ')}. Source files are context only; I am not treating inference as source-of-truth.`
-    : '';
-  const assistant = await runPlannerAssistant(Number(req.params.id), content);
-  const governanceLine = candidateId
-    ? '\n\nMemory governance: I saved your note as a candidate for review and will not promote it until you approve it.'
-    : '\n\nMemory governance: I saved this to chat history and did not extract a memory candidate from this short note.';
-  const response = `${assistant.content}${governanceLine}${contextLine}\n\nRuntime: ${assistant.mode}.`;
+  const userMessage = row('SELECT * FROM chat_messages WHERE id = ?', [messageId]);
+  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
+  const controller = new AbortController();
+  activeChatGenerations.set(String(req.params.id), controller);
+  let assistant;
+  try {
+    assistant = await runPlannerAssistant(Number(req.params.id), content, controller.signal);
+  } catch (error) {
+    const cancelled = controller.signal.aborted;
+    lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
+    return ok(res, {
+      messages: [userMessage],
+      candidateId,
+      runtime: cancelled ? 'cancelled' : 'setup/runtime error',
+      error: cancelled ? 'Local model generation was cancelled. Your message was saved.' : `${error.message} Your message was saved for review; no assistant response was invented.`
+    });
+  } finally {
+    if (activeChatGenerations.get(String(req.params.id)) === controller) activeChatGenerations.delete(String(req.params.id));
+  }
+  lastRuntimeResult = { ok: true, mode: assistant.mode, at: new Date().toISOString() };
+  const response = composeAssistantMessageText(Number(req.params.id), candidateId, assistant.content, assistant.mode);
   const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'assistant', response).lastInsertRowid;
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
   ok(res, {
@@ -1963,6 +2151,343 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     candidateId,
     runtime: assistant.mode
   });
+});
+
+// Streaming counterpart of the message endpoint. It forwards visible tokens over
+// SSE for a live in-progress bubble but still persists exactly one final
+// assistant message (a single INSERT on completion), so there is never a
+// duplicate partial+final row. Clients fall back to the JSON endpoint above if
+// this route or the stream is unavailable.
+app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
+  const content = req.body.content?.trim();
+  if (!content) return fail(res, 400, 'Message content is required.');
+  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
+  if (!session) return fail(res, 404, 'Session not found.');
+  const sessionId = Number(req.params.id);
+  const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'user', content).lastInsertRowid;
+  const candidateId = createCandidateFromMessage(sessionId, messageId, content);
+  const userMessage = row('SELECT * FROM chat_messages WHERE id = ?', [messageId]);
+  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+  const emit = (event, data) => { if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
+  emit('user', { message: userMessage, candidateId });
+
+  const controller = new AbortController();
+  activeChatGenerations.set(String(sessionId), controller);
+  // Abort generation only if the client disconnects before we finish responding.
+  // (res 'close' fires on real socket close; req 'close' fires as soon as the
+  // small request body is fully read, which would abort every stream instantly.)
+  res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+
+  let assistant;
+  try {
+    assistant = await runPlannerAssistant(sessionId, content, controller.signal, (delta) => emit('token', { delta }));
+  } catch (error) {
+    const cancelled = controller.signal.aborted;
+    lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
+    emit('error', {
+      runtime: cancelled ? 'cancelled' : 'setup/runtime error',
+      error: cancelled ? 'Local model generation was cancelled. Your message was saved.' : `${error.message} Your message was saved for review; no assistant response was invented.`
+    });
+    res.end();
+    return;
+  } finally {
+    if (activeChatGenerations.get(String(sessionId)) === controller) activeChatGenerations.delete(String(sessionId));
+  }
+  lastRuntimeResult = { ok: true, mode: assistant.mode, at: new Date().toISOString() };
+  const response = composeAssistantMessageText(sessionId, candidateId, assistant.content, assistant.mode);
+  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'assistant', response).lastInsertRowid;
+  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+  emit('done', { message: row('SELECT * FROM chat_messages WHERE id = ?', [assistantId]), runtime: assistant.mode, candidateId });
+  res.end();
+});
+
+app.post('/api/chat/sessions/:id/cancel', (req, res) => {
+  const controller = activeChatGenerations.get(String(req.params.id));
+  if (!controller) return ok(res, { cancelled: false, message: 'No local generation is active for this chat.' });
+  controller.abort();
+  ok(res, { cancelled: true, message: 'Cancellation requested for the local model generation.' });
+});
+
+// ---------------------------------------------------------------------------
+// Chat control-surface capability layer.
+// Bounded, schema-validated services that connect Chat to the authoritative
+// Knowledge, Workboard, System, model-registry, and conversation repositories.
+// The capability module (chatCapabilities.js) is pure; all data access happens
+// here through named dependency functions using parameterised queries, so the
+// model/client can never inject raw SQL, shell commands, or filesystem paths.
+// Read capabilities run immediately; propose_* capabilities never mutate — they
+// return a proposal that must be confirmed via /workboard/confirm.
+// ---------------------------------------------------------------------------
+
+function writeChatAudit(sessionId, capability, outcome, detail) {
+  try {
+    db.prepare('INSERT INTO chat_audit (session_id, capability, outcome, detail) VALUES (?, ?, ?, ?)')
+      .run(Number.isInteger(sessionId) ? sessionId : null, String(capability).slice(0, 80), String(outcome).slice(0, 40), String(detail || '').slice(0, 500));
+  } catch { /* audit is best-effort and must never break a request */ }
+}
+
+function likeParam(query) {
+  return `%${String(query).replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+}
+
+function resolveContextRecord(kind, refId) {
+  if (kind === 'knowledge-item') {
+    const r = row('SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.id = ?', [refId]);
+    return r ? { label: `${r.type}: ${r.title}`, provenance: { kind, id: r.id, source: r.source, evidence: r.evidence, confidence: r.confidence, status: r.status } } : null;
+  }
+  if (kind === 'knowledge-candidate') {
+    const r = row('SELECT * FROM memory_candidates WHERE id = ?', [refId]);
+    return r ? { label: `candidate: ${r.title}`, provenance: { kind, id: r.id, source: r.source, evidence: r.evidence, confidence: r.confidence, status: r.status } } : null;
+  }
+  if (kind === 'workboard-project') {
+    const r = row('SELECT * FROM projects WHERE id = ?', [refId]);
+    return r ? { label: `project: ${r.name}`, provenance: { kind, id: r.id, status: r.status, owner: r.owner } } : null;
+  }
+  if (kind === 'workboard-item') {
+    const r = row('SELECT * FROM knowledge_items WHERE id = ?', [refId]);
+    return r ? { label: `${r.type}: ${r.title}`, provenance: { kind, id: r.id, source: r.source, status: r.status } } : null;
+  }
+  return null;
+}
+
+const capabilityRegistry = createCapabilityRegistry({
+  searchKnowledge({ query, scope, limit }) {
+    const like = likeParam(query);
+    const cap = Math.min(limit * 3, 60);
+    const out = [];
+    if (scope === 'all' || scope === 'approved' || scope === 'rules') {
+      const typeClause = scope === 'rules' ? "AND k.type = 'rule'" : '';
+      const rows = allRows(`
+        SELECT k.*, p.name AS project_name FROM knowledge_items k
+        LEFT JOIN projects p ON p.id = k.project_id
+        WHERE (k.title LIKE ? ESCAPE '\\' OR k.body LIKE ? ESCAPE '\\')
+          ${typeClause}
+          AND k.status NOT IN ('archived','deprecated','superseded')
+        ORDER BY k.confidence DESC, k.updated_at DESC LIMIT ?`, [like, like, cap]);
+      for (const r of rows) out.push({ ...r, kind: 'item' });
+    }
+    if (scope === 'all' || scope === 'candidates') {
+      const rows = allRows(`
+        SELECT * FROM memory_candidates
+        WHERE (title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')
+          AND status IN ('candidate','deferred')
+        ORDER BY created_at DESC LIMIT ?`, [like, like, cap]);
+      for (const r of rows) out.push({ ...r, kind: 'candidate' });
+    }
+    return out;
+  },
+  readKnowledge({ id, kind }) {
+    if (kind === 'candidate') {
+      const r = row('SELECT * FROM memory_candidates WHERE id = ?', [id]);
+      return r ? { ...r, kind: 'candidate' } : null;
+    }
+    const r = row('SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.id = ?', [id]);
+    return r ? { ...r, kind: 'item' } : null;
+  },
+  async listWorkboard({ view, limit }) {
+    if (view === 'projects') {
+      const records = allRows('SELECT * FROM projects ORDER BY updated_at DESC LIMIT ?', [limit])
+        .map((p) => ({ ...p, title: p.name, type: 'project', record_kind: 'project' }));
+      return { summary: { projects: records.length }, records };
+    }
+    if (view === 'roadmap') {
+      const records = allRows('SELECT * FROM roadmap_items ORDER BY sort_order ASC, updated_at DESC LIMIT ?', [limit])
+        .map((r) => ({ ...r, type: r.category || 'roadmap', detail: r.detail }));
+      return { summary: { roadmap: records.length }, records };
+    }
+    if (view === 'review') {
+      const approvals = allRows("SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at DESC LIMIT ?", [limit])
+        .map((a) => ({ ...a, type: a.action_type || 'approval', detail: a.title }));
+      const candidates = allRows("SELECT * FROM memory_candidates WHERE status IN ('candidate','deferred') ORDER BY created_at DESC LIMIT ?", [limit])
+        .map((c) => ({ ...c, type: 'candidate' }));
+      return { summary: { approvals: approvals.length, candidates: candidates.length }, records: [...approvals, ...candidates].slice(0, limit) };
+    }
+    if (view === 'completed') {
+      const records = allRows("SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.status IN ('done','archived','deprecated','superseded') ORDER BY k.updated_at DESC LIMIT ?", [limit]);
+      return { summary: { completed: records.length }, records };
+    }
+    const planner = await plannerData();
+    if (view === 'blocked') return { summary: planner.summary, records: planner.blockers };
+    return { summary: planner.summary, records: [...planner.focus, ...planner.blockers, ...planner.waiting].slice(0, limit) };
+  },
+  async readWorkboard({ id, kind }) {
+    if (kind === 'project') {
+      const project = row('SELECT * FROM projects WHERE id = ?', [id]);
+      if (!project) return null;
+      const items = allRows("SELECT id, type, title, status, next_action, confidence FROM knowledge_items WHERE project_id = ? AND status NOT IN ('archived','deprecated','superseded') ORDER BY updated_at DESC LIMIT 25", [id]);
+      return {
+        kind: 'project',
+        project: { id: project.id, name: project.name, status: project.status, owner: project.owner, confidence: project.confidence, next_action: project.next_action, evidence: project.evidence, updated_at: project.updated_at },
+        items
+      };
+    }
+    const item = row('SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.id = ?', [id]);
+    if (!item) return null;
+    return { kind: 'item', id: item.id, type: item.type, title: item.title, body: item.body, status: item.status, confidence: item.confidence, next_action: item.next_action, due_at: item.due_at, source: item.source, evidence: item.evidence, project_name: item.project_name, updated_at: item.updated_at };
+  },
+  async systemStatus() {
+    const model = await localModelStatus();
+    let workboard = null;
+    try { workboard = (await plannerData()).summary; } catch { workboard = null; }
+    let repository = { available: false, note: 'See System → Repository for full detail.' };
+    try {
+      const snap = await gitStatusSnapshot();
+      repository = { available: true, branch: snap.branch || null, hasChanges: (snap.changedFiles?.length || 0) > 0, hasConflicts: Boolean(snap.hasConflicts), ahead: snap.ahead ?? null, behind: snap.behind ?? null };
+    } catch { /* repository detail is optional/best-effort */ }
+    return {
+      health: { db: 'ready', storageFile: path.basename(dbPath) },
+      sqlite: { ready: true },
+      model: { assigned: model.assigned, name: model.model?.name || null, available: model.modelFile?.available ?? null, file_error: model.modelFile?.file_error || null },
+      runtime: {
+        managedServerRunning: model.managedServerRunning,
+        managedServerReady: model.managedServerReady,
+        endpoint: model.managedEndpoint || (model.endpointConfigured ? model.endpoint : null),
+        endpointConfigured: model.endpointConfigured,
+        llamaServerAvailable: model.llamaServerExists,
+        llamaCliAvailable: model.llamaCliExists,
+        lastResult: lastRuntimeResult
+      },
+      workboard,
+      browserConnector: { connected: browserConnectorConnected() },
+      repository
+    };
+  },
+  async listModels() {
+    return modelsWithExists().map((m) => ({
+      id: m.id, name: m.name, assigned_role: m.assigned_role || null,
+      available: Boolean(m.available), size_gb: m.size_bytes ? Math.round((m.size_bytes / 1e9) * 100) / 100 : null,
+      file_error: m.file_error || null
+    }));
+  },
+  listRuns({ limit }) {
+    let runs = [];
+    try {
+      runs = readOpenHandsRequests().map((r) => ({ id: r.id, title: r.title || r.goal || 'run', status: r.status || 'unknown', created_at: r.created_at || r.createdAt || null }));
+    } catch { runs = []; }
+    runs.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    return runs.slice(0, limit);
+  },
+  searchConversations({ query, limit }) {
+    const like = likeParam(query);
+    return allRows("SELECT session_id, role, content, created_at FROM chat_messages WHERE content LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?", [like, Math.min(limit * 2, 40)]);
+  }
+});
+
+app.get('/api/chat/capabilities', (_req, res) => ok(res, capabilityRegistry.list()));
+
+app.post('/api/chat/capability', async (req, res) => {
+  const name = String(req.body?.name || '');
+  const sessionId = Number(req.body?.session_id) || null;
+  try {
+    const result = await capabilityRegistry.invoke(name, req.body?.args || {});
+    writeChatAudit(sessionId, name, 'ok', result.readOnly ? 'read' : 'proposal');
+    ok(res, result);
+  } catch (error) {
+    writeChatAudit(sessionId, name || 'unknown', 'error', error.message);
+    fail(res, 400, error.message);
+  }
+});
+
+app.get('/api/chat/sessions/:id/context-records', (req, res) => {
+  ok(res, allRows('SELECT * FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
+});
+
+app.post('/api/chat/sessions/:id/context-records', (req, res) => {
+  const kind = String(req.body?.kind || '');
+  const refId = Number(req.body?.ref_id);
+  if (!['knowledge-item', 'knowledge-candidate', 'workboard-project', 'workboard-item'].includes(kind)) return fail(res, 400, 'Unsupported context kind.');
+  if (!Number.isInteger(refId) || refId <= 0) return fail(res, 400, 'A valid record id is required.');
+  const resolved = resolveContextRecord(kind, refId);
+  if (!resolved) return fail(res, 404, 'That record was not found.');
+  db.prepare('INSERT OR IGNORE INTO chat_context_records (session_id, kind, ref_id, label, provenance) VALUES (?, ?, ?, ?, ?)')
+    .run(req.params.id, kind, refId, resolved.label, JSON.stringify(resolved.provenance));
+  writeChatAudit(Number(req.params.id), 'context.attach', 'ok', `${kind}:${refId}`);
+  ok(res, allRows('SELECT * FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
+});
+
+app.delete('/api/chat/sessions/:id/context-records/:recordId', (req, res) => {
+  db.prepare('DELETE FROM chat_context_records WHERE id = ? AND session_id = ?').run(req.params.recordId, req.params.id);
+  writeChatAudit(Number(req.params.id), 'context.remove', 'ok', String(req.params.recordId));
+  ok(res, allRows('SELECT * FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
+});
+
+// Execute a Workboard write that the user has explicitly confirmed in the UI.
+// The proposal is re-validated here (enums, allowed fields, required title) and
+// written only through the authoritative knowledge_items store — the model
+// never writes to SQLite or constructs SQL.
+app.post('/api/chat/sessions/:id/workboard/confirm', (req, res) => {
+  const sessionId = Number(req.params.id);
+  const proposal = req.body?.proposal || {};
+  try {
+    if (proposal.operation === 'workboard.create') {
+      const p = proposal.preview || {};
+      const title = String(p.title || '').trim();
+      if (!title) throw new Error('A title is required to create a Workboard item.');
+      const type = ITEM_TYPES.includes(p.type) ? p.type : 'note';
+      const status = type === 'blocker' ? 'blocked' : 'active';
+      const id = db.prepare(`INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, owner, next_action)
+        VALUES (?, ?, ?, 'chat', ?, ?, date('now'), 'user', ?)`)
+        .run(type, title, String(p.body || title), status, 0.9, p.next_action ? String(p.next_action) : null).lastInsertRowid;
+      writeChatAudit(sessionId, 'workboard.create', 'confirmed', `item ${id}: ${title}`);
+      return ok(res, { operation: 'workboard.create', success: true, record: row('SELECT * FROM knowledge_items WHERE id = ?', [id]) });
+    }
+    if (proposal.operation === 'workboard.update') {
+      const id = Number(proposal.target_id);
+      const existing = row('SELECT * FROM knowledge_items WHERE id = ?', [id]);
+      if (!existing) throw new Error('The item to update no longer exists.');
+      const allowed = ['status', 'title', 'body', 'next_action', 'confidence', 'due_at', 'reviewed'];
+      const fields = {};
+      for (const [k, v] of Object.entries(proposal.after || {})) {
+        if (!allowed.includes(k)) throw new Error(`Field "${k}" cannot be changed from Chat.`);
+        if (k === 'reviewed') { if (v) fields.last_reviewed = new Date().toISOString().slice(0, 10); continue; }
+        if (k === 'status' && !ITEM_STATUSES.includes(String(v))) throw new Error(`Invalid status "${v}".`);
+        if (k === 'confidence') { fields.confidence = Number(v); continue; }
+        fields[k] = k === 'title' || k === 'body' || k === 'next_action' ? (v === null ? null : String(v)) : v;
+      }
+      if (!Object.keys(fields).length) throw new Error('No permitted changes to apply.');
+      fields.updated_at = new Date().toISOString();
+      const sets = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
+      db.prepare(`UPDATE knowledge_items SET ${sets} WHERE id = ?`).run(...Object.values(fields), id);
+      writeChatAudit(sessionId, 'workboard.update', 'confirmed', `item ${id}`);
+      return ok(res, { operation: 'workboard.update', success: true, record: row('SELECT * FROM knowledge_items WHERE id = ?', [id]) });
+    }
+    throw new Error('Unsupported or missing proposal operation.');
+  } catch (error) {
+    writeChatAudit(sessionId, proposal.operation || 'workboard.confirm', 'error', error.message);
+    fail(res, 400, error.message);
+  }
+});
+
+app.get('/api/chat/sessions/:id/connection', async (req, res) => {
+  const sessionId = Number(req.params.id);
+  const model = await localModelStatus();
+  const contextRecords = allRows('SELECT id, kind, ref_id, label FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
+  const files = allRows('SELECT id, path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
+  ok(res, {
+    conversationId: sessionId,
+    model: { assigned: model.assigned, name: model.model?.name || null, endpointConfigured: model.endpointConfigured },
+    runtime: { managedServerRunning: model.managedServerRunning, ready: Boolean(model.managedServerReady || model.endpointConfigured || model.assigned), lastResult: lastRuntimeResult },
+    attached: {
+      knowledge: contextRecords.filter((r) => r.kind.startsWith('knowledge')).length,
+      workboard: contextRecords.filter((r) => r.kind.startsWith('workboard')).length,
+      files: files.length,
+      records: contextRecords,
+      fileList: files
+    },
+    capabilities: capabilityRegistry.list().map((c) => c.name),
+    generating: activeChatGenerations.has(String(sessionId))
+  });
+});
+
+app.get('/api/chat/sessions/:id/audit', (req, res) => {
+  ok(res, allRows('SELECT * FROM chat_audit WHERE session_id = ? ORDER BY id DESC LIMIT 40', [req.params.id]));
 });
 
 app.get('/api/memory', (_req, res) => {
@@ -2177,6 +2702,8 @@ app.post('/api/approvals', (req, res) => {
 
 app.get('/api/projects', (_req, res) => ok(res, allRows('SELECT * FROM projects ORDER BY updated_at DESC')));
 
+app.get('/api/approvals', (_req, res) => ok(res, allRows("SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at DESC")));
+
 app.post('/api/projects', (req, res) => {
   const name = req.body.name?.trim();
   if (!name) return fail(res, 400, 'Project name is required.');
@@ -2246,7 +2773,7 @@ app.patch('/api/items/:id', (req, res) => {
 // show "ready to load" vs a stale entry whose file was moved/deleted elsewhere.
 function modelsWithExists() {
   return allRows('SELECT * FROM model_registry ORDER BY assigned_role DESC, name ASC')
-    .map((model) => ({ ...model, exists: Boolean(model.path && fs.existsSync(model.path)) }));
+    .map((model) => ({ ...model, ...modelFileState(model) }));
 }
 
 app.get('/api/models', (_req, res) => ok(res, modelsWithExists()));
@@ -2354,18 +2881,41 @@ app.get('/api/hardware', async (_req, res) => {
 });
 
 app.post('/api/models/scan', (req, res) => {
-  const folders = req.body.folders?.length ? req.body.folders : getSetting('modelFolders', []);
+  const folders = Array.isArray(req.body.folders) && req.body.folders.length ? req.body.folders : getSetting('modelFolders', []);
   const discovered = [];
-  for (const folder of folders) {
-    if (!folder || !fs.existsSync(folder)) continue;
+  const issues = [];
+  for (const rawFolder of folders) {
+    const folder = String(rawFolder || '').trim();
+    if (!folder) continue;
+    if (!fs.existsSync(folder)) {
+      issues.push(`${folder}: folder does not exist.`);
+      continue;
+    }
     const stack = [folder];
     while (stack.length) {
       const current = stack.pop();
-      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      let entries;
+      try {
+        entries = fs.readdirSync(current, { withFileTypes: true });
+      } catch (error) {
+        issues.push(`${current}: ${error.message}`);
+        continue;
+      }
+      for (const entry of entries) {
         const full = path.join(current, entry.name);
         if (entry.isDirectory()) stack.push(full);
         if (entry.isFile() && entry.name.toLowerCase().endsWith('.gguf')) {
-          const stat = fs.statSync(full);
+          let stat;
+          try {
+            stat = fs.statSync(full);
+          } catch (error) {
+            issues.push(`${full}: ${error.message}`);
+            continue;
+          }
+          if (!stat.isFile() || stat.size < 1024) {
+            issues.push(`${full}: not a complete readable GGUF file.`);
+            continue;
+          }
           db.prepare(`
             INSERT INTO model_registry (name, path, size_bytes, source, updated_at)
             VALUES (?, ?, ?, 'local', CURRENT_TIMESTAMP)
@@ -2376,17 +2926,16 @@ app.post('/api/models/scan', (req, res) => {
       }
     }
   }
-  setSetting('modelFolders', folders);
-  ok(res, { discovered, models: modelsWithExists() });
+  setSetting('modelFolders', folders.map((folder) => String(folder).trim()).filter(Boolean));
+  ok(res, { discovered, issues, models: modelsWithExists() });
 });
 
 app.post('/api/models/:id/assign', async (req, res) => {
   const role = req.body.role || 'Planner Assistant';
   const model = row('SELECT * FROM model_registry WHERE id = ?', [req.params.id]);
   if (!model) return fail(res, 404, 'Model not found.');
-  if (model.path && !fs.existsSync(model.path)) {
-    return fail(res, 409, 'That model file is no longer on disk. Re-download it or remove the stale entry before assigning.');
-  }
+  const modelFile = modelFileState(model);
+  if (!modelFile.available) return fail(res, 409, `That model cannot be assigned: ${modelFile.file_error}`);
   db.prepare('UPDATE model_registry SET assigned_role = NULL WHERE assigned_role = ?').run(role);
   db.prepare('UPDATE model_registry SET assigned_role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(role, req.params.id);
   await stopManagedLlamaServer();

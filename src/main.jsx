@@ -37,23 +37,12 @@ import {
   X
 } from 'lucide-react';
 import './styles.css';
+import { PRIMARY_NAVIGATION, SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
 
 const API = '';
 
-const nav = [
-  { id: 'planner', label: 'Planner', icon: ListChecks },
-  { id: 'chat', label: 'Chat', icon: MessageSquareText },
-  { id: 'memory', label: 'Memory', icon: Brain },
-  { id: 'approvals', label: 'Approvals', icon: ShieldCheck },
-  { id: 'projects', label: 'Projects', icon: FolderKanban },
-  { id: 'roadmap', label: 'Dev Roadmap', icon: Route },
-  { id: 'repository', label: 'Repository', icon: FileText },
-  { id: 'calibration', label: 'Calibration', icon: SearchCheck },
-  { id: 'source', label: 'Source', icon: GitBranch },
-  { id: 'browser', label: 'Browser', icon: Globe2 },
-  { id: 'tooling', label: 'Tooling', icon: Wrench },
-  { id: 'settings', label: 'Settings', icon: Settings }
-];
+const navIcons = { workboard: ListChecks, chat: MessageSquareText, knowledge: Brain, system: Wrench, settings: Settings };
+const nav = PRIMARY_NAVIGATION.map((entry) => ({ ...entry, icon: navIcons[entry.id] }));
 
 async function api(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
@@ -213,10 +202,11 @@ function repoBoundaryLabel(repoPath = '', repoName = '') {
 }
 
 function App() {
-  const [view, setView] = useState('planner');
+  const [route, setRoute] = useState(() => routeFromLocation(window.location.pathname, window.location.search, window.location.hash));
   const [theme, setTheme] = useState(() => localStorage.getItem('life-planner-theme') || 'dark');
   const [boot, setBoot] = useState(null);
   const [planner, setPlanner] = useState(null);
+  const [approvals, setApprovals] = useState([]);
   const [memory, setMemory] = useState({ candidates: [], items: [] });
   const [projects, setProjects] = useState([]);
   const [models, setModels] = useState([]);
@@ -233,17 +223,42 @@ function App() {
     localStorage.setItem('life-planner-theme', theme);
   }, [theme]);
 
+  useEffect(() => {
+    if (route.legacy) window.history.replaceState({}, '', routeFor(route.section, route.tab, route.sessionId));
+  }, [route]);
+
+  useEffect(() => {
+    const onPopState = () => setRoute(routeFromLocation(window.location.pathname, window.location.search, window.location.hash));
+    window.addEventListener('popstate', onPopState);
+    window.addEventListener('hashchange', onPopState);
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+      window.removeEventListener('hashchange', onPopState);
+    };
+  }, []);
+
+  function navigate(section, tab = null, sessionId = null) {
+    const next = { section, tab: tab || nav.find((entry) => entry.id === section)?.defaultTab || null, sessionId, legacy: false };
+    const path = routeFor(next.section, next.tab, next.sessionId);
+    if (path !== window.location.hash) window.history.pushState({}, '', path);
+    setRoute(next);
+  }
+
   async function refreshAll() {
-    const data = await api('/api/bootstrap');
+    const [data, mem, pendingApprovals] = await Promise.all([
+      api('/api/bootstrap'),
+      api('/api/memory'),
+      api('/api/approvals').catch(() => null)
+    ]);
     setBoot(data);
     setPlanner(data.planner);
     setProjects(data.projects);
     setModels(data.models);
     setSettings(data.settings || {});
     setSessions(data.sessions);
-    if (!selectedSession && data.sessions[0]) setSelectedSession(data.sessions[0].id);
-    const mem = await api('/api/memory');
+    setSelectedSession((current) => current && data.sessions.some((session) => session.id === current) ? current : data.sessions[0]?.id || null);
     setMemory(mem);
+    setApprovals(pendingApprovals || data.planner.approvals || []);
   }
 
   async function refreshCurrentView() {
@@ -269,6 +284,13 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (route.section !== 'chat' || !route.sessionId || sessions.length === 0) return;
+    const session = sessions.find((item) => String(item.id) === String(route.sessionId));
+    if (session) setSelectedSession(session.id);
+    else navigate('chat');
+  }, [route.section, route.sessionId, sessions]);
+
+  useEffect(() => {
     if (!selectedSession) return;
     api(`/api/chat/sessions/${selectedSession}/messages`).then(setMessages).catch((err) => setNotice(err.message));
   }, [selectedSession]);
@@ -276,16 +298,27 @@ function App() {
   const activeSession = useMemo(() => sessions.find((session) => session.id === selectedSession), [sessions, selectedSession]);
 
   async function reloadPlanner() {
-    setPlanner(await api('/api/planner'));
-    setMemory(await api('/api/memory'));
+    const [nextPlanner, nextMemory, pendingApprovals] = await Promise.all([
+      api('/api/planner'),
+      api('/api/memory'),
+      api('/api/approvals').catch(() => null)
+    ]);
+    setPlanner(nextPlanner);
+    setMemory(nextMemory);
+    setApprovals(pendingApprovals || nextPlanner.approvals || []);
   }
 
   async function runPlannerRefresh() {
     const result = await api('/api/planner/refresh', { method: 'POST' });
     setPlanner(result.planner);
     setMemory(await api('/api/memory'));
+    setApprovals(await api('/api/approvals').catch(() => result.planner.approvals || []));
     setNotice(result.message);
   }
+
+  const candidateCount = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status)).length;
+  const operationalApprovalCount = approvals.filter((approval) => !isMemoryApproval(approval)).length;
+  const activeNav = nav.find((entry) => entry.id === route.section);
 
   return (
     <div className="app-shell">
@@ -301,9 +334,11 @@ function App() {
           {nav.map((entry) => {
             const Icon = entry.icon;
             return (
-              <button key={entry.id} className={cx('nav-item', view === entry.id && 'selected')} onClick={() => setView(entry.id)}>
+              <button key={entry.id} className={cx('nav-item', route.section === entry.id && 'selected')} onClick={() => navigate(entry.id)} aria-current={route.section === entry.id ? 'page' : undefined}>
                 <Icon size={18} />
                 <span>{entry.label}</span>
+                {entry.id === 'workboard' && operationalApprovalCount > 0 && <span className="nav-badge" aria-label={`${operationalApprovalCount} operational approvals awaiting review`}>{operationalApprovalCount}</span>}
+                {entry.id === 'knowledge' && candidateCount > 0 && <span className="nav-badge" aria-label={`${candidateCount} memory candidates awaiting review`}>{candidateCount}</span>}
               </button>
             );
           })}
@@ -317,8 +352,8 @@ function App() {
       <main className="main">
         <header className="topbar">
           <div>
-            <h1>{nav.find((entry) => entry.id === view)?.label}</h1>
-            <p>One source of truth, many views. Chat becomes candidate memory only after review.</p>
+            <h1>{route.section === 'settings' ? 'Settings' : activeNav?.label || 'Chat'}</h1>
+            <p>{route.section === 'workboard' ? 'Plan, prioritise, review, and complete work from one operational space.' : route.section === 'knowledge' ? 'Review memory candidates, evidence, rules, and calibration without auto-promotion.' : route.section === 'system' ? 'Inspect real local status, repository, browser, tooling, and run state.' : route.section === 'settings' ? 'Configure local-only models, runtime paths, and application preferences.' : 'One source of truth, many views. Chat becomes candidate memory only after review.'}</p>
           </div>
           <div className="top-actions">
             {notice && <span className="notice">{notice}</span>}
@@ -326,11 +361,14 @@ function App() {
               <RefreshCcw size={18} />
             </button>
             <ThemeToggle theme={theme} setTheme={setTheme} />
+            <button className={cx('icon-button', route.section === 'settings' && 'active')} onClick={() => navigate('settings')} aria-label="Open Settings" aria-current={route.section === 'settings' ? 'page' : undefined} title="Open Settings">
+              <Settings size={18} />
+            </button>
           </div>
         </header>
 
-        {view === 'planner' && <Planner planner={planner} refresh={reloadPlanner} runRefresh={runPlannerRefresh} setNotice={setNotice} />}
-        {view === 'chat' && (
+        {route.section === 'workboard' && <Workboard route={route} navigate={navigate} planner={planner} projects={projects} setProjects={setProjects} refresh={reloadPlanner} refreshAll={refreshAll} runRefresh={runPlannerRefresh} setNotice={setNotice} refreshSignal={refreshSignal} />}
+        {route.section === 'chat' && (
           <Chat
             sessions={sessions}
             activeSession={activeSession}
@@ -341,18 +379,12 @@ function App() {
             setMessages={setMessages}
             refreshAll={refreshAll}
             setNotice={setNotice}
+            navigate={navigate}
           />
         )}
-        {view === 'memory' && <Memory memory={memory} refresh={reloadPlanner} />}
-        {view === 'approvals' && <ApprovalQueue setNotice={setNotice} refreshPlanner={reloadPlanner} />}
-        {view === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
-        {view === 'roadmap' && <DevRoadmap setNotice={setNotice} refreshSignal={refreshSignal} />}
-        {view === 'repository' && <RepositoryExplorer setNotice={setNotice} refreshSignal={refreshSignal} />}
-        {view === 'calibration' && <Calibration setNotice={setNotice} refreshSignal={refreshSignal} />}
-        {view === 'source' && <SourceControl setNotice={setNotice} refreshSignal={refreshSignal} />}
-        {view === 'browser' && <BrowserConsult setNotice={setNotice} refresh={reloadPlanner} refreshSignal={refreshSignal} />}
-        {view === 'tooling' && <Tooling setNotice={setNotice} refreshSignal={refreshSignal} />}
-        {view === 'settings' && (
+        {route.section === 'knowledge' && <Knowledge route={route} navigate={navigate} memory={memory} refresh={reloadPlanner} setNotice={setNotice} refreshSignal={refreshSignal} />}
+        {route.section === 'system' && <System route={route} navigate={navigate} boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refresh={reloadPlanner} refreshSignal={refreshSignal} />}
+        {route.section === 'settings' && (
           <SettingsView
             settings={settings}
             setSettings={setSettings}
@@ -363,6 +395,153 @@ function App() {
         )}
       </main>
     </div>
+  );
+}
+
+function SectionTabs({ section, activeTab, navigate, badges = {} }) {
+  return (
+    <div className="section-tabs" role="tablist" aria-label={`${section} navigation`}>
+      {SECTION_TABS[section].map((tab) => (
+        <button
+          key={tab.id}
+          className={cx('section-tab', activeTab === tab.id && 'active')}
+          role="tab"
+          aria-selected={activeTab === tab.id}
+          onClick={() => navigate(section, tab.id)}
+        >
+          {tab.label}
+          {badges[tab.id] ? <span className="section-tab-badge">{badges[tab.id]}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Workboard({ route, navigate, planner, projects, setProjects, refresh, refreshAll, runRefresh, setNotice, refreshSignal }) {
+  const completedCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
+  return (
+    <section className="section-shell">
+      <SectionTabs section="workboard" activeTab={route.tab} navigate={navigate} badges={{ completed: completedCount || null }} />
+      {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} setNotice={setNotice} />}
+      {route.tab === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
+      {route.tab === 'roadmap' && <DevRoadmap setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'review' && <ApprovalQueue scope="operational" setNotice={setNotice} refreshPlanner={refresh} />}
+      {route.tab === 'completed' && <CompletedWorkboard setNotice={setNotice} refreshSignal={refreshSignal} />}
+    </section>
+  );
+}
+
+function Knowledge({ route, navigate, memory, refresh, setNotice, refreshSignal }) {
+  const candidateCount = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status)).length;
+  return (
+    <section className="section-shell">
+      <SectionTabs section="knowledge" activeTab={route.tab} navigate={navigate} badges={{ candidates: candidateCount || null }} />
+      {route.tab === 'memory' && <Memory memory={memory} refresh={refresh} mode="memory" />}
+      {route.tab === 'candidates' && (
+        <div className="stacked-panels">
+          <Memory memory={memory} refresh={refresh} mode="candidates" />
+          <ApprovalQueue scope="memory" setNotice={setNotice} refreshPlanner={refresh} />
+        </div>
+      )}
+      {route.tab === 'sources' && <KnowledgeSources memory={memory} setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'rules' && <KnowledgeRules memory={memory} />}
+      {route.tab === 'calibration' && <Calibration setNotice={setNotice} refreshSignal={refreshSignal} />}
+    </section>
+  );
+}
+
+function System({ route, navigate, boot, planner, sessions, models, setNotice, refresh, refreshSignal }) {
+  return (
+    <section className="section-shell">
+      <SectionTabs section="system" activeTab={route.tab} navigate={navigate} />
+      {route.tab === 'status' && <SystemStatus boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'repository' && <RepositoryExplorer setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'browser' && <BrowserConsult setNotice={setNotice} refresh={refresh} refreshSignal={refreshSignal} />}
+      {route.tab === 'tools' && <Tooling setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'runs' && <SourceControl setNotice={setNotice} refreshSignal={refreshSignal} initialTab="coding" availableTabs={['coding']} />}
+    </section>
+  );
+}
+
+function CompletedWorkboard({ setNotice, refreshSignal }) {
+  const [records, setRecords] = useState({ items: [], projects: [], roadmap: [], runs: [] });
+
+  useEffect(() => {
+    Promise.all([api('/api/items?all=1'), api('/api/projects'), api('/api/roadmap'), api('/api/tooling/openhands/requests').catch(() => [])])
+      .then(([items, projects, roadmap, runs]) => setRecords({ items, projects, roadmap, runs }))
+      .catch((err) => setNotice(err.message));
+  }, [refreshSignal, setNotice]);
+
+  const items = records.items.filter((item) => ['done', 'archived', 'deprecated', 'superseded'].includes(item.status));
+  const projects = records.projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status));
+  const roadmap = records.roadmap.filter((item) => item.status === 'done');
+  const runs = records.runs.filter((run) => ['completed', 'succeeded', 'executor-ran'].includes(run.status));
+  const groups = [
+    ['Workboard records', items, (item) => <ItemRow item={item} compact />],
+    ['Projects', projects, (project) => <ItemRow item={{ ...project, title: project.name, type: 'project' }} compact />],
+    ['Development roadmap', roadmap, (item) => <ItemRow item={{ ...item, type: item.category || 'roadmap' }} compact />],
+    ['Execution requests', runs, (run) => <ItemRow item={{ ...run, type: 'execution request' }} compact />]
+  ];
+  return (
+    <div className="completed-grid">
+      <div className="panel wide-panel">
+        <h2>Completed</h2>
+        <p>One read-only index of existing completed, archived, deprecated, and superseded records. Nothing is copied or migrated here.</p>
+      </div>
+      {groups.map(([title, recordsForGroup, render]) => (
+        <div className="panel" key={title}>
+          <div className="panel-heading"><h2>{title}</h2><Pill tone="good">{recordsForGroup.length}</Pill></div>
+          {recordsForGroup.length ? <div className="table-list">{recordsForGroup.map((record) => <React.Fragment key={record.id}>{render(record)}</React.Fragment>)}</div> : <Empty title="Nothing recorded" body="Completed source records will appear here when they exist." />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function KnowledgeSources({ memory, setNotice, refreshSignal }) {
+  const records = [...memory.items, ...memory.candidates].filter((item) => item.source || item.evidence);
+  return (
+    <section className="panel">
+      <div className="panel-heading"><div><h2>Sources & evidence</h2><p>Live provenance from existing memory and candidate records. Source details are never invented or promoted from this view.</p></div><Pill tone="info">{records.length} records</Pill></div>
+      {records.length ? <div className="table-list">{records.map((record) => <div className="memory-row" key={`${record.id}-${record.status}`}><ItemRow item={record} compact /><div className="candidate-meta"><span>Source: {record.source || 'not recorded'}</span><span>Evidence: {record.evidence || 'not recorded'}</span></div></div>)}</div> : <Empty title="No provenance records" body="Source and evidence details will appear when existing records provide them." />}
+      <div className="source-management"><h2>Source management</h2><p>The existing source-control workspace remains available here for repository provenance, history, and safe publication controls. Local coding runs are surfaced separately in System/Runs.</p><SourceControl setNotice={setNotice} refreshSignal={refreshSignal} initialTab="changes" availableTabs={['changes', 'history', 'branches', 'sync']} /></div>
+    </section>
+  );
+}
+
+function KnowledgeRules({ memory }) {
+  const rules = memory.items.filter((item) => item.type === 'rule');
+  return (
+    <section className="panel">
+      <div className="panel-heading"><div><h2>Rules</h2><p>Approved rule records from the local knowledge store. Updates remain governed through the Knowledge review flow.</p></div><Pill tone="info">{rules.length}</Pill></div>
+      {rules.length ? <div className="table-list">{rules.map((rule) => <ItemRow key={rule.id} item={rule} />)}</div> : <Empty title="No approved rules" body="Approved items with the rule type will be shown here." />}
+    </section>
+  );
+}
+
+function SystemStatus({ boot, planner, sessions, models, setNotice, refreshSignal }) {
+  const settings = boot?.settings || {};
+  const storage = settings.storageLocation || 'Checking local database…';
+  const [live, setLive] = useState({ tooling: null, connector: null, source: null, coding: null });
+  useEffect(() => {
+    Promise.all([
+      api('/api/tooling/status'),
+      api('/api/browser/extension/install-info'),
+      api('/api/source/status'),
+      api('/api/source/coding/status')
+    ]).then(([tooling, connector, source, coding]) => setLive({ tooling, connector, source, coding })).catch((err) => setNotice(err.message));
+  }, [refreshSignal, setNotice]);
+  return (
+    <section className="status-grid">
+      <div className="panel wide-panel"><h2>Local system status</h2><p>Reported from the current bootstrap response only; this page does not run synthetic checks.</p></div>
+      <div className="panel"><h3>Storage</h3><Pill tone={boot ? 'good' : 'warn'}>{boot ? 'Available' : 'Checking'}</Pill><p>{storage}</p></div>
+      <div className="panel"><h3>Workboard</h3><strong>{planner?.summary?.focus ?? '—'} focus items</strong><p>{planner?.summary?.approvals ?? '—'} pending approvals · {planner?.summary?.candidates ?? '—'} memory candidates</p></div>
+      <div className="panel"><h3>Chat</h3><strong>{sessions.length} active sessions</strong><p>Sessions are loaded from the local database.</p></div>
+      <div className="panel"><h3>Models</h3><strong>{models.length} configured records</strong><p>Runtime readiness and installation controls are available under Tools and Settings.</p></div>
+      <div className="panel"><h3>Browser connector</h3><Pill tone={live.connector?.connected ? 'good' : 'warn'}>{live.connector ? live.connector.connected ? 'Connected' : 'Needs attention' : 'Checking'}</Pill><p>{live.connector?.recommendedAction || 'Loading connector state…'}</p></div>
+      <div className="panel"><h3>Repository</h3><Pill tone={live.source?.hasConflicts ? 'bad' : live.source ? 'good' : 'warn'}>{live.source ? live.source.hasConflicts ? 'Conflicts' : live.source.hasChanges ? 'Changes pending' : 'Clean' : 'Checking'}</Pill><p>{live.source?.branch ? `${live.source.branch}${live.source.upstream ? ` → ${live.source.upstream}` : ''}` : 'Loading local repository state…'}</p></div>
+      <div className="panel"><h3>Tools & runs</h3><Pill tone={live.tooling?.playwright?.available ? 'good' : 'warn'}>{live.tooling ? live.tooling.playwright?.available ? 'Tooling available' : 'Setup needed' : 'Checking'}</Pill><p>{live.coding ? `${live.coding.activeTaskIds?.length || 0} active coding run(s)` : 'Loading active run state…'}</p></div>
+    </section>
   );
 }
 
@@ -379,7 +558,7 @@ function QuickAddItem({ refresh, setNotice }) {
       await api('/api/items', { method: 'POST', body: JSON.stringify({ ...form, status: form.type === 'blocker' ? 'blocked' : 'active' }) });
       setForm({ type: 'goal', title: '', body: '', due_at: '', next_action: '' });
       setOpen(false);
-      setNotice?.('Item added to the planner.');
+      setNotice?.('Item added to the Workboard.');
       refresh();
     } finally {
       setBusy(false);
@@ -387,7 +566,7 @@ function QuickAddItem({ refresh, setNotice }) {
   }
 
   if (!open) {
-    return <button className="primary subtle" onClick={() => setOpen(true)}>+ Add planner item</button>;
+    return <button className="primary subtle" onClick={() => setOpen(true)}>+ Add Workboard item</button>;
   }
   return (
     <div className="quick-add">
@@ -431,9 +610,9 @@ function PlannerItemActions({ item, refresh }) {
 }
 
 function Planner({ planner, refresh, runRefresh, setNotice }) {
-  if (!planner) return <div className="loading">Loading planner context...</div>;
+  if (!planner) return <div className="loading">Loading Workboard context...</div>;
   const nextBestBody = planner.nextBest?.body
-    || (planner.nextBest?.action_type ? 'Review and approve, deny, or defer this proposed change.' : 'Add goals, projects, or memory candidates to feed the planner.');
+    || (planner.nextBest?.action_type ? 'Review and approve, deny, or defer this proposed change.' : 'Add goals, projects, or memory candidates to feed the Workboard.');
   const buckets = [
     ['Today’s Focus', planner.focus, 'good'],
     ['Blocked', planner.blockers, 'bad'],
@@ -481,7 +660,7 @@ function Planner({ planner, refresh, runRefresh, setNotice }) {
           </>
         )}
         <QuickAddItem refresh={refresh} setNotice={setNotice} />
-        <button className="primary subtle" onClick={runRefresh}>Run planner refresh</button>
+        <button className="primary subtle" onClick={runRefresh}>Refresh Workboard</button>
       </div>
 
       <div className="bucket-grid">
@@ -495,7 +674,7 @@ function Planner({ planner, refresh, runRefresh, setNotice }) {
               <ItemRow key={`${title}-${item.id}`} item={item}>
                 <PlannerItemActions item={item} refresh={refresh} />
               </ItemRow>
-            )) : <Empty title="Nothing here" body="The database has no matching active items. Use “+ Add planner item” to put real life in here." />}
+            )) : <Empty title="Nothing here" body="The database has no matching active items. Use “+ Add Workboard item” to put real life in here." />}
           </div>
         ))}
       </div>
@@ -520,31 +699,176 @@ function ApprovalRow({ item, refresh }) {
   );
 }
 
-function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice }) {
+function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice, navigate }) {
   const [draft, setDraft] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
+  const [streamingText, setStreamingText] = useState(null);
   const [runtimeMode, setRuntimeMode] = useState('');
   const [runtime, setRuntime] = useState(null);
   const [repoFiles, setRepoFiles] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
+  const [connection, setConnection] = useState(null);
+  const [contextRecords, setContextRecords] = useState([]);
+  const [picker, setPicker] = useState(null);
+  const [proposal, setProposal] = useState(null);
+  const [proposeOpen, setProposeOpen] = useState(false);
+  const [proposeForm, setProposeForm] = useState({ type: 'note', title: '', next_action: '' });
+
+  async function loadConnection(sessionId = selectedSession) {
+    if (!sessionId) return;
+    try { setConnection(await api(`/api/chat/sessions/${sessionId}/connection`)); } catch { /* connection state is best-effort */ }
+  }
+
+  async function loadContextRecords(sessionId = selectedSession) {
+    if (!sessionId) return;
+    try { setContextRecords(await api(`/api/chat/sessions/${sessionId}/context-records`)); } catch { /* non-fatal */ }
+  }
+
+  function capability(name, args) {
+    return api('/api/chat/capability', { method: 'POST', body: JSON.stringify({ name, args, session_id: selectedSession }) });
+  }
+
+  async function runPickerSearch(next = {}) {
+    const p = { ...picker, ...next };
+    setPicker({ ...p, loading: true });
+    try {
+      let results = [];
+      if (p.domain === 'knowledge') {
+        const r = await capability('knowledge.search', { query: p.query?.trim() || 'a', scope: p.scope || 'all', limit: 15 });
+        results = (r.data.items || []).map((it) => ({ kind: it.kind === 'candidate' ? 'knowledge-candidate' : 'knowledge-item', ref_id: it.id, label: `${it.type || it.kind}: ${it.title}`, sub: it.snippet }));
+      } else {
+        const r = await capability('workboard.list', { view: p.view || 'projects', limit: 15 });
+        results = (r.data.records || []).map((rec) => ({ kind: (p.view || 'projects') === 'projects' ? 'workboard-project' : 'workboard-item', ref_id: rec.id, label: `${rec.type}: ${rec.title}`, sub: rec.detail || rec.status || '' }));
+      }
+      setPicker({ ...p, loading: false, results });
+    } catch (err) { setNotice(err.message); setPicker({ ...p, loading: false, results: [] }); }
+  }
+
+  function openPicker(domain) {
+    const base = { domain, query: '', results: [], loading: false, scope: 'all', view: 'projects' };
+    setPicker(base);
+    runPickerSearch(base);
+  }
+
+  async function attachRecord(rec) {
+    try {
+      const records = await api(`/api/chat/sessions/${selectedSession}/context-records`, { method: 'POST', body: JSON.stringify({ kind: rec.kind, ref_id: rec.ref_id }) });
+      setContextRecords(records);
+      loadConnection();
+      setNotice(`Attached ${rec.label} to this chat.`);
+    } catch (err) { setNotice(err.message); }
+  }
+
+  async function removeContextRecord(id) {
+    try {
+      const records = await api(`/api/chat/sessions/${selectedSession}/context-records/${id}`, { method: 'DELETE' });
+      setContextRecords(records);
+      loadConnection();
+    } catch (err) { setNotice(err.message); }
+  }
+
+  async function submitProposeCreate() {
+    if (!proposeForm.title.trim()) return;
+    try {
+      const r = await capability('workboard.propose_create', { type: proposeForm.type, title: proposeForm.title, next_action: proposeForm.next_action });
+      setProposal(r.data);
+      setProposeOpen(false);
+      setProposeForm({ type: 'note', title: '', next_action: '' });
+    } catch (err) { setNotice(err.message); }
+  }
+
+  async function confirmProposal() {
+    if (!proposal) return;
+    try {
+      const result = await api(`/api/chat/sessions/${selectedSession}/workboard/confirm`, { method: 'POST', body: JSON.stringify({ proposal }) });
+      setNotice(`Workboard ${result.operation === 'workboard.create' ? 'item created' : 'item updated'}: ${result.record?.title || ''}.`);
+      setProposal(null);
+      refreshAll();
+    } catch (err) { setNotice(err.message); }
+  }
+
+  async function sendViaJson(outgoing, optimisticId) {
+    const result = await api(`/api/chat/sessions/${selectedSession}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content: outgoing })
+    });
+    setMessages((current) => [...current.filter((m) => m.id !== optimisticId), ...result.messages]);
+    setRuntimeMode(result.runtime || '');
+    if (result.error) setNotice(result.error);
+  }
 
   async function send() {
     if (!draft.trim() || !selectedSession || chatBusy) return;
+    const outgoing = draft;
+    const optimisticId = `tmp-${Date.now()}`;
     setChatBusy(true);
+    setDraft('');
+    setMessages((current) => [...current, { id: optimisticId, role: 'user', content: outgoing }]);
+    setStreamingText('');
+    let streamStarted = false;
     try {
-      const result = await api(`/api/chat/sessions/${selectedSession}/messages`, {
+      const response = await fetch(`/api/chat/sessions/${selectedSession}/messages/stream`, {
         method: 'POST',
-        body: JSON.stringify({ content: draft })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: outgoing })
       });
-      setMessages((current) => [...current, ...result.messages]);
-      setRuntimeMode(result.runtime || '');
-      setDraft('');
+      if (!response.ok || !response.body) throw new Error('stream-unavailable');
+      streamStarted = true;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let acc = '';
+      let runtimeLabel = '';
+      let streamError = null;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buffer.indexOf('\n\n')) >= 0) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const lines = frame.split('\n');
+          const event = (lines.find((l) => l.startsWith('event:')) || '').slice(6).trim();
+          const dataRaw = (lines.find((l) => l.startsWith('data:')) || '').slice(5).trim();
+          if (!event || !dataRaw) continue;
+          let data;
+          try { data = JSON.parse(dataRaw); } catch { continue; }
+          if (event === 'token') { acc += data.delta; setStreamingText(acc); }
+          else if (event === 'done') { runtimeLabel = data.runtime || ''; }
+          else if (event === 'error') { streamError = data.error; runtimeLabel = data.runtime || ''; }
+        }
+      }
+      setRuntimeMode(runtimeLabel);
+      if (streamError) setNotice(streamError);
+      // Reconcile with the server's persisted history so the list is always
+      // exactly one user + one final assistant message (no duplicate rows).
+      setMessages(await api(`/api/chat/sessions/${selectedSession}/messages`));
+    } catch (err) {
+      if (!streamStarted) {
+        // Streaming endpoint unavailable: use the non-streaming JSON endpoint.
+        try { await sendViaJson(outgoing, optimisticId); }
+        catch (jsonErr) { setNotice(jsonErr.message); setMessages((current) => current.filter((m) => m.id !== optimisticId)); }
+      } else {
+        setNotice('Streaming was interrupted; showing saved messages.');
+        try { setMessages(await api(`/api/chat/sessions/${selectedSession}/messages`)); } catch { /* keep current view */ }
+      }
+    } finally {
+      setStreamingText(null);
+      setChatBusy(false);
       refreshAll();
+      loadConnection();
+    }
+  }
+
+  async function cancelGeneration() {
+    if (!selectedSession || !chatBusy) return;
+    try {
+      const result = await api(`/api/chat/sessions/${selectedSession}/cancel`, { method: 'POST' });
+      setNotice(result.message);
     } catch (err) {
       setNotice(err.message);
-    } finally {
-      setChatBusy(false);
     }
   }
 
@@ -552,12 +876,17 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     const session = await api('/api/chat/sessions', { method: 'POST', body: JSON.stringify({ title: 'New planning chat' }) });
     setSessions((current) => [session, ...current]);
     setSelectedSession(session.id);
+    navigate('chat', null, session.id);
   }
 
   async function patchSession(id, body) {
     const updated = await api(`/api/chat/sessions/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
     setSessions((current) => current.map((session) => (session.id === id ? updated : session)).filter((session) => !session.deleted));
-    if (body.deleted && selectedSession === id) setSelectedSession(sessions.find((session) => session.id !== id)?.id || null);
+    if (body.deleted && selectedSession === id) {
+      const nextSession = sessions.find((session) => session.id !== id);
+      setSelectedSession(nextSession?.id || null);
+      navigate('chat', null, nextSession?.id || null);
+    }
   }
 
   async function loadContext(sessionId = selectedSession) {
@@ -598,6 +927,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
 
   useEffect(() => {
     loadContext();
+    loadContextRecords();
+    loadConnection();
+    setProposal(null);
+    setPicker(null);
   }, [selectedSession]);
 
   const modelReady = Boolean(runtime?.endpointConfigured || runtime?.assigned || runtime?.managedServerRunning);
@@ -609,14 +942,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         : runtime.endpointConfigured
           ? `Planner Assistant will try local endpoint ${runtime.endpoint}.`
           : `Planner Assistant model is assigned: ${runtime.model?.name}.`
-      : 'No Planner Assistant model or local endpoint is configured. Chat will still save messages and memory candidates, but model replies use the setup-gated fallback until Settings is configured.';
+      : 'No Planner Assistant model or local endpoint is configured. Your message can still be saved and reviewed as a memory candidate, but no assistant reply will be invented until local inference is available.';
 
   return (
     <section className="chat-layout">
       <div className="session-list">
         <button className="primary" onClick={newSession}><Plus size={16} /> New chat</button>
         {sessions.map((session) => (
-          <button key={session.id} className={cx('session-row', session.id === selectedSession && 'selected')} onClick={() => setSelectedSession(session.id)}>
+          <button key={session.id} className={cx('session-row', session.id === selectedSession && 'selected')} onClick={() => { setSelectedSession(session.id); navigate('chat', null, session.id); }}>
             <span>{session.pinned ? 'Pinned' : 'Chat'}</span>
             <strong>{session.title}</strong>
           </button>
@@ -640,26 +973,61 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <div className={cx('source-warning', modelReady ? 'info' : 'warn')}>
-            <strong>{modelReady ? 'Planner Assistant configured' : 'Planner Assistant setup needed'}</strong>
-            <small>{modelStatus} Open Settings to save a local endpoint, scan/load a GGUF model, or set llama-cli/llama-server paths.</small>
+          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} />
+          <div className="context-actions">
+            <button onClick={() => openPicker('knowledge')}><Brain size={15} /> Use Knowledge</button>
+            <button onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
+            <button onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
+            <div className="inline-form compact">
+              <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
+                <option value="">Attach repo file…</option>
+                {repoFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}
+              </select>
+              <button onClick={addContextFile} disabled={!selectedFile}><Plus size={15} /> Add file</button>
+            </div>
           </div>
-          <div className="inline-form">
-            <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
-              <option value="">Attach repo file as context</option>
-              {repoFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}
-            </select>
-            <button onClick={addContextFile} disabled={!selectedFile}><Plus size={16} /> Add</button>
-          </div>
-          <div className="context-chips">
-            {contextFiles.length === 0 ? <span>No repo files attached.</span> : contextFiles.map((file) => (
-              <button key={file.id} onClick={() => removeContextFile(file.id)} title="Remove context file">
-                <FileText size={13} />
-                <span>{file.path}</span>
-                <X size={13} />
-              </button>
-            ))}
-          </div>
+          {(contextRecords.length > 0 || contextFiles.length > 0) ? (
+            <div className="context-chips">
+              {contextRecords.map((rec) => (
+                <button key={`rec-${rec.id}`} className={rec.kind.startsWith('knowledge') ? 'chip-knowledge' : 'chip-workboard'} onClick={() => removeContextRecord(rec.id)} title={`Remove ${rec.label}`}>
+                  {rec.kind.startsWith('knowledge') ? <Brain size={13} /> : <ListChecks size={13} />}
+                  <span>{rec.label}</span>
+                  <X size={13} />
+                </button>
+              ))}
+              {contextFiles.map((file) => (
+                <button key={`file-${file.id}`} onClick={() => removeContextFile(file.id)} title="Remove context file">
+                  <FileText size={13} />
+                  <span>{file.path}</span>
+                  <X size={13} />
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="context-chips"><span>No Knowledge, Workboard, or file context attached. New chats start empty — attach records deliberately.</span></div>
+          )}
+          {!modelReady && (
+            <div className="source-warning warn">
+              <strong>Planner Assistant setup needed</strong>
+              <small>{modelStatus} Use the Settings cog (top-right) to assign a local GGUF model.</small>
+            </div>
+          )}
+          {proposeOpen && (
+            <div className="propose-form">
+              <div className="quick-add-row">
+                <select value={proposeForm.type} onChange={(e) => setProposeForm((f) => ({ ...f, type: e.target.value }))}>
+                  {['goal', 'project', 'decision', 'reminder', 'blocker', 'waiting', 'note'].map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <input value={proposeForm.title} onChange={(e) => setProposeForm((f) => ({ ...f, title: e.target.value }))} placeholder="Proposed task title" />
+              </div>
+              <input value={proposeForm.next_action} onChange={(e) => setProposeForm((f) => ({ ...f, next_action: e.target.value }))} placeholder="Next action (optional)" />
+              <div className="quick-add-row">
+                <button className="primary" onClick={submitProposeCreate} disabled={!proposeForm.title.trim()}>Preview proposal</button>
+                <button onClick={() => setProposeOpen(false)}>Cancel</button>
+              </div>
+            </div>
+          )}
+          {proposal && <ProposalCard proposal={proposal} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
         </div>
         <div className="messages">
           {messages.map((message) => (
@@ -668,13 +1036,131 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               <p>{message.content}</p>
             </div>
           ))}
+          {streamingText !== null && (
+            <div className="message assistant streaming" aria-live="polite">
+              <span>assistant</span>
+              <p>{streamingText || 'Planner Assistant is responding…'}</p>
+            </div>
+          )}
         </div>
         <div className="composer">
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
-          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save chat and use setup-gated fallback until Settings has a model or endpoint'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
+          {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
+          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
+        {picker && <ContextPicker picker={picker} onSearch={runPickerSearch} onAttach={attachRecord} onClose={() => setPicker(null)} />}
       </div>
     </section>
+  );
+}
+
+function ChatConnectionBar({ connection, runtime, generating, navigate }) {
+  const modelName = connection?.model?.name || runtime?.model?.name || null;
+  const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
+  const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
+  const ready = connection?.runtime?.ready ?? Boolean(runtime?.managedServerRunning || runtime?.endpointConfigured || runtime?.assigned);
+  const last = connection?.runtime?.lastResult;
+  const attached = connection?.attached || { knowledge: 0, workboard: 0, files: 0 };
+  const genStatus = generating ? 'generating…' : running ? 'ready · server running' : ready ? 'ready' : 'setup needed';
+  return (
+    <div className="connection-bar">
+      <div className="conn-item">
+        <span>Model</span>
+        <strong className={modelAssigned ? 'good' : 'warn'}>{modelName || 'None assigned'}</strong>
+        <button className="link" onClick={() => navigate('settings')}>Assign / change</button>
+      </div>
+      <div className="conn-item">
+        <span>Runtime</span>
+        <strong className={generating ? 'good' : ''}>{genStatus}</strong>
+        <button className="link" onClick={() => navigate('system', 'status')}>System status</button>
+      </div>
+      <div className="conn-item">
+        <span>Attached context</span>
+        <strong>{attached.knowledge} Knowledge · {attached.workboard} Workboard · {attached.files} file(s)</strong>
+      </div>
+      <div className="conn-item">
+        <span>Capabilities</span>
+        <strong>{connection?.capabilities?.length ?? 10} tools</strong>
+      </div>
+      <div className="conn-item">
+        <span>Conversation</span>
+        <strong>#{connection?.conversationId ?? '—'}</strong>
+      </div>
+      {last && (
+        <div className="conn-item">
+          <span>Last runtime</span>
+          <strong className={last.ok ? 'good' : 'warn'}>{last.ok ? last.mode : `${last.mode} error`}</strong>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProposalCard({ proposal, onConfirm, onCancel }) {
+  const isUpdate = proposal.operation === 'workboard.update';
+  return (
+    <div className="proposal-card">
+      <div className="proposal-head"><ShieldCheck size={16} /><strong>Confirm Workboard {isUpdate ? 'update' : 'create'}</strong></div>
+      <p>{proposal.affects}</p>
+      <div className="proposal-diff">
+        {isUpdate
+          ? Object.keys(proposal.after || {}).map((k) => (
+            <div key={k}><span>{k}</span><em>{String(proposal.before?.[k] ?? '—')}</em> → <strong>{String(proposal.after[k])}</strong></div>
+          ))
+          : (
+            <>
+              <div><span>type</span><strong>{proposal.preview?.type}</strong></div>
+              <div><span>title</span><strong>{proposal.preview?.title}</strong></div>
+              {proposal.preview?.next_action ? <div><span>next action</span><strong>{proposal.preview.next_action}</strong></div> : null}
+            </>
+          )}
+      </div>
+      <div className="decision-row">
+        <button className="primary" onClick={onConfirm}><Check size={15} /> Confirm and apply</button>
+        <button onClick={onCancel}><X size={15} /> Cancel</button>
+      </div>
+      <small>This is the only way Chat changes the Workboard. Nothing is written to the database until you confirm.</small>
+    </div>
+  );
+}
+
+function ContextPicker({ picker, onSearch, onAttach, onClose }) {
+  return (
+    <div className="picker-overlay" onClick={onClose}>
+      <div className="picker" onClick={(e) => e.stopPropagation()}>
+        <div className="picker-head">
+          <strong>{picker.domain === 'knowledge' ? 'Attach Knowledge context' : 'Attach Workboard context'}</strong>
+          <button className="icon-button" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div className="picker-controls">
+          {picker.domain === 'knowledge' ? (
+            <>
+              <input value={picker.query} placeholder="Search approved memory, candidates, rules…" onChange={(e) => onSearch({ query: e.target.value })} autoFocus />
+              <select value={picker.scope} onChange={(e) => onSearch({ scope: e.target.value })}>
+                {['all', 'approved', 'candidates', 'rules'].map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </>
+          ) : (
+            <select value={picker.view} onChange={(e) => onSearch({ view: e.target.value })}>
+              {['projects', 'overview', 'roadmap', 'review', 'blocked', 'completed'].map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
+          )}
+        </div>
+        <div className="picker-results">
+          {picker.loading
+            ? <div className="loading">Searching…</div>
+            : (picker.results || []).length === 0
+              ? <Empty title="No records" body="Nothing matched. Adjust the search or scope." />
+              : picker.results.map((rec) => (
+                <button key={`${rec.kind}-${rec.ref_id}`} className="picker-row" onClick={() => onAttach(rec)}>
+                  <div><strong>{rec.label}</strong><span>{rec.sub}</span></div>
+                  <Plus size={16} />
+                </button>
+              ))}
+        </div>
+        <small>Only the record you pick is attached — never the whole database. IDs and provenance are retained.</small>
+      </div>
+    </div>
   );
 }
 
@@ -751,7 +1237,7 @@ function CandidateReviewCard({ candidate, edits = {}, setEdits, onSave, onDecisi
   );
 }
 
-function Memory({ memory, refresh }) {
+function Memory({ memory, refresh, mode = 'memory' }) {
   const [candidateEdits, setCandidateEdits] = useState({});
 
   async function decide(id, decision) {
@@ -785,12 +1271,17 @@ function Memory({ memory, refresh }) {
     refresh();
   }
 
+  const candidates = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status));
+  const approvedItems = memory.items.filter((item) => item.type !== 'rule');
+
   return (
-    <section className="two-column">
+    <section className={mode === 'all' ? 'two-column' : 'stacked-panels'}>
+      {mode !== 'memory' && (
       <div className="panel">
         <h2>Candidate Review</h2>
         <p>Chat and cloud consultation outputs wait here before becoming active memory.</p>
-        {memory.candidates.filter((c) => ['candidate', 'deferred'].includes(c.status)).map((candidate) => (
+        {candidates.length === 0 && <Empty title="No pending candidates" body="Chat and consultation outputs will appear here for explicit review." />}
+        {candidates.map((candidate) => (
           <CandidateReviewCard
             key={candidate.id}
             candidate={candidate}
@@ -801,11 +1292,13 @@ function Memory({ memory, refresh }) {
           />
         ))}
       </div>
+      )}
+      {mode !== 'candidates' && (
       <div className="panel">
         <h2>Approved Knowledge</h2>
         <p>Canonical database items with status, confidence, evidence, owner, and next action.</p>
         <div className="table-list">
-          {memory.items.map((item) => (
+          {approvedItems.map((item) => (
             <div className="memory-row" key={item.id}>
               <ItemRow item={item} />
               <div className="mini-actions text-actions">
@@ -815,21 +1308,24 @@ function Memory({ memory, refresh }) {
               </div>
             </div>
           ))}
+          {approvedItems.length === 0 && <Empty title="No approved knowledge" body="Approved non-rule memory will appear here." />}
         </div>
       </div>
+      )}
     </section>
   );
 }
 
-function ApprovalQueue({ setNotice, refreshPlanner }) {
+function ApprovalQueue({ setNotice, refreshPlanner, scope = 'all' }) {
   const [items, setItems] = useState([]);
   const [candidates, setCandidates] = useState([]);
   const [checks, setChecks] = useState({});
 
   async function load(announce = false) {
     const data = await api('/api/planner');
-    setItems(data.approvals);
-    setCandidates(data.candidates || []);
+    const approvalItems = data.approvals || [];
+    setItems(scope === 'memory' ? approvalItems.filter((item) => item.action_type === 'update_memory') : scope === 'operational' ? approvalItems.filter((item) => item.action_type !== 'update_memory') : approvalItems);
+    setCandidates(scope === 'all' ? data.candidates || [] : []);
     if (announce) setNotice('Approval queue refreshed.');
   }
 
@@ -871,16 +1367,16 @@ function ApprovalQueue({ setNotice, refreshPlanner }) {
     <section className="panel">
       <div className="panel-heading">
         <div>
-          <h2>Approval Queue</h2>
-          <p>Meaningful changes wait here before memory, plans, repo files, or priorities change.</p>
+          <h2>{scope === 'memory' ? 'Memory change proposals' : scope === 'operational' ? 'Operational review' : 'Approval Queue'}</h2>
+          <p>{scope === 'memory' ? 'Existing-memory changes stay governed here; candidate promotion is reviewed above.' : scope === 'operational' ? 'Tasks, projects, workflows, agents, code, and execution proposals require an explicit decision.' : 'Meaningful changes wait here before memory, plans, repo files, or priorities change.'}</p>
         </div>
         <button onClick={() => load(true)}><RefreshCcw size={16} /> Refresh</button>
       </div>
       {items.length === 0 && candidates.length === 0 ? (
-        <Empty title="No pending approvals" body="Staged changes and memory candidates will appear here for explicit review." />
+        <Empty title="No pending approvals" body={scope === 'operational' ? 'Operational proposals will appear here for explicit review.' : scope === 'memory' ? 'Governed changes to existing memory will appear here.' : 'Staged changes and memory candidates will appear here for explicit review.'} />
       ) : (
         <div className="approval-list">
-          {items.length > 0 && <h3>Governed Changes</h3>}
+          {items.length > 0 && <h3>{scope === 'operational' ? 'Operational proposals' : 'Governed changes'}</h3>}
           {items.map((item) => {
             const payload = JSON.parse(item.payload || '{}');
             const check = checks[item.id];
@@ -2432,7 +2928,7 @@ function DevRoadmap({ setNotice, refreshSignal = 0 }) {
     <section className="roadmap-panel">
       <div className="source-warning info">
         <strong>Development roadmap — build work only</strong>
-        <small>Features not built or partly built, dev todos, and parked work. This is separate from your life-assistant Planner, Projects, and Memory. Nothing here is a life goal.</small>
+                <small>Features not built or partly built, dev todos, and parked work. This is separate from your life-assistant Workboard, Projects, and Memory. Nothing here is a life goal.</small>
       </div>
 
       <div className="panel roadmap-add">
@@ -2764,7 +3260,7 @@ function SideBySideDiff({ data }) {
   );
 }
 
-function SourceControl({ setNotice, refreshSignal = 0 }) {
+function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', availableTabs = null }) {
   const [source, setSource] = useState(null);
   const [diff, setDiff] = useState(null);
   const [commitMessage, setCommitMessage] = useState('');
@@ -2781,7 +3277,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [fileDiff, setFileDiff] = useState(null);
   const [diffBusy, setDiffBusy] = useState(false);
   const [pushArmed, setPushArmed] = useState(false);
-  const [tab, setTab] = useState('changes');
+  const [tab, setTab] = useState(initialTab);
   const [history, setHistory] = useState([]);
   const [mergeBranch, setMergeBranch] = useState('');
   const [tokenInput, setTokenInput] = useState('');
@@ -2798,6 +3294,8 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
   const [publicationCheckBusy, setPublicationCheckBusy] = useState(false);
   const [coding, setCoding] = useState({ tasks: [], validations: {}, model: {}, activeTaskIds: [] });
   const [codingDraft, setCodingDraft] = useState({ title: '', objective: '', allowedPaths: 'src', maxFilesChanged: 3, validation: 'frontend' });
+
+  useEffect(() => { setTab(initialTab); }, [initialTab]);
 
   async function refreshInstallerBuild(announce = false) {
     try {
@@ -3029,7 +3527,7 @@ function SourceControl({ setNotice, refreshSignal = 0 }) {
     { id: 'branches', label: 'Branches', icon: GitBranch, badge: null },
     { id: 'coding', label: 'Local Coding', icon: Bot, badge: coding.tasks.filter((task) => task.status === 'review').length || null },
     { id: 'sync', label: 'Sync & Setup', icon: Upload, badge: null }
-  ];
+  ].filter((entry) => !availableTabs || availableTabs.includes(entry.id));
 
   return (
     <section className="source-panel">
@@ -3719,7 +4217,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
       body: JSON.stringify({ folders: modelFolders.split('\n').map((s) => s.trim()).filter(Boolean) })
     });
     setModels(data.models);
-    setNotice(`Detected ${data.discovered.length} GGUF model file(s).`);
+    setNotice(`Detected ${data.discovered.length} verified GGUF model file(s).${data.issues?.length ? ` ${data.issues.length} folder/file issue(s) need attention.` : ''}`);
   }
 
   async function assign(id) {
@@ -3854,7 +4352,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
       </div>
       <div className="panel">
         <h2>Local Model Registry</h2>
-        <p>Scan folders for GGUF files and assign one model to Planner Assistant.</p>
+        <p>Rescan folders for real GGUF files, verify each file is readable, and assign one model to Planner Assistant.</p>
         <div className="runtime-card">
           <Pill tone={runtime?.endpointConfigured || runtime?.assigned ? 'good' : 'warn'}>{runtime?.endpointConfigured ? 'Endpoint configured' : runtime?.assigned ? 'Model assigned' : 'No model assigned'}</Pill>
           <strong>{runtime?.endpointConfigured ? runtime.endpointModelName : runtime?.model?.name || 'Planner Assistant unavailable'}</strong>
@@ -3893,7 +4391,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
         </div>
         <div className="decision-row">
           <button onClick={saveSettings}><Check size={16} /> Save</button>
-          <button className="primary" onClick={scan}><RefreshCcw size={16} /> Scan GGUF</button>
+          <button className="primary" onClick={scan}><RefreshCcw size={16} /> Rescan GGUF</button>
           <button onClick={startServer} disabled={!runtime?.llamaServerExists || !runtime?.assigned}><Bot size={16} /> Start / verify server</button>
           <button onClick={stopServer} disabled={!runtime?.managedServerRunning}><X size={16} /> Stop server</button>
         </div>
@@ -3908,17 +4406,17 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
                 <small>
                   {model.assigned_role
                     ? <Pill tone="good">{model.assigned_role}</Pill>
-                    : model.exists
+                    : model.available
                       ? <Pill tone="info">Downloaded · ready to load</Pill>
                       : (model.hf_repo
                         ? <Pill tone="warn">Not downloaded</Pill>
-                        : <Pill tone="bad">File missing</Pill>)}
-                  {model.size_bytes && model.exists ? ` ${(model.size_bytes / 1e9).toFixed(2)} GB` : ''}
-                  {!model.exists && model.hf_repo ? ` ${model.hf_repo}` : ''}
+                        : <Pill tone="bad">{model.file_error || 'File missing'}</Pill>)}
+                  {model.size_bytes && model.available ? ` ${(model.size_bytes / 1e9).toFixed(2)} GB` : ''}
+                  {!model.available && model.hf_repo ? ` ${model.hf_repo}` : ''}
                 </small>
               </div>
               <div className="mini-actions">
-                {model.exists ? (
+                {model.available ? (
                   <>
                     <button className={model.assigned_role ? 'primary' : ''} onClick={() => assign(model.id)} title="Assign as Planner Assistant">
                       {model.assigned_role ? 'Assigned' : 'Load'}

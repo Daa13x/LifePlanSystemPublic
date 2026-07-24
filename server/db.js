@@ -226,6 +226,32 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Explicitly-selected Knowledge/Workboard records attached to a conversation
+    -- as Chat context. Provenance (kind + ref_id + label) is retained so the
+    -- assistant only ever sees records the user deliberately chose. Nothing is
+    -- attached automatically to a new conversation.
+    CREATE TABLE IF NOT EXISTS chat_context_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      ref_id INTEGER NOT NULL,
+      label TEXT NOT NULL DEFAULT '',
+      provenance TEXT NOT NULL DEFAULT '',
+      added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(session_id, kind, ref_id)
+    );
+
+    -- Append-only audit trail of Chat capability invocations and confirmed
+    -- Workboard writes, for accountability of the Chat control surface.
+    CREATE TABLE IF NOT EXISTS chat_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER,
+      capability TEXT NOT NULL,
+      outcome TEXT NOT NULL DEFAULT 'ok',
+      detail TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   for (const column of [
