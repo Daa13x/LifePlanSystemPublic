@@ -8,7 +8,8 @@
 # Setup installer, and uploads the results as downloadable artifacts. Every
 # successful push to main also replaces the rolling latest-main Release so the
 # downloadable installer follows main automatically. Version tags continue to
-# publish immutable versioned releases.
+# publish immutable versioned releases. AI systems are tools and are never
+# published as authors, contributors, taggers, or release owners.
 
 name: Build Installer
 
@@ -41,11 +42,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: '24.15.0'
+
+      - name: Verify maintainer-only attribution
+        shell: pwsh
+        run: >
+          node scripts/verify-maintainer-attribution.mjs
+          "${{ github.event.before }}"
+          "${{ github.sha }}"
+          "${{ github.ref }}"
 
       - name: Install dependencies
         run: npm ci
@@ -96,7 +107,7 @@ jobs:
           $repo = $env:GITHUB_REPOSITORY
           $sha = $env:GITHUB_SHA
           $title = 'Latest main build'
-          $notes = "Automatically built from main commit $sha. This rolling release is replaced after every successful push to main."
+          $notes = "LifePlanSystem latest main build. Owner and maintainer: Daa13x. Built automatically from main commit $sha. AI tools are not project contributors. This rolling release is replaced after every successful push to main."
           $installer = 'release/LifePlannerPortableSetup.exe'
           $portableZip = 'release/LifePlannerPortable.zip'
 
@@ -105,6 +116,8 @@ jobs:
           }
           Compress-Archive -Path 'release/LifePlannerPortable/*' -DestinationPath $portableZip -CompressionLevel Optimal
 
+          # This identity is used only for the mechanical lightweight-tag move.
+          # It does not author a commit and is not included as a contributor.
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git tag --force $tag $sha
@@ -124,6 +137,8 @@ jobs:
           }
 
       # Explicit version tags remain available as permanent versioned releases.
+      # Release notes are not auto-generated, so AI contributor lists are never
+      # injected by this workflow.
       - name: Attach installer to versioned Release
         if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
