@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
 import { evaluateMutationGuard, isMutation } from './mutationGuard.js';
+import { recoverInterruptedConfirmations } from './confirmations.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { openFolderInExplorer } from './openFolder.js';
@@ -43,6 +44,15 @@ import {
 } from './sourceControlSafety.js';
 
 migrate();
+// Restart safety: settle any confirmation left mid-apply by a previous crash.
+// It is never re-applied automatically — it becomes interrupted (requires
+// review) unless an idempotency receipt proves the external op completed.
+{
+  const recovered = recoverInterruptedConfirmations(db);
+  if (recovered.applied || recovered.interrupted) {
+    console.log(`Confirmations recovered on startup: ${recovered.applied} settled via receipt, ${recovered.interrupted} interrupted (need review).`);
+  }
+}
 seedRoadmapIfEmpty();
 
 // Safety net: a bug in one request handler must not silently take the whole

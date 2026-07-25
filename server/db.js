@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
+import { createConfirmationsTable } from './confirmations.js';
 
 const root = process.cwd();
 const dataDir = path.join(root, 'data');
@@ -290,6 +291,9 @@ export function migrate() {
       // Column already exists.
     }
   }
+
+  // Durable confirmation + replay-protection store (see server/confirmations.js).
+  createConfirmationsTable(db);
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
   if (projectCount === 0) {
