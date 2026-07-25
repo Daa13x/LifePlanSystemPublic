@@ -24,8 +24,23 @@ async function waitForHealth() {
   throw new Error('Isolated acceptance server did not become healthy.');
 }
 
-async function jsonApi(url, options) {
-  const response = await fetch(`${base}${url}`, options);
+let csrfToken = '';
+async function mutationToken() {
+  if (csrfToken) return csrfToken;
+  const body = await (await fetch(`${base}/api/csrf-token`)).json();
+  if (body.ok) csrfToken = body.data.token;
+  return csrfToken;
+}
+
+async function jsonApi(url, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = { ...(options.headers || {}) };
+  // Authenticate mutations like the real SPA: same-origin + per-runtime token.
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    headers['X-LPS-CSRF'] = await mutationToken();
+    headers.Origin = base;
+  }
+  const response = await fetch(`${base}${url}`, { ...options, headers });
   const body = await response.json();
   return { response, body };
 }

@@ -56,13 +56,36 @@ const API = '';
 const navIcons = { workboard: ListChecks, chat: MessageSquareText, knowledge: Brain, system: Wrench, settings: Settings };
 const nav = PRIMARY_NAVIGATION.map((entry) => ({ ...entry, icon: navIcons[entry.id] }));
 
+const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+let csrfToken = '';
+
+// The local server rejects mutations that lack the per-runtime token, so a
+// cross-site page cannot drive the app. Fetch it once, lazily, on the first
+// mutation and reuse it; a 403 clears it so the next call re-fetches (e.g. after
+// a server restart issued a fresh token).
+async function mutationToken() {
+  if (csrfToken) return csrfToken;
+  try {
+    const response = await fetch(`${API}/api/csrf-token`);
+    const payload = await response.json();
+    if (payload.ok) csrfToken = payload.data.token;
+  } catch {
+    // Leave empty; the mutation will 403 and surface a reload prompt.
+  }
+  return csrfToken;
+}
+
 async function api(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    ...options
-  });
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (MUTATION_METHODS.has(method)) headers['X-LPS-CSRF'] = await mutationToken();
+  // headers spread last so the merged/token headers win over any options.headers.
+  const response = await fetch(`${API}${path}`, { ...options, headers });
   const payload = await response.json();
-  if (!payload.ok) throw new Error(payload.error || 'Request failed');
+  if (!payload.ok) {
+    if (response.status === 403) csrfToken = '';
+    throw new Error(payload.error || 'Request failed');
+  }
   return payload.data;
 }
 
@@ -981,7 +1004,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     try {
       const response = await fetch(`/api/chat/sessions/${selectedSession}/messages/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-LPS-CSRF': await mutationToken() },
         body: JSON.stringify({ content: outgoing })
       });
       if (!response.ok || !response.body) throw new Error('stream-unavailable');

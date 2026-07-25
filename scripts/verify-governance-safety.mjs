@@ -49,11 +49,24 @@ async function waitForServer(baseUrl, child, output) {
   throw new Error(`Timed out waiting for isolated server.\n${output.join('')}`);
 }
 
+const csrfTokens = new Map();
+async function mutationToken(baseUrl) {
+  if (csrfTokens.has(baseUrl)) return csrfTokens.get(baseUrl);
+  const body = await (await fetch(`${baseUrl}/api/csrf-token`)).json();
+  const token = body.ok ? body.data.token : '';
+  csrfTokens.set(baseUrl, token);
+  return token;
+}
+
 async function request(baseUrl, route, options = {}) {
-  const response = await fetch(`${baseUrl}${route}`, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
-  });
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  // Authenticate mutations like the real SPA: same-origin + per-runtime token.
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    headers['X-LPS-CSRF'] = await mutationToken(baseUrl);
+    headers.Origin = baseUrl;
+  }
+  const response = await fetch(`${baseUrl}${route}`, { ...options, headers });
   const body = await response.json();
   return { status: response.status, body };
 }

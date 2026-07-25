@@ -7,6 +7,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
+import { evaluateMutationGuard, isMutation } from './mutationGuard.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { openFolderInExplorer } from './openFolder.js';
@@ -512,6 +513,58 @@ function requireBrowserExtension(req, res) {
   fail(res, 401, 'Browser connector authentication failed. Reload the unpacked LPS extension to refresh pairing.');
   return false;
 }
+
+// Per-runtime CSRF token for the mutation guard. Regenerated on every start so a
+// token from a previous run (or a stale cached page) cannot be replayed. Handed
+// to the same-origin SPA via GET /api/csrf-token; a cross-site page cannot read
+// it (same-origin policy) nor set the custom header without a CORS preflight
+// this app never grants. Only accepted from the X-LPS-CSRF header — never from a
+// query string or request body.
+const MUTATION_TOKEN = crypto.randomBytes(32).toString('hex');
+
+function mutationTokenMatches(supplied) {
+  const value = String(supplied || '');
+  if (value.length !== MUTATION_TOKEN.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(value), Buffer.from(MUTATION_TOKEN));
+  } catch {
+    return false;
+  }
+}
+
+// Local mutation protection: an Origin/Host-validated per-runtime CSRF token.
+// Every state-changing request must not be cross-site, must originate from this
+// app's own localhost origin, and must carry the per-runtime token in the
+// X-LPS-CSRF header. Safe methods are untouched. Registered before any route so
+// it covers the whole /api surface. Failure responses are deliberately generic —
+// they never echo the expected token, the supplied value, or internal details.
+app.use((req, res, next) => {
+  if (!isMutation(req.method)) return next();
+
+  // Extension connector routes are protected by their own timing-safe token. A
+  // valid token exempts the request from the CSRF check; a missing/invalid one
+  // is rejected here with the connector's own 401, so the exemption only ever
+  // applies AFTER successful connector-token validation.
+  const connectorOk = browserExtensionAuthorized(req);
+  if (req.path.startsWith('/api/browser/extension/')) {
+    if (connectorOk) return next();
+    return fail(res, 401, 'Browser connector authentication failed. Reload the unpacked LPS extension to refresh pairing.');
+  }
+
+  const guard = evaluateMutationGuard({
+    method: req.method,
+    host: req.get('Host'),
+    origin: req.get('Origin'),
+    secFetchSite: req.get('Sec-Fetch-Site'),
+    port,
+    isConnector: connectorOk
+  });
+  if (guard.blocked) return fail(res, 403, guard.reason);
+  if (guard.requiresToken && !mutationTokenMatches(req.get('X-LPS-CSRF'))) {
+    return fail(res, 403, 'Request rejected: missing or invalid mutation token. Reload Life Planner.');
+  }
+  return next();
+});
 
 function chromeExecutablePath() {
   if (process.platform !== 'win32') return '';
@@ -1901,6 +1954,10 @@ function readBuildInfo() {
 }
 
 app.get('/api/version', (_req, res) => ok(res, readBuildInfo()));
+
+// Same-origin SPA fetches the per-runtime mutation token here, then sends it as
+// the X-LPS-CSRF header on every state-changing request.
+app.get('/api/csrf-token', (_req, res) => ok(res, { token: MUTATION_TOKEN }));
 
 app.get('/api/bootstrap', async (_req, res) => {
   ok(res, {

@@ -21,8 +21,24 @@ function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
 }
 
-async function api(route, options) {
-  const response = await fetch(`${base}${route}`, options);
+let csrfToken = '';
+async function mutationToken() {
+  if (csrfToken) return csrfToken;
+  const body = await (await fetch(`${base}/api/csrf-token`)).json();
+  if (body.ok) csrfToken = body.data.token;
+  return csrfToken;
+}
+
+// Authenticate mutations exactly as the real SPA does: same-origin request with
+// the per-runtime CSRF token. GETs are unaffected.
+async function api(route, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = { ...(options.headers || {}) };
+  if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    headers['X-LPS-CSRF'] = await mutationToken();
+    headers.Origin = base;
+  }
+  const response = await fetch(`${base}${route}`, { ...options, headers });
   const body = await response.json();
   return { response, body };
 }
