@@ -139,6 +139,7 @@ export function migrate() {
       last_reviewed TEXT,
       evidence TEXT,
       next_action TEXT,
+      shareability TEXT NOT NULL DEFAULT 'unknown' CHECK (shareability IN ('private', 'local-shareable', 'public-shareable', 'unknown')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -182,6 +183,7 @@ export function migrate() {
       next_action TEXT,
       project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
       due_at TEXT,
+      shareability TEXT NOT NULL DEFAULT 'unknown' CHECK (shareability IN ('private', 'local-shareable', 'public-shareable', 'unknown')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -299,6 +301,13 @@ export function migrate() {
     } catch {
       // Column already exists.
     }
+  }
+
+  // Workflow status is not a privacy decision. Existing records and every new
+  // import begin unknown until the user explicitly classifies them.
+  for (const table of ['projects', 'knowledge_items']) {
+    try { db.exec(`ALTER TABLE ${table} ADD COLUMN shareability TEXT NOT NULL DEFAULT 'unknown'`); } catch { /* already present */ }
+    db.prepare(`UPDATE ${table} SET shareability = 'unknown' WHERE shareability IS NULL OR shareability NOT IN ('private', 'local-shareable', 'public-shareable', 'unknown')`).run();
   }
 
   // Candidate annotations make the review decision explicit without treating a

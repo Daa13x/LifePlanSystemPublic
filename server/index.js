@@ -95,7 +95,7 @@ function seedRoadmapIfEmpty() {
     { title: 'Local API sessions and coding approval durability', detail: 'Authenticate local mutation APIs and move coding leases/approvals/evidence to transactional durable state.', resume_notes: 'P1 follow-up from the 2026-07-22 Regulus audit. Add same-origin authenticated sessions and CSRF protection instead of trusting loopback alone. Move .lps native-coding JSON state to transactional SQLite with compare-and-swap lease/heartbeat, single-use nonce bound to principal/action/workspace/base/hash/expiry, append-only chained evidence, stale-run recovery, process-tree cancellation/reaping, handle-based final-path checks, and adversarial replay/substitution/junction/CSRF/restart tests. Preserve the current no-command/no-Git/no-browser worker boundary. See docs/handoffs/HANDOFF_2026-07-22_NATIVE_CODING_WORKER_AND_REGULUS_REVIEW.md.', status: 'planned', category: 'fix' },
     { title: 'Brain-aware Chat provider router', detail: 'Chat routes to ChatGPT connector first with local model fallback; brain context loading foundation.', status: 'active', category: 'feature' },
     { title: 'Encrypt stored credentials with Windows DPAPI', detail: 'Keep GitHub, Hugging Face, and browser connector tokens out of plaintext SQLite while preserving redacted APIs and normal Source/browser behavior.', resume_notes: 'COMPLETED 2026-07-17: current-user Windows DPAPI encryption is enforced in server/db.js. Startup migrates legacy plaintext rows, secure-delete plus WAL truncation and VACUUM remove recoverable plaintext, empty values delete rows, and decrypt failures fail closed. verify:governance-safety proves migration, ciphertext-at-rest, redaction, replacement, and clearing. The live database was migrated and inspected without exposing values.', status: 'done', category: 'fix' },
-    { title: 'Classified exports and transactional recovery', detail: 'Require explicit shareability classification and preview for public exports, then redesign Local Backup as a documented, transactional recovery format.', resume_notes: 'P1. Follow docs/handoffs/HANDOFF_2026-07-17_NEXT_AGENT_REPAIR_QUEUE.md section 2. Do not infer public safety from active/stable status. Add a persisted classification, blocked/unknown preview, format version and manifest, dry-run import, one transaction, rollback tests, and truthful UI naming. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4663,4666,4680.', status: 'planned', category: 'fix' },
+    { title: 'Classified exports and transactional recovery', detail: 'Require explicit shareability classification and preview for public exports, then redesign Local Backup as a documented, transactional recovery format.', resume_notes: 'ACTIVE 2026-07-27: persisted closed-set shareability, server-side public export preview/confirmation, and atomic JSON import are being implemented. Keep status separate from privacy classification. Remaining: complete recovery manifest/import support and UI classification workflow.', status: 'active', category: 'fix' },
     { title: 'Cloud egress classification and provider-aware completion', detail: 'Block sensitive prose and file content from browser-agent egress until reviewed, and replace generic DOM/stability capture with provider-specific completion evidence.', resume_notes: 'P1. Follow repair queue section 3. Add a server-side egress decision before job creation, user preview/confirmation, provider adapters for ChatGPT/Gemini/Grok/Claude, deterministic DOM fixtures, bounded fallback, cancellation, terminal-job pruning, and extension reload/port-change acceptance. Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 independently confirmed both egress risk (server/index.js:670,677,2482,2498) and stale generic capture risk (background.js:99,148,199). Current Serenity reference implementations are data/native/extensions/browser-agent/conversation-capture.js and conversation-capture.test.cjs; review the privacy and stale-turn gaps in docs/handoffs/HANDOFF_2026-07-22_SERENITY_BROWSER_CONTROL_PARITY.md before porting.', status: 'planned', category: 'fix' },
     { title: 'Transactional chat consultation and import writes', detail: 'Make multi-row chat, consultation-candidate, model, and JSON import operations atomic with recoverable failure states and durable idempotency.', resume_notes: 'P1/P2. Follow repair queue section 4. Start with POST /api/import/json and chat send. Validate the complete payload before BEGIN IMMEDIATE, commit all rows together, roll back injected mid-operation failures, and add request/provenance keys for retry safety. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4699,4711,1779,1784.', status: 'planned', category: 'fix' },
     { title: 'Repository Explorer realpath containment', detail: 'Apply canonical realpath and junction/symlink containment to every Repository Explorer read, list, preview, and proposal path.', resume_notes: 'P2. Follow repair queue section 5. Centralize an operation-aware resolver, reject protected paths before and after canonicalization, constrain parent realpaths for creates, and test symlink/junction escapes plus TOCTOU-sensitive cases. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:991,999,4599,4612.', status: 'planned', category: 'fix' },
@@ -6239,6 +6239,87 @@ function publicSettings() {
   return readSettingsRedacted();
 }
 
+const SHAREABILITY_VALUES = new Set(['private', 'local-shareable', 'public-shareable', 'unknown']);
+
+function shareability(value) {
+  const normalized = String(value || 'unknown').trim().toLowerCase();
+  return SHAREABILITY_VALUES.has(normalized) ? normalized : 'unknown';
+}
+
+function requireShareability(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!SHAREABILITY_VALUES.has(normalized)) throw new Error(`Shareability must be one of: ${[...SHAREABILITY_VALUES].join(', ')}.`);
+  return normalized;
+}
+
+function publicExportSelection() {
+  const records = [
+    ...allRows('SELECT id, name AS label, shareability, updated_at FROM projects ORDER BY id').map((entry) => ({ ...entry, kind: 'project' })),
+    ...allRows('SELECT id, title AS label, shareability, updated_at FROM knowledge_items ORDER BY id').map((entry) => ({ ...entry, kind: 'knowledge_item' }))
+  ].map((entry) => ({ ...entry, shareability: shareability(entry.shareability) }));
+  const included = records.filter((entry) => entry.shareability === 'public-shareable');
+  const blocked = records.filter((entry) => entry.shareability === 'private' || entry.shareability === 'local-shareable');
+  const unknown = records.filter((entry) => entry.shareability === 'unknown');
+  const selection = included.map((entry) => ({ kind: entry.kind, id: entry.id, updatedAt: entry.updated_at, shareability: entry.shareability }));
+  const selectionHash = crypto.createHash('sha256').update(JSON.stringify(selection)).digest('hex');
+  return {
+    selection,
+    selectionHash,
+    summary: {
+      included: included.length,
+      blocked: blocked.length,
+      unknown: unknown.length,
+      byKind: {
+        projects: { included: included.filter((entry) => entry.kind === 'project').length, blocked: blocked.filter((entry) => entry.kind === 'project').length, unknown: unknown.filter((entry) => entry.kind === 'project').length },
+        knowledgeItems: { included: included.filter((entry) => entry.kind === 'knowledge_item').length, blocked: blocked.filter((entry) => entry.kind === 'knowledge_item').length, unknown: unknown.filter((entry) => entry.kind === 'knowledge_item').length }
+      }
+    }
+  };
+}
+
+function publicExportData() {
+  return {
+    format: 'life-planner-public-export',
+    version: 1,
+    exported_at: new Date().toISOString(),
+    projects: allRows("SELECT * FROM projects WHERE shareability = 'public-shareable' ORDER BY name"),
+    knowledge_items: allRows("SELECT * FROM knowledge_items WHERE shareability = 'public-shareable' ORDER BY type, title")
+  };
+}
+
+function validateImportData(data = {}, mode = 'skip_duplicates') {
+  if (!data || typeof data !== 'object' || (Array.isArray(data) || (!Array.isArray(data.projects) && !Array.isArray(data.knowledge_items)))) {
+    throw new Error('Import must include projects or knowledge_items arrays.');
+  }
+  const projects = Array.isArray(data.projects) ? data.projects : [];
+  const knowledgeItems = Array.isArray(data.knowledge_items) ? data.knowledge_items : [];
+  const assertRecord = (record, label, index) => {
+    if (!record || typeof record !== 'object' || Array.isArray(record)) throw new Error(`${label} ${index + 1} must be an object.`);
+  };
+  projects.forEach((record, index) => assertRecord(record, 'Project', index));
+  knowledgeItems.forEach((record, index) => assertRecord(record, 'Knowledge item', index));
+  const seenProjects = new Set();
+  const seenKnowledge = new Set();
+  const prepared = { projects: [], knowledgeItems: [], skippedProjects: 0, skippedKnowledgeItems: 0 };
+  for (const project of projects) {
+    const name = String(project.name || '').trim();
+    if (!name) throw new Error('Every imported project needs a non-empty name.');
+    const duplicate = mode === 'skip_duplicates' && (seenProjects.has(name) || row('SELECT id FROM projects WHERE name = ? LIMIT 1', [name]));
+    seenProjects.add(name);
+    if (duplicate) { prepared.skippedProjects += 1; continue; }
+    prepared.projects.push({ ...project, name });
+  }
+  for (const item of knowledgeItems) {
+    const title = String(item.title || '').trim();
+    if (!title) throw new Error('Every imported knowledge item needs a non-empty title.');
+    const duplicate = mode === 'skip_duplicates' && (seenKnowledge.has(title) || row('SELECT id FROM knowledge_items WHERE title = ? LIMIT 1', [title]));
+    seenKnowledge.add(title);
+    if (duplicate) { prepared.skippedKnowledgeItems += 1; continue; }
+    prepared.knowledgeItems.push({ ...item, title });
+  }
+  return prepared;
+}
+
 function importPreview(data = {}) {
   const projects = Array.isArray(data.projects) ? data.projects : [];
   const knowledgeItems = Array.isArray(data.knowledge_items) ? data.knowledge_items : [];
@@ -6400,7 +6481,7 @@ app.post('/api/import/pdf', async (req, res) => {
 app.get('/api/export/json', (req, res) => {
   const mode = req.query.mode === 'backup' ? 'backup' : 'public';
   if (mode === 'public') {
-    return fail(res, 409, 'Public export is disabled until every included record has an explicit shareability classification and the final preview is confirmed. Use a local context export instead.');
+    return fail(res, 409, 'Public export requires POST /api/export/public/preview followed by POST /api/export/public/confirm. Local context exports remain private to this device.');
   }
   const data = {
     exported_at: new Date().toISOString(),
@@ -6421,45 +6502,83 @@ app.get('/api/export/json', (req, res) => {
   res.json(data);
 });
 
+app.post('/api/export/public/preview', (_req, res) => {
+  try {
+    const preview = publicExportSelection();
+    const confirmation = proposeConfirmation(db, {
+      operation: 'public.export', target: preview.selectionHash, beforeState: preview,
+      afterState: { format: 'life-planner-public-export', version: 1 },
+      reason: 'User reviewed the public-export classification summary.', origin: 'public-export',
+      sessionId: CONFIRMATION_SESSION, requiresRevalidation: true
+    });
+    ok(res, { ...preview.summary, selectionHash: preview.selectionHash, confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt });
+  } catch (error) { fail(res, 400, error.message); }
+});
+
+app.post('/api/export/public/confirm', async (req, res) => {
+  const result = await confirmAndApply(db, {
+    id: req.body?.confirmationId, token: req.body?.token, sessionId: CONFIRMATION_SESSION
+  }, async () => publicExportData(), {
+    revalidate: () => publicExportSelection()
+  });
+  if (!result.ok) return fail(res, result.code === 'stale' ? 409 : 400, result.error);
+  res.setHeader('Content-Disposition', 'attachment; filename="life-planner-public-export.json"');
+  res.json(result.result);
+});
+
+app.patch('/api/shareability/:kind/:id', (req, res) => {
+  try {
+    const table = req.params.kind === 'project' ? 'projects' : req.params.kind === 'knowledge_item' ? 'knowledge_items' : null;
+    const id = Number(req.params.id);
+    if (!table || !Number.isSafeInteger(id) || id <= 0) return fail(res, 400, 'A supported record kind and positive record id are required.');
+    const value = requireShareability(req.body?.shareability);
+    const changed = db.prepare(`UPDATE ${table} SET shareability = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(value, id);
+    if (!changed.changes) return fail(res, 404, 'Record not found.');
+    ok(res, { kind: req.params.kind, id, shareability: value });
+  } catch (error) { fail(res, 400, error.message); }
+});
+
 app.get('/api/export/markdown', (_req, res) => {
   const items = allRows('SELECT * FROM knowledge_items ORDER BY type, title');
-  const lines = ['# Life Planner Export', '', `Exported: ${new Date().toISOString()}`, ''];
+  const lines = ['# Life Planner Private Local Export', '', `Exported: ${new Date().toISOString()}`, 'Classification: private local export; do not publish without using the classified public-export workflow.', ''];
   for (const item of items) {
     lines.push(`## ${item.title}`, '', `Type: ${item.type}`, `Status: ${item.status}`, `Confidence: ${item.confidence}`, `Source: ${item.source}`, '', item.body, '', `Next action: ${item.next_action || 'None'}`, '');
   }
   res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="life-planner-export.md"');
+  res.setHeader('Content-Disposition', 'attachment; filename="life-planner-private-local-export.md"');
   res.send(lines.join('\n'));
 });
 
 app.post('/api/import/json', (req, res) => {
-  const data = req.body;
-  if (!Array.isArray(data.projects) && !Array.isArray(data.knowledge_items)) return fail(res, 400, 'Import must include projects or knowledge_items arrays.');
-  const mode = req.query.mode === 'import_all' || req.body.mode === 'import_all' ? 'import_all' : 'skip_duplicates';
-  const imported = { projects: 0, knowledge_items: 0, skipped_projects: 0, skipped_knowledge_items: 0, mode };
+  const data = req.body || {};
+  const mode = req.query.mode === 'import_all' || data.mode === 'import_all' ? 'import_all' : 'skip_duplicates';
+  let prepared;
+  try { prepared = validateImportData(data, mode); } catch (error) { return fail(res, 400, error.message); }
+  const imported = { projects: 0, knowledge_items: 0, skipped_projects: prepared.skippedProjects, skipped_knowledge_items: prepared.skippedKnowledgeItems, mode };
   const insertProject = db.prepare(`
-    INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action, shareability)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unknown')
   `);
-  for (const project of data.projects || []) {
-    if (mode === 'skip_duplicates' && project.name && row('SELECT id FROM projects WHERE name = ? LIMIT 1', [project.name])) {
-      imported.skipped_projects += 1;
-      continue;
-    }
-    insertProject.run(project.name, project.status || 'active', project.owner || 'user', 'json import', project.confidence || 0.6, project.last_reviewed || null, project.evidence || '', project.next_action || '');
-    imported.projects += 1;
-  }
   const insertItem = db.prepare(`
-    INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action, shareability)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown')
   `);
-  for (const item of data.knowledge_items || []) {
-    if (mode === 'skip_duplicates' && item.title && row('SELECT id FROM knowledge_items WHERE title = ? LIMIT 1', [item.title])) {
-      imported.skipped_knowledge_items += 1;
-      continue;
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    for (const project of prepared.projects) {
+      insertProject.run(project.name, project.status || 'active', project.owner || 'user', 'json import', project.confidence || 0.6, project.last_reviewed || null, project.evidence || '', project.next_action || '');
+      imported.projects += 1;
+      if (process.env.LIFE_PLANNER_TEST_IMPORT_FAIL_AFTER === 'project') throw new Error('Injected import failure.');
     }
-    insertItem.run(item.type || 'current state', item.title || 'Imported item', item.body || '', 'json import', item.status || 'pending review', item.confidence || 0.5, item.last_reviewed || null, item.evidence || '', item.owner || 'user', item.next_action || '');
-    imported.knowledge_items += 1;
+    for (const item of prepared.knowledgeItems) {
+      insertItem.run(item.type || 'current state', item.title, item.body || '', 'json import', item.status || 'pending review', item.confidence || 0.5, item.last_reviewed || null, item.evidence || '', item.owner || 'user', item.next_action || '');
+      imported.knowledge_items += 1;
+      if (process.env.LIFE_PLANNER_TEST_IMPORT_FAIL_AFTER === 'knowledge_item') throw new Error('Injected import failure.');
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction already settled */ }
+    return fail(res, 500, `JSON import rolled back: ${error.message}`);
   }
   ok(res, imported);
 });
