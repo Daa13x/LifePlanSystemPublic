@@ -24,6 +24,7 @@ import {
 } from './setupRecovery.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
+import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion } from './localKnowledge.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -1324,11 +1325,13 @@ function createCandidateFromMessage(sessionId, messageId, content) {
   if (trimmed.length < 24) return null;
   const type = classifyCandidate(trimmed);
   const title = trimmed.split(/[.!?\n]/)[0].slice(0, 96) || 'Chat memory candidate';
+  const conflict = row("SELECT id FROM knowledge_items WHERE type = ? AND title = ? AND status IN ('active','stable') ORDER BY updated_at DESC LIMIT 1", [type, title]);
+  const sensitivity = /health|medical|diagnos|accessib/i.test(trimmed) ? 'sensitive' : 'personal';
   return db.prepare(`
     INSERT INTO memory_candidates
-    (session_id, source_message_id, type, title, body, source, evidence, confidence)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(sessionId, messageId, type, title, trimmed, 'chat', `Chat session ${sessionId}, message ${messageId}`, 0.52).lastInsertRowid;
+    (session_id, source_message_id, type, title, body, source, evidence, confidence, category, sensitivity, conflict_target_id, replacement_mode)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(sessionId, messageId, type, title, trimmed, 'chat', `Chat session ${sessionId}, message ${messageId}`, 0.52, type, sensitivity, conflict?.id || null, conflict ? 'replace-after-review' : 'create').lastInsertRowid;
 }
 
 function assignedPlannerModel() {
@@ -1553,6 +1556,14 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
     const answer = await answerDataQuery(intent);
     if (typeof onToken === 'function' && answer.content) onToken(answer.content);
     return answer;
+  }
+  // Personal-information questions are answered from the bounded, local source
+  // registry before a model is consulted. This avoids the former false
+  // disclaimer and never sends private records to an external provider.
+  if (isLocalKnowledgeQuestion(userMessage)) {
+    const answer = answerLocalKnowledgeQuestion(db, userMessage);
+    if (typeof onToken === 'function' && answer.content) onToken(answer.content);
+    return { mode: 'local knowledge', content: answer.content, localSources: answer.sources, diagnostics: { endpointType: 'local-knowledge', sourceCount: answer.sources.length } };
   }
   return runPlannerAssistant(sessionId, userMessage, signal, onToken, onStatus);
 }
@@ -1850,6 +1861,7 @@ function buildAssistantMetadata(sessionId, candidateId, assistant, elapsedMs) {
           created: false,
           message: 'Saved to chat history; no memory candidate was extracted from this short note.'
         },
+    localSources: Array.isArray(assistant.localSources) ? assistant.localSources : [],
     tokens: assistant.diagnostics?.usage || null,
     timingMs: typeof elapsedMs === 'number' ? elapsedMs : null,
     fallback: (assistant.mode === 'unavailable' || assistant.mode === 'runtime error') ? assistant.mode : null,
@@ -2849,11 +2861,19 @@ app.post('/api/memory/candidates/:id/:decision', async (req, res) => {
   try {
     if (decision === 'approve') {
       const approved = normalizedMemoryCandidate(candidate);
-      db.prepare(`
+      const newMemoryId = db.prepare(`
         INSERT INTO knowledge_items
         (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action)
         VALUES (?, ?, ?, ?, 'active', ?, date('now'), ?, 'user', ?)
-      `).run(approved.type, approved.title, approved.body, approved.source, Math.max(approved.confidence, 0.7), approved.evidence, 'Review during next planner pass.');
+      `).run(approved.type, approved.title, approved.body, approved.source, Math.max(approved.confidence, 0.7), approved.evidence, 'Review during next planner pass.').lastInsertRowid;
+      if (candidate.conflict_target_id) {
+        const previous = row('SELECT * FROM knowledge_items WHERE id = ?', [candidate.conflict_target_id]);
+        if (previous) {
+          db.prepare("UPDATE knowledge_items SET status = 'superseded', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(previous.id);
+          db.prepare('INSERT INTO memory_revisions (memory_id, action, previous_value, replacement_memory_id) VALUES (?, ?, ?, ?)')
+            .run(previous.id, 'superseded-by-reviewed-correction', JSON.stringify({ title: previous.title, body: previous.body }), newMemoryId);
+        }
+      }
       db.prepare("UPDATE memory_candidates SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'").run(candidate.id);
     } else {
       db.prepare("UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'").run(decision === 'deny' ? 'denied' : 'deferred', candidate.id);
@@ -2880,6 +2900,19 @@ app.patch('/api/memory/candidates/:id', async (req, res) => {
     WHERE id = ?
   `).run(req.body.type || null, req.body.title || null, req.body.body || null, req.body.evidence || null, confidence, candidate.id);
   ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidate.id]), planner: await plannerData() });
+});
+
+app.delete('/api/memory/items/:id', (req, res) => {
+  const item = row('SELECT * FROM knowledge_items WHERE id = ?', [req.params.id]);
+  if (!item) return fail(res, 404, 'Memory not found.');
+  db.prepare("UPDATE knowledge_items SET status = 'archived', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.id);
+  db.prepare('INSERT INTO memory_revisions (memory_id, action, previous_value) VALUES (?, ?, ?)')
+    .run(item.id, 'deleted-from-active-retrieval', JSON.stringify({ title: item.title, body: item.body }));
+  ok(res, { deleted: true, id: item.id });
+});
+
+app.get('/api/memory/items/:id/history', (req, res) => {
+  ok(res, allRows('SELECT * FROM memory_revisions WHERE memory_id = ? OR replacement_memory_id = ? ORDER BY created_at DESC', [req.params.id, req.params.id]));
 });
 
 const APPROVAL_ACTION_TYPES = new Set(['create_project', 'update_project', 'add_memory', 'repo_write', 'update_memory']);

@@ -1534,6 +1534,12 @@ function Memory({ memory, refresh, mode = 'memory' }) {
     refresh();
   }
 
+  async function deleteMemory(item) {
+    if (!window.confirm(`Remove “${item.title}” from active retrieval? Its minimal revision record remains for audit.`)) return;
+    await api(`/api/memory/items/${item.id}`, { method: 'DELETE' });
+    refresh();
+  }
+
   const candidates = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status));
   const approvedItems = memory.items.filter((item) => item.type !== 'rule');
 
@@ -1568,6 +1574,7 @@ function Memory({ memory, refresh, mode = 'memory' }) {
                 <button onClick={() => proposeMemoryUpdate(item, { status: item.status, confidence: item.confidence, evidence: 'Reviewed from Memory tab.', next_action: item.next_action }, `Review memory: ${item.title}`)}>Review</button>
                 <button onClick={() => proposeMemoryUpdate(item, { status: 'stale', confidence: Math.min(Number(item.confidence || 0), 0.45), evidence: 'Marked stale from Memory tab.', next_action: 'Verify before relying on this memory.' }, `Mark stale: ${item.title}`)}>Stale</button>
                 <button className="danger" onClick={() => proposeMemoryUpdate(item, { status: 'superseded', confidence: 0.3, evidence: 'Superseded from Memory tab.', next_action: 'Use newer approved memory instead.' }, `Supersede memory: ${item.title}`)}>Supersede</button>
+                <button className="danger" onClick={() => deleteMemory(item)}>Delete</button>
               </div>
             </div>
           ))}

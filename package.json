@@ -47,6 +47,7 @@
     "verify:setup-recovery-http": "node scripts/verify-setup-recovery-http.mjs",
     "verify:setup-recovery-ui": "node scripts/verify-setup-recovery-ui.mjs",
     "verify:chat-behavior": "node scripts/verify-chat-behavior.mjs",
+    "verify:local-knowledge-memory": "node scripts/verify-local-knowledge-memory.mjs",
     "verify:installed-chat": "node scripts/verify-installed-chat.mjs",
     "verify:windows-path-open": "node scripts/verify-windows-path-open.mjs",
     "verify:extension-icons": "node scripts/verify-extension-icons.mjs",

@@ -253,6 +253,15 @@ export function migrate() {
       detail TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS memory_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      memory_id INTEGER,
+      action TEXT NOT NULL,
+      previous_value TEXT,
+      replacement_memory_id INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   for (const column of [
@@ -290,6 +299,12 @@ export function migrate() {
     } catch {
       // Column already exists.
     }
+  }
+
+  // Candidate annotations make the review decision explicit without treating a
+  // raw Chat message as canonical memory.
+  for (const column of [['category', 'TEXT'], ['sensitivity', 'TEXT'], ['conflict_target_id', 'INTEGER'], ['replacement_mode', 'TEXT']]) {
+    try { db.exec(`ALTER TABLE memory_candidates ADD COLUMN ${column[0]} ${column[1]}`); } catch { /* already present */ }
   }
 
   // Durable confirmation + replay-protection store (see server/confirmations.js).

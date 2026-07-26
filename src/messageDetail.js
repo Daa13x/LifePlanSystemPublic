@@ -38,6 +38,10 @@ export function buildDetailRows(metadata, mode) {
       : 'No memory candidate created'
   ]);
   rows.push(['Runtime / provider', metadata.runtime || 'unknown']);
+  const localSources = Array.isArray(metadata.localSources) ? metadata.localSources : [];
+  if (localSources.length) {
+    rows.push(['Local sources', localSources.map((source) => `${source.title} (${source.category}; ${source.state}; updated ${source.updatedAt || 'unknown'})`).join(' · ')]);
+  }
   if (metadata.fallback) {
     rows.push([
       'Fallback',
@@ -62,6 +66,7 @@ export function buildDetailRows(metadata, mode) {
       if (parts.length) rows.push(['Tokens', parts.join(' · ')]);
     }
     if (metadata.error) rows.push(['Error', metadata.error]);
+    for (const source of localSources) rows.push(['Source detail', `${source.title}: ${source.whySelected || 'relevant'} · ${source.source || 'local'} · ${source.provenance || 'no additional provenance'}`]);
     if (metadata.generatedAt) rows.push(['Generated at', metadata.generatedAt]);
   }
 
