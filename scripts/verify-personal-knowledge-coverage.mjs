@@ -46,6 +46,8 @@ try {
 
   const broad = answerLocalKnowledgeQuestion(db, 'Tell me something about myself.');
   assert.match(broad.content, /Coverage profile|Coverage preference/);
+  const exactObservedWording = answerLocalKnowledgeQuestion(db, 'tell me something about me');
+  assert.match(exactObservedWording.content, /Coverage profile|Coverage preference/, 'the observed real-app wording routes to local retrieval');
   assert.ok(broad.sources.every((source) => source.sourceId && source.provenance !== undefined), 'answers retain stable source provenance');
   const projects = answerLocalKnowledgeQuestion(db, 'What am I currently working on?');
   assert.match(projects.content, /Coverage project|Coverage task/);

@@ -24,7 +24,7 @@ import {
 } from './setupRecovery.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
-import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion } from './localKnowledge.js';
+import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage } from './localKnowledge.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -113,6 +113,7 @@ const app = express();
 const port = Number(process.env.LIFE_PLANNER_PORT || 4177);
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
+let lastPersonalRetrieval = { at: null, sourceCount: 0, resultType: 'none' };
 let managedLlamaServer = null;
 let managedLlamaServerReady = false;
 let managedLlamaServerStartPromise = null;
@@ -1562,6 +1563,7 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
   // disclaimer and never sends private records to an external provider.
   if (isLocalKnowledgeQuestion(userMessage)) {
     const answer = answerLocalKnowledgeQuestion(db, userMessage);
+    lastPersonalRetrieval = { at: new Date().toISOString(), sourceCount: answer.sources.length, resultType: answer.sources.length ? 'deterministic-local-knowledge' : 'deterministic-no-match' };
     if (typeof onToken === 'function' && answer.content) onToken(answer.content);
     return { mode: 'local knowledge', content: answer.content, localSources: answer.sources, diagnostics: { endpointType: 'local-knowledge', sourceCount: answer.sources.length } };
   }
@@ -1996,6 +1998,15 @@ function readBuildInfo() {
 
 app.get('/api/version', (_req, res) => ok(res, readBuildInfo()));
 
+function runtimeDiagnostics() {
+  const coverage = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath) });
+  return { build: readBuildInfo(), applicationRoot: root, activeDatabasePath: dbPath, personalRetrievalEnabled: true, coverage, lastPersonalRetrieval };
+}
+
+// Local, counts-only evidence for System and verification. It returns neither
+// record contents nor settings, credentials, logs, or recovery metadata.
+app.get('/api/runtime-diagnostics', (_req, res) => ok(res, runtimeDiagnostics()));
+
 // Same-origin SPA fetches the per-runtime mutation token here, then sends it as
 // the X-LPS-CSRF header on every state-changing request.
 app.get('/api/csrf-token', (_req, res) => ok(res, { token: MUTATION_TOKEN }));
@@ -2004,6 +2015,7 @@ app.get('/api/bootstrap', async (_req, res) => {
   ok(res, {
     settings: readSettingsRedacted(),
     build: readBuildInfo(),
+    runtimeDiagnostics: runtimeDiagnostics(),
     planner: await plannerData(),
     sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC'),
     projects: allRows('SELECT * FROM projects ORDER BY updated_at DESC'),
