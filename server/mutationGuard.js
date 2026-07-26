@@ -13,22 +13,35 @@
 
 export const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost']);
+// Loopback hostnames are "this machine". The port is deliberately NOT pinned:
+// the frontend is same-origin in the packaged app (127.0.0.1:4177) but a
+// legitimately different port in development (Vite on 127.0.0.1:5173 proxying to
+// the API on 4177), and both are the user's own machine. The real CSRF defense
+// is the per-runtime token in a custom header, which a cross-site page cannot set
+// (no CORS preflight is ever granted) — the loopback check is defence in depth
+// against non-local origins, not a port allowlist.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 export function isMutation(method) {
   return MUTATION_METHODS.has(String(method || '').toUpperCase());
 }
 
-export function hostAllowed(hostHeader, port) {
-  if (!hostHeader) return false;
-  const [host, hostPort] = String(hostHeader).split(':');
-  return LOCAL_HOSTS.has(host) && hostPort === String(port);
+function loopbackName(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  // Bracketed IPv6 host, e.g. "[::1]:4177".
+  if (raw.startsWith('[')) return raw.slice(1, raw.indexOf(']'));
+  return raw.split(':')[0];
 }
 
-export function originAllowed(originHeader, port) {
+export function hostAllowed(hostHeader) {
+  return LOOPBACK_HOSTS.has(loopbackName(hostHeader));
+}
+
+export function originAllowed(originHeader) {
   // A missing Origin is allowed here: same-origin navigations and some app
   // webviews omit it, and the Host check still constrains the request. A PRESENT
-  // Origin must be this app's own localhost origin on the expected port.
+  // Origin must be a loopback origin (any port).
   if (!originHeader) return true;
   let url;
   try {
@@ -36,24 +49,24 @@ export function originAllowed(originHeader, port) {
   } catch {
     return false;
   }
-  return LOCAL_HOSTS.has(url.hostname) && url.port === String(port);
+  return LOOPBACK_HOSTS.has(url.hostname.toLowerCase());
 }
 
 // Decide whether a request must be blocked outright and, if allowed, whether it
 // still needs the per-runtime CSRF token. The token comparison itself is done by
 // the caller (it holds the secret and uses a constant-time compare).
-export function evaluateMutationGuard({ method, host, origin, secFetchSite, port, isConnector = false }) {
+export function evaluateMutationGuard({ method, host, origin, secFetchSite, isConnector = false }) {
   if (!isMutation(method)) return { blocked: false, requiresToken: false, reason: '' };
   if (isConnector) return { blocked: false, requiresToken: false, reason: '' };
   // Fetch-metadata: an explicitly cross-site request is never legitimate for a
-  // local same-origin app, so reject it before any other check when present.
+  // local app, so reject it before any other check when present.
   if (String(secFetchSite || '').toLowerCase() === 'cross-site') {
     return { blocked: true, requiresToken: false, reason: 'Request rejected: cross-site requests are not permitted.' };
   }
-  if (!hostAllowed(host, port)) {
+  if (!hostAllowed(host)) {
     return { blocked: true, requiresToken: false, reason: 'Request rejected: mutations must target the local Life Planner host.' };
   }
-  if (!originAllowed(origin, port)) {
+  if (!originAllowed(origin)) {
     return { blocked: true, requiresToken: false, reason: 'Request rejected: mutations must originate from the local Life Planner app.' };
   }
   return { blocked: false, requiresToken: true, reason: '' };

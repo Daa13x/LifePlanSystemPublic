@@ -48,21 +48,31 @@ for (const method of ['GET', 'HEAD', 'OPTIONS']) {
   line(!guard.blocked && guard.requiresToken, 'Sec-Fetch-Site: none is allowed on (still needs a token)');
 }
 
-// Wrong port is not this app instance.
-line(!originAllowed(`http://127.0.0.1:9999`, PORT), 'origin on a different port is rejected');
-line(!hostAllowed(`127.0.0.1:9999`, PORT), 'host on a different port is rejected');
-line(originAllowed(`http://localhost:${PORT}`, PORT), 'localhost origin on the right port is allowed');
+// Any loopback origin/host is "this machine"; the port is NOT pinned so the dev
+// proxy (Vite 5173 -> API 4177) and the packaged same-origin app both work.
+line(originAllowed('http://127.0.0.1:9999'), 'a loopback origin on any port is allowed');
+line(hostAllowed('127.0.0.1:9999'), 'a loopback host on any port is allowed');
+line(originAllowed(`http://localhost:${PORT}`), 'a localhost origin is allowed');
+line(hostAllowed('127.0.0.1'), 'a loopback host without a port is allowed');
+line(hostAllowed('[::1]:4177'), 'an IPv6 loopback host is allowed');
 
-// A foreign Host header is blocked even without an Origin.
+// Regression guard: in development the frontend is served by Vite on 5173 and
+// proxied to the API on 4177, so the API sees Origin http://127.0.0.1:5173. This
+// previously 403'd every mutation (Chat send "did nothing"); it must be allowed.
 {
-  const guard = evaluateMutationGuard({ method: 'DELETE', host: 'evil.example', origin: '', port: PORT });
-  line(guard.blocked, 'DELETE with a foreign Host is blocked');
+  const guard = evaluateMutationGuard({ method: 'POST', host: `127.0.0.1:${PORT}`, origin: 'http://127.0.0.1:5173' });
+  line(!guard.blocked && guard.requiresToken, 'dev cross-port origin (5173 -> API 4177) is allowed and still needs a token');
 }
 
-// Malformed / port-less Host headers are rejected (they are not this app).
-line(!hostAllowed('127.0.0.1', PORT), 'host without a port is rejected');
-line(!hostAllowed(`127.0.0.1:abc`, PORT), 'host with a non-numeric port is rejected');
-line(!hostAllowed('', PORT), 'empty host is rejected');
+// Non-loopback origins/hosts are still rejected outright.
+{
+  const guard = evaluateMutationGuard({ method: 'DELETE', host: 'evil.example', origin: '' });
+  line(guard.blocked, 'DELETE with a foreign Host is blocked');
+}
+line(!originAllowed('https://evil.example'), 'a non-loopback origin is rejected');
+line(!hostAllowed('evil.example'), 'a non-loopback host is rejected');
+line(!hostAllowed('evil.example:4177'), 'a non-loopback host on the app port is still rejected');
+line(!hostAllowed(''), 'empty host is rejected');
 
 // A missing Origin is tolerated (some app webviews omit it); the Host still
 // constrains it and the token is still required.
