@@ -97,7 +97,7 @@ try {
     assert.equal(evidence.response?.status, 200, 'server must accept the CSRF-protected Chat send');
     assert.equal(evidence.visible?.trim(), 'Test, I want to see you respond.', 'sent message must remain visibly rendered');
     assert.ok(evidence.persisted.some((message) => message.role === 'user' && message.content === 'Test, I want to see you respond.'), 'sent message must persist');
-    await page.reload({ waitUntil: 'networkidle' });
+    await page.goto(`${base}/#chat/${sessionId}`, { waitUntil: 'networkidle' });
     await page.getByText('Test, I want to see you respond.').last().waitFor({ timeout: 15000 });
     evidence.reopened = true;
     await page.getByRole('button', { name: 'System', exact: true }).click();
