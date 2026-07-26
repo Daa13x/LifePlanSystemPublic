@@ -12,7 +12,7 @@ import {
 assert.deepEqual(PRIMARY_NAVIGATION.map((entry) => entry.label), ['Chat', 'Knowledge', 'System', 'Workboard']);
 assert.deepEqual(SECTION_TABS.workboard.map((entry) => entry.label), ['Overview', 'Projects', 'Roadmap', 'Review', 'Completed']);
 assert.deepEqual(SECTION_TABS.knowledge.map((entry) => entry.label), ['Memory', 'Candidates', 'Sources & Source Control', 'Rules', 'Calibration']);
-assert.deepEqual(SECTION_TABS.system.map((entry) => entry.label), ['Status', 'Repository', 'Browser', 'Tools', 'Runs']);
+assert.deepEqual(SECTION_TABS.system.map((entry) => entry.label), ['Status', 'Setup & Recovery', 'Repository', 'Browser', 'Tools', 'Runs']);
 
 const expectedRoutes = [
   ['/planner', {}, { section: 'workboard', tab: 'overview' }],
@@ -37,6 +37,7 @@ assert.equal(routeFor('chat'), '#chat');
 assert.equal(routeFor('chat', null, 42), '#chat/42');
 assert.equal(routeFor('workboard', 'overview'), '#workboard');
 assert.equal(routeFor('knowledge', 'candidates'), '#knowledge/candidates');
+assert.equal(routeFor('system', 'setup'), '#system/setup');
 assert.equal(routeFor('system', 'tools'), '#system/tools');
 assert.equal(routeFor('settings'), '#settings');
 assert.deepEqual(routeFromHash('#chat/42'), { section: 'chat', tab: null, sessionId: '42', legacy: false });

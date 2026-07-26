@@ -193,6 +193,21 @@ Do not commit:
 
 Cloud agents and external browser consultations are advisory only. Their responses do not become memory unless reviewed and approved.
 
+## Setup and Recovery
+
+The **System → Setup & Recovery** screen shows local diagnostics, build
+provenance, backup status, and any staged recovery warning. Backups contain the
+validated Life Planner SQLite database and a versioned manifest with checksums;
+they deliberately exclude credentials, browser profiles, model files, logs,
+temporary files, and application binaries.
+
+Restore is deliberately restart-based. The app first validates the selected
+backup and requires the protected confirmation flow, then stages the request.
+On the next startup—before SQLite is opened—it preserves the previous database,
+installs and validates the replacement, and keeps a rollback copy. An invalid
+or interrupted restore is recorded as recovery evidence and is never reported
+as a successful restore.
+
 ## Repository Setup
 
 The canonical repository is `Daa13x/LifePlanSystemPublic`, with `main` as its

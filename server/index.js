@@ -6,9 +6,22 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
+// Imported before ./db.js so any staged database restore is applied before the
+// SQLite connection is opened.
+import './restoreBootstrap.js';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
 import { evaluateMutationGuard, isMutation } from './mutationGuard.js';
-import { recoverInterruptedConfirmations } from './confirmations.js';
+import { proposeConfirmation, confirmAndApply, getConfirmation, recoverInterruptedConfirmations } from './confirmations.js';
+import {
+  assessEnvironment,
+  createBackup,
+  listBackups,
+  validateBackup,
+  stageRestore,
+  readPendingRestore,
+  detectLegacyData,
+  importLegacyAsBackup
+} from './setupRecovery.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { openFolderInExplorer } from './openFolder.js';
@@ -1979,6 +1992,149 @@ app.get('/api/bootstrap', async (_req, res) => {
     models: modelsWithExists()
   });
 });
+
+// --- Setup & Recovery ---------------------------------------------------------
+// Per-runtime session id that binds a confirmation to the runtime that created
+// it (distinct from the CSRF token, which is never stored). A confirmation
+// proposed in one runtime cannot be confirmed after a restart.
+const CONFIRMATION_SESSION = crypto.randomBytes(16).toString('hex');
+const LEGACY_DATA_DIR = process.env.LIFE_PLANNER_LEGACY_DIR ? path.resolve(process.env.LIFE_PLANNER_LEGACY_DIR) : null;
+
+// Canonical signature of the live database's USER data. It deliberately excludes
+// the confirmation bookkeeping tables so that proposing/confirming a restore does
+// not itself look like a change; genuine user edits (inserts, deletes, updates)
+// do change it. Used as the revalidation before-state for restore and migration.
+function liveUserDataSignature() {
+  const tables = ['settings', 'projects', 'knowledge_items', 'chat_sessions', 'chat_messages', 'roadmap_items', 'memory_candidates', 'approvals'];
+  const signature = {};
+  for (const table of tables) {
+    try {
+      const stats = db.prepare(`SELECT COUNT(*) AS count, COALESCE(MAX(rowid), 0) AS maxRowid FROM ${table}`).get();
+      let updated = '';
+      try { updated = db.prepare(`SELECT COALESCE(MAX(updated_at), '') AS u FROM ${table}`).get().u; } catch { updated = ''; }
+      signature[table] = `${stats.count}:${stats.maxRowid}:${updated}`;
+    } catch {
+      signature[table] = 'absent';
+    }
+  }
+  return signature;
+}
+
+function proposeStagedRestore(res, backupDir, backupName, operation, origin) {
+  const validation = validateBackup(backupDir);
+  if (!validation.ok) return fail(res, 400, `Backup failed validation: ${validation.errors.join('; ')}`);
+  const confirmation = proposeConfirmation(db, {
+    operation,
+    target: backupName,
+    beforeState: liveUserDataSignature(),
+    afterState: { restoreFrom: backupName },
+    reason: operation === 'legacy.migrate' ? 'Migrate data from a legacy installation' : 'Restore the database from a backup',
+    origin,
+    sessionId: CONFIRMATION_SESSION,
+    requiresRevalidation: true,
+    idempotencyKey: `${operation}:${backupName}`
+  });
+  ok(res, { confirmationId: confirmation.id, token: confirmation.token, operation: confirmation.operation, target: confirmation.target, expiresAt: confirmation.expiresAt });
+}
+
+async function confirmStagedRestore(req, res, expectedOperation) {
+  const confirmationId = String(req.body?.confirmationId || '');
+  const token = String(req.body?.token || '');
+  const confirmation = getConfirmation(db, confirmationId);
+  if (!confirmation) return fail(res, 404, 'Confirmation not found.');
+  if (confirmation.operation !== expectedOperation) return fail(res, 400, 'Confirmation does not match this operation.');
+  const target = listBackups(dbPath).find((backup) => backup.name === confirmation.target);
+  if (!target) return fail(res, 409, 'The backup for this confirmation is no longer available.');
+  const result = await confirmAndApply(
+    db,
+    { id: confirmationId, token, sessionId: CONFIRMATION_SESSION },
+    (record) => stageRestore({ dbPath, backupDir: target.dir, confirmationId: record.id, idempotencyKey: `${expectedOperation}:${confirmation.target}` }),
+    { revalidate: () => liveUserDataSignature() }
+  );
+  if (!result.ok) {
+    const status = result.code === 'not_found' ? 404 : (result.code === 'apply_failed' ? 500 : 409);
+    return fail(res, status, result.error);
+  }
+  ok(res, { staged: true, status: result.confirmation.status, message: 'Staged. It will complete on the next restart.' });
+}
+
+app.get('/api/setup/status', async (_req, res) => {
+  let model = {};
+  try { model = await localModelStatus(); } catch { model = {}; }
+  ok(res, assessEnvironment({
+    dbPath,
+    modelAssigned: Boolean(model.assigned || model.endpointConfigured),
+    runtimePresent: Boolean(model.assigned || model.endpointConfigured || model.llamaServerExists || model.managedServerReady),
+    legacyDataDir: LEGACY_DATA_DIR
+  }));
+});
+
+app.post('/api/setup/repair/data-directory', async (_req, res) => {
+  try {
+    // Bounded, idempotent repair only: recreate the known local data directory
+    // and return fresh diagnostics. No command execution or external paths.
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    let model = {};
+    try { model = await localModelStatus(); } catch { model = {}; }
+    ok(res, assessEnvironment({ dbPath, modelAssigned: Boolean(model.assigned || model.endpointConfigured), runtimePresent: Boolean(model.assigned || model.endpointConfigured || model.llamaServerExists || model.managedServerReady), legacyDataDir: LEGACY_DATA_DIR }));
+  } catch (error) { fail(res, 500, 'The application data directory could not be repaired safely.'); }
+});
+
+app.get('/api/recovery/status', (_req, res) => {
+  const pending = readPendingRestore(dbPath);
+  ok(res, {
+    environment: assessEnvironment({ dbPath, legacyDataDir: LEGACY_DATA_DIR }),
+    backups: listBackups(dbPath).map((backup) => ({
+      name: backup.name,
+      createdAt: backup.manifest.createdAt,
+      label: backup.manifest.label,
+      files: (backup.manifest.files || []).map((file) => ({ name: file.name, size: file.size }))
+    })),
+    pendingRestore: pending ? { requestedAt: pending.requestedAt } : null,
+    legacyDetected: LEGACY_DATA_DIR ? detectLegacyData({ legacyDataDir: LEGACY_DATA_DIR }).detected : false
+  });
+});
+
+app.post('/api/recovery/backup', (_req, res) => {
+  try {
+    try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* best effort */ }
+    const backup = createBackup({ dbPath, label: 'manual', provenance: { version: readBuildInfo()?.version || null } });
+    ok(res, { name: path.basename(backup.dir), createdAt: backup.manifest.createdAt, files: backup.manifest.files.map((file) => ({ name: file.name, size: file.size })) });
+  } catch (error) {
+    fail(res, 500, error.message);
+  }
+});
+
+app.get('/api/recovery/backups', (_req, res) => {
+  ok(res, listBackups(dbPath).map((backup) => ({ name: backup.name, createdAt: backup.manifest.createdAt, label: backup.manifest.label })));
+});
+
+app.post('/api/recovery/backup/validate', (req, res) => {
+  const backupName = String(req.body?.backup || '');
+  const target = listBackups(dbPath).find((backup) => backup.name === backupName);
+  if (!target) return fail(res, 404, 'Backup not found or failed validation.');
+  const result = validateBackup(target.dir);
+  if (!result.ok) return fail(res, 400, 'Backup failed validation.');
+  ok(res, { valid: true, name: backupName, files: result.manifest.files.map((file) => ({ name: file.name, size: file.size })) });
+});
+
+app.post('/api/recovery/restore/propose', (req, res) => {
+  const backupName = String(req.body?.backup || '');
+  const target = listBackups(dbPath).find((backup) => backup.name === backupName);
+  if (!target) return fail(res, 404, 'Backup not found.');
+  proposeStagedRestore(res, target.dir, backupName, 'backup.restore', 'recovery-restore');
+});
+
+app.post('/api/recovery/restore/confirm', (req, res) => confirmStagedRestore(req, res, 'backup.restore'));
+
+app.post('/api/recovery/legacy-migrate/propose', (_req, res) => {
+  if (!LEGACY_DATA_DIR || !detectLegacyData({ legacyDataDir: LEGACY_DATA_DIR }).detected) return fail(res, 404, 'No legacy installation data was found.');
+  let imported;
+  try { imported = importLegacyAsBackup({ dbPath, legacyDataDir: LEGACY_DATA_DIR }); } catch (error) { return fail(res, 400, error.message); }
+  proposeStagedRestore(res, imported.dir, path.basename(imported.dir), 'legacy.migrate', 'recovery-legacy');
+});
+
+app.post('/api/recovery/legacy-migrate/confirm', (req, res) => confirmStagedRestore(req, res, 'legacy.migrate'));
 
 const ROADMAP_STATUSES = ['planned', 'active', 'paused', 'parked', 'done'];
 const ROADMAP_CATEGORIES = ['feature', 'fix', 'infra', 'chore', 'idea'];

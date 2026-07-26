@@ -22,6 +22,7 @@ export const SECTION_TABS = {
   ],
   system: [
     { id: 'status', label: 'Status' },
+    { id: 'setup', label: 'Setup & Recovery' },
     { id: 'repository', label: 'Repository' },
     { id: 'browser', label: 'Browser' },
     { id: 'tools', label: 'Tools' },
