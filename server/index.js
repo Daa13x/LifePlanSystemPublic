@@ -842,7 +842,17 @@ function classifyAndRedactCloudPrompt(prompt) {
     });
     if (count) findings.push({ type: rule.type, count, action: 'redacted' });
   }
-  return { prompt: redacted, findings, changed: redacted !== prompt };
+  // Some categories are not safe to transform into a cloud prompt at all.
+  // The user can remove or generalise them locally; the automatic browser path
+  // must never turn a review checkbox into permission to export them.
+  const sensitive = [
+    { type: 'health or treatment detail', pattern: /\b(?:diagnos(?:is|ed)|medication|prescription|therap(?:y|ist)|mental health|medical record|symptom|hospital|disability)\b/i },
+    { type: 'legal matter detail', pattern: /\b(?:solicitor|lawyer|court case|legal advice|criminal record|settlement|litigation)\b/i },
+    { type: 'financial account detail', pattern: /\b(?:bank account|sort code|account number|credit card|debt collection|income statement)\b/i },
+    { type: 'government identity detail', pattern: /\b(?:passport number|national insurance number|social security number|driving licence number)\b/i }
+  ];
+  const blockedFindings = sensitive.filter((rule) => rule.pattern.test(redacted)).map((rule) => ({ type: rule.type, count: 1, action: 'blocked' }));
+  return { prompt: redacted, findings: [...findings, ...blockedFindings], changed: redacted !== prompt, blocked: blockedFindings.length > 0 };
 }
 
 function prepareCloudEgress(req) {
@@ -852,7 +862,7 @@ function prepareCloudEgress(req) {
   const assembled = req.body.prompt?.trim() || buildCloudConsultationPrompt({ targetAgent, localDraft, contexts });
   const classified = classifyAndRedactCloudPrompt(assembled);
   const promptHash = crypto.createHash('sha256').update(`${targetAgent}\0${classified.prompt}`, 'utf8').digest('hex');
-  return { targetAgent, localDraft, contexts, prompt: classified.prompt, promptHash, findings: classified.findings, changed: classified.changed };
+  return { targetAgent, localDraft, contexts, prompt: classified.prompt, promptHash, findings: classified.findings, changed: classified.changed, blocked: classified.blocked };
 }
 
 function buildBrowserAgentAssistPrompt({ targetAgent = 'ChatGPT', localDraft = '', contexts = [] }) {
@@ -3762,8 +3772,11 @@ app.post('/api/browser/consult/preview', (req, res) => {
       promptHash: prepared.promptHash,
       findings: prepared.findings,
       changed: prepared.changed,
+      blocked: prepared.blocked,
       contexts: prepared.contexts.map((item) => ({ path: item.path, truncated: item.truncated })),
-      note: 'Review this exact final prompt. Confirmation is bound to its SHA-256 and cloud provider; any edit or provider change invalidates it.'
+      note: prepared.blocked
+        ? 'Automatic cloud sending is blocked because the prompt contains sensitive personal material. Remove or generalise it locally, then create a new preview.'
+        : 'Review this exact final prompt. Confirmation is bound to its SHA-256 and cloud provider; any edit or provider change invalidates it.'
     });
   } catch (error) {
     fail(res, 400, error.message);
@@ -3782,6 +3795,9 @@ app.post('/api/browser/consult', async (req, res) => {
 
   try {
     const prepared = prepareCloudEgress(req);
+    if (prepared.blocked) {
+      return fail(res, 422, 'Automatic cloud sending is blocked for sensitive personal material. Remove or generalise it locally, then create a new preview.');
+    }
     const confirmation = req.body.egress_confirmation || {};
     if (confirmation.promptHash !== prepared.promptHash || confirmation.targetAgent !== prepared.targetAgent) {
       return fail(res, 428, 'Review and confirm the final redacted cloud prompt for this provider before sending. The prompt or provider changed since confirmation.');

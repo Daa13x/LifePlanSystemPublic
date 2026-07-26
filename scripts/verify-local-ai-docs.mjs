@@ -84,6 +84,22 @@ try {
   assert.match(preview.body.data.prompt, /secret=\[REDACTED\]/);
   assert.match(preview.body.data.promptHash, /^[a-f0-9]{64}$/);
 
+  const sensitivePreview = await jsonApi('/api/browser/consult/preview', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      target_agent: 'Claude', local_draft: 'My medication changed after a hospital appointment.'
+    })
+  });
+  assert.equal(sensitivePreview.response.status, 200);
+  assert.equal(sensitivePreview.body.data.blocked, true);
+  assert.ok(sensitivePreview.body.data.findings.some((finding) => finding.action === 'blocked'));
+  const sensitiveSend = await jsonApi('/api/browser/consult', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      target_agent: 'Claude', local_draft: 'My medication changed after a hospital appointment.', temporary_chat_required: false,
+      egress_confirmation: { promptHash: sensitivePreview.body.data.promptHash, targetAgent: 'Claude' }
+    })
+  });
+  assert.equal(sensitiveSend.response.status, 422);
+
   const unconfirmed = await jsonApi('/api/browser/consult', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       target_agent: 'Claude', local_draft: 'Safe prompt', temporary_chat_required: false

@@ -1912,6 +1912,8 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
       ? 'Enter a message before running cloud consultation.'
       : temporaryChatNeedsConfirmation
           ? 'Turn on Temporary Chat in ChatGPT, then tick the confirmation box before sending the full prompt.'
+          : egressPreview?.blocked
+            ? 'Automatic cloud sending is blocked because this prompt contains sensitive personal material. Remove or generalise it locally, then preview again.'
           : connectorDisabledReason || browserDisabledReason;
   const waitingForExternalResponse = Boolean(activeConsultationId || browserResult || consultPrompt);
   const responseCaptureHint = external.trim()
@@ -2448,7 +2450,7 @@ function BrowserConsult({ setNotice, refresh, refreshSignal = 0 }) {
           ))}
         </div>
         {egressPreview && (
-          <div className={cx('source-warning', egressPreview.changed ? 'warn' : 'info')}>
+          <div className={cx('source-warning', egressPreview.blocked || egressPreview.changed ? 'warn' : 'info')}>
             <strong>Final cloud egress preview</strong>
             <small>{egressPreview.note}</small>
             <small>{egressPreview.findings.length ? egressPreview.findings.map((item) => `${item.count} ${item.type}`).join(', ') : 'No automatic sensitive-pattern redactions were required.'}</small>
