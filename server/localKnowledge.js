@@ -71,7 +71,7 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
 }
 
 export function isLocalKnowledgeQuestion(message) {
-  return /what do you know about me|what.*(health|condition|preference|goal|project|decision|task|appointment)|what did i say|why did we make|saved (memory|information)|previously/i.test(String(message || '').toLowerCase());
+  return /what do you know about me|tell me (?:something )?about myself|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|saved (memory|information)|previously/i.test(String(message || '').toLowerCase());
 }
 
 export function answerLocalKnowledgeQuestion(db, message) {

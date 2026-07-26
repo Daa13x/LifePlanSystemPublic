@@ -53,6 +53,16 @@ export function shouldCreateMemoryCandidate(message) {
 
   if (text.length < 12) return { create: false, reason: 'too short / low-signal' };
 
+  // Explicit terminology and naming conventions are durable preferences. They
+  // are still only review candidates; this merely prevents them being lost in
+  // conversational phrasing such as “when I say X, I mean Y”.
+  if (/\bwhen\s+i\s+say\s+.+?\s+i\s+mean\s+.+/i.test(text)
+    || /\bremember\s+that\s+.+?\s+means?\s+.+/i.test(text)
+    || /\bcall\s+.+?\s+.+/i.test(text)
+    || /\bfrom\s+now\s+on\s+(?:use|call)\s+.+?\s+(?:for|as)\s+.+/i.test(text)) {
+    return { create: true, reason: 'explicit terminology preference' };
+  }
+
   // 1. Explicit save intent — always honour it.
   if (/\b(remember|memori[sz]e|save (this|that|it)|store (this|that|it)|keep (this|that|it) in mind|note (this|that|it) down|make a note|don'?t forget|for the record|sync (this|that|it) to memory)\b/.test(lower)) {
     return { create: true, reason: 'explicit save request' };

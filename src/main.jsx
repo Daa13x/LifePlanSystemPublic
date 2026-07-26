@@ -1232,7 +1232,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         <div className="context-bar">
           <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} />
           <div className="context-actions">
-            <button onClick={() => openPicker('knowledge')}><Brain size={15} /> Use Knowledge</button>
+            <button onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
             <button onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
             <div className="inline-form compact">
