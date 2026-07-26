@@ -68,6 +68,8 @@ try {
   // Backup + validation.
   const backup = createBackup({ dbPath, label: 'manual', now: now() });
   line(fs.existsSync(path.join(backup.dir, 'manifest.json')), 'createBackup writes a manifest');
+  line(backup.manifest.recoveryScope?.kind === 'sqlite-database-snapshot' && backup.manifest.recoveryScope.tables.length > 0, 'backup manifest lists included SQLite tables');
+  line(backup.manifest.recoveryScope?.credentialHandling?.includes('DPAPI') && backup.manifest.recoveryScope.excluded.includes('logs'), 'backup manifest truthfully records DPAPI credential handling and excluded local files');
   line(validateBackup(backup.dir).ok, 'a fresh backup validates');
   line(listBackups(dbPath).length >= 1, 'listBackups returns the new backup');
 

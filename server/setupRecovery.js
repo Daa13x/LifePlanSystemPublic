@@ -81,6 +81,30 @@ function sqliteDetails(file) {
   }
 }
 
+function databaseSnapshotScope(file) {
+  let db;
+  const transientSidecars = [`${file}-wal`, `${file}-shm`].filter((sidecar) => !fs.existsSync(sidecar));
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
+      .map(({ name }) => {
+        const identifier = `"${String(name).replaceAll('"', '""')}"`;
+        return { name, rows: Number(db.prepare(`SELECT COUNT(*) AS count FROM ${identifier}`).get().count) };
+      });
+    return {
+      kind: 'sqlite-database-snapshot',
+      tables,
+      excluded: ['temporary files', 'logs', 'models', 'browser profiles'],
+      credentialHandling: 'Settings remain inside the database snapshot. Credential values are Windows DPAPI-protected and can only be decrypted by the same Windows user.'
+    };
+  } catch {
+    throw new Error('Backup database tables could not be enumerated safely.');
+  } finally {
+    try { db?.close(); } catch { /* nothing to close */ }
+    for (const sidecar of transientSidecars) removeIfPresent(sidecar);
+  }
+}
+
 export function isSqliteFile(file) {
   try {
     const fd = fs.openSync(file, 'r');
@@ -144,7 +168,8 @@ export function createBackup({ dbPath, sources = null, label = 'manual', provena
     }
     const database = sqliteDetails(path.join(staging, databaseName));
     if (!database.ok) throw new Error(`Refusing to back up an invalid database: ${database.error}`);
-    const manifest = { formatVersion: BACKUP_FORMAT_VERSION, application: APPLICATION_ID, createdAt: iso(now), label, databaseFile: databaseName, schemaVersion: database.schemaVersion, provenance: provenance || null, files: manifestFiles };
+    const recoveryScope = databaseSnapshotScope(path.join(staging, databaseName));
+    const manifest = { formatVersion: BACKUP_FORMAT_VERSION, application: APPLICATION_ID, createdAt: iso(now), label, databaseFile: databaseName, schemaVersion: database.schemaVersion, recoveryScope, provenance: provenance || null, files: manifestFiles };
     atomicJson(path.join(staging, 'manifest.json'), manifest);
     const validation = validateBackup(staging);
     if (!validation.ok) throw new Error(`Backup validation failed: ${validation.errors.join('; ')}`);
@@ -195,6 +220,16 @@ export function validateBackup(dir) {
   const database = safeName(manifest.databaseFile) && seen.has(manifest.databaseFile) ? sqliteDetails(dbFile) : { ok: false, error: 'Database is not declared in the backup manifest.' };
   if (!database.ok) errors.push(database.error || 'Backup database failed validation.');
   if (database.ok && Number.isFinite(manifest.schemaVersion) && database.schemaVersion !== manifest.schemaVersion) errors.push('Backup database schema version does not match its manifest.');
+  if (manifest.recoveryScope !== undefined) {
+    if (manifest.recoveryScope?.kind !== 'sqlite-database-snapshot' || !Array.isArray(manifest.recoveryScope.tables) || !Array.isArray(manifest.recoveryScope.excluded) || typeof manifest.recoveryScope.credentialHandling !== 'string') {
+      errors.push('Backup recovery scope is invalid.');
+    } else if (database.ok) {
+      try {
+        const currentScope = databaseSnapshotScope(dbFile);
+        if (JSON.stringify(currentScope.tables) !== JSON.stringify(manifest.recoveryScope.tables)) errors.push('Backup table counts do not match its manifest.');
+      } catch { errors.push('Backup table counts could not be verified.'); }
+    }
+  }
   return { ok: errors.length === 0, errors, manifest };
 }
 
@@ -263,7 +298,7 @@ export function applyPendingRestore({ dbPath, now = Date.now() }) {
         removeIfPresent(`${rollbackDb}-shm`);
         const rollbackCheck = sqliteDetails(rollbackDb);
         if (!rollbackCheck.ok) throw new Error(`Rollback copy could not be validated: ${rollbackCheck.error}`);
-        atomicJson(path.join(rollbackDir, 'manifest.json'), { formatVersion: BACKUP_FORMAT_VERSION, application: APPLICATION_ID, createdAt: iso(now), label: 'pre-restore-rollback', databaseFile: path.basename(dbPath), schemaVersion: rollbackCheck.schemaVersion, provenance: { restoreBackup: path.basename(marker.backupDir) }, files: [{ name: path.basename(dbPath), sha256: sha256File(rollbackDb), size: fs.statSync(rollbackDb).size }] });
+        atomicJson(path.join(rollbackDir, 'manifest.json'), { formatVersion: BACKUP_FORMAT_VERSION, application: APPLICATION_ID, createdAt: iso(now), label: 'pre-restore-rollback', databaseFile: path.basename(dbPath), schemaVersion: rollbackCheck.schemaVersion, recoveryScope: databaseSnapshotScope(rollbackDb), provenance: { restoreBackup: path.basename(marker.backupDir) }, files: [{ name: path.basename(dbPath), sha256: sha256File(rollbackDb), size: fs.statSync(rollbackDb).size }] });
       } else marker = updateMarker(dbPath, marker, 'live-moved-aside', { rollbackDir: null });
     }
     if (marker.state === 'live-moved-aside' || marker.state === 'replacement-installed') {
