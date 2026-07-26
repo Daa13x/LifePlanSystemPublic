@@ -17,7 +17,7 @@ const appRoot = portableRoot ? path.join(portableRoot, 'app') : repoRoot;
 const nodeCommand = portableRoot ? path.join(portableRoot, 'node', 'node.exe') : process.execPath;
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-installed-chat-'));
 const dbPath = path.join(probeRoot, 'data', 'life-planner.sqlite');
-const evidence = { target: portableRoot ? 'portable' : 'production-dist', pageUrl: '', build: null, request: null, response: null, persisted: null, visible: null, reopened: false, setupRecoveryLoaded: false, rejectedTokenSurfaced: false };
+const evidence = { target: portableRoot ? 'portable' : 'production-dist', pageUrl: '', build: null, request: null, response: null, persisted: null, visible: null, localKnowledgeVisible: false, localSourceCount: 0, reopened: false, setupRecoveryLoaded: false, rejectedTokenSurfaced: false };
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -68,6 +68,15 @@ try {
   const { child, base } = await startServer(port);
   let browser;
   try {
+    const csrf = (await (await fetch(`${base}/api/csrf-token`)).json()).data.token;
+    const mutate = async (route, body) => {
+      const response = await fetch(`${base}${route}`, { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json', 'X-LPS-CSRF': csrf }, body: JSON.stringify(body) });
+      assert.equal(response.status, 200, `fixture request succeeds: ${route}`);
+      return (await response.json()).data;
+    };
+    await mutate('/api/items', { type: 'profile', title: 'Browser coverage profile', body: 'A deterministic browser acceptance profile fact.', status: 'active', confidence: 0.95 });
+    await mutate('/api/items', { type: 'preference', title: 'Browser coverage preference', body: 'The user prefers grounded local answers.', status: 'stable', confidence: 0.95 });
+    await mutate('/api/projects', { name: 'Browser coverage project', next_action: 'Verify packaged Chat retrieval.' });
     evidence.pageUrl = `${base}/`;
     evidence.build = await (await fetch(`${base}/build-info.json`)).json();
     const page = await (browser = await chromium.launch({ headless: true })).newPage();
@@ -83,22 +92,28 @@ try {
     });
     await page.goto(evidence.pageUrl, { waitUntil: 'networkidle' });
     await page.getByRole('button', { name: 'New chat' }).click();
-    await page.getByPlaceholder('Tell Life Planner what changed, what is blocked, or what needs review...').fill('Test, I want to see you respond.');
+    await page.getByPlaceholder('Tell Life Planner what changed, what is blocked, or what needs review...').fill('Tell me something about myself.');
     await page.getByRole('button', { name: 'Send' }).click();
     await page.getByRole('button', { name: 'Send' }).waitFor({ state: 'visible', timeout: 15000 });
     await page.waitForTimeout(250);
     const sessionId = Number(evidence.request?.endpoint?.match(/\/sessions\/(\d+)\/messages\/stream$/)?.[1]);
     assert.ok(sessionId, 'browser request must identify the Chat session');
     const messages = await (await fetch(`${base}/api/chat/sessions/${sessionId}/messages`)).json();
-    evidence.persisted = messages.data.map((message) => ({ role: message.role, content: message.content }));
+    evidence.persisted = messages.data.map((message) => ({ role: message.role, content: message.content, metadata: message.metadata }));
     evidence.visible = await page.locator('.message.user .message-body').last().textContent();
     assert.equal(evidence.request?.endpoint, `/api/chat/sessions/${sessionId}/messages/stream`, 'built client must use the streaming Chat endpoint');
     assert.ok(evidence.request?.csrf, 'built client must send X-LPS-CSRF on Chat send');
     assert.equal(evidence.response?.status, 200, 'server must accept the CSRF-protected Chat send');
-    assert.equal(evidence.visible?.trim(), 'Test, I want to see you respond.', 'sent message must remain visibly rendered');
-    assert.ok(evidence.persisted.some((message) => message.role === 'user' && message.content === 'Test, I want to see you respond.'), 'sent message must persist');
+    assert.equal(evidence.visible?.trim(), 'Tell me something about myself.', 'sent message must remain visibly rendered');
+    const localReply = evidence.persisted.find((message) => message.role === 'assistant' && /Browser coverage profile/.test(message.content));
+    assert.ok(localReply, 'built Chat visibly persists the deterministic local-knowledge answer');
+    const localMetadata = JSON.parse(localReply.metadata || '{}');
+    evidence.localKnowledgeVisible = true;
+    evidence.localSourceCount = localMetadata.localSources?.length || 0;
+    assert.ok(evidence.localSourceCount >= 2, 'grounded reply carries multiple source details');
+    assert.ok(evidence.persisted.some((message) => message.role === 'user' && message.content === 'Tell me something about myself.'), 'sent message must persist');
     await page.goto(`${base}/#chat/${sessionId}`, { waitUntil: 'networkidle' });
-    await page.getByText('Test, I want to see you respond.').last().waitFor({ timeout: 15000 });
+    await page.getByText('Tell me something about myself.').last().waitFor({ timeout: 15000 });
     evidence.reopened = true;
     await page.getByRole('button', { name: 'System', exact: true }).click();
     await page.getByRole('tab', { name: 'Setup & Recovery' }).click();

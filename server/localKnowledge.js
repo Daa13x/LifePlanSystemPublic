@@ -7,13 +7,14 @@ const MAX_CHARS = 4200;
 const STOP = new Set(['what', 'does', 'about', 'have', 'that', 'this', 'with', 'from', 'your', 'know', 'said', 'tell', 'life', 'planner', 'user']);
 
 function words(value) {
-  return [...new Set(String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((word) => !STOP.has(word)) || [])];
+  const raw = String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((word) => !STOP.has(word)) || [];
+  return [...new Set(raw.flatMap((word) => word.length > 4 && word.endsWith('s') ? [word, word.slice(0, -1)] : [word]))];
 }
 
 function dateValue(value) { const time = Date.parse(value || ''); return Number.isFinite(time) ? time : 0; }
 function snippet(value, limit = 700) { const text = String(value || '').trim(); return text.length > limit ? `${text.slice(0, limit)}…` : text; }
 
-export function sourceRegistry(db, { includeHistory = false, includeCandidates = true } = {}) {
+export function sourceRegistry(db, { includeHistory = false, includeCandidates = false } = {}) {
   const records = [];
   const active = includeHistory ? '' : "AND status NOT IN ('archived','deprecated','superseded')";
   for (const item of db.prepare(`SELECT * FROM knowledge_items WHERE 1=1 ${active}`).all()) {
@@ -21,7 +22,9 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
       canonicalId: `knowledge:${item.id}`, category: item.type || 'knowledge', title: item.title,
       text: `${item.title}\n${item.body}\n${item.next_action || ''}`, timestamp: item.created_at,
       updatedAt: item.updated_at || item.last_reviewed || item.created_at, sensitivity: /health|medical|accessibility/i.test(item.type || '') ? 'sensitive' : 'personal',
-      chatReadable: ['active', 'stable', 'pending review', 'stale'].includes(item.status), chatProposable: true,
+      // A Knowledge record becomes personal context only after it is in a
+      // reviewed, current state. "pending review" is deliberately not a fact.
+      chatReadable: ['active', 'stable', 'stale', 'blocked'].includes(item.status), chatProposable: true,
       state: item.status === 'superseded' ? 'historical' : item.status === 'pending review' ? 'pending' : 'approved',
       source: item.source || 'local Knowledge', provenance: item.evidence || '', record: item
     });
@@ -45,10 +48,38 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
   return records;
 }
 
+export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '' } = {}) {
+  const count = (sql, params = []) => Number(db.prepare(sql).get(...params)?.count || 0);
+  const registry = sourceRegistry(db);
+  const retrievableByCategory = Object.fromEntries([...new Set(registry.map((record) => record.category))]
+    .sort()
+    .map((category) => [category, registry.filter((record) => record.category === category).length]));
+  return {
+    resolvedDatabasePath: dbPath || null,
+    resolvedUserDataPath: userDataPath || null,
+    sourceAdapters: ['knowledge_items', 'projects', 'chat_messages:user'],
+    unavailableCategories: ['attachments (paths only; no persisted extracted text)', 'settings (runtime configuration and secrets excluded)', 'roadmap_items (product implementation roadmap, not confirmed personal context)'],
+    counts: {
+      activeKnowledge: count("SELECT COUNT(*) count FROM knowledge_items WHERE status IN ('active','stable','stale','blocked')"),
+      pendingKnowledge: count("SELECT COUNT(*) count FROM knowledge_items WHERE status = 'pending review'"),
+      pendingCandidates: count("SELECT COUNT(*) count FROM memory_candidates WHERE status IN ('candidate','deferred','temporary')"),
+      rejectedCandidates: count("SELECT COUNT(*) count FROM memory_candidates WHERE status IN ('denied','rejected')"),
+      activeProjects: count("SELECT COUNT(*) count FROM projects WHERE status NOT IN ('done','completed','archived')"),
+      userChatMessages: count("SELECT COUNT(*) count FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id WHERE s.deleted=0 AND m.role='user'"),
+      assistantChatMessagesExcluded: count("SELECT COUNT(*) count FROM chat_messages WHERE role='assistant'"),
+      archivedOrSupersededKnowledgeExcluded: count("SELECT COUNT(*) count FROM knowledge_items WHERE status IN ('archived','deprecated','superseded')"),
+      indexedFileRecords: count("SELECT COUNT(*) count FROM knowledge_items WHERE lower(type) IN ('file','document','attachment')")
+    },
+    retrievableByCategory,
+    totalRetrievable: registry.length,
+    refreshedAt: new Date().toISOString()
+  };
+}
+
 function score(record, queryWords, rawQuery, now = Date.now()) {
-  const haystack = `${record.title}\n${record.text}`.toLowerCase();
+  const haystack = `${record.category}\n${record.title}\n${record.text}`.toLowerCase();
   const matches = queryWords.reduce((total, word) => total + (haystack.includes(word) ? 1 : 0), 0);
-  const broad = /what do you know|about me|profile|preferences|health|goals|projects|decisions|tasks|overdue|previously/i.test(rawQuery);
+  const broad = /what do you know|about me|about myself|tell me (?:something )?about myself|profile|preferences|health|goals|projects|decisions|tasks|overdue|what am i (?:currently )?working on/i.test(rawQuery);
   if (!matches && !broad) return -Infinity;
   const recency = Math.max(0, 1 - ((now - dateValue(record.updatedAt)) / (365 * 86400000)));
   return matches * 10 + (record.state === 'approved' ? 4 : record.state === 'pending' ? 1 : 0) + recency;
@@ -57,7 +88,11 @@ function score(record, queryWords, rawQuery, now = Date.now()) {
 export function retrieveLocalKnowledge(db, query, options = {}) {
   const queryWords = words(query);
   const disabled = new Set(options.disabledCategories || []);
-  const rows = sourceRegistry(db, options).filter((record) => record.chatReadable && !disabled.has(record.category));
+  const exactQuery = String(query || '').trim().toLowerCase();
+  const rows = sourceRegistry(db, options).filter((record) => record.chatReadable
+    && !disabled.has(record.category)
+    // The just-saved user prompt must not be recycled as evidence for itself.
+    && !(record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery));
   const ranked = rows.map((record) => ({ ...record, score: score(record, queryWords, String(query || '')) })).filter((record) => Number.isFinite(record.score)).sort((a, b) => b.score - a.score || dateValue(b.updatedAt) - dateValue(a.updatedAt));
   let remaining = options.budget || MAX_CHARS;
   const items = [];
@@ -71,12 +106,13 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
 }
 
 export function isLocalKnowledgeQuestion(message) {
-  return /what do you know about me|tell me (?:something )?about myself|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|saved (memory|information)|previously/i.test(String(message || '').toLowerCase());
+  return /what do you know about me|tell me (?:something )?about myself|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously/i.test(String(message || '').toLowerCase());
 }
 
 export function answerLocalKnowledgeQuestion(db, message) {
-  const result = retrieveLocalKnowledge(db, message);
-  if (!result.items.length) return { content: 'I could not find relevant authorised local information for that question.', sources: [] };
+  const includeCandidates = /\b(pending|candidate|review)\b/i.test(String(message || ''));
+  const result = retrieveLocalKnowledge(db, message, { includeCandidates });
+  if (!result.items.length) return { content: 'I searched the active LPS records available to Chat, but I did not find a matching saved record.', sources: [] };
   const grouped = new Map();
   for (const item of result.items) {
     const label = item.category === 'current state' ? 'Profile' : item.category === 'rule' ? 'Preferences and rules' : item.category === 'conversation history' ? 'Previously in Chat' : item.category;
@@ -91,5 +127,5 @@ export function answerLocalKnowledgeQuestion(db, message) {
   }
   const conflicts = result.items.filter((item) => item.state === 'pending');
   if (conflicts.length) lines.push('_Pending items are not treated as approved facts; review them in Knowledge before relying on them._');
-  return { content: lines.join('\n').trim(), sources: result.items.map((item) => ({ title: item.title, category: item.category, updatedAt: item.updatedAt, state: item.state, whySelected: item.whySelected, source: item.source, provenance: item.provenance })) };
+  return { content: lines.join('\n').trim(), sources: result.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, updatedAt: item.updatedAt, state: item.state, whySelected: item.whySelected, source: item.source, provenance: item.provenance })) };
 }
