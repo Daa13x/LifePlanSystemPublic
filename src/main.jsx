@@ -913,6 +913,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [chatBusy, setChatBusy] = useState(false);
   const [streamingText, setStreamingText] = useState(null);
   const [runtimeMode, setRuntimeMode] = useState('');
+  // Truthful "model warming up" note shown while the local model loads on the
+  // first message, so a normal ~1 min warm-up is not mistaken for a hang.
+  const [warmupNote, setWarmupNote] = useState('');
   const [runtime, setRuntime] = useState(null);
   const [repoFiles, setRepoFiles] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
@@ -1087,9 +1090,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           if (!event || !dataRaw) continue;
           let data;
           try { data = JSON.parse(dataRaw); } catch { continue; }
-          if (event === 'token') { acc += data.delta; setStreamingText(acc); }
-          else if (event === 'done') { runtimeLabel = data.runtime || ''; }
-          else if (event === 'error') { streamError = data.error; runtimeLabel = data.runtime || ''; }
+          if (event === 'token') { acc += data.delta; setStreamingText(acc); setWarmupNote(''); }
+          else if (event === 'status') { if (data.phase === 'warming') setWarmupNote(data.message || 'Starting the local model…'); }
+          else if (event === 'done') { runtimeLabel = data.runtime || ''; setWarmupNote(''); }
+          else if (event === 'error') { streamError = data.error; runtimeLabel = data.runtime || ''; setWarmupNote(''); }
         }
       }
       setRuntimeMode(runtimeLabel);
@@ -1108,6 +1112,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       }
     } finally {
       setStreamingText(null);
+      setWarmupNote('');
       setChatBusy(false);
       refreshAll();
       loadConnection();
@@ -1290,7 +1295,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               <span>assistant</span>
               {streamingText
                 ? <div className="message-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(streamingText) }} />
-                : <p>Planner Assistant is responding…</p>}
+                : warmupNote
+                  ? <p className="warmup-note">{warmupNote}</p>
+                  : <p>Planner Assistant is responding…</p>}
             </div>
           )}
         </div>

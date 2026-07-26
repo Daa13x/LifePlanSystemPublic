@@ -1547,14 +1547,14 @@ async function answerDataQuery(intent) {
 
 // Single entry point for a chat turn: explicit data questions are answered from
 // local data without the model; everything else is an ordinary conversation.
-async function generateAssistantTurn(sessionId, userMessage, signal, onToken) {
+async function generateAssistantTurn(sessionId, userMessage, signal, onToken, onStatus) {
   const intent = classifyChatIntent(userMessage);
   if (intent !== 'conversation') {
     const answer = await answerDataQuery(intent);
     if (typeof onToken === 'function' && answer.content) onToken(answer.content);
     return answer;
   }
-  return runPlannerAssistant(sessionId, userMessage, signal, onToken);
+  return runPlannerAssistant(sessionId, userMessage, signal, onToken, onStatus);
 }
 
 async function localModelStatus() {
@@ -1602,7 +1602,7 @@ async function waitForLlamaServer(endpoint, child, timeoutMs = 90000) {
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 350));
   }
-  throw new Error(`llama-server did not become healthy within ${Math.round(timeoutMs / 1000)} seconds.`);
+  throw new Error(`llama-server did not become healthy within ${Math.round(timeoutMs / 1000)} seconds. The model may still be loading; try sending again in a moment, or repair the local model runtime in Settings.`);
 }
 
 async function startManagedLlamaServer(options = {}) {
@@ -1775,7 +1775,7 @@ async function runLlamaCli(llamaCliPath, modelPath, prompt, signal) {
   return cleaned || result.stdout.trim();
 }
 
-async function runPlannerAssistant(sessionId, userMessage, signal, onToken) {
+async function runPlannerAssistant(sessionId, userMessage, signal, onToken, onStatus) {
   let status = await localModelStatus();
   if (!status.assigned && !status.endpointConfigured) {
     throw new Error(status.model && !status.modelFile.available
@@ -1796,6 +1796,12 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken) {
       }
     }
     if (status.assigned && status.llamaServerExists && !status.managedServerReady) {
+      // Loading the model into memory can take up to ~a minute on the first
+      // message after launch. Tell the client so a normal warm-up is not
+      // mistaken for a hang; later replies reuse the warm server and are fast.
+      if (typeof onStatus === 'function') {
+        onStatus({ phase: 'warming', message: 'Starting the local model — loading it into memory. The first message after launch can take up to a minute; later replies are fast.' });
+      }
       await startManagedLlamaServer();
       status = await localModelStatus();
     }
@@ -2516,7 +2522,7 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   const startedAt = Date.now();
   let assistant;
   try {
-    assistant = await generateAssistantTurn(sessionId, content, controller.signal, (delta) => emit('token', { delta }));
+    assistant = await generateAssistantTurn(sessionId, content, controller.signal, (delta) => emit('token', { delta }), (status) => emit('status', status));
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
