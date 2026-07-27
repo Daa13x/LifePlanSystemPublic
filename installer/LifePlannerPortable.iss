@@ -34,10 +34,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Vite assets are content-hashed. Preserve prior bundles during updates and
 ; always copy the complete current payload; index.html references current
 ; hashes, while retaining old files prevents deletion of the active UI bundle.
-; The local server may hold its embedded node.exe open while updating. Mark
-; payload files restart-replaceable so that lock cannot roll back the complete
-; installation after the frontend bundles have already been copied.
-Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace; Excludes: "app\data\*,app\.env,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
+; The local server holds its embedded node.exe open while running. Preserve an
+; existing runtime during updates so that an app update cannot roll back after
+; copying the UI; first installs still receive the complete embedded runtime.
+Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "node\*,app\data\*,app\.env,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
+Source: "{#PortableSource}\node\*"; DestDir: "{app}\node"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: NeedsEmbeddedNodeRuntime
+
+[Code]
+function NeedsEmbeddedNodeRuntime(): Boolean;
+begin
+  Result := not FileExists(ExpandConstant('{app}\node\node.exe'));
+end;
 
 [Icons]
 Name: "{group}\Life Planner"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; WorkingDir: "{app}"; IconFilename: "{app}\{#InstalledIconName}"
