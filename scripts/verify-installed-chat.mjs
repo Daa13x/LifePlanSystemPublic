@@ -17,7 +17,7 @@ const appRoot = portableRoot ? path.join(portableRoot, 'app') : repoRoot;
 const nodeCommand = portableRoot ? path.join(portableRoot, 'node', 'node.exe') : process.execPath;
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-installed-chat-'));
 const dbPath = path.join(probeRoot, 'data', 'life-planner.sqlite');
-const evidence = { target: portableRoot ? 'portable' : 'production-dist', pageUrl: '', build: null, request: null, response: null, persisted: null, visible: null, localKnowledgeVisible: false, localSourceCount: 0, reopened: false, setupRecoveryLoaded: false, rejectedTokenSurfaced: false, cloudPreviewProtected: false, cloudSendRejectedWithoutProviderTab: false, cloudComposerVisible: false, directCloudRequestPrepared: false };
+const evidence = { target: portableRoot ? 'portable' : 'production-dist', pageUrl: '', build: null, request: null, response: null, persisted: null, visible: null, localKnowledgeVisible: false, localSourceCount: 0, reopened: false, setupRecoveryLoaded: false, rejectedTokenSurfaced: false, cloudPreviewProtected: false, cloudSendRejectedWithoutProviderTab: false, cloudComposerVisible: false, cloudProviderButtonVisible: false, directCloudRequestPrepared: false };
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -131,7 +131,9 @@ try {
     evidence.cloudSendRejectedWithoutProviderTab = true;
     assert.equal(await page.locator('.cloud-composer').count(), 1, 'Chat displays one persistent compact cloud-control bar');
     assert.equal(await page.getByRole('button', { name: 'Manage cloud accounts' }).count(), 1, 'cloud account management control is accessible');
+    assert.equal(await page.getByRole('button', { name: 'Use ChatGPT' }).count(), 1, 'enabled ChatGPT control remains visible even before browser connection');
     evidence.cloudComposerVisible = true;
+    evidence.cloudProviderButtonVisible = true;
     await page.route('**/api/chat/cloud-providers', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: [{ provider: 'ChatGPT', model: 'Current model selected in ChatGPT', models: ['Current model selected in ChatGPT'], configured: true, connected: true, transport: 'browser session connector' }] }) }));
     await page.reload({ waitUntil: 'networkidle' });
     await page.getByRole('button', { name: 'Use ChatGPT' }).waitFor({ timeout: 15000 });

@@ -651,6 +651,7 @@ h3 { font-size: 14px; font-weight: 700; }
 .cloud-composer select { width: auto; padding: 6px 8px; }
 .cloud-provider-button { min-width: 31px; height: 31px; padding: 5px 8px; border-radius: 999px; font-weight: 700; }
 .cloud-provider-button.selected { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, var(--panel)); }
+.cloud-provider-button.setup-required { border-style: dashed; opacity: .82; }
 .cloud-preview { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-2); }
 .cloud-preview small { display: block; color: var(--muted); margin: 4px 0; }
 .provider-settings { display: grid; gap: 8px; margin: 10px 0; }
