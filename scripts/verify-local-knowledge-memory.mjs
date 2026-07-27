@@ -40,6 +40,16 @@ try {
   assert.match(after.body.data.messages.find((m) => m.role === 'assistant').content, /knowledge system in lps/i);
   const personal = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'ok well are you going to you know tell me something about myself?' });
   assert.doesNotMatch(personal.body.data.messages.find((m) => m.role === 'assistant').content, /don.?t have access to your personal records/i);
+  const sensitiveSession = (await api('/api/chat/sessions', 'POST', { title: 'blocked history verifier' })).body.data;
+  const sensitiveTurn = await api(`/api/chat/sessions/${sensitiveSession.id}/messages`, 'POST', { content: 'What health information is in my medical record?' });
+  assert.equal(sensitiveTurn.response.status, 200, JSON.stringify(sensitiveTurn.body));
+  assert.equal(sensitiveTurn.body.data.messages.filter((message) => message.role === 'assistant').length, 1, JSON.stringify(sensitiveTurn.body));
+  const blockedPreview = await api(`/api/chat/sessions/${sensitiveSession.id}/cloud-checks/preview`, 'POST', { scope: 'latest-turn', provider: 'ChatGPT', instruction: 'Assess only.' });
+  assert.equal(blockedPreview.response.status, 200, JSON.stringify(blockedPreview.body));
+  assert.equal(blockedPreview.body.data.blocked, true, 'sensitive deterministic turn is blocked for cloud egress');
+  await api(`/api/chat/sessions/${sensitiveSession.id}/cloud-checks`, 'POST', { scope: 'latest-turn', provider: 'ChatGPT', instruction: 'Assess only.', idempotency_key: 'local-knowledge-sensitive-history-0001' });
+  const afterSensitive = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'tell me something about me' });
+  assert.doesNotMatch(afterSensitive.body.data.messages.find((m) => m.role === 'assistant').content, /medical record/i, 'sensitive or cloud-blocked Chat history is not eligible local knowledge');
   await api(`/api/memory/items/${profile.body.data.id}`, 'DELETE');
   const deleted = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'What do you know about me?' });
   assert.doesNotMatch(deleted.body.data.messages.find((m) => m.role === 'assistant').content, /Preferred name/);

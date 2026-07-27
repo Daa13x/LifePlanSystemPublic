@@ -5,6 +5,11 @@
 const MAX_ITEMS = 10;
 const MAX_CHARS = 4200;
 const STOP = new Set(['what', 'does', 'about', 'have', 'that', 'this', 'with', 'from', 'your', 'know', 'said', 'tell', 'life', 'planner', 'user']);
+// Conversation history is useful local context, but it is not automatically
+// approved memory.  Keep health, credential, and similarly sensitive turns out
+// of broad "tell me about me" retrieval, even though they remain in their own
+// Chat session.  A turn already blocked for cloud egress is also ineligible.
+const SENSITIVE_CHAT_HISTORY = /\b(?:diagnos(?:is|ed)|medication|prescription|therap(?:y|ist)|mental health|medical record|symptom|hospital|disability|password|passcode|api[ _-]?key|secret|social security)\b/i;
 
 function words(value) {
   const raw = String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((word) => !STOP.has(word)) || [];
@@ -41,7 +46,12 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
     records.push({ canonicalId: `project:${project.id}`, category: 'project', title: project.name, text: `${project.name}\n${project.next_action || ''}\n${project.evidence || ''}`,
       timestamp: project.created_at, updatedAt: project.updated_at || project.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: false, state: 'approved', source: project.source || 'Workboard', provenance: project.evidence || '', record: project });
   }
-  for (const message of db.prepare("SELECT m.*, s.title AS session_title FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id WHERE s.deleted = 0 AND m.role='user' ORDER BY m.created_at DESC LIMIT 200").all()) {
+  for (const message of db.prepare(`SELECT m.*, s.title AS session_title,
+    EXISTS(SELECT 1 FROM chat_cloud_checks cc
+      WHERE cc.status = 'blocked' AND (cc.user_message_id = m.id OR cc.assistant_message_id = m.id)) AS cloud_egress_blocked
+    FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id
+    WHERE s.deleted = 0 AND m.role='user' ORDER BY m.created_at DESC LIMIT 200`).all()) {
+    if (message.cloud_egress_blocked || SENSITIVE_CHAT_HISTORY.test(String(message.content || ''))) continue;
     records.push({ canonicalId: `chat:${message.id}`, category: 'conversation history', title: message.session_title || 'Chat', text: message.content,
       timestamp: message.created_at, updatedAt: message.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: true, state: 'historical', source: 'saved Chat', provenance: `Conversation: ${message.session_title || 'Chat'}`, record: message });
   }
