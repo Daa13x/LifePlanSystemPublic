@@ -242,6 +242,7 @@ export function migrate() {
       scope TEXT NOT NULL CHECK (scope IN ('latest-turn','full-conversation')),
       provider TEXT NOT NULL,
       model TEXT,
+      instruction TEXT NOT NULL DEFAULT '',
       prompt_hash TEXT NOT NULL,
       included_message_ids TEXT NOT NULL DEFAULT '[]',
       classification TEXT NOT NULL DEFAULT 'pending',
@@ -336,7 +337,7 @@ export function migrate() {
     try { db.exec(`ALTER TABLE consultations ADD COLUMN ${column[0]} ${column[1]}`); } catch { /* already present */ }
   }
 
-  for (const column of [['feedback_dismissed_at', 'TEXT']]) {
+  for (const column of [['feedback_dismissed_at', 'TEXT'], ['instruction', "TEXT NOT NULL DEFAULT ''"]]) {
     try { db.exec(`ALTER TABLE chat_cloud_checks ADD COLUMN ${column[0]} ${column[1]}`); } catch { /* already present */ }
   }
 

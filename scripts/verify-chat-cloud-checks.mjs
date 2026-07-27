@@ -21,7 +21,11 @@ const checks = [
   ['one-use guidance route', /\/api\/chat\/cloud-checks\/:id\/guidance/],
   ['guidance isolation', /WHERE session_id = \? AND guidance_active = 1/],
   ['guidance consumed after assistant persistence', /guidance_consumed_at = CURRENT_TIMESTAMP/]
-  ,['guidance provenance stored with assistant reply', /cloudCheckId: check\.id/]
+  ,['guidance provenance stored with assistant reply', /cloudCheckId: check\.id/],
+  ['model registry is connector-truthful', /Current model selected in ChatGPT/],
+  ['server validates focus length', /Cloud-check guidance must be 1,200 characters or fewer/],
+  ['send requires matching provider tab', /No signed-in \$\{check\.provider\} tab is connected/],
+  ['dismissal keeps persisted audit record', /feedback_dismissed_at = COALESCE/]
 ];
 let failed = 0;
 for (const [label, pattern] of checks) { const ok = pattern.test(`${server}\n${db}`); console.log(`${ok ? 'ok' : 'FAIL'} ${label}`); if (!ok) failed++; }
@@ -31,6 +35,9 @@ const uiChecks = [
   ['transcript placement', /assistant_message_id\) === Number\(message\.id\)/],
   ['guidance action', /Use for next reply/],
   ['dismissed feedback provenance', /feedback_dismissed_at/],
+  ['dismissed feedback hidden from normal transcript', /&& !check\.feedback_dismissed_at/],
+  ['provider model selector', /Cloud provider model/],
+  ['reviewed focus instruction', /Focus for the cloud consultant/],
   ['explicit candidate action', /Save as memory candidate/],
   ['active polling', /setInterval\(\(\) => loadCloudChecks\(\), 1500\)/]
 ];
