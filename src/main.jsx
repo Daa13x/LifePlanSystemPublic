@@ -1395,10 +1395,12 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
 function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidance, onSaveCandidate, onDismiss, onHistory }) {
   let includedCount = 0;
   try { includedCount = JSON.parse(check.included_message_ids || '[]').length; } catch { /* malformed legacy metadata remains displayable */ }
+  const sourceTurn = [check.user_message_id ? `user #${check.user_message_id}` : '', check.assistant_message_id ? `assistant #${check.assistant_message_id}` : ''].filter(Boolean).join(' → ') || 'session context';
+  const completedAt = check.status === 'completed' && check.updated_at ? new Date(check.updated_at).toLocaleString() : '';
   return <article className="cloud-check-card" aria-label={`Cloud check ${check.id}: ${stateLabel}`}>
     <strong>{check.provider} / {check.model || 'configured browser model'} · {stateLabel}</strong>
     <small>{check.scope} · {includedCount} included messages · approximately {(check.prompt || '').length} characters</small>
-    <small>Privacy: {check.classification || 'pending'} · created {new Date(check.created_at).toLocaleString()}</small>
+    <small>Source: {sourceTurn} · Privacy: {check.classification || 'pending'} · created {new Date(check.created_at).toLocaleString()}{completedAt ? ` · completed ${completedAt}` : ''}</small>
     <button className="link" onClick={onHistory}>Open Cloud Consultation #{check.consultation_id}</button>
     <details><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>
     {check.response && <div className="message-body" aria-live="polite" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} />}
