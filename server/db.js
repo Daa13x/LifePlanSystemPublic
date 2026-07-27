@@ -252,6 +252,7 @@ export function migrate() {
       idempotency_key TEXT NOT NULL UNIQUE,
       guidance_active INTEGER NOT NULL DEFAULT 0,
       guidance_consumed_at TEXT,
+      feedback_dismissed_at TEXT,
       memory_candidate_id INTEGER REFERENCES memory_candidates(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -333,6 +334,10 @@ export function migrate() {
 
   for (const column of [['chat_session_id', 'INTEGER'], ['user_message_id', 'INTEGER'], ['assistant_message_id', 'INTEGER'], ['scope', 'TEXT'], ['provider_model', 'TEXT']]) {
     try { db.exec(`ALTER TABLE consultations ADD COLUMN ${column[0]} ${column[1]}`); } catch { /* already present */ }
+  }
+
+  for (const column of [['feedback_dismissed_at', 'TEXT']]) {
+    try { db.exec(`ALTER TABLE chat_cloud_checks ADD COLUMN ${column[0]} ${column[1]}`); } catch { /* already present */ }
   }
 
   // Workflow status is not a privacy decision. Existing records and every new

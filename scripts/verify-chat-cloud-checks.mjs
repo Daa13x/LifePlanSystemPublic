@@ -30,6 +30,7 @@ const uiChecks = [
   ['exact prompt', /Exact authorised prompt/],
   ['transcript placement', /assistant_message_id\) === Number\(message\.id\)/],
   ['guidance action', /Use for next reply/],
+  ['dismissed feedback provenance', /feedback_dismissed_at/],
   ['explicit candidate action', /Save as memory candidate/],
   ['active polling', /setInterval\(\(\) => loadCloudChecks\(\), 1500\)/]
 ];

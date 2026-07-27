@@ -985,6 +985,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   async function saveCloudCandidate(id) { try { await api(`/api/chat/cloud-checks/${id}/memory-candidate`, { method: 'POST' }); await loadCloudChecks(); refreshAll(); setNotice('Cloud response saved as a review-only memory candidate.'); } catch (err) { setNotice(err.message); } }
   async function setCloudGuidance(id, active) { try { await api(`/api/chat/cloud-checks/${id}/guidance`, { method: active ? 'POST' : 'DELETE' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function cancelCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/cancel`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  async function dismissCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/dismiss`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function retryCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/retry`, { method: 'POST' }); await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   const cloudStateLabel = (status) => ({
     'checking-sharing-permissions': 'Checking sharing permissions', prepared: 'Ready to send', active: 'Waiting for provider', completed: 'Completed', blocked: 'Blocked', failed: 'Failed', cancelled: 'Cancelled'
@@ -1317,7 +1318,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </section>
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
-          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id)).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} />)}</React.Fragment>)}
+          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id)).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} />)}</React.Fragment>)}
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
               <span>assistant</span>
@@ -1346,7 +1347,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   );
 }
 
-function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidance, onSaveCandidate }) {
+function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidance, onSaveCandidate, onDismiss }) {
   let includedCount = 0;
   try { includedCount = JSON.parse(check.included_message_ids || '[]').length; } catch { /* malformed legacy metadata remains displayable */ }
   return <article className="cloud-check-card" aria-label={`Cloud check ${check.id}: ${stateLabel}`}>
@@ -1359,7 +1360,7 @@ function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidan
     {check.status === 'prepared' && <button onClick={() => onSend(check.id)}>Send reviewed prompt</button>}
     {check.status === 'active' && <button onClick={() => onCancel(check.id)}>Cancel cloud check</button>}
     {['failed', 'cancelled'].includes(check.status) && <button onClick={() => onRetry(check.id)}>Retry cloud check</button>}
-    {check.status === 'completed' && <><button onClick={() => onGuidance(check.id, !check.guidance_active)}>{check.guidance_active ? 'Remove guidance' : 'Use for next reply'}</button>{check.memory_candidate_id ? <small>Memory candidate #{check.memory_candidate_id} is awaiting review.</small> : <button onClick={() => onSaveCandidate(check.id)}>Save as memory candidate</button>}</>}
+    {check.status === 'completed' && <>{check.feedback_dismissed_at ? <small>Feedback dismissed; this historical card remains available for provenance.</small> : <><button onClick={() => onGuidance(check.id, !check.guidance_active)}>{check.guidance_active ? 'Remove guidance' : 'Use for next reply'}</button><button onClick={() => onDismiss(check.id)}>Dismiss</button></>}{check.memory_candidate_id ? <small>Memory candidate #{check.memory_candidate_id} is awaiting review.</small> : <button onClick={() => onSaveCandidate(check.id)}>Save as memory candidate</button>}</>}
   </article>;
 }
 

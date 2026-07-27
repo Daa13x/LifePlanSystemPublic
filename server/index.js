@@ -3142,6 +3142,14 @@ app.delete('/api/chat/cloud-checks/:id/guidance', (req, res) => {
   ok(res, { check: row('SELECT * FROM chat_cloud_checks WHERE id = ?', [check.id]) });
 });
 
+app.post('/api/chat/cloud-checks/:id/dismiss', (req, res) => {
+  const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [req.params.id]);
+  if (!check) return fail(res, 404, 'Cloud check not found.');
+  if (check.status !== 'completed') return fail(res, 409, 'Only completed cloud feedback can be dismissed.');
+  db.prepare('UPDATE chat_cloud_checks SET guidance_active = 0, feedback_dismissed_at = COALESCE(feedback_dismissed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(check.id);
+  ok(res, { check: row('SELECT * FROM chat_cloud_checks WHERE id = ?', [check.id]) });
+});
+
 app.delete('/api/memory/items/:id', (req, res) => {
   const item = row('SELECT * FROM knowledge_items WHERE id = ?', [req.params.id]);
   if (!item) return fail(res, 404, 'Memory not found.');
