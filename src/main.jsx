@@ -1196,10 +1196,15 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     }
   }
 
+  const refreshCloudProviders = () => api('/api/chat/cloud-providers').then((providers) => { const connected = providers.filter((provider) => provider.configured); setCloudProviders(connected); setCloudProvider((current) => connected.some((provider) => provider.provider === current) ? current : (connected[0]?.provider || '')); }).catch(() => {});
   useEffect(() => {
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
     api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
-    api('/api/chat/cloud-providers').then((providers) => { const connected = providers.filter((provider) => provider.configured); setCloudProviders(connected); setCloudProvider((current) => connected.some((provider) => provider.provider === current) ? current : (connected[0]?.provider || '')); }).catch((err) => setNotice(err.message));
+    refreshCloudProviders();
+  }, []);
+  useEffect(() => {
+    const timer = window.setInterval(refreshCloudProviders, 3000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
