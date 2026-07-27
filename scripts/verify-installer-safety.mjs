@@ -56,8 +56,9 @@ line(postinstallLaunches.every((l) => /runasoriginaluser/i.test(l)),
 line(/Excludes:[^\n]*app\\\.env/i.test(iss) || /Excludes:/i.test(iss), 'installer still excludes private runtime data (.env/db/models/logs)');
 line(
   iss.includes('Source: "{#PortableSource}\\*"') && iss.includes('app\\*.log')
+    && /Flags:[^\r\n]*restartreplace/i.test(iss)
     && !/\[InstallDelete\]|ClearStaleFrontendAssets|DelTree\(ExpandConstant\('\{app\}\\app\\dist\\assets'\)/i.test(iss),
-  'installer copies the complete current frontend payload and never deletes generated assets or app data during an update'
+  'installer copies the complete current frontend payload, tolerates a running embedded runtime, and never deletes generated assets or app data during an update'
 );
 
 console.log(`\n${failures === 0 ? 'ALL PASS - installer is lowest-privilege, runs no elevated downloads, and launches the app as the standard user.' : failures + ' CHECK(S) FAILED'}`);
