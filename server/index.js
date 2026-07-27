@@ -3014,7 +3014,33 @@ app.get('/api/chat/sessions/:id/cloud-checks', (req, res) => {
 app.get('/api/chat/cloud-providers', (_req, res) => {
   const enabled = getSetting('cloudEnabledProviders', Object.keys(cloudAgentHosts));
   const selected = Array.isArray(enabled) ? enabled.filter((provider) => Object.hasOwn(cloudAgentHosts, provider)) : Object.keys(cloudAgentHosts);
-  ok(res, selected.map((provider) => ({ provider, model: provider === 'ChatGPT' ? 'OpenAI / ChatGPT (browser-assisted)' : `${provider} (browser-assisted)`, transport: 'browser connector', configured: true })));
+  const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
+  const sessions = agentTabsFromUrls(browserExtensionState.tabs);
+  ok(res, selected.map((provider) => ({
+    provider,
+    model: provider === 'ChatGPT' ? 'OpenAI / ChatGPT (browser-assisted)' : `${provider} (browser-assisted)`,
+    transport: 'browser session connector',
+    enabled: true,
+    connected: Boolean(connectorConnected && sessions[provider]?.open),
+    configured: Boolean(connectorConnected && sessions[provider]?.open),
+    action: connectorConnected ? `Open a signed-in ${provider} tab in Chrome.` : 'Install or reload the LPS Browser Agent extension, then open a signed-in provider tab.'
+  })));
+});
+
+app.get('/api/cloud/accounts', (_req, res) => {
+  const enabled = getSetting('cloudEnabledProviders', []);
+  const selected = Array.isArray(enabled) ? enabled : [];
+  const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
+  const sessions = agentTabsFromUrls(browserExtensionState.tabs);
+  ok(res, Object.keys(cloudAgentHosts).map((provider) => ({
+    provider,
+    model: provider === 'ChatGPT' ? 'OpenAI / ChatGPT (browser-assisted)' : `${provider} (browser-assisted)`,
+    transport: 'browser session connector',
+    enabled: selected.includes(provider),
+    connected: Boolean(connectorConnected && sessions[provider]?.open),
+    actionable: connectorConnected ? `Open a signed-in ${provider} tab in the connected Chrome profile.` : 'Install or reload the LPS Browser Agent extension, then sign in in Chrome.',
+    url: defaultCloudAgentUrl(provider)
+  })));
 });
 
 app.post('/api/chat/sessions/:id/cloud-checks/preview', (req, res) => {

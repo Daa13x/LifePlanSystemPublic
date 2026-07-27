@@ -980,8 +980,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
   async function loadCloudChecks(sessionId = selectedSession) { if (sessionId) try { setCloudChecks(await api(`/api/chat/sessions/${sessionId}/cloud-checks`)); } catch {} }
   async function previewCloudCheck() { try { setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider }) })); } catch (err) { setNotice(err.message); } }
-  async function createCloudCheck() { try { await api(`/api/chat/sessions/${selectedSession}/cloud-checks`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, idempotency_key: crypto.randomUUID().replaceAll('-', '') }) }); setCloudPreview(null); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
-  async function sendCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  async function createCloudCheck() { try { const result = await api(`/api/chat/sessions/${selectedSession}/cloud-checks`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, idempotency_key: crypto.randomUUID().replaceAll('-', '') }) }); if (!result.blocked) await api(`/api/chat/cloud-checks/${result.check.id}/send`, { method: 'POST' }); setCloudPreview(null); await loadCloudChecks(); } catch (err) { setNotice(`${cloudProvider || 'Cloud provider'} could not send: ${err.message} Open Cloud accounts with + to connect the LPS Browser Agent and a signed-in provider tab.`); await loadCloudChecks(); } }
+  async function sendCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(`Cloud check could not send: ${err.message} Open Cloud accounts with + to connect the provider.`); } }
   async function saveCloudCandidate(id) { try { await api(`/api/chat/cloud-checks/${id}/memory-candidate`, { method: 'POST' }); await loadCloudChecks(); refreshAll(); setNotice('Cloud response saved as a review-only memory candidate.'); } catch (err) { setNotice(err.message); } }
   async function setCloudGuidance(id, active) { try { await api(`/api/chat/cloud-checks/${id}/guidance`, { method: active ? 'POST' : 'DELETE' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function cancelCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/cancel`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
@@ -1199,7 +1199,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   useEffect(() => {
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
     api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
-    api('/api/chat/cloud-providers').then((providers) => { setCloudProviders(providers); if (providers[0]) setCloudProvider(providers[0].provider); }).catch((err) => setNotice(err.message));
+    api('/api/chat/cloud-providers').then((providers) => { const connected = providers.filter((provider) => provider.configured); setCloudProviders(connected); setCloudProvider((current) => connected.some((provider) => provider.provider === current) ? current : (connected[0]?.provider || '')); }).catch((err) => setNotice(err.message));
   }, []);
 
   useEffect(() => {
@@ -1331,8 +1331,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </button>
         )}
         <div className="composer">
-          <div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check">☁</span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected')} onClick={() => { setCloudProvider(item.provider); setCloudPreview(null); }} title={`Prepare a reviewed ${item.provider} cloud check`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} /> : item.provider.slice(0, 1)}</button>)}<select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => setCloudScope(event.target.value)}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider}>Review cloud prompt</button></div>
-          {cloudPreview && <div className="cloud-preview"><strong>{cloudProvider} cloud check</strong><small>{cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck}>Create reviewed cloud check</button>}</div>}
+          <div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected')} onClick={() => { setCloudProvider(item.provider); setCloudPreview(null); }} title={`Prepare a reviewed ${item.provider} cloud check`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => setCloudScope(event.target.value)}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider}>Review cloud prompt</button></> : <small>No connected cloud provider. Use + to connect a browser session.</small>}</div>
+          {cloudPreview && <div className="cloud-preview"><strong>{cloudProvider} cloud check</strong><small>{cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck}>Ask {cloudProvider}</button>}</div>}
           {cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
@@ -4471,6 +4471,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 4096);
   const [browserAgentMode, setBrowserAgentMode] = useState(settings.browserAgentMode || 'myChromeConnector');
   const [cloudEnabledProviders, setCloudEnabledProviders] = useState(settings.cloudEnabledProviders || ['ChatGPT']);
+  const [cloudAccounts, setCloudAccounts] = useState([]);
   const browserAgentPort = window.location.port || '4177';
   const [repo, setRepo] = useState('unsloth/Qwen3.5-4B-GGUF');
   const [repoTouched, setRepoTouched] = useState(false);
@@ -4495,6 +4496,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
       if (!llamaServerPath && data.llamaServerPath) setLlamaServerPath(data.llamaServerPath);
       if (!llamaCliPath && data.llamaCliPath) setLlamaCliPath(data.llamaCliPath);
     }).catch((err) => setNotice(err.message));
+    api('/api/cloud/accounts').then(setCloudAccounts).catch((err) => setNotice(err.message));
   }, []);
 
   useEffect(() => {
@@ -4650,6 +4652,17 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
     setModels(result.models);
     setRuntime(result.runtime);
     setNotice(result.runtimeError || `Verified, loaded, and started ${file.path}.`);
+  }
+
+  async function setCloudProviderEnabled(provider, enabled) {
+    const next = enabled ? [...new Set([...cloudEnabledProviders, provider])] : cloudEnabledProviders.filter((name) => name !== provider);
+    setCloudEnabledProviders(next);
+    try {
+      const data = await api('/api/settings', { method: 'POST', body: JSON.stringify({ cloudEnabledProviders: next }) });
+      setSettings(data);
+      setCloudAccounts(await api('/api/cloud/accounts'));
+      setNotice(enabled ? `${provider} enabled. Connect its browser session to show it in Chat.` : `${provider} removed from Chat.`);
+    } catch (err) { setNotice(err.message); }
   }
 
   async function previewPublicExport() {
@@ -4921,10 +4934,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
             <button onClick={previewPublicExport} disabled={publicExportBusy}><SearchCheck size={16} /> {publicExportBusy ? 'Working…' : 'Preview public export'}</button>
             <button className="primary" onClick={confirmPublicExport} disabled={publicExportBusy || !publicExportPreview}><Download size={16} /> Confirm and download public JSON</button>
         </div>
-        <h3>Cloud sign-in buttons</h3>
+        <h3>Cloud accounts</h3>
         <p>Choose the providers you use. Each enabled provider appears as a small button in Chat. “Sign in” opens that provider in your normal browser; finish sign-in there, then keep the LPS Chrome connector enabled.</p>
         <div className="provider-settings">
-          {CLOUD_AGENTS.map((agent) => <div key={agent.name} className="provider-setting"><label className="temporary-chat-option"><input type="checkbox" checked={cloudEnabledProviders.includes(agent.name)} onChange={(event) => setCloudEnabledProviders((current) => event.target.checked ? [...new Set([...current, agent.name])] : current.filter((name) => name !== agent.name))} />{agent.name}</label><button onClick={async () => { try { await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: agent.url }) }); setNotice(`Opened ${agent.name} for sign-in in your normal browser.`); } catch (err) { setNotice(err.message); } }}>Sign in</button></div>)}
+          {(cloudAccounts.length ? cloudAccounts : CLOUD_AGENTS.map((agent) => ({ provider: agent.name, url: agent.url, enabled: cloudEnabledProviders.includes(agent.name), connected: false, model: `${agent.name} (browser-assisted)`, transport: 'browser session connector', actionable: 'Checking connection…' }))).map((account) => <div key={account.provider} className="provider-setting"><div><label className="temporary-chat-option"><input type="checkbox" checked={account.enabled} onChange={(event) => setCloudProviderEnabled(account.provider, event.target.checked)} />{account.provider}</label><small>{account.transport} · {account.connected ? 'Connected' : 'Disconnected'} · {account.model}<br />{account.actionable}</small></div><button onClick={async () => { try { await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: account.url }) }); setNotice(`Opened ${account.provider} sign-in in your normal browser. Then install/reload the LPS Browser Agent and open a signed-in tab.`); } catch (err) { setNotice(err.message); } }}>{account.connected ? 'Reconnect' : 'Connect browser session'}</button></div>)}
         </div>
         <small>Saving provider choices does not share a prompt or credentials with any provider. Chat sends only after the visible exact-prompt review and an active connector.</small>
       </div>
