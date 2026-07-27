@@ -17,3 +17,5 @@ release/
 *.db-*
 pairing-config.json
 /public/build-info.json
+/native/**/bin/
+/native/**/obj/
