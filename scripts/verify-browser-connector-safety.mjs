@@ -94,6 +94,93 @@ try {
   assert.equal(next.status, 200);
   assert.equal(next.body.data.job, null);
 
+  // Exercise the Chat cloud-check lifecycle through the real HTTP boundary
+  // with a deterministic, token-authenticated connector. This proves more
+  // than source contracts: provider dispatch, result capture, cancellation,
+  // idempotent candidate saving, and the no-egress privacy boundary.
+  const csrf = (await (await fetch(`${baseUrl}/api/csrf-token`)).json()).data.token;
+  const mutate = async (route, body, method = 'POST') => {
+    const response = await fetch(`${baseUrl}${route}`, {
+      method,
+      headers: { Origin: baseUrl, 'Content-Type': 'application/json', 'X-LPS-CSRF': csrf },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  assert.equal((await mutate('/api/items', { type: 'profile', title: 'Cloud workflow fixture', body: 'A deterministic local fact for the cloud connector test.', status: 'active', confidence: 0.9 })).status, 200);
+  const session = await mutate('/api/chat/sessions', { title: 'Cloud connector behaviour' });
+  assert.equal(session.status, 200);
+  const sessionId = session.body.data.id;
+  const turn = await mutate(`/api/chat/sessions/${sessionId}/messages`, { content: 'Tell me something about myself.' });
+  assert.equal(turn.status, 200);
+  assert.equal(turn.body.data.messages.length, 2, 'fixture has a completed user/assistant turn');
+
+  const preview = await mutate(`/api/chat/sessions/${sessionId}/cloud-checks/preview`, {
+    scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: 'Focus on concrete risks.'
+  });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.data.messageCount, 2, 'latest turn contains exactly the user/assistant pair');
+  assert.match(preview.body.data.prompt, /Focus on concrete risks\./);
+  const create = await mutate(`/api/chat/sessions/${sessionId}/cloud-checks`, {
+    scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: 'Focus on concrete risks.', idempotency_key: 'connector-behaviour-primary-0001'
+  });
+  assert.equal(create.status, 200);
+  const cloudCheckId = create.body.data.check.id;
+  const replay = await mutate(`/api/chat/sessions/${sessionId}/cloud-checks`, {
+    scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: 'Changed text cannot duplicate the record.', idempotency_key: 'connector-behaviour-primary-0001'
+  });
+  assert.equal(replay.body.data.reused, true, 'creation idempotency reuses the durable cloud check');
+  assert.equal(replay.body.data.check.id, cloudCheckId);
+  const dispatched = await mutate(`/api/chat/cloud-checks/${cloudCheckId}/send`, {});
+  assert.equal(dispatched.status, 200, 'connected matching provider creates a browser job');
+  const claimed = await request(baseUrl, '/api/browser/extension/next', { token: pairing.token });
+  assert.equal(claimed.status, 200);
+  assert.equal(claimed.body.data.job.targetAgent, 'ChatGPT');
+  assert.equal(claimed.body.data.job.prompt, create.body.data.prompt, 'connector receives the exact authorised prompt');
+  const answered = await request(baseUrl, `/api/browser/extension/jobs/${claimed.body.data.job.id}`, {
+    method: 'POST', token: pairing.token,
+    body: JSON.stringify({ status: 'answered', claimToken: claimed.body.data.job.claimToken, answer: 'External advisory response.', title: 'ChatGPT' })
+  });
+  assert.equal(answered.status, 200);
+  const checksAfterAnswer = await (await fetch(`${baseUrl}/api/chat/sessions/${sessionId}/cloud-checks`)).json();
+  const completed = checksAfterAnswer.data.find((item) => item.id === cloudCheckId);
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.response, 'External advisory response.');
+  const candidate = await mutate(`/api/chat/cloud-checks/${cloudCheckId}/memory-candidate`, {});
+  assert.equal(candidate.status, 200);
+  const candidateReplay = await mutate(`/api/chat/cloud-checks/${cloudCheckId}/memory-candidate`, {});
+  assert.equal(candidateReplay.body.data.reused, true, 'memory-candidate saving is explicitly idempotent');
+  const guidance = await mutate(`/api/chat/cloud-checks/${cloudCheckId}/guidance`, {});
+  assert.equal(guidance.status, 200);
+  const guidedTurn = await mutate(`/api/chat/sessions/${sessionId}/messages`, { content: 'Tell me something about myself.' });
+  assert.equal(guidedTurn.status, 200);
+  assert.equal(guidedTurn.body.data.messages.length, 2, 'guidance is retained until an assistant reply is actually stored');
+  const checksAfterGuidance = await (await fetch(`${baseUrl}/api/chat/sessions/${sessionId}/cloud-checks`)).json();
+  assert.ok(checksAfterGuidance.data.find((item) => item.id === cloudCheckId).guidance_consumed_at, 'guidance is consumed after one persisted assistant reply');
+
+  const cancelledCreate = await mutate(`/api/chat/sessions/${sessionId}/cloud-checks`, {
+    scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: '', idempotency_key: 'connector-behaviour-cancel-0001'
+  });
+  const cancelledId = cancelledCreate.body.data.check.id;
+  assert.equal((await mutate(`/api/chat/cloud-checks/${cancelledId}/send`, {})).status, 200);
+  const cancelledClaim = await request(baseUrl, '/api/browser/extension/next', { token: pairing.token });
+  assert.ok(cancelledClaim.body.data.job, 'second check is claimable before cancellation');
+  assert.equal((await mutate(`/api/chat/cloud-checks/${cancelledId}/cancel`, {})).status, 200);
+  const lateAnswer = await request(baseUrl, `/api/browser/extension/jobs/${cancelledClaim.body.data.job.id}`, {
+    method: 'POST', token: pairing.token,
+    body: JSON.stringify({ status: 'answered', claimToken: cancelledClaim.body.data.job.claimToken, answer: 'Late answer must not win.' })
+  });
+  assert.equal(lateAnswer.status, 403, 'cancellation invalidates the connector claim token');
+  const checksAfterCancel = await (await fetch(`${baseUrl}/api/chat/sessions/${sessionId}/cloud-checks`)).json();
+  assert.equal(checksAfterCancel.data.find((item) => item.id === cancelledId).status, 'cancelled');
+
+  const blockedPreview = await mutate(`/api/chat/sessions/${sessionId}/cloud-checks/preview`, {
+    scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: 'Include my medical record in the review.'
+  });
+  assert.equal(blockedPreview.status, 200);
+  assert.equal(blockedPreview.body.data.blocked, true, 'sensitive cloud egress is blocked server-side');
+  console.log('Chat cloud workflow HTTP verification passed: dispatch, capture, guidance, candidate, cancellation, and privacy boundaries.');
+
   const settings = await request(baseUrl, '/api/settings');
   assert.equal(settings.status, 200);
   assert.equal(settings.body.data.browserConnectorToken, '[redacted]');
