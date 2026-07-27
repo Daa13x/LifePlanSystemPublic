@@ -93,7 +93,12 @@ $itemsToCopy = @(
 foreach ($item in $itemsToCopy) {
   $source = Join-Path $repoRoot $item
   if (Test-Path $source) {
-    Copy-Item -Path $source -Destination $appRoot -Recurse -Force
+    # Preserve each named entry beneath app.  The launchers deliberately start
+    # in LifePlannerPortable\app; flattening entry contents into the portable
+    # root leaves server/index.js and node_modules unreachable at runtime.
+    $destination = Join-Path $appRoot $item
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
   }
 }
 

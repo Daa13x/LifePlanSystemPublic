@@ -31,7 +31,8 @@ Write-Host "Packaging portable bundle..."
 
 $candidates = @(
   (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
-  (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
+  (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
+  (Join-Path $env:LOCALAPPDATA 'LifePlanSystem\tools\Inno Setup 6\ISCC.exe')
 ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
 
 $iscc = $candidates | Select-Object -First 1

@@ -230,6 +230,34 @@ export function migrate() {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- A durable, session-scoped projection of an existing consultation into
+    -- Chat. The consultation remains the single underlying cloud-history
+    -- record; this table only adds Chat provenance, state, and one-use advice.
+    CREATE TABLE IF NOT EXISTS chat_cloud_checks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      consultation_id INTEGER NOT NULL UNIQUE REFERENCES consultations(id) ON DELETE CASCADE,
+      session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      user_message_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL,
+      assistant_message_id INTEGER REFERENCES chat_messages(id) ON DELETE SET NULL,
+      scope TEXT NOT NULL CHECK (scope IN ('latest-turn','full-conversation')),
+      provider TEXT NOT NULL,
+      model TEXT,
+      prompt_hash TEXT NOT NULL,
+      included_message_ids TEXT NOT NULL DEFAULT '[]',
+      classification TEXT NOT NULL DEFAULT 'pending',
+      status TEXT NOT NULL DEFAULT 'preparing',
+      response TEXT,
+      feedback TEXT,
+      error_detail TEXT,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      guidance_active INTEGER NOT NULL DEFAULT 0,
+      guidance_consumed_at TEXT,
+      memory_candidate_id INTEGER REFERENCES memory_candidates(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_cloud_checks_session ON chat_cloud_checks(session_id, created_at);
+
     -- Explicitly-selected Knowledge/Workboard records attached to a conversation
     -- as Chat context. Provenance (kind + ref_id + label) is retained so the
     -- assistant only ever sees records the user deliberately chose. Nothing is
@@ -301,6 +329,10 @@ export function migrate() {
     } catch {
       // Column already exists.
     }
+  }
+
+  for (const column of [['chat_session_id', 'INTEGER'], ['user_message_id', 'INTEGER'], ['assistant_message_id', 'INTEGER'], ['scope', 'TEXT'], ['provider_model', 'TEXT']]) {
+    try { db.exec(`ALTER TABLE consultations ADD COLUMN ${column[0]} ${column[1]}`); } catch { /* already present */ }
   }
 
   // Workflow status is not a privacy decision. Existing records and every new

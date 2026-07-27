@@ -928,6 +928,11 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [proposal, setProposal] = useState(null);
   const [proposeOpen, setProposeOpen] = useState(false);
   const [proposeForm, setProposeForm] = useState({ type: 'note', title: '', next_action: '' });
+  const [cloudChecks, setCloudChecks] = useState([]);
+  const [cloudScope, setCloudScope] = useState('latest-turn');
+  const [cloudPreview, setCloudPreview] = useState(null);
+  const [cloudProviders, setCloudProviders] = useState([]);
+  const [cloudProvider, setCloudProvider] = useState('ChatGPT');
 
   // --- ChatGPT-style auto-scroll for the message container (not the window) ---
   // autoFollow tracks whether the newest content should stick to the bottom. It
@@ -973,6 +978,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     if (!sessionId) return;
     try { setConnection(await api(`/api/chat/sessions/${sessionId}/connection`)); } catch { /* connection state is best-effort */ }
   }
+  async function loadCloudChecks(sessionId = selectedSession) { if (sessionId) try { setCloudChecks(await api(`/api/chat/sessions/${sessionId}/cloud-checks`)); } catch {} }
+  async function previewCloudCheck() { try { setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider }) })); } catch (err) { setNotice(err.message); } }
+  async function createCloudCheck() { try { await api(`/api/chat/sessions/${selectedSession}/cloud-checks`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, idempotency_key: crypto.randomUUID().replaceAll('-', '') }) }); setCloudPreview(null); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  async function sendCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  async function saveCloudCandidate(id) { try { await api(`/api/chat/cloud-checks/${id}/memory-candidate`, { method: 'POST' }); await loadCloudChecks(); refreshAll(); setNotice('Cloud response saved as a review-only memory candidate.'); } catch (err) { setNotice(err.message); } }
+  async function setCloudGuidance(id, active) { try { await api(`/api/chat/cloud-checks/${id}/guidance`, { method: active ? 'POST' : 'DELETE' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  async function cancelCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/cancel`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  async function retryCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/retry`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
 
   async function loadContextRecords(sessionId = selectedSession) {
     if (!sessionId) return;
@@ -1182,15 +1195,22 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   useEffect(() => {
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
     api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
+    api('/api/chat/cloud-providers').then((providers) => { setCloudProviders(providers); if (providers[0]) setCloudProvider(providers[0].provider); }).catch((err) => setNotice(err.message));
   }, []);
 
   useEffect(() => {
     loadContext();
     loadContextRecords();
     loadConnection();
+    loadCloudChecks();
     setProposal(null);
     setPicker(null);
   }, [selectedSession]);
+  useEffect(() => {
+    if (!cloudChecks.some((check) => check.status === 'active')) return undefined;
+    const timer = window.setInterval(() => loadCloudChecks(), 1500);
+    return () => window.clearInterval(timer);
+  }, [cloudChecks, selectedSession]);
 
   const modelReady = Boolean(runtime?.endpointConfigured || runtime?.assigned || runtime?.managedServerRunning);
   const modelStatus = !runtime
@@ -1287,11 +1307,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             </div>
           )}
           {proposal && <ProposalCard proposal={proposal} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
+          <section className="source-warning info" aria-label="Cloud check">
+            <strong>Cloud check</strong><small>Review the exact server-classified Chat scope before it is sent.</small>
+            <div className="inline-form compact"><select aria-label="Cloud provider" value={cloudProvider} onChange={(event) => setCloudProvider(event.target.value)}>{cloudProviders.map((item) => <option key={item.provider} value={item.provider}>{item.model}</option>)}</select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => setCloudScope(event.target.value)}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck}>Preview exact prompt</button></div>
+            {cloudPreview && <div><small>{cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck}>Create cloud check</button>}</div>}
+          </section>
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
-          {messages.map((message) => (
-            <MessageBubble key={message.id} message={message} mode={detailMode} />
-          ))}
+          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id)).map((check) => <div key={`cloud-${check.id}`} className="cloud-check-card"><strong>{check.provider} / {check.model || 'configured browser model'} · {check.status}</strong><small>{check.scope} · messages {check.included_message_ids}</small><details><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>{check.response && <div className="message-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} />}{check.error_detail && <small>{check.error_detail}</small>}{check.status === 'prepared' && <button onClick={() => sendCloudCheck(check.id)}>Send reviewed prompt</button>}{check.status === 'active' && <button onClick={() => cancelCloudCheck(check.id)}>Cancel cloud check</button>}{['failed', 'cancelled'].includes(check.status) && <button onClick={() => retryCloudCheck(check.id)}>Retry cloud check</button>}{check.status === 'completed' && <><button onClick={() => setCloudGuidance(check.id, !check.guidance_active)}>{check.guidance_active ? 'Remove guidance' : 'Use for next reply'}</button>{check.memory_candidate_id ? <small>Memory candidate #{check.memory_candidate_id} is awaiting review.</small> : <button onClick={() => saveCloudCandidate(check.id)}>Save as memory candidate</button>}</>}</div>)}</React.Fragment>)}
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
               <span>assistant</span>
@@ -1535,7 +1558,6 @@ function Memory({ memory, refresh, mode = 'memory' }) {
     });
     refresh();
   }
-
   async function deleteMemory(item) {
     if (!window.confirm(`Remove “${item.title}” from active retrieval? Its minimal revision record remains for audit.`)) return;
     await api(`/api/memory/items/${item.id}`, { method: 'DELETE' });
