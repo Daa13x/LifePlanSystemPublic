@@ -31,17 +31,10 @@ UninstallDisplayIcon={app}\{#InstalledIconName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
+; Vite assets are content-hashed. Preserve prior bundles during updates and
+; always copy the complete current payload; index.html references current
+; hashes, while retaining old files prevents deletion of the active UI bundle.
 Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "app\data\*,app\.env,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
-
-; Vite emits content-hashed filenames. Clear old generated assets before Inno
-; starts extracting the new payload; [InstallDelete] and ssInstall are both
-; too late and would remove the freshly copied bundles as well.
-[Code]
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-begin
-  DelTree(ExpandConstant('{app}\app\dist\assets'), True, True, True);
-  Result := '';
-end;
 
 [Icons]
 Name: "{group}\Life Planner"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; WorkingDir: "{app}"; IconFilename: "{app}\{#InstalledIconName}"
