@@ -1,0 +1,80 @@
+{
+  "format": 1,
+  "restore": {
+    "C:\\Users\\alexl\\Documents\\LifePlanSystemPublic-release-sync-1.0.1-2026-07-15\\native\\LifePlanSystem.Native\\LifePlanSystem.Native.csproj": {}
+  },
+  "projects": {
+    "C:\\Users\\alexl\\Documents\\LifePlanSystemPublic-release-sync-1.0.1-2026-07-15\\native\\LifePlanSystem.Native\\LifePlanSystem.Native.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\Users\\alexl\\Documents\\LifePlanSystemPublic-release-sync-1.0.1-2026-07-15\\native\\LifePlanSystem.Native\\LifePlanSystem.Native.csproj",
+        "projectName": "LifePlanSystem.Native",
+        "projectPath": "C:\\Users\\alexl\\Documents\\LifePlanSystemPublic-release-sync-1.0.1-2026-07-15\\native\\LifePlanSystem.Native\\LifePlanSystem.Native.csproj",
+        "packagesPath": "C:\\Users\\alexl\\.nuget\\packages\\",
+        "outputPath": "C:\\Users\\alexl\\Documents\\LifePlanSystemPublic-release-sync-1.0.1-2026-07-15\\native\\LifePlanSystem.Native\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\alexl\\AppData\\Roaming\\NuGet\\NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net9.0-windows"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net9.0-windows7.0": {
+            "targetAlias": "net9.0-windows",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "9.0.300"
+      },
+      "frameworks": {
+        "net9.0-windows7.0": {
+          "targetAlias": "net9.0-windows",
+          "dependencies": {
+            "Microsoft.Extensions.Hosting": {
+              "target": "Package",
+              "version": "[9.0.10, )"
+            },
+            "Microsoft.Web.WebView2": {
+              "target": "Package",
+              "version": "[1.0.3124.44, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            },
+            "Microsoft.WindowsDesktop.App.WindowsForms": {
+              "privateAssets": "none"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Users\\alexl\\AppData\\Local\\LifePlanSystem\\dotnet-sdk-9\\sdk\\9.0.316/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}
