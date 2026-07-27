@@ -17,7 +17,7 @@ const appRoot = portableRoot ? path.join(portableRoot, 'app') : repoRoot;
 const nodeCommand = portableRoot ? path.join(portableRoot, 'node', 'node.exe') : process.execPath;
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-installed-chat-'));
 const dbPath = path.join(probeRoot, 'data', 'life-planner.sqlite');
-const evidence = { target: portableRoot ? 'portable' : 'production-dist', pageUrl: '', build: null, request: null, response: null, persisted: null, visible: null, localKnowledgeVisible: false, localSourceCount: 0, reopened: false, setupRecoveryLoaded: false, rejectedTokenSurfaced: false, cloudPreviewProtected: false, cloudSendRejectedWithoutProviderTab: false, cloudComposerVisible: false };
+const evidence = { target: portableRoot ? 'portable' : 'production-dist', pageUrl: '', build: null, request: null, response: null, persisted: null, visible: null, localKnowledgeVisible: false, localSourceCount: 0, reopened: false, setupRecoveryLoaded: false, rejectedTokenSurfaced: false, cloudPreviewProtected: false, cloudSendRejectedWithoutProviderTab: false, cloudComposerVisible: false, directCloudRequestPrepared: false };
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -132,6 +132,15 @@ try {
     assert.equal(await page.locator('.cloud-composer').count(), 1, 'Chat displays one persistent compact cloud-control bar');
     assert.equal(await page.getByRole('button', { name: 'Manage cloud accounts' }).count(), 1, 'cloud account management control is accessible');
     evidence.cloudComposerVisible = true;
+    await page.route('**/api/chat/cloud-providers', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: [{ provider: 'ChatGPT', model: 'Current model selected in ChatGPT', models: ['Current model selected in ChatGPT'], configured: true, connected: true, transport: 'browser session connector' }] }) }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'Use ChatGPT' }).waitFor({ timeout: 15000 });
+    await page.getByPlaceholder('Tell Life Planner what changed, what is blocked, or what needs review...').fill('Ask ChatGPT to identify any missing risks.');
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await page.locator('.cloud-preview').waitFor({ state: 'visible', timeout: 15000 });
+    const directPreviewCount = await page.locator('.cloud-preview').count();
+    assert.equal(directPreviewCount, 1, 'direct provider request opens the reviewed cloud workflow instead of silently sending');
+    evidence.directCloudRequestPrepared = true;
     await page.goto(`${base}/#chat/${sessionId}`, { waitUntil: 'networkidle' });
     await page.getByText('Tell me something about myself.').last().waitFor({ timeout: 15000 });
     evidence.reopened = true;

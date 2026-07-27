@@ -1071,9 +1071,36 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     if (result.error) setNotice(result.error);
   }
 
+  async function prepareDirectCloudRequest(outgoing) {
+    const match = String(outgoing || '').match(/\b(?:ask|use|consult|check with)\s+(chatgpt|gemini|grok|claude)\b/i);
+    if (!match) return false;
+    const provider = cloudProviders.find((item) => item.provider.toLowerCase() === match[1].toLowerCase());
+    if (!provider) {
+      setNotice(`${match[1]} is not connected. Open Cloud accounts with + to connect a signed-in browser session first.`);
+      navigate('settings');
+      return true;
+    }
+    try {
+      setCloudProvider(provider.provider);
+      setCloudModel(provider.model || '');
+      setCloudInstruction(outgoing);
+      setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, {
+        method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: provider.provider, model: provider.model, instruction: outgoing })
+      }));
+      setNotice(`Prepared a reviewed ${provider.provider} cloud check. Review the exact prompt before sending.`);
+    } catch (err) {
+      setNotice(`Could not prepare the ${provider.provider} cloud check: ${err.message}`);
+    }
+    return true;
+  }
+
   async function send() {
     if (!draft.trim() || !selectedSession || chatBusy) return;
     const outgoing = draft;
+    if (await prepareDirectCloudRequest(outgoing)) {
+      setDraft('');
+      return;
+    }
     const optimisticId = `tmp-${Date.now()}`;
     setChatBusy(true);
     setDraft('');
@@ -1320,7 +1347,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           {proposal && <ProposalCard proposal={proposal} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
-          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} />)}</React.Fragment>)}
+          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
               <span>assistant</span>
@@ -1351,13 +1378,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   );
 }
 
-function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidance, onSaveCandidate, onDismiss }) {
+function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidance, onSaveCandidate, onDismiss, onHistory }) {
   let includedCount = 0;
   try { includedCount = JSON.parse(check.included_message_ids || '[]').length; } catch { /* malformed legacy metadata remains displayable */ }
   return <article className="cloud-check-card" aria-label={`Cloud check ${check.id}: ${stateLabel}`}>
     <strong>{check.provider} / {check.model || 'configured browser model'} · {stateLabel}</strong>
     <small>{check.scope} · {includedCount} included messages · approximately {(check.prompt || '').length} characters</small>
     <small>Privacy: {check.classification || 'pending'} · created {new Date(check.created_at).toLocaleString()}</small>
+    <button className="link" onClick={onHistory}>Open Cloud Consultation #{check.consultation_id}</button>
     <details><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>
     {check.response && <div className="message-body" aria-live="polite" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} />}
     {check.error_detail && <small role="status">{check.error_detail}</small>}
