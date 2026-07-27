@@ -33,6 +33,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "app\data\*,app\.env,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
 
+; Vite emits content-hashed filenames.  Replacing index.html without removing
+; prior generated assets can leave an installed update pointing at a missing
+; bundle, while deliberately excluded data remains untouched.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\app\dist\assets\*"
+
 [Icons]
 Name: "{group}\Life Planner"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; WorkingDir: "{app}"; IconFilename: "{app}\{#InstalledIconName}"
 Name: "{userdesktop}\Life Planner"; Filename: "{sys}\wscript.exe"; Parameters: """{app}\{#TrayLauncherName}"""; WorkingDir: "{app}"; IconFilename: "{app}\{#InstalledIconName}"; Tasks: desktopicon
