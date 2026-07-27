@@ -54,7 +54,10 @@ line(postinstallLaunches.every((l) => /runasoriginaluser/i.test(l)),
 
 // The download scripts must still SHIP so on-demand install works.
 line(/Excludes:[^\n]*app\\\.env/i.test(iss) || /Excludes:/i.test(iss), 'installer still excludes private runtime data (.env/db/models/logs)');
-line(/\[InstallDelete\][\s\S]*?\{app\}\\app\\dist\\assets\\\*/i.test(iss), 'installer replaces stale generated frontend assets without touching app data');
+line(
+  /CurStep\s*=\s*ssInstall[\s\S]*?DelTree\(ExpandConstant\('\{app\}\\app\\dist\\assets'\)/i.test(iss),
+  'installer clears stale generated frontend assets before copying the new payload, without touching app data'
+);
 
 console.log(`\n${failures === 0 ? 'ALL PASS - installer is lowest-privilege, runs no elevated downloads, and launches the app as the standard user.' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);
