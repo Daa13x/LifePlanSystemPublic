@@ -33,14 +33,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "app\data\*,app\.env,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
 
-; Vite emits content-hashed filenames. Clear old generated assets *before*
-; Inno copies the new payload; [InstallDelete] executes too late and would
-; otherwise remove the freshly copied bundles as well.
+; Vite emits content-hashed filenames. Clear old generated assets before Inno
+; starts extracting the new payload; [InstallDelete] and ssInstall are both
+; too late and would remove the freshly copied bundles as well.
 [Code]
-procedure CurStepChanged(CurStep: TSetupStep);
+function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  if CurStep = ssInstall then
-    DelTree(ExpandConstant('{app}\app\dist\assets'), True, True, True);
+  DelTree(ExpandConstant('{app}\app\dist\assets'), True, True, True);
+  Result := '';
 end;
 
 [Icons]

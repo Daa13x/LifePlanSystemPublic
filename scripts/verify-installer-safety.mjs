@@ -55,7 +55,7 @@ line(postinstallLaunches.every((l) => /runasoriginaluser/i.test(l)),
 // The download scripts must still SHIP so on-demand install works.
 line(/Excludes:[^\n]*app\\\.env/i.test(iss) || /Excludes:/i.test(iss), 'installer still excludes private runtime data (.env/db/models/logs)');
 line(
-  /CurStep\s*=\s*ssInstall[\s\S]*?DelTree\(ExpandConstant\('\{app\}\\app\\dist\\assets'\)/i.test(iss),
+  /function\s+PrepareToInstall[\s\S]*?DelTree\(ExpandConstant\('\{app\}\\app\\dist\\assets'\)/i.test(iss),
   'installer clears stale generated frontend assets before copying the new payload, without touching app data'
 );
 
