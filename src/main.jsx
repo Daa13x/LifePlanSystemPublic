@@ -1702,7 +1702,7 @@ function ApprovalQueue({ setNotice, refreshPlanner, scope = 'all' }) {
 function Projects({ projects, setProjects, setNotice, refreshAll }) {
   const [name, setName] = useState('');
   const [editing, setEditing] = useState(null);
-  const [projectDraft, setProjectDraft] = useState({ name: '', status: 'active', owner: 'user', confidence: 0.75, next_action: '' });
+  const [projectDraft, setProjectDraft] = useState({ name: '', status: 'active', owner: 'user', confidence: 0.75, next_action: '', shareability: 'unknown' });
 
   function startEdit(project) {
     setEditing(project);
@@ -1711,7 +1711,8 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
       status: project.status || 'active',
       owner: project.owner || 'user',
       confidence: Number(project.confidence || 0.75),
-      next_action: project.next_action || ''
+      next_action: project.next_action || '',
+      shareability: project.shareability || 'unknown'
     });
   }
 
@@ -1751,7 +1752,8 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
               status: editing.status,
               owner: editing.owner,
               confidence: editing.confidence,
-              next_action: editing.next_action || ''
+              next_action: editing.next_action || '',
+              shareability: editing.shareability || 'unknown'
             },
             updates: {
               ...projectDraft,
@@ -1808,6 +1810,13 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
           <input type="number" min="0" max="1" step="0.05" value={projectDraft.confidence} onChange={(event) => setProjectDraft((draft) => ({ ...draft, confidence: event.target.value }))} />
           <label>Next action</label>
           <textarea value={projectDraft.next_action} onChange={(event) => setProjectDraft((draft) => ({ ...draft, next_action: event.target.value }))} />
+          <label>Shareability</label>
+          <select value={projectDraft.shareability} onChange={(event) => setProjectDraft((draft) => ({ ...draft, shareability: event.target.value }))}>
+            <option value="unknown">Unknown — never public</option>
+            <option value="private">Private — never public</option>
+            <option value="local-shareable">Local-shareable — not public</option>
+            <option value="public-shareable">Public-shareable — eligible only after export review</option>
+          </select>
           <div className="decision-row">
             <button className="primary" onClick={proposeProjectUpdate}><Check size={16} /> Propose update</button>
             <button onClick={() => setEditing(null)}><X size={16} /> Cancel</button>
@@ -4428,6 +4437,8 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [runtime, setRuntime] = useState(null);
   const [modelDeleteArmed, setModelDeleteArmed] = useState(null);
   const [exportScope, setExportScope] = useState('all');
+  const [publicExportPreview, setPublicExportPreview] = useState(null);
+  const [publicExportBusy, setPublicExportBusy] = useState(false);
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
@@ -4596,6 +4607,35 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
     setModels(result.models);
     setRuntime(result.runtime);
     setNotice(result.runtimeError || `Verified, loaded, and started ${file.path}.`);
+  }
+
+  async function previewPublicExport() {
+    setPublicExportBusy(true);
+    try {
+      const preview = await api('/api/export/public/preview', { method: 'POST', body: '{}' });
+      setPublicExportPreview(preview);
+      setNotice(`Public export preview: ${preview.included} eligible, ${preview.blocked} blocked, ${preview.unknown} unknown.`);
+    } catch (err) { setNotice(err.message); }
+    finally { setPublicExportBusy(false); }
+  }
+
+  async function confirmPublicExport() {
+    if (!publicExportPreview) return;
+    setPublicExportBusy(true);
+    try {
+      const exported = await api('/api/export/public/confirm', {
+        method: 'POST',
+        body: JSON.stringify({ confirmationId: publicExportPreview.confirmationId, token: publicExportPreview.token })
+      });
+      const blob = new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = 'life-planner-public-export.json'; link.click();
+      URL.revokeObjectURL(url);
+      setPublicExportPreview(null);
+      setNotice(`Downloaded classified public export with ${exported.projects.length + exported.knowledge_items.length} record(s).`);
+    } catch (err) { setNotice(err.message); }
+    finally { setPublicExportBusy(false); }
   }
 
   return (
@@ -4830,6 +4870,15 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           <a className="link-button" href={`/api/export/context.json?scope=${exportScope}`}><Download size={16} /> JSON</a>
         </div>
         <a className="link-button" href="/api/export/json?mode=backup"><Download size={16} /> Export Local Backup</a>
+        <div className="source-warning warn">
+          <strong>Classified public export</strong>
+          <small>Only records explicitly marked public-shareable are eligible. Private, local-shareable, and unknown records are excluded. Review is bound to the current server-side selection.</small>
+          {publicExportPreview && <small>{publicExportPreview.included} eligible; {publicExportPreview.blocked} blocked; {publicExportPreview.unknown} unknown. Confirmation expires at {new Date(publicExportPreview.expiresAt).toLocaleTimeString()}.</small>}
+          <div className="decision-row">
+            <button onClick={previewPublicExport} disabled={publicExportBusy}><SearchCheck size={16} /> {publicExportBusy ? 'Working…' : 'Preview public export'}</button>
+            <button className="primary" onClick={confirmPublicExport} disabled={publicExportBusy || !publicExportPreview}><Download size={16} /> Confirm and download public JSON</button>
+          </div>
+        </div>
         <PdfImport setNotice={setNotice} />
         <JsonImport setNotice={setNotice} />
         <MarkdownImport setNotice={setNotice} />

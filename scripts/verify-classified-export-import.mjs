@@ -66,10 +66,10 @@ try {
   assert.equal(JSON.stringify(preview.body.data).includes('PRIVATE_EXPORT_CANARY'), false, 'preview never includes sensitive bodies');
   const exported = await request('/api/export/public/confirm', { method: 'POST', body: JSON.stringify({ confirmationId: preview.body.data.confirmationId, token: preview.body.data.token }) });
   assert.equal(exported.status, 200);
-  assert.equal(exported.body.format, 'life-planner-public-export');
-  assert.equal(JSON.stringify(exported.body).includes('PRIVATE_EXPORT_CANARY'), false, 'public export excludes private canary');
-  assert.equal(exported.body.projects[0].shareability, 'public-shareable');
-  assert.equal(exported.body.knowledge_items[0].shareability, 'public-shareable');
+  assert.equal(exported.body.data.format, 'life-planner-public-export');
+  assert.equal(JSON.stringify(exported.body.data).includes('PRIVATE_EXPORT_CANARY'), false, 'public export excludes private canary');
+  assert.equal(exported.body.data.projects[0].shareability, 'public-shareable');
+  assert.equal(exported.body.data.knowledge_items[0].shareability, 'public-shareable');
 
   const beforeProjects = database.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
   const beforeKnowledge = database.prepare('SELECT COUNT(*) AS count FROM knowledge_items').get().count;

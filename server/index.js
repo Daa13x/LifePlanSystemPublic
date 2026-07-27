@@ -2959,7 +2959,7 @@ app.post('/api/approvals/:id/:decision', async (req, res) => {
         const target = row('SELECT * FROM projects WHERE id = ?', [payload.id]);
         if (!target) return fail(res, 404, 'Project not found.');
         const previous = payload.previous || {};
-        for (const key of ['name', 'status', 'owner', 'next_action']) {
+        for (const key of ['name', 'status', 'owner', 'next_action', 'shareability']) {
           if (Object.hasOwn(previous, key) && String(target[key] || '') !== String(previous[key] || '')) {
             return fail(res, 409, `Project changed after this proposal was created. Refresh before approving.`);
           }
@@ -2968,6 +2968,7 @@ app.post('/api/approvals/:id/:decision', async (req, res) => {
           return fail(res, 409, 'Project confidence changed after this proposal was created. Refresh before approving.');
         }
         const updates = payload.updates || {};
+        if (Object.hasOwn(updates, 'shareability')) requireShareability(updates.shareability);
         db.prepare(`
           UPDATE projects
           SET name = COALESCE(?, name),
@@ -2977,6 +2978,7 @@ app.post('/api/approvals/:id/:decision', async (req, res) => {
               last_reviewed = date('now'),
               evidence = COALESCE(?, evidence),
               next_action = COALESCE(?, next_action),
+              shareability = COALESCE(?, shareability),
               updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
         `).run(
@@ -2986,6 +2988,7 @@ app.post('/api/approvals/:id/:decision', async (req, res) => {
           updates.confidence ?? null,
           updates.evidence ?? `Approval ${approval.id}`,
           updates.next_action ?? null,
+          updates.shareability ?? null,
           target.id
         );
       }
@@ -3070,7 +3073,7 @@ app.post('/api/approvals/:id/revalidate', (req, res) => {
       const target = row('SELECT * FROM projects WHERE id = ?', [payload.id]);
       if (!target) return ok(res, { valid: false, stale: true, message: 'Project no longer exists.' });
       const previous = payload.previous || {};
-      const stale = ['name', 'status', 'owner', 'next_action'].some((key) => Object.hasOwn(previous, key) && String(target[key] || '') !== String(previous[key] || ''))
+      const stale = ['name', 'status', 'owner', 'next_action', 'shareability'].some((key) => Object.hasOwn(previous, key) && String(target[key] || '') !== String(previous[key] || ''))
         || (Object.hasOwn(previous, 'confidence') && Number(target.confidence || 0) !== Number(previous.confidence || 0));
       return ok(res, { valid: !stale, stale, message: stale ? 'Project changed since proposal.' : 'Proposal still matches current project state.' });
     }
@@ -6523,7 +6526,7 @@ app.post('/api/export/public/confirm', async (req, res) => {
   });
   if (!result.ok) return fail(res, result.code === 'stale' ? 409 : 400, result.error);
   res.setHeader('Content-Disposition', 'attachment; filename="life-planner-public-export.json"');
-  res.json(result.result);
+  ok(res, result.result);
 });
 
 app.patch('/api/shareability/:kind/:id', (req, res) => {
