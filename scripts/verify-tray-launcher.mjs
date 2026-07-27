@@ -22,6 +22,8 @@ assert.match(tray, /RedirectStandardOutput/);
 assert.match(tray, /RedirectStandardError/);
 assert.match(tray, /Stop-LifePlannerServer\s*\n\s*throw \$failureMessage/);
 assert.match(tray, /Ensure-LocalModelRuntime/);
+assert.match(tray, /Life Planner restarted/);
+assert.match(tray, /Start-LifePlannerServer\s*\n\s*\$notifyIcon\.ShowBalloonTip/);
 
 assert.match(packaging, /LifePlannerTray\.ps1/);
 assert.match(packaging, /Start Life Planner\.vbs/);

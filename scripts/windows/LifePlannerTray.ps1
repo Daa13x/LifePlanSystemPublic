@@ -395,7 +395,17 @@ $healthTimer.Add_Tick({
       if ($script:serverProcess.HasExited) {
         $script:serverProcess = $null
         $script:ownsServerProcess = $false
-        Show-StartupError "The local server stopped unexpectedly. Check $stderrLog"
+        # An installer update can replace the bundled Node process while this
+        # tray host remains alive. Recover through the same owned-process path
+        # before reporting an outage, so an update never leaves a stale tray
+        # icon claiming the environment is available with no local server.
+        try {
+          Start-LifePlannerServer
+          $notifyIcon.ShowBalloonTip(2500, 'Life Planner restarted', 'The local server restarted after an update or unexpected exit.', [System.Windows.Forms.ToolTipIcon]::Info)
+        }
+        catch {
+          Show-StartupError "The local server stopped unexpectedly and could not restart. $($_.Exception.Message) Check $stderrLog"
+        }
       }
     }
     catch {
