@@ -646,6 +646,15 @@ h3 { font-size: 14px; font-weight: 700; }
 .message.streaming { opacity: 0.92; }
 
 .composer { padding: 14px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+.cloud-composer { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.cloud-composer > span { color: var(--muted); font-size: 18px; }
+.cloud-composer select { width: auto; padding: 6px 8px; }
+.cloud-provider-button { min-width: 31px; height: 31px; padding: 5px 8px; border-radius: 999px; font-weight: 700; }
+.cloud-provider-button.selected { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, var(--panel)); }
+.cloud-preview { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-2); }
+.cloud-preview small { display: block; color: var(--muted); margin: 4px 0; }
+.provider-settings { display: grid; gap: 8px; margin: 10px 0; }
+.provider-setting { display: flex; justify-content: space-between; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
 
 input, textarea, select {
   width: 100%;

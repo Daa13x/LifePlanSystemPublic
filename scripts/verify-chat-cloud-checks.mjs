@@ -26,7 +26,7 @@ const checks = [
 let failed = 0;
 for (const [label, pattern] of checks) { const ok = pattern.test(`${server}\n${db}`); console.log(`${ok ? 'ok' : 'FAIL'} ${label}`); if (!ok) failed++; }
 const uiChecks = [
-  ['provider menu', /aria-label="Cloud provider"/],
+  ['composer provider buttons', /cloud-provider-button/],
   ['exact prompt', /Exact authorised prompt/],
   ['transcript placement', /assistant_message_id\) === Number\(message\.id\)/],
   ['guidance action', /Use for next reply/],

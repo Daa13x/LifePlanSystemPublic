@@ -1311,11 +1311,6 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             </div>
           )}
           {proposal && <ProposalCard proposal={proposal} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
-          <section className="source-warning info" aria-label="Cloud check">
-            <strong>Cloud check</strong><small>Review the exact server-classified Chat scope before it is sent.</small>
-            <div className="inline-form compact"><select aria-label="Cloud provider" value={cloudProvider} onChange={(event) => setCloudProvider(event.target.value)}>{cloudProviders.map((item) => <option key={item.provider} value={item.provider}>{item.model}</option>)}</select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => setCloudScope(event.target.value)}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck}>Preview exact prompt</button></div>
-            {cloudPreview && <div><small>{cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck}>Create cloud check</button>}</div>}
-          </section>
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id)).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} />)}</React.Fragment>)}
@@ -1336,6 +1331,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </button>
         )}
         <div className="composer">
+          <div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check">☁</span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected')} onClick={() => { setCloudProvider(item.provider); setCloudPreview(null); }} title={`Prepare a reviewed ${item.provider} cloud check`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} /> : item.provider.slice(0, 1)}</button>)}<select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => setCloudScope(event.target.value)}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider}>Review cloud prompt</button></div>
+          {cloudPreview && <div className="cloud-preview"><strong>{cloudProvider} cloud check</strong><small>{cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck}>Create reviewed cloud check</button>}</div>}
           {cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
@@ -4473,6 +4470,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
   const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 4096);
   const [browserAgentMode, setBrowserAgentMode] = useState(settings.browserAgentMode || 'myChromeConnector');
+  const [cloudEnabledProviders, setCloudEnabledProviders] = useState(settings.cloudEnabledProviders || ['ChatGPT']);
   const browserAgentPort = window.location.port || '4177';
   const [repo, setRepo] = useState('unsloth/Qwen3.5-4B-GGUF');
   const [repoTouched, setRepoTouched] = useState(false);
@@ -4528,6 +4526,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           llamaServerPort: Number(llamaServerPort),
           llamaContextSize: Number(llamaContextSize),
           browserAgentMode,
+          cloudEnabledProviders,
           assistantResponseDetail: responseDetail
         })
       });
@@ -4921,8 +4920,14 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
           <div className="decision-row">
             <button onClick={previewPublicExport} disabled={publicExportBusy}><SearchCheck size={16} /> {publicExportBusy ? 'Working…' : 'Preview public export'}</button>
             <button className="primary" onClick={confirmPublicExport} disabled={publicExportBusy || !publicExportPreview}><Download size={16} /> Confirm and download public JSON</button>
-          </div>
         </div>
+        <h3>Cloud sign-in buttons</h3>
+        <p>Choose the providers you use. Each enabled provider appears as a small button in Chat. “Sign in” opens that provider in your normal browser; finish sign-in there, then keep the LPS Chrome connector enabled.</p>
+        <div className="provider-settings">
+          {CLOUD_AGENTS.map((agent) => <div key={agent.name} className="provider-setting"><label className="temporary-chat-option"><input type="checkbox" checked={cloudEnabledProviders.includes(agent.name)} onChange={(event) => setCloudEnabledProviders((current) => event.target.checked ? [...new Set([...current, agent.name])] : current.filter((name) => name !== agent.name))} />{agent.name}</label><button onClick={async () => { try { await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: agent.url }) }); setNotice(`Opened ${agent.name} for sign-in in your normal browser.`); } catch (err) { setNotice(err.message); } }}>Sign in</button></div>)}
+        </div>
+        <small>Saving provider choices does not share a prompt or credentials with any provider. Chat sends only after the visible exact-prompt review and an active connector.</small>
+      </div>
         <PdfImport setNotice={setNotice} />
         <JsonImport setNotice={setNotice} />
         <MarkdownImport setNotice={setNotice} />

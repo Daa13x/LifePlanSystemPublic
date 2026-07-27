@@ -3012,7 +3012,9 @@ app.get('/api/chat/sessions/:id/cloud-checks', (req, res) => {
 });
 
 app.get('/api/chat/cloud-providers', (_req, res) => {
-  ok(res, Object.keys(cloudAgentHosts).map((provider) => ({ provider, model: `${provider} (browser-assisted)`, transport: 'browser connector', configured: true })));
+  const enabled = getSetting('cloudEnabledProviders', Object.keys(cloudAgentHosts));
+  const selected = Array.isArray(enabled) ? enabled.filter((provider) => Object.hasOwn(cloudAgentHosts, provider)) : Object.keys(cloudAgentHosts);
+  ok(res, selected.map((provider) => ({ provider, model: provider === 'ChatGPT' ? 'OpenAI / ChatGPT (browser-assisted)' : `${provider} (browser-assisted)`, transport: 'browser connector', configured: true })));
 });
 
 app.post('/api/chat/sessions/:id/cloud-checks/preview', (req, res) => {
