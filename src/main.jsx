@@ -985,7 +985,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   async function saveCloudCandidate(id) { try { await api(`/api/chat/cloud-checks/${id}/memory-candidate`, { method: 'POST' }); await loadCloudChecks(); refreshAll(); setNotice('Cloud response saved as a review-only memory candidate.'); } catch (err) { setNotice(err.message); } }
   async function setCloudGuidance(id, active) { try { await api(`/api/chat/cloud-checks/${id}/guidance`, { method: active ? 'POST' : 'DELETE' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function cancelCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/cancel`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
-  async function retryCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/retry`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  async function retryCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/retry`, { method: 'POST' }); await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  const cloudStateLabel = (status) => ({
+    'checking-sharing-permissions': 'Checking sharing permissions', prepared: 'Ready to send', active: 'Waiting for provider', completed: 'Completed', blocked: 'Blocked', failed: 'Failed', cancelled: 'Cancelled'
+  }[status] || 'Preparing cloud prompt');
 
   async function loadContextRecords(sessionId = selectedSession) {
     if (!sessionId) return;
@@ -1314,7 +1317,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </section>
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
-          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id)).map((check) => <div key={`cloud-${check.id}`} className="cloud-check-card"><strong>{check.provider} / {check.model || 'configured browser model'} · {check.status}</strong><small>{check.scope} · messages {check.included_message_ids}</small><details><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>{check.response && <div className="message-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} />}{check.error_detail && <small>{check.error_detail}</small>}{check.status === 'prepared' && <button onClick={() => sendCloudCheck(check.id)}>Send reviewed prompt</button>}{check.status === 'active' && <button onClick={() => cancelCloudCheck(check.id)}>Cancel cloud check</button>}{['failed', 'cancelled'].includes(check.status) && <button onClick={() => retryCloudCheck(check.id)}>Retry cloud check</button>}{check.status === 'completed' && <><button onClick={() => setCloudGuidance(check.id, !check.guidance_active)}>{check.guidance_active ? 'Remove guidance' : 'Use for next reply'}</button>{check.memory_candidate_id ? <small>Memory candidate #{check.memory_candidate_id} is awaiting review.</small> : <button onClick={() => saveCloudCandidate(check.id)}>Save as memory candidate</button>}</>}</div>)}</React.Fragment>)}
+          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id)).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} />)}</React.Fragment>)}
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
               <span>assistant</span>
@@ -1332,6 +1335,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </button>
         )}
         <div className="composer">
+          {cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
           <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
@@ -1340,6 +1344,23 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       </div>
     </section>
   );
+}
+
+function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidance, onSaveCandidate }) {
+  let includedCount = 0;
+  try { includedCount = JSON.parse(check.included_message_ids || '[]').length; } catch { /* malformed legacy metadata remains displayable */ }
+  return <article className="cloud-check-card" aria-label={`Cloud check ${check.id}: ${stateLabel}`}>
+    <strong>{check.provider} / {check.model || 'configured browser model'} · {stateLabel}</strong>
+    <small>{check.scope} · {includedCount} included messages · approximately {(check.prompt || '').length} characters</small>
+    <small>Privacy: {check.classification || 'pending'} · created {new Date(check.created_at).toLocaleString()}</small>
+    <details><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>
+    {check.response && <div className="message-body" aria-live="polite" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} />}
+    {check.error_detail && <small role="status">{check.error_detail}</small>}
+    {check.status === 'prepared' && <button onClick={() => onSend(check.id)}>Send reviewed prompt</button>}
+    {check.status === 'active' && <button onClick={() => onCancel(check.id)}>Cancel cloud check</button>}
+    {['failed', 'cancelled'].includes(check.status) && <button onClick={() => onRetry(check.id)}>Retry cloud check</button>}
+    {check.status === 'completed' && <><button onClick={() => onGuidance(check.id, !check.guidance_active)}>{check.guidance_active ? 'Remove guidance' : 'Use for next reply'}</button>{check.memory_candidate_id ? <small>Memory candidate #{check.memory_candidate_id} is awaiting review.</small> : <button onClick={() => onSaveCandidate(check.id)}>Save as memory candidate</button>}</>}
+  </article>;
 }
 
 function ChatConnectionBar({ connection, runtime, generating, navigate }) {

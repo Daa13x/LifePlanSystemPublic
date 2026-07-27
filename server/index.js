@@ -1357,7 +1357,10 @@ function persistChatAssistantTurn(sessionId, content, metadata) {
 }
 
 function chatCloudScope(sessionId, scope) {
-  const messages = allRows('SELECT id, role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC, id ASC', [sessionId]);
+  // Cloud checks may include only visible user/assistant conversation rows from
+  // this session. System rows and any other internal provenance are never part
+  // of an egress scope.
+  const messages = allRows("SELECT id, role, content, created_at FROM chat_messages WHERE session_id = ? AND role IN ('user', 'assistant') ORDER BY created_at ASC, id ASC", [sessionId]);
   if (scope === 'full-conversation') return messages;
   const latestUserIndex = messages.map((message) => message.role).lastIndexOf('user');
   if (latestUserIndex < 0) throw new Error('Cloud check needs a completed user turn.');
@@ -1544,7 +1547,7 @@ async function buildConversationPrompt(sessionId, userMessage) {
   const hasFiles = files.length > 0;
 
   const systemInstructions = [
-    'You are the LifePlanSystem assistant — a local-first, on-device helper. Reply to the user naturally and directly, the way a normal chat assistant would. No cloud model is used.',
+    'You are the LifePlanSystem assistant — a local-first, on-device helper. Reply to the user naturally and directly, the way a normal chat assistant would. Local replies use the on-device model. If the user asks to use a cloud provider, explain that a reviewed Cloud check can be prepared from the visible Chat control; never claim cloud access is impossible and never send anything silently.',
     'Style:',
     '- Answer only what the user asked, in a natural conversational voice. Keep it brief unless more detail is requested.',
     '- Do NOT report system status, the model name or filename, runtime details, project or Workboard counts, attached-context status, memory policy, routing decisions, or "next steps" unless the user explicitly asks for them.',
@@ -2052,8 +2055,6 @@ async function refreshPlannerState() {
   };
 }
 
-app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: dbPath }));
-
 // Build provenance embedded at build time (public/build-info.json -> dist/).
 // Read from the built dist first (installed/portable app), then the source
 // public/ folder (dev). Never throws; returns unknowns if absent.
@@ -2069,9 +2070,38 @@ function readBuildInfo() {
 
 app.get('/api/version', (_req, res) => ok(res, readBuildInfo()));
 
+function runtimeMode() {
+  const normalized = root.replace(/\\/g, '/').toLowerCase();
+  if (normalized.includes('/programs/life planner/app')) return 'installed';
+  if (path.basename(path.dirname(root)).toLowerCase() === 'lifeplannerportable') return 'portable';
+  return 'development';
+}
+
+function frontendAssetBuildId() {
+  try {
+    const html = fs.readFileSync(path.join(root, 'dist', 'index.html'), 'utf8');
+    return html.match(/\/assets\/(index-[A-Za-z0-9_-]+\.js)/)?.[1] || 'unknown';
+  } catch { return 'unbuilt'; }
+}
+
+function runtimeInfo() {
+  return {
+    build: readBuildInfo(),
+    runtimeMode: runtimeMode(),
+    serverRoot: root,
+    frontendAssetBuildId: frontendAssetBuildId(),
+    database: { basename: path.basename(dbPath), directory: path.basename(path.dirname(dbPath)) }
+  };
+}
+
+// Local-only server identity: enough to prove the launched server and static
+// frontend came from the same package, without exposing secrets or file data.
+app.get('/api/runtime-info', (_req, res) => ok(res, runtimeInfo()));
+app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: dbPath, runtime: runtimeInfo() }));
+
 function runtimeDiagnostics() {
   const coverage = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath) });
-  return { build: readBuildInfo(), applicationRoot: root, activeDatabasePath: dbPath, personalRetrievalEnabled: true, coverage, lastPersonalRetrieval };
+  return { ...runtimeInfo(), applicationRoot: root, activeDatabasePath: dbPath, personalRetrievalEnabled: true, coverage, lastPersonalRetrieval };
 }
 
 // Local, counts-only evidence for System and verification. It returns neither
@@ -3023,16 +3053,16 @@ app.post('/api/chat/sessions/:id/cloud-checks', (req, res) => {
     const promptHash = crypto.createHash('sha256').update(`${provider}\0${classified.prompt}`, 'utf8').digest('hex');
     const user = messages.find((message) => message.role === 'user') || null;
     const assistant = [...messages].reverse().find((message) => message.role === 'assistant') || null;
-    const consultationId = transaction(() => {
+    const created = transaction(() => {
       const consultation = db.prepare(`INSERT INTO consultations (title, local_draft, target_agent, prompt, status, chat_session_id, user_message_id, assistant_message_id, scope, provider_model)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(`Chat cloud check: ${scope}`, rawPrompt, provider, classified.prompt, classified.blocked ? 'blocked' : 'prepared', sessionId, user?.id || null, assistant?.id || null, scope, provider === 'ChatGPT' ? 'OpenAI / ChatGPT (browser-assisted)' : `${provider} (browser-assisted)`).lastInsertRowid;
-      return consultation;
+      const check = db.prepare(`INSERT INTO chat_cloud_checks (consultation_id, session_id, user_message_id, assistant_message_id, scope, provider, model, prompt_hash, included_message_ids, classification, status, error_detail, idempotency_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(consultation, sessionId, user?.id || null, assistant?.id || null, scope, provider, provider === 'ChatGPT' ? 'OpenAI / ChatGPT (browser-assisted)' : `${provider} (browser-assisted)`, promptHash, JSON.stringify(messages.map((message) => message.id)), classified.blocked ? 'blocked' : 'checking-sharing-permissions', classified.blocked ? 'blocked' : 'prepared', classified.blocked ? classified.findings.filter((finding) => finding.action === 'blocked').map((finding) => finding.type).join(', ') : null, idempotencyKey).lastInsertRowid;
+      return { consultationId: Number(consultation), checkId: Number(check) };
     });
-    const checkId = db.prepare(`INSERT INTO chat_cloud_checks (consultation_id, session_id, user_message_id, assistant_message_id, scope, provider, model, prompt_hash, included_message_ids, classification, status, error_detail, idempotency_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(consultationId, sessionId, user?.id || null, assistant?.id || null, scope, provider, provider === 'ChatGPT' ? 'OpenAI / ChatGPT (browser-assisted)' : `${provider} (browser-assisted)`, promptHash, JSON.stringify(messages.map((message) => message.id)), classified.blocked ? 'blocked' : 'checking-sharing-permissions', classified.blocked ? 'blocked' : 'prepared', classified.blocked ? classified.findings.filter((finding) => finding.action === 'blocked').map((finding) => finding.type).join(', ') : null, idempotencyKey).lastInsertRowid;
-    ok(res, { check: row('SELECT * FROM chat_cloud_checks WHERE id = ?', [checkId]), prompt: classified.prompt, findings: classified.findings, blocked: classified.blocked, reused: false });
+    ok(res, { check: row('SELECT * FROM chat_cloud_checks WHERE id = ?', [created.checkId]), prompt: classified.prompt, findings: classified.findings, blocked: classified.blocked, reused: false });
   } catch (error) { fail(res, 400, error.message); }
 });
 
@@ -3056,7 +3086,14 @@ app.post('/api/chat/cloud-checks/:id/send', (req, res) => {
 app.post('/api/chat/cloud-checks/:id/cancel', (req, res) => {
   const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [req.params.id]);
   if (!check) return fail(res, 404, 'Cloud check not found.');
-  for (const job of browserAgentJobs.values()) if (job.chatCheckId === check.id && !['answered', 'blocked', 'error'].includes(job.status)) { job.status = 'error'; job.error = 'Cancelled by user.'; }
+  for (const job of browserAgentJobs.values()) if (job.chatCheckId === check.id && !['answered', 'blocked', 'error', 'cancelled'].includes(job.status)) {
+    // Invalidate the connector lease so a late browser result is rejected at
+    // the boundary, rather than merely ignored after it reaches the server.
+    job.status = 'cancelled';
+    job.error = 'Cancelled by user.';
+    job.claimToken = '';
+    job.leaseExpiresAt = 0;
+  }
   db.prepare("UPDATE chat_cloud_checks SET status = 'cancelled', error_detail = 'Cancelled by user.', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(check.id);
   db.prepare("UPDATE consultations SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(check.consultation_id);
   ok(res, { check: row('SELECT * FROM chat_cloud_checks WHERE id = ?', [check.id]) });
