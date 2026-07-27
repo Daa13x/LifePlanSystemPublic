@@ -1320,6 +1320,36 @@ function row(sql, params = []) {
   return db.prepare(sql).get(...params);
 }
 
+function transaction(fn) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction already settled */ }
+    throw error;
+  }
+}
+
+function persistChatUserTurn(sessionId, content) {
+  return transaction(() => {
+    const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'user', content).lastInsertRowid;
+    const candidateId = shouldCreateMemoryCandidate(content).create ? createCandidateFromMessage(sessionId, messageId, content) : null;
+    db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+    return { messageId, candidateId, userMessage: row('SELECT * FROM chat_messages WHERE id = ?', [messageId]) };
+  });
+}
+
+function persistChatAssistantTurn(sessionId, content, metadata) {
+  return transaction(() => {
+    const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)')
+      .run(sessionId, 'assistant', content, JSON.stringify(metadata)).lastInsertRowid;
+    db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+    return assistantId;
+  });
+}
+
 function classifyCandidate(text) {
   const lower = text.toLowerCase();
   if (lower.includes('blocked') || lower.includes('blocker')) return 'blocker';
@@ -2481,18 +2511,14 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   if (!content) return fail(res, 400, 'Message content is required.');
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
-  const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(req.params.id, 'user', content).lastInsertRowid;
-  const candidateId = shouldCreateMemoryCandidate(content).create
-    ? createCandidateFromMessage(Number(req.params.id), messageId, content)
-    : null;
-  const userMessage = row('SELECT * FROM chat_messages WHERE id = ?', [messageId]);
-  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
+  const sessionId = Number(req.params.id);
+  const { messageId, candidateId, userMessage } = persistChatUserTurn(sessionId, content);
   const controller = new AbortController();
   activeChatGenerations.set(String(req.params.id), controller);
   const startedAt = Date.now();
   let assistant;
   try {
-    assistant = await generateAssistantTurn(Number(req.params.id), content, controller.signal);
+    assistant = await generateAssistantTurn(sessionId, content, controller.signal);
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
@@ -2508,10 +2534,8 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   lastRuntimeResult = { ok: true, mode: assistant.mode, at: new Date().toISOString() };
   // Store the natural answer only; diagnostics live in structured metadata so
   // Clean mode stays conversational and Detailed/Developer can surface them.
-  const metadata = buildAssistantMetadata(Number(req.params.id), candidateId, assistant, Date.now() - startedAt);
-  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)')
-    .run(req.params.id, 'assistant', assistant.content, JSON.stringify(metadata)).lastInsertRowid;
-  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
+  const metadata = buildAssistantMetadata(sessionId, candidateId, assistant, Date.now() - startedAt);
+  const assistantId = persistChatAssistantTurn(sessionId, assistant.content, metadata);
   ok(res, {
     messages: allRows('SELECT * FROM chat_messages WHERE id IN (?, ?) ORDER BY id ASC', [messageId, assistantId]),
     candidateId,
@@ -2530,12 +2554,7 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
   const sessionId = Number(req.params.id);
-  const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'user', content).lastInsertRowid;
-  const candidateId = shouldCreateMemoryCandidate(content).create
-    ? createCandidateFromMessage(sessionId, messageId, content)
-    : null;
-  const userMessage = row('SELECT * FROM chat_messages WHERE id = ?', [messageId]);
-  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+  const { messageId, candidateId, userMessage } = persistChatUserTurn(sessionId, content);
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -2572,8 +2591,7 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   lastRuntimeResult = { ok: true, mode: assistant.mode, at: new Date().toISOString() };
   // Store the natural answer only; diagnostics live in structured metadata.
   const metadata = buildAssistantMetadata(sessionId, candidateId, assistant, Date.now() - startedAt);
-  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)').run(sessionId, 'assistant', assistant.content, JSON.stringify(metadata)).lastInsertRowid;
-  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+  const assistantId = persistChatAssistantTurn(sessionId, assistant.content, metadata);
   emit('done', { message: row('SELECT * FROM chat_messages WHERE id = ?', [assistantId]), runtime: assistant.mode, candidateId });
   res.end();
 });
