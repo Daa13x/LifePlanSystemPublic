@@ -571,7 +571,10 @@ app.use((req, res, next) => {
   // is rejected here with the connector's own 401, so the exemption only ever
   // applies AFTER successful connector-token validation.
   const connectorOk = browserExtensionAuthorized(req);
-  if (req.path.startsWith('/api/browser/extension/')) {
+  // The install helper is invoked by the local Settings page before an
+  // extension can exist. It is a CSRF-protected local UI action, not an
+  // extension protocol endpoint.
+  if (req.path.startsWith('/api/browser/extension/') && req.path !== '/api/browser/extension/install-helper') {
     if (connectorOk) return next();
     return fail(res, 401, 'Browser connector authentication failed. Reload the unpacked LPS extension to refresh pairing.');
   }
