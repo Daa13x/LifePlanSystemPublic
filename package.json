@@ -57,6 +57,8 @@
     "verify:extension-icons": "node scripts/verify-extension-icons.mjs",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss",
+    "build:native": "powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1",
+    "verify:native": "powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1 -SmokeTest",
     "verify:installer-safety": "node scripts/verify-installer-safety.mjs",
     "verify:build-provenance": "node scripts/verify-build-provenance.mjs"
   },

@@ -63,3 +63,13 @@ Create a formal compatibility fixture from the current Node health/workboard res
 ## Next
 
 Make the native shell packageable and add a native launcher alongside the existing Node tray path. Keep it opt-in until installed evidence proves WebView runtime, health, clean exit and profile isolation.
+
+## Native publish evidence
+
+- Added npm run build:native and npm run verify:native.
+- Evidence: verify:native published the win-x64 native artifact to release/LifePlannerNative and passed its bounded native loopback health smoke test.
+- The native artifact is not installed or substituted for the Node package. This is intentional: SQLite ownership, full React contract routing, provider isolation and Node exit gates remain incomplete.
+
+## Next
+
+Define a native launch manifest and portable-package verification that can ship the native artifact alongside, but never replace, the Node runtime until full parity evidence is recorded.
