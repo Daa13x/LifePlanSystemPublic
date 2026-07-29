@@ -1514,7 +1514,8 @@ function ChatConnectionBar({ connection, runtime, generating, navigate }) {
       <div className="conn-item">
         <span>Always-on local sources</span>
         <strong>{available.knowledge} Knowledge · {available.workboard} Workboard · {available.files} file(s)</strong>
-        <small title={available.sources.join('\n')}>{available.total} safe records searchable</small>
+        <small>{available.total} safe records searchable</small>
+        {available.sources.length > 0 && <details className="local-source-list"><summary>Show indexed source files</summary><ul>{available.sources.map((source) => <li key={source}>{source}</li>)}</ul></details>}
         <span>Attached context</span>
         <strong>{attached.knowledge} Knowledge · {attached.workboard} Workboard · {attached.files} file(s)</strong>
       </div>

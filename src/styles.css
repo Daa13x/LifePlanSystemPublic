@@ -628,6 +628,10 @@ h3 { font-size: 14px; font-weight: 700; }
 .session-entry:hover .session-hover-actions,
 .session-entry:focus-within .session-hover-actions { opacity: 1; pointer-events: auto; }
 .session-hover-actions .icon-button { width: 25px; height: 25px; padding: 0; background: var(--panel); }
+.local-source-list { margin-top: 4px; font-size: 11px; color: var(--muted); }
+.local-source-list summary { cursor: pointer; color: var(--accent); }
+.local-source-list ul { margin: 5px 0 0; padding-left: 16px; max-height: 140px; overflow: auto; }
+.local-source-list li { overflow-wrap: anywhere; }
 .chat-panel { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; position: relative; }
 .chat-header { padding: 16px; border-bottom: 1px solid var(--line); }
 .messages { padding: 16px; overflow: auto; display: grid; gap: 12px; align-content: start; scroll-behavior: auto; overflow-anchor: none; }
