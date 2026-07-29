@@ -58,6 +58,7 @@
     "verify:installed-chat": "node scripts/verify-installed-chat.mjs",
     "verify:windows-path-open": "node scripts/verify-windows-path-open.mjs",
     "verify:extension-icons": "node scripts/verify-extension-icons.mjs",
+    "verify:native-provider-window": "node scripts/verify-native-provider-window.mjs",
     "package:portable": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "package:inno": "powershell -ExecutionPolicy Bypass -File scripts/package-portable.ps1 && ISCC.exe installer/LifePlannerPortable.iss",
     "build:native": "powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1",

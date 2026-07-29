@@ -53,6 +53,13 @@ import {
 
 const API = '';
 
+function openNativeProviderWindow(provider) {
+  const bridge = window.chrome?.webview;
+  if (!bridge?.postMessage) return false;
+  bridge.postMessage(JSON.stringify({ type: 'open-provider-window', provider }));
+  return true;
+}
+
 function ChatGptMark({ size = 18, ...props }) {
   return <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
     <path d="M12 3.1a4.7 4.7 0 0 1 7.8 3.52v3.11" />
@@ -297,6 +304,10 @@ function App() {
   }
 
   async function openChatGptSyncFromShell() {
+    if (openNativeProviderWindow('chatgpt')) {
+      setNotice('Opened ChatGPT in its separate Life Planner provider window. Sign in there; it uses an isolated browser profile and does not send LPS data automatically.');
+      return;
+    }
     try {
       await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: 'https://chatgpt.com/' }) });
       setNotice('Opened ChatGPT in your normal browser. Sign in there, then keep the LPS Browser Agent enabled to connect the session.');
@@ -1333,6 +1344,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   async function openChatGptSync() {
+    if (openNativeProviderWindow('chatgpt')) {
+      setNotice('Opened ChatGPT in its separate Life Planner provider window. Sign in there; it uses an isolated browser profile and does not send LPS data automatically.');
+      return;
+    }
     try {
       await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: 'https://chatgpt.com/' }) });
       setNotice('Opened ChatGPT in your normal browser. Sign in there, then keep the LPS Browser Agent enabled to connect the session.');
