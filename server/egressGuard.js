@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 const SECRET_PATTERNS = [
-  ['token', /\b(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|AKIA[A-Z0-9]{12,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g],
+  ['token', /(?:sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|AKIA[A-Z0-9]{12,}|xox[baprs]-[A-Za-z0-9-]{10,})/g],
   ['private-key', /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g]
 ];
 const DENIED = [/(^|\/)\.env[^/]*$/i, /\.(pem|key|pfx|sqlite|db)$/i, /(^|\/)id_rsa[^/]*$/i, /(^|\/)secrets\//i, /(^|\/)credentials[^/]*$/i];
