@@ -146,8 +146,8 @@ export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', 
   return {
     resolvedDatabasePath: dbPath || null,
     resolvedUserDataPath: userDataPath || null,
-    sourceAdapters: ['knowledge_items', 'projects', 'chat_messages:user', 'bundled_github_knowledge'],
-    unavailableCategories: ['attachments (paths only; no persisted extracted text)', 'settings (runtime configuration and secrets excluded)', 'roadmap_items (product implementation roadmap, not confirmed personal context)', 'unbundled or private repository files'],
+    sourceAdapters: ['knowledge_items', 'projects', 'chat_messages:user', 'bundled_github_knowledge', 'safe_private_repository_files'],
+    unavailableCategories: ['attachments (paths only; no persisted extracted text)', 'settings (runtime configuration and secrets excluded)', 'roadmap_items (product implementation roadmap, not confirmed personal context)', 'protected, secret, binary, and oversized private repository files'],
     counts: {
       activeKnowledge: count("SELECT COUNT(*) count FROM knowledge_items WHERE status IN ('active','stable','stale','blocked')"),
       pendingKnowledge: count("SELECT COUNT(*) count FROM knowledge_items WHERE status = 'pending review'"),
