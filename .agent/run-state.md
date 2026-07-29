@@ -164,3 +164,13 @@ Build the formal Node request/response fixture corpus for the first project comm
 ## Next
 
 Extend the fixture corpus to project updates and rejection cases, then create a controlled native-only compatibility adapter that is disabled by default and can be exercised against a copied profile before any live routing decision.
+
+## Shared project request validation
+
+- Aligned the native project command with the actual Projects UI status surface: active, blocked, waiting, stable, archived, done and completed. User-entered owners are retained but bounded; confidence and text fields are bounded and validated.
+- The existing Node `POST /api/projects` route now enforces the same canonical bounds and defaults before writing. This removes a future transfer mismatch without changing the accepted UI states or canonical response shape.
+- Added `npm run verify:project-contract`, which launches the real Node server on a disposable SQLite profile, proves a valid blocked project with a named owner persists canonically, and proves six invalid request classes return 400. `verify:chat-cloud-checks` passed after the change.
+
+## Next
+
+Create the matching project-update fixture and native transaction contract, including stale/idempotency/cancellation outcomes. Keep it copied-profile-only until both create and update compatibility replays are complete.

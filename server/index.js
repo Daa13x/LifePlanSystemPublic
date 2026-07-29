@@ -3383,13 +3383,24 @@ app.get('/api/projects', (_req, res) => ok(res, allRows('SELECT * FROM projects 
 
 app.get('/api/approvals', (_req, res) => ok(res, allRows("SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at DESC")));
 
+const PROJECT_STATUSES = new Set(['active', 'blocked', 'waiting', 'stable', 'archived', 'done', 'completed']);
+
 app.post('/api/projects', (req, res) => {
   const name = req.body.name?.trim();
-  if (!name) return fail(res, 400, 'Project name is required.');
+  if (!name || name.length > 200) return fail(res, 400, 'Project name must contain 1 to 200 characters.');
+  const status = req.body.status ?? 'active';
+  if (!PROJECT_STATUSES.has(status)) return fail(res, 400, 'Project status is not allowed.');
+  const owner = String(req.body.owner ?? 'user').trim();
+  if (!owner || owner.length > 120) return fail(res, 400, 'Project owner must contain 1 to 120 characters.');
+  const confidence = Number(req.body.confidence ?? 0.75);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) return fail(res, 400, 'Project confidence must be between zero and one.');
+  const evidence = String(req.body.evidence ?? '').trim() || 'Manual entry';
+  const nextAction = String(req.body.next_action ?? '').trim();
+  if (evidence.length > 4000 || nextAction.length > 4000) return fail(res, 400, 'Project evidence and next action are limited to 4000 characters.');
   const id = db.prepare(`
     INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
     VALUES (?, ?, ?, 'manual', ?, date('now'), ?, ?)
-  `).run(name, req.body.status || 'active', req.body.owner || 'user', Number(req.body.confidence || 0.75), req.body.evidence || 'Manual entry', req.body.next_action || '').lastInsertRowid;
+  `).run(name, status, owner, confidence, evidence, nextAction).lastInsertRowid;
   ok(res, row('SELECT * FROM projects WHERE id = ?', [id]));
 });
 

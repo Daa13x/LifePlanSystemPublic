@@ -49,6 +49,7 @@
     "verify:setup-recovery-ui": "node scripts/verify-setup-recovery-ui.mjs",
     "verify:chat-behavior": "node scripts/verify-chat-behavior.mjs",
     "verify:chat-cloud-checks": "node scripts/verify-chat-cloud-checks.mjs",
+    "verify:project-contract": "node scripts/verify-project-contract.mjs",
     "verify:local-knowledge-memory": "node scripts/verify-local-knowledge-memory.mjs",
     "verify:personal-knowledge-coverage": "node scripts/verify-personal-knowledge-coverage.mjs",
     "verify:real-knowledge-runtime": "node scripts/verify-real-knowledge-runtime.mjs",

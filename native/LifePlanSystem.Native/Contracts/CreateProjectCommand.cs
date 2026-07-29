@@ -22,12 +22,7 @@ public sealed class CreateProjectCommandHandler(NativeDatabase database)
 {
     private static readonly HashSet<string> AllowedStatuses = new(StringComparer.Ordinal)
     {
-        "active", "paused", "done", "completed", "archived"
-    };
-
-    private static readonly HashSet<string> AllowedOwners = new(StringComparer.Ordinal)
-    {
-        "user", "app"
+        "active", "blocked", "waiting", "stable", "archived", "done", "completed"
     };
 
     public async Task<ProjectCommandResult> ExecuteAsync(CreateProjectCommand command, CancellationToken cancellationToken)
@@ -51,8 +46,8 @@ public sealed class CreateProjectCommandHandler(NativeDatabase database)
             insert.Parameters.AddWithValue("$status", command.Status);
             insert.Parameters.AddWithValue("$owner", command.Owner);
             insert.Parameters.AddWithValue("$confidence", command.Confidence);
-            insert.Parameters.AddWithValue("$evidence", command.Evidence.Trim());
-            insert.Parameters.AddWithValue("$nextAction", (object?)command.NextAction?.Trim() ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$evidence", string.IsNullOrWhiteSpace(command.Evidence) ? "Manual entry" : command.Evidence.Trim());
+            insert.Parameters.AddWithValue("$nextAction", command.NextAction?.Trim() ?? string.Empty);
             var projectId = Convert.ToInt64(await insert.ExecuteScalarAsync(token));
 
             await using var receipt = connection.CreateCommand();
@@ -72,12 +67,14 @@ public sealed class CreateProjectCommandHandler(NativeDatabase database)
             throw new ArgumentException("Project name must contain 1 to 200 characters.", nameof(command));
         if (!AllowedStatuses.Contains(command.Status))
             throw new ArgumentException("Project status is not allowed.", nameof(command));
-        if (!AllowedOwners.Contains(command.Owner))
-            throw new ArgumentException("Project owner is not allowed.", nameof(command));
+        if (string.IsNullOrWhiteSpace(command.Owner) || command.Owner.Trim().Length > 120)
+            throw new ArgumentException("Project owner must contain 1 to 120 characters.", nameof(command));
         if (double.IsNaN(command.Confidence) || double.IsInfinity(command.Confidence) || command.Confidence is < 0 or > 1)
             throw new ArgumentException("Project confidence must be between zero and one.", nameof(command));
         if (string.IsNullOrWhiteSpace(command.IdempotencyKey) || command.IdempotencyKey.Length > 128)
             throw new ArgumentException("Idempotency key is required and bounded.", nameof(command));
+        if (command.Evidence?.Length > 4000 || command.NextAction?.Length > 4000)
+            throw new ArgumentException("Project evidence and next action are bounded to 4000 characters.", nameof(command));
     }
 
     private static async Task EnsureReceiptsAsync(SqliteConnection connection, SqliteTransaction transaction, CancellationToken token)
