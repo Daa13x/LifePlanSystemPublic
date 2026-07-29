@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
 // Deterministic, local-only Knowledge retrieval. This is deliberately
 // structured-search first: no embeddings, network calls, or hidden database
 // dump. Every returned item includes human-readable provenance.
@@ -10,6 +13,39 @@ const STOP = new Set(['what', 'does', 'about', 'have', 'that', 'this', 'with', '
 // of broad "tell me about me" retrieval, even though they remain in their own
 // Chat session.  A turn already blocked for cloud egress is also ineligible.
 const SENSITIVE_CHAT_HISTORY = /\b(?:diagnos(?:is|ed)|medication|prescription|therap(?:y|ist)|mental health|medical record|symptom|hospital|disability|password|passcode|api[ _-]?key|secret|social security)\b/i;
+const REPOSITORY_KNOWLEDGE_ROOT = 'LifePlanSystem_Public_Sanitized';
+const REPOSITORY_KNOWLEDGE_DIRECTORIES = ['docs', 'rules', 'source_of_truth', 'templates'];
+const REPOSITORY_KNOWLEDGE_EXTENSIONS = new Set(['.md', '.mdx', '.txt']);
+const MAX_REPOSITORY_FILES = 60;
+const MAX_REPOSITORY_FILE_CHARS = 8000;
+
+function safeRepositoryKnowledge(repoRoot = '') {
+  if (!repoRoot) return [];
+  const root = path.resolve(repoRoot);
+  const knowledgeRoot = path.join(root, REPOSITORY_KNOWLEDGE_ROOT);
+  if (!fs.existsSync(knowledgeRoot) || !fs.statSync(knowledgeRoot).isDirectory()) return [];
+  const files = [];
+  const roots = [path.join(knowledgeRoot, 'README_PUBLIC_SANITIZED.md'), ...REPOSITORY_KNOWLEDGE_DIRECTORIES.map((directory) => path.join(knowledgeRoot, directory))];
+  const visit = (target) => {
+    if (files.length >= MAX_REPOSITORY_FILES || !fs.existsSync(target)) return;
+    const stat = fs.lstatSync(target);
+    if (stat.isSymbolicLink()) return;
+    if (stat.isFile()) {
+      if (!REPOSITORY_KNOWLEDGE_EXTENSIONS.has(path.extname(target).toLowerCase())) return;
+      const relative = path.relative(root, target).replaceAll('\\\\', '/');
+      const text = fs.readFileSync(target, 'utf8').slice(0, MAX_REPOSITORY_FILE_CHARS).trim();
+      if (text) files.push({ relative, text, updatedAt: stat.mtime.toISOString() });
+      return;
+    }
+    if (!stat.isDirectory()) return;
+    for (const entry of fs.readdirSync(target, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      visit(path.join(target, entry.name));
+      if (files.length >= MAX_REPOSITORY_FILES) break;
+    }
+  };
+  for (const target of roots) visit(target);
+  return files;
+}
 
 function words(value) {
   const raw = String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((word) => !STOP.has(word)) || [];
@@ -19,7 +55,7 @@ function words(value) {
 function dateValue(value) { const time = Date.parse(value || ''); return Number.isFinite(time) ? time : 0; }
 function snippet(value, limit = 700) { const text = String(value || '').trim(); return text.length > limit ? `${text.slice(0, limit)}…` : text; }
 
-export function sourceRegistry(db, { includeHistory = false, includeCandidates = false } = {}) {
+export function sourceRegistry(db, { includeHistory = false, includeCandidates = false, repoRoot = '' } = {}) {
   const records = [];
   const active = includeHistory ? '' : "AND status NOT IN ('archived','deprecated','superseded')";
   for (const item of db.prepare(`SELECT * FROM knowledge_items WHERE 1=1 ${active}`).all()) {
@@ -55,20 +91,27 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
     records.push({ canonicalId: `chat:${message.id}`, category: 'conversation history', title: message.session_title || 'Chat', text: message.content,
       timestamp: message.created_at, updatedAt: message.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: true, state: 'historical', source: 'saved Chat', provenance: `Conversation: ${message.session_title || 'Chat'}`, record: message });
   }
+  for (const file of safeRepositoryKnowledge(repoRoot)) {
+    records.push({
+      canonicalId: `repository:${file.relative}`, category: 'repository knowledge', title: path.basename(file.relative), text: file.text,
+      timestamp: file.updatedAt, updatedAt: file.updatedAt, sensitivity: 'public', chatReadable: true, chatProposable: false, state: 'reference',
+      source: 'bundled GitHub knowledge base', provenance: `Repository document: ${file.relative}`, record: { path: file.relative }
+    });
+  }
   return records;
 }
 
-export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '' } = {}) {
+export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', repoRoot = '' } = {}) {
   const count = (sql, params = []) => Number(db.prepare(sql).get(...params)?.count || 0);
-  const registry = sourceRegistry(db);
+  const registry = sourceRegistry(db, { repoRoot });
   const retrievableByCategory = Object.fromEntries([...new Set(registry.map((record) => record.category))]
     .sort()
     .map((category) => [category, registry.filter((record) => record.category === category).length]));
   return {
     resolvedDatabasePath: dbPath || null,
     resolvedUserDataPath: userDataPath || null,
-    sourceAdapters: ['knowledge_items', 'projects', 'chat_messages:user'],
-    unavailableCategories: ['attachments (paths only; no persisted extracted text)', 'settings (runtime configuration and secrets excluded)', 'roadmap_items (product implementation roadmap, not confirmed personal context)'],
+    sourceAdapters: ['knowledge_items', 'projects', 'chat_messages:user', 'bundled_github_knowledge'],
+    unavailableCategories: ['attachments (paths only; no persisted extracted text)', 'settings (runtime configuration and secrets excluded)', 'roadmap_items (product implementation roadmap, not confirmed personal context)', 'unbundled or private repository files'],
     counts: {
       activeKnowledge: count("SELECT COUNT(*) count FROM knowledge_items WHERE status IN ('active','stable','stale','blocked')"),
       pendingKnowledge: count("SELECT COUNT(*) count FROM knowledge_items WHERE status = 'pending review'"),
@@ -116,12 +159,12 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
 }
 
 export function isLocalKnowledgeQuestion(message) {
-  return /what do you know about(?:\s+me)?(?:\s+|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously/i.test(String(message || '').toLowerCase());
+  return /what do you know about(?:\s+me)?(?:\s+|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
 }
 
-export function answerLocalKnowledgeQuestion(db, message) {
+export function answerLocalKnowledgeQuestion(db, message, options = {}) {
   const includeCandidates = /\b(pending|candidate|review)\b/i.test(String(message || ''));
-  const result = retrieveLocalKnowledge(db, message, { includeCandidates });
+  const result = retrieveLocalKnowledge(db, message, { ...options, includeCandidates });
   if (!result.items.length) return { content: 'I searched the active LPS records available to Chat, but I did not find a matching saved record.', sources: [] };
   const grouped = new Map();
   for (const item of result.items) {

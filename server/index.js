@@ -1656,7 +1656,7 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
   // registry before a model is consulted. This avoids the former false
   // disclaimer and never sends private records to an external provider.
   if (isLocalKnowledgeQuestion(userMessage)) {
-    const answer = answerLocalKnowledgeQuestion(db, userMessage);
+    const answer = answerLocalKnowledgeQuestion(db, userMessage, { repoRoot: root });
     lastPersonalRetrieval = { at: new Date().toISOString(), sourceCount: answer.sources.length, resultType: answer.sources.length ? 'deterministic-local-knowledge' : 'deterministic-no-match' };
     if (typeof onToken === 'function' && answer.content) onToken(answer.content);
     return { mode: 'local knowledge', content: answer.content, localSources: answer.sources, diagnostics: { endpointType: 'local-knowledge', sourceCount: answer.sources.length } };
@@ -2120,7 +2120,7 @@ app.get('/api/runtime-info', (_req, res) => ok(res, runtimeInfo()));
 app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: dbPath, runtime: runtimeInfo() }));
 
 function runtimeDiagnostics() {
-  const coverage = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath) });
+  const coverage = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath), repoRoot: root });
   return { ...runtimeInfo(), applicationRoot: root, activeDatabasePath: dbPath, personalRetrievalEnabled: true, coverage, lastPersonalRetrieval };
 }
 

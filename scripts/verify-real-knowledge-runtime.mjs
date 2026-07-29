@@ -50,13 +50,25 @@ try {
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await page.getByRole('button', { name: 'Send', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
     assert.ok(sessionId, 'built UI sent the Chat request to a session');
+    const personalSessionId = sessionId;
     const messages = (await (await fetch(`${base}/api/chat/sessions/${sessionId}/messages`)).json()).data;
     const answer = messages.filter((message) => message.role === 'assistant').at(-1);
     const metadata = JSON.parse(answer.metadata || '{}');
     assert.equal(metadata.endpointType, 'local-knowledge', 'answer is deterministic local retrieval, not model fallback');
     assert.ok(metadata.localSources?.length > 0, 'answer retains source provenance');
     assert.doesNotMatch(answer.content, /don't have access to any personal records/i);
-    await page.goto(`${base}/#chat/${sessionId}`, { waitUntil: 'networkidle' });
+    await page.getByRole('button', { name: 'New chat' }).click();
+    await page.getByPlaceholder('Tell Life Planner what changed, what is blocked, or what needs review...').fill('What does the GitHub knowledge base say about memory architecture?');
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).waitFor({ state: 'visible', timeout: 15000 });
+    assert.ok(sessionId, 'repository question is sent to a session');
+    const repositoryMessages = (await (await fetch(`${base}/api/chat/sessions/${sessionId}/messages`)).json()).data;
+    const repositoryAnswer = repositoryMessages.filter((message) => message.role === 'assistant').at(-1);
+    const repositoryMetadata = JSON.parse(repositoryAnswer.metadata || '{}');
+    assert.equal(repositoryMetadata.endpointType, 'local-knowledge', 'repository knowledge is answered locally');
+    assert.ok(repositoryMetadata.localSources?.some((source) => source.category === 'repository knowledge'), 'repository answer retains document provenance');
+    assert.match(repositoryAnswer.content, /memory/i, 'repository answer contains the matched document content');
+    await page.goto(`${base}/#chat/${personalSessionId}`, { waitUntil: 'networkidle' });
     await page.getByText('tell me something about me').last().waitFor({ timeout: 15000 });
     console.log(JSON.stringify({ build: diagnostics.build.shortCommit, database: diagnostics.activeDatabasePath, retrievable: diagnostics.coverage.totalRetrievable, sourceCount: metadata.localSources.length, persistence: true, csrf: true }, null, 2));
   } finally { await browser.close(); }

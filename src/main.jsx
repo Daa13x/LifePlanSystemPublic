@@ -1345,7 +1345,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               ))}
             </div>
           ) : (
-            <div className="context-chips"><span>No Knowledge, Workboard, or file context attached. New chats start empty — attach records deliberately.</span></div>
+            <div className="context-chips"><span>No records or files attached. Reviewed local Knowledge and bundled GitHub documentation remain searchable; attach records deliberately for focused context.</span></div>
           )}
           {!modelReady && (
             <div className="source-warning warn">

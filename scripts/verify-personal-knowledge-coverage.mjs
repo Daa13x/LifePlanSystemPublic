@@ -62,12 +62,21 @@ try {
   const disabled = retrieveLocalKnowledge(db, 'Coverage preference', { disabledCategories: ['preference'] });
   assert.ok(!disabled.items.some((item) => item.category === 'preference'), 'disabled category cannot leak records');
 
-  const diagnostic = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath) });
+  const repositoryRoot = path.join(probe, 'repository');
+  const repositoryDoc = path.join(repositoryRoot, 'LifePlanSystem_Public_Sanitized', 'docs', 'MEMORY_ARCHITECTURE.md');
+  fs.mkdirSync(path.dirname(repositoryDoc), { recursive: true });
+  fs.writeFileSync(repositoryDoc, '# Memory Architecture\n\nThe bundled GitHub knowledge base is available to local Chat retrieval.');
+  const repositoryAnswer = answerLocalKnowledgeQuestion(db, 'What does the GitHub knowledge base say about memory architecture?', { repoRoot: repositoryRoot });
+  assert.match(repositoryAnswer.content, /bundled GitHub knowledge base/i);
+  assert.ok(repositoryAnswer.sources.some((source) => source.category === 'repository knowledge' && /MEMORY_ARCHITECTURE/.test(source.provenance)), 'repository knowledge carries file provenance');
+
+  const diagnostic = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath), repoRoot: repositoryRoot });
   assert.equal(diagnostic.resolvedDatabasePath, dbPath);
   assert.equal(diagnostic.resolvedUserDataPath, path.dirname(dbPath));
   assert.ok(diagnostic.counts.activeKnowledge >= 6 && diagnostic.counts.pendingCandidates === 1);
   assert.equal(diagnostic.counts.assistantChatMessagesExcluded, 1);
   assert.ok(diagnostic.sourceAdapters.includes('knowledge_items'));
+  assert.ok(diagnostic.sourceAdapters.includes('bundled_github_knowledge'));
   assert.ok(diagnostic.unavailableCategories.some((category) => category.startsWith('settings')));
   assert.ok(!JSON.stringify(diagnostic).includes('Assistant-only claim'), 'diagnostic contains counts only');
   console.log('Personal knowledge coverage verification passed.');
