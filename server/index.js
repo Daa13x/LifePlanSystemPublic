@@ -24,7 +24,7 @@ import {
 } from './setupRecovery.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
-import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, sourceRegistry } from './localKnowledge.js';
+import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -1565,6 +1565,9 @@ async function buildConversationPrompt(sessionId, userMessage) {
   const selected = readSelectedContextRecords(sessionId);
   const hasRecords = Boolean(selected);
   const hasFiles = files.length > 0;
+  const retrieved = shouldGroundConversationInLocalKnowledge(userMessage)
+    ? retrieveLocalKnowledge(db, userMessage, { repoRoot: root, limit: 6, budget: 3600 })
+    : { items: [] };
 
   const systemInstructions = [
     'You are the LifePlanSystem assistant — a local-first, on-device helper. Reply to the user naturally and directly, the way a normal chat assistant would. Local replies use the on-device model. If the user asks to use a cloud provider, explain that a reviewed Cloud check can be prepared from the visible Chat control; never claim cloud access is impossible and never send anything silently.',
@@ -1587,8 +1590,16 @@ async function buildConversationPrompt(sessionId, userMessage) {
     if (hasFiles) parts.push(files.map((file) => `--- ${file.path} ---\n${file.text}`).join('\n\n'));
     parts.push('');
   }
+  if (retrieved.items.length) {
+    parts.push('Relevant local records selected for this reply. Use them as factual context, mention uncertainty when they are incomplete, and do not claim a record says more than the excerpt:',
+      ...retrieved.items.map((item, index) => `--- local source ${index + 1}: ${item.provenance || item.title} ---\n${item.body}`),
+      '--- end local records ---', '');
+  }
   parts.push(`User: ${userMessage}`);
-  return parts.join('\n');
+  return {
+    prompt: parts.join('\n'),
+    localSources: retrieved.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, updatedAt: item.updatedAt, state: item.state, whySelected: item.whySelected, source: item.source, provenance: item.provenance }))
+  };
 }
 
 // --- Explicit data queries answered deterministically (no model, no dump) ----
@@ -1890,7 +1901,8 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken, onSt
       : 'No Planner Assistant model is assigned and no OpenAI-compatible local endpoint is configured.');
   }
 
-  const prompt = await buildConversationPrompt(sessionId, userMessage);
+  const conversation = await buildConversationPrompt(sessionId, userMessage);
+  const prompt = conversation.prompt;
   try {
     if (status.endpointConfigured) {
       const { content, usage } = await runEndpointModel(status.endpoint, status.endpointModelName, prompt, signal, onToken);
@@ -1898,6 +1910,7 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken, onSt
         return {
           mode: `local endpoint (${status.endpointModelName})`,
           content,
+          localSources: conversation.localSources,
           diagnostics: { endpointType: 'OpenAI-compatible local endpoint', endpoint: status.endpoint, model: status.endpointModelName || null, usage }
         };
       }
@@ -1914,13 +1927,13 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken, onSt
     }
     if (status.managedEndpoint) {
       const { content, usage } = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt, signal, onToken);
-      if (content) return { mode: 'bundled llama.cpp', content, diagnostics: { endpointType: 'bundled llama.cpp', endpoint: status.managedEndpoint, model: status.endpointModelName || status.model?.name || null, usage } };
+      if (content) return { mode: 'bundled llama.cpp', content, localSources: conversation.localSources, diagnostics: { endpointType: 'bundled llama.cpp', endpoint: status.managedEndpoint, model: status.endpointModelName || status.model?.name || null, usage } };
     }
     if (status.llamaCliConfigured && status.llamaCliExists) {
       // llama-cli/llama-completion runs as a buffered subprocess; deliver its
       // output as a single chunk so streaming clients still render the answer.
       const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt, signal);
-      if (content) { if (typeof onToken === 'function') onToken(content); return { mode: 'llama-cli', content, diagnostics: { endpointType: 'llama-cli', model: status.model?.name || null, modelPath: status.model?.path || null } }; }
+      if (content) { if (typeof onToken === 'function') onToken(content); return { mode: 'llama-cli', content, localSources: conversation.localSources, diagnostics: { endpointType: 'llama-cli', model: status.model?.name || null, modelPath: status.model?.path || null } }; }
     }
   } catch (error) {
     if (signal?.aborted) throw new Error('Local model generation was cancelled.');

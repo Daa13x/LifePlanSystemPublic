@@ -169,10 +169,16 @@ export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', 
 function score(record, queryWords, rawQuery, now = Date.now()) {
   const haystack = `${record.category}\n${record.title}\n${record.text}`.toLowerCase();
   const matches = queryWords.reduce((total, word) => total + (haystack.includes(word) ? 1 : 0), 0);
-  const broad = /what do you know|about me|about myself|tell me (?:something )?about (?:myself|me)|profile|preferences|health|goals|projects|decisions|tasks|overdue|what am i (?:currently )?working on/i.test(rawQuery);
+  const broad = shouldGroundConversationInLocalKnowledge(rawQuery);
   if (!matches && !broad) return -Infinity;
   const recency = Math.max(0, 1 - ((now - dateValue(record.updatedAt)) / (365 * 86400000)));
-  return matches * 10 + (record.state === 'approved' ? 4 : record.state === 'pending' ? 1 : 0) + recency;
+  // A question about the user must prefer their actual local records over the
+  // public app documentation that happens to share generic words such as
+  // "knowledge" or "work". Private repository files are personal too.
+  const personalPriority = broad
+    ? (record.category !== 'repository knowledge' ? 30 : record.source === 'local private repository' ? 6 : -8)
+    : 0;
+  return matches * 10 + personalPriority + (record.state === 'approved' ? 4 : record.state === 'pending' ? 1 : 0) + recency;
 }
 
 export function retrieveLocalKnowledge(db, query, options = {}) {
@@ -183,7 +189,14 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
     && !disabled.has(record.category)
     // The just-saved user prompt must not be recycled as evidence for itself.
     && !(record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery));
-  const ranked = rows.map((record) => ({ ...record, score: score(record, queryWords, String(query || '')) })).filter((record) => Number.isFinite(record.score)).sort((a, b) => b.score - a.score || dateValue(b.updatedAt) - dateValue(a.updatedAt));
+  const broadPersonalRequest = shouldGroundConversationInLocalKnowledge(query);
+  // Do not crowd a personal answer with source-code and product documents when
+  // any eligible personal record exists. Public documentation remains a useful
+  // fallback for repository questions or an otherwise empty personal profile.
+  const eligibleRows = broadPersonalRequest && rows.some((record) => record.category !== 'repository knowledge')
+    ? rows.filter((record) => record.category !== 'repository knowledge')
+    : rows;
+  const ranked = eligibleRows.map((record) => ({ ...record, score: score(record, queryWords, String(query || '')) })).filter((record) => Number.isFinite(record.score)).sort((a, b) => b.score - a.score || dateValue(b.updatedAt) - dateValue(a.updatedAt));
   let remaining = options.budget || MAX_CHARS;
   const items = [];
   for (const record of ranked) {
@@ -196,7 +209,18 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
 }
 
 export function isLocalKnowledgeQuestion(message) {
-  return /what do you know about(?:\s+me)?(?:\s+|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
+  return /what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
+}
+
+// Questions asking for a recommendation about the user need the same local
+// grounding as a direct "what do you know about me" request, but they should
+// still go to the local model so it can weigh the retrieved facts and answer
+// the actual question rather than merely listing records.
+export function shouldGroundConversationInLocalKnowledge(message) {
+  const text = String(message || '').toLowerCase();
+  return isLocalKnowledgeQuestion(text)
+    || /\b(?:what|which|where|how)\b[^?]{0,100}\b(?:job|career|role|profession|work)\b[^?]{0,100}\b(?:should|recommend|best|fit|suit|right)\b/i.test(text)
+    || /\b(?:recommend|suggest|help me choose|help me find)\b[^?]{0,100}\b(?:job|career|role|profession|work)\b/i.test(text);
 }
 
 export function answerLocalKnowledgeQuestion(db, message, options = {}) {
