@@ -53,6 +53,18 @@ import {
 
 const API = '';
 
+function ChatGptMark({ size = 18, ...props }) {
+  return <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.85" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+    <path d="M12 3.1a4.7 4.7 0 0 1 7.8 3.52v3.11" />
+    <path d="M18.18 5.55a4.7 4.7 0 0 1 1.02 8.5l-2.68 1.55" />
+    <path d="M20.1 12.65a4.7 4.7 0 0 1-6.76 5.23l-2.69-1.55" />
+    <path d="M15.94 18.2a4.7 4.7 0 0 1-7.8-3.52v-3.1" />
+    <path d="M5.82 18.45a4.7 4.7 0 0 1-1.02-8.5l2.68-1.55" />
+    <path d="M3.9 11.35a4.7 4.7 0 0 1 6.76-5.23l2.69 1.55" />
+    <path d="m12 8.25 3.25 1.88v3.74L12 15.75l-3.25-1.88v-3.74L12 8.25Z" />
+  </svg>;
+}
+
 const navIcons = { workboard: ListChecks, chat: MessageSquareText, knowledge: Brain, system: Wrench, settings: Settings };
 const nav = PRIMARY_NAVIGATION.map((entry) => ({ ...entry, icon: navIcons[entry.id] }));
 
@@ -391,7 +403,7 @@ function App() {
           </div>
           <div className="top-actions">
             <button className="icon-button sync-service-button" onClick={openRepositorySyncFromShell} aria-label="Open private GitHub repository sync" title="Private GitHub repository sync"><Github size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
-            <button className="icon-button sync-service-button" onClick={openChatGptSyncFromShell} aria-label="Connect ChatGPT browser session" title="Connect ChatGPT browser session"><Sparkles size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
+            <button className="icon-button sync-service-button" onClick={openChatGptSyncFromShell} aria-label="Connect ChatGPT browser session" title="Connect ChatGPT browser session"><ChatGptMark size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
             <button className="icon-button" onClick={refreshCurrentView} disabled={refreshBusy} aria-label="Refresh" title={refreshBusy ? 'Refreshing current view...' : 'Refresh current view'}>
               <RefreshCcw size={18} />
             </button>
@@ -4819,7 +4831,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
         <p>Connect services deliberately. GitHub sync remains review-gated; ChatGPT sign-in happens only in your normal browser.</p>
         <div className="decision-row">
           <button onClick={openPrivateRepositorySync} title="Open the private repository sync controls"><Github size={16} /> Private repo sync <RefreshCcw size={14} /></button>
-          <button onClick={openChatGptSync} title="Open ChatGPT sign-in in your normal browser"><Sparkles size={16} /> Connect ChatGPT <RefreshCcw size={14} /></button>
+          <button onClick={openChatGptSync} title="Open ChatGPT sign-in in your normal browser"><ChatGptMark size={16} /> Connect ChatGPT <RefreshCcw size={14} /></button>
         </div>
       </div>
       <div className="panel">
