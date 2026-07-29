@@ -62,7 +62,23 @@ try {
   ]) {
     assert.equal((await create(body)).status, 400, `invalid project request is rejected: ${JSON.stringify(Object.keys(body))}`);
   }
-  console.log('Project contract verification passed: direct compatibility validation and canonical record shape are enforced.');
+  const propose = async (payload) => fetch(`${base}/api/approvals`, {
+    method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json', 'X-LPS-CSRF': csrf },
+    body: JSON.stringify({ action_type: 'create_project', title: 'Verifier proposal', payload, priority: 'normal' })
+  });
+  const approvedProposal = await propose({ name: 'Approved contract project', status: 'waiting', owner: 'Alex', confidence: 0.5, evidence: 'Approved verifier', next_action: 'Wait.' });
+  assert.equal(approvedProposal.status, 200, 'well-formed project proposal is accepted for review');
+  const approvalId = (await approvedProposal.json()).data.id;
+  const approvalResult = await fetch(`${base}/api/approvals/${approvalId}/approve`, { method: 'POST', headers: { Origin: base, 'X-LPS-CSRF': csrf } });
+  assert.equal(approvalResult.status, 200, 'well-formed project proposal can be approved');
+  const projects = (await (await fetch(`${base}/api/projects`)).json()).data;
+  assert.ok(projects.some((project) => project.name === 'Approved contract project' && project.source === 'approved proposal'), 'approved proposal preserves its governed provenance');
+  const malformedProposal = await propose({ name: 'Bad approved status', status: 'not-a-status' });
+  assert.equal(malformedProposal.status, 200, 'malformed proposal is retained for review rather than written');
+  const malformedId = (await malformedProposal.json()).data.id;
+  const malformedResult = await fetch(`${base}/api/approvals/${malformedId}/approve`, { method: 'POST', headers: { Origin: base, 'X-LPS-CSRF': csrf } });
+  assert.equal(malformedResult.status, 400, 'malformed project proposal is rejected before its governed write');
+  console.log('Project contract verification passed: direct and approval-driven compatibility writes use one bounded canonical contract.');
 } finally {
   if (child.exitCode === null) child.kill();
   for (let attempt = 0; child.exitCode === null && attempt < 40; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));

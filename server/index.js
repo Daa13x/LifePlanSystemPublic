@@ -3235,12 +3235,17 @@ app.post('/api/approvals/:id/:decision', async (req, res) => {
     if (status === 'approved') {
       const payload = JSON.parse(approval.payload);
       if (approval.action_type === 'create_project') {
+        const project = normalizeProjectCreate(payload, {
+          evidence: `Approval ${approval.id}`,
+          nextAction: 'Define next action.'
+        });
         db.prepare(`
           INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
           VALUES (?, ?, ?, 'approved proposal', ?, date('now'), ?, ?)
-        `).run(payload.name, payload.status || 'active', payload.owner || 'user', payload.confidence || 0.75, payload.evidence || `Approval ${approval.id}`, payload.next_action || 'Define next action.');
+        `).run(project.name, project.status, project.owner, project.confidence, project.evidence, project.nextAction);
       }
       if (approval.action_type === 'update_project') {
+        if (!Number.isInteger(payload.id) || payload.id <= 0) return fail(res, 400, 'Project approval must identify a valid project.');
         const target = row('SELECT * FROM projects WHERE id = ?', [payload.id]);
         if (!target) return fail(res, 404, 'Project not found.');
         const previous = payload.previous || {};
@@ -3252,8 +3257,7 @@ app.post('/api/approvals/:id/:decision', async (req, res) => {
         if (Object.hasOwn(previous, 'confidence') && Number(target.confidence || 0) !== Number(previous.confidence || 0)) {
           return fail(res, 409, 'Project confidence changed after this proposal was created. Refresh before approving.');
         }
-        const updates = payload.updates || {};
-        if (Object.hasOwn(updates, 'shareability')) requireShareability(updates.shareability);
+        const updates = normalizeProjectUpdate(payload.updates || {});
         db.prepare(`
           UPDATE projects
           SET name = COALESCE(?, name),
@@ -3385,22 +3389,69 @@ app.get('/api/approvals', (_req, res) => ok(res, allRows("SELECT * FROM approval
 
 const PROJECT_STATUSES = new Set(['active', 'blocked', 'waiting', 'stable', 'archived', 'done', 'completed']);
 
+function boundedProjectText(value, field, maxLength, { fallback, required = false } = {}) {
+  if (value === undefined || value === null) {
+    if (fallback !== undefined) return fallback;
+    if (required) throw new Error(`${field} is required.`);
+    return undefined;
+  }
+  if (typeof value !== 'string') throw new Error(`${field} must be text.`);
+  const normalized = value.trim();
+  if ((required && !normalized) || normalized.length > maxLength) {
+    throw new Error(`${field} must contain ${required ? '1 to ' : 'at most '}${maxLength} characters.`);
+  }
+  return normalized;
+}
+
+function normalizeProjectCreate(input, { evidence = 'Manual entry', nextAction = '' } = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Project request must be an object.');
+  const name = boundedProjectText(input.name, 'Project name', 200, { required: true });
+  const status = input.status ?? 'active';
+  if (typeof status !== 'string' || !PROJECT_STATUSES.has(status)) throw new Error('Project status is not allowed.');
+  const owner = boundedProjectText(input.owner, 'Project owner', 120, { fallback: 'user', required: true });
+  const confidence = Number(input.confidence ?? 0.75);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new Error('Project confidence must be between zero and one.');
+  return {
+    name,
+    status,
+    owner,
+    confidence,
+    evidence: boundedProjectText(input.evidence, 'Project evidence', 4000, { fallback: evidence }) || evidence,
+    nextAction: boundedProjectText(input.next_action, 'Project next action', 4000, { fallback: nextAction })
+  };
+}
+
+function normalizeProjectUpdate(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Project updates must be an object.');
+  const updates = {};
+  if (Object.hasOwn(input, 'name')) updates.name = boundedProjectText(input.name, 'Project name', 200, { required: true });
+  if (Object.hasOwn(input, 'status')) {
+    if (typeof input.status !== 'string' || !PROJECT_STATUSES.has(input.status)) throw new Error('Project status is not allowed.');
+    updates.status = input.status;
+  }
+  if (Object.hasOwn(input, 'owner')) updates.owner = boundedProjectText(input.owner, 'Project owner', 120, { required: true });
+  if (Object.hasOwn(input, 'confidence')) {
+    const confidence = Number(input.confidence);
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) throw new Error('Project confidence must be between zero and one.');
+    updates.confidence = confidence;
+  }
+  if (Object.hasOwn(input, 'evidence')) updates.evidence = boundedProjectText(input.evidence, 'Project evidence', 4000, { fallback: '' });
+  if (Object.hasOwn(input, 'next_action')) updates.next_action = boundedProjectText(input.next_action, 'Project next action', 4000, { fallback: '' });
+  if (Object.hasOwn(input, 'shareability')) updates.shareability = requireShareability(input.shareability);
+  return updates;
+}
+
 app.post('/api/projects', (req, res) => {
-  const name = req.body.name?.trim();
-  if (!name || name.length > 200) return fail(res, 400, 'Project name must contain 1 to 200 characters.');
-  const status = req.body.status ?? 'active';
-  if (!PROJECT_STATUSES.has(status)) return fail(res, 400, 'Project status is not allowed.');
-  const owner = String(req.body.owner ?? 'user').trim();
-  if (!owner || owner.length > 120) return fail(res, 400, 'Project owner must contain 1 to 120 characters.');
-  const confidence = Number(req.body.confidence ?? 0.75);
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) return fail(res, 400, 'Project confidence must be between zero and one.');
-  const evidence = String(req.body.evidence ?? '').trim() || 'Manual entry';
-  const nextAction = String(req.body.next_action ?? '').trim();
-  if (evidence.length > 4000 || nextAction.length > 4000) return fail(res, 400, 'Project evidence and next action are limited to 4000 characters.');
+  let project;
+  try {
+    project = normalizeProjectCreate(req.body);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
   const id = db.prepare(`
     INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
     VALUES (?, ?, ?, 'manual', ?, date('now'), ?, ?)
-  `).run(name, status, owner, confidence, evidence, nextAction).lastInsertRowid;
+  `).run(project.name, project.status, project.owner, project.confidence, project.evidence, project.nextAction).lastInsertRowid;
   ok(res, row('SELECT * FROM projects WHERE id = ?', [id]));
 });
 
