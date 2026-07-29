@@ -44,6 +44,8 @@ try
         || commandValidator.TryValidate(localOrigin.AbsoluteUri, validEnvelope, DateTimeOffset.UtcNow, out _)
         || commandValidator.TryValidate(localOrigin.AbsoluteUri, "{\"version\":1,\"type\":\"unbounded\"}", DateTimeOffset.UtcNow, out _))
         throw new InvalidOperationException("Native command envelope did not enforce origin, schema and one-use capability validation.");
+    if (commandValidator.TryValidate(localOrigin.AbsoluteUri, "{\"version\":\"not-an-integer\"}", DateTimeOffset.UtcNow, out _))
+        throw new InvalidOperationException("Native command envelope accepted a malformed schema.");
     var wrongOriginCapability = commandValidator.IssueForTesting(localOrigin, "create-project", TimeSpan.FromMinutes(1));
     var wrongOriginEnvelope = JsonSerializer.Serialize(new
     {

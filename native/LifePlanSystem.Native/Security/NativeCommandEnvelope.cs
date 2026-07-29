@@ -44,7 +44,7 @@ public sealed class NativeCommandEnvelopeValidator
             command = new ValidatedNativeCommand(type.GetString()!, correlationId, payload.Clone());
             return true;
         }
-        catch (JsonException)
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or FormatException or ArgumentException)
         {
             return false;
         }

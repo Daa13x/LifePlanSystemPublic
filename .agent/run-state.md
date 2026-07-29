@@ -149,7 +149,7 @@ Add a versioned native command envelope plus machine checks that prevent rendere
 
 - Added a finite v1 main-view envelope for the future `create-project` command. It requires the trusted loopback origin, a GUID correlation ID, bounded future expiry, object payload and a cryptographically random one-use capability.
 - Main-view capabilities are deliberately separate from provider capabilities: provider tokens remain HTTPS-only, while local command tokens are origin-bound only to the trusted loopback shell. Neither token family can cross into the other trust domain.
-- Security fixture proof rejects replay, hostile origin, expired envelope, malformed JSON and an unknown command type. The main WebView still denies all messages and no command is dispatched in the installed application.
+- Security fixture proof rejects replay, hostile origin, expired envelope, malformed JSON, malformed field types and an unknown command type. The main WebView still denies all messages and no command is dispatched in the installed application.
 
 ## Next
 
