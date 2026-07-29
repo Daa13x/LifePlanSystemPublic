@@ -279,6 +279,41 @@ try
     await AssertStaleProjectAsync(updateProject, projectUpdate);
     await AssertCancelledProjectAsync(createProject);
     await AssertMissingProjectAsync(updateProject, projectUpdate);
+    await using (var seedAdapterUpdate = new SqliteConnection($"Data Source={commandPath};Pooling=False"))
+    {
+        await seedAdapterUpdate.OpenAsync();
+        await using var insert = seedAdapterUpdate.CreateCommand();
+        insert.CommandText = "INSERT INTO projects (id, name, status, owner, source, confidence, last_reviewed, evidence, next_action, shareability) VALUES (100, $name, $status, $owner, 'approved proposal', $confidence, date('now'), 'Before adapter update', $nextAction, $shareability)";
+        insert.Parameters.AddWithValue("$name", previousFixture.GetProperty("name").GetString()!);
+        insert.Parameters.AddWithValue("$status", previousFixture.GetProperty("status").GetString()!);
+        insert.Parameters.AddWithValue("$owner", previousFixture.GetProperty("owner").GetString()!);
+        insert.Parameters.AddWithValue("$confidence", previousFixture.GetProperty("confidence").GetDouble());
+        insert.Parameters.AddWithValue("$nextAction", previousFixture.GetProperty("next_action").GetString()!);
+        insert.Parameters.AddWithValue("$shareability", previousFixture.GetProperty("shareability").GetString()!);
+        await insert.ExecuteNonQueryAsync();
+    }
+    var updateAdapterValidator = new NativeCommandEnvelopeValidator();
+    var updateAdapterCapability = updateAdapterValidator.IssueForTesting(localOrigin, "update-project", TimeSpan.FromMinutes(1));
+    var updateAdapterEnvelope = JsonSerializer.Serialize(new
+    {
+        version = 1, type = "update-project", correlationId = Guid.NewGuid(), expiresAt = DateTimeOffset.UtcNow.AddMinutes(1),
+        capability = updateAdapterCapability.Token, payload = new { id = 100, previous = previousFixture, updates = updatesFixture }
+    });
+    if (!updateAdapterValidator.TryValidate(localOrigin.AbsoluteUri, updateAdapterEnvelope, DateTimeOffset.UtcNow, out var validatedUpdate) || validatedUpdate is null)
+        throw new InvalidOperationException("Native update adapter fixture did not pass the envelope boundary.");
+    var updateAdapter = new NativeProjectUpdateCommandAdapter(updateProject);
+    var adapterUpdate = await updateAdapter.ExecuteAsync(validatedUpdate, CancellationToken.None);
+    var replayedAdapterUpdate = await updateAdapter.ExecuteAsync(validatedUpdate, CancellationToken.None);
+    if (adapterUpdate.Replayed || !replayedAdapterUpdate.Replayed) throw new InvalidOperationException("Native update adapter did not provide idempotent replay.");
+    using var malformedUpdatePayload = JsonDocument.Parse("{\"id\":100,\"previous\":{},\"updates\":{\"untrusted\":true}}");
+    try
+    {
+        await updateAdapter.ExecuteAsync(new ValidatedNativeCommand("update-project", Guid.NewGuid(), malformedUpdatePayload.RootElement.Clone()), CancellationToken.None);
+        throw new InvalidOperationException("Native update adapter accepted an unrecognised field.");
+    }
+    catch (ArgumentException)
+    {
+    }
     Console.WriteLine("PASS native SQLite migration and transaction contract");
 }
 

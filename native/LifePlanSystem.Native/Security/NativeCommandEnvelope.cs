@@ -15,7 +15,7 @@ public sealed class NativeCommandEnvelopeValidator
 {
     private static readonly HashSet<string> AllowedTypes = new(StringComparer.Ordinal)
     {
-        "create-project"
+        "create-project", "update-project"
     };
     private readonly Dictionary<string, NativeCommandCapability> _capabilities = new(StringComparer.Ordinal);
 
