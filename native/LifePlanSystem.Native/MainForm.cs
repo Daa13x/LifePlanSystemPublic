@@ -1,4 +1,5 @@
 using Microsoft.Web.WebView2.WinForms;
+using LifePlanSystem.Native.Security;
 
 namespace LifePlanSystem.Native;
 
@@ -27,12 +28,19 @@ internal sealed class MainForm : Form
             var environment = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(userDataFolder: profile);
             await _webView.EnsureCoreWebView2Async(environment);
             _webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+            _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+            _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+            _webView.CoreWebView2.NewWindowRequested += (_, popup) => popup.Handled = true;
+            _webView.CoreWebView2.PermissionRequested += (_, permission) => permission.State =
+                Microsoft.Web.WebView2.Core.CoreWebView2PermissionState.Deny;
+            _webView.CoreWebView2.WebMessageReceived += (_, message) =>
+            {
+                if (!WebViewSecurityPolicy.IsPermittedMainMessage(message.Source, message.TryGetWebMessageAsString()))
+                    return;
+            };
             _webView.CoreWebView2.NavigationStarting += (_, navigation) =>
             {
-                if (!Uri.TryCreate(navigation.Uri, UriKind.Absolute, out var uri)
-                    || uri.Scheme != Uri.UriSchemeHttp
-                    || uri.Host != "127.0.0.1"
-                    || uri.Port != 4177)
+                if (!WebViewSecurityPolicy.IsTrustedMainUri(navigation.Uri))
                 {
                     navigation.Cancel = true;
                 }

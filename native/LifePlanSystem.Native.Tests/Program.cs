@@ -1,5 +1,6 @@
 using LifePlanSystem.Native.Persistence;
 using LifePlanSystem.Native.Contracts;
+using LifePlanSystem.Native.Security;
 using Microsoft.Data.Sqlite;
 
 var root = Path.Combine(Path.GetTempPath(), "lps-native-db-" + Guid.NewGuid().ToString("N"));
@@ -7,6 +8,11 @@ Directory.CreateDirectory(root);
 var path = Path.Combine(root, "copied-profile.sqlite");
 try
 {
+    if (!WebViewSecurityPolicy.IsTrustedMainUri("http://127.0.0.1:4177/#chat")
+        || WebViewSecurityPolicy.IsTrustedMainUri("https://provider.example/")
+        || WebViewSecurityPolicy.IsPermittedMainMessage("http://127.0.0.1:4177", "{\"action\":\"anything\"}"))
+        throw new InvalidOperationException("Main WebView security policy did not deny untrusted capability use.");
+
     var database = new NativeDatabase(path);
     await database.MigrateAsync(CancellationToken.None);
     await database.MigrateAsync(CancellationToken.None);
