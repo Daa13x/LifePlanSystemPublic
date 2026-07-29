@@ -16,6 +16,8 @@ assert.match(provider, /"webview", "providers", _providerId/, 'provider uses a p
 assert.match(provider, /IsAllowedNavigation\(_providerId/, 'every provider navigation is allow-listed');
 assert.match(provider, /WebMessageReceived.*no native message channel/s, 'provider pages cannot invoke native commands');
 assert.match(policy, /"chatgpt\.com", "auth\.openai\.com"/, 'ChatGPT host policy remains explicit');
+assert.match(provider, /PermissionRequested[\s\S]*CoreWebView2PermissionState\.Deny/, 'provider permissions are denied by default');
+assert.match(provider, /DownloadStarting[\s\S]*download\.Cancel = true/, 'provider downloads are denied by default');
 assert.match(ui, /openNativeProviderWindow\('chatgpt'\)/, 'ChatGPT controls use native provider window when available');
 assert.match(ui, /Open ChatGPT provider window/, 'the UI does not misrepresent opening the isolated provider window as connector pairing');
 

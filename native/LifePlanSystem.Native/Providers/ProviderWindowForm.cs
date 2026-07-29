@@ -74,6 +74,16 @@ internal sealed class ProviderWindowForm : Form
                     _status.Text = "Blocked a provider popup outside the ChatGPT allow-list.";
                 }
             };
+            _webView.CoreWebView2.PermissionRequested += (_, permission) =>
+            {
+                permission.State = CoreWebView2PermissionState.Deny;
+                _status.Text = "Blocked a ChatGPT permission request in the isolated provider window.";
+            };
+            _webView.CoreWebView2.DownloadStarting += (_, download) =>
+            {
+                download.Cancel = true;
+                _status.Text = "Blocked a download from the isolated provider window.";
+            };
             _webView.Source = new Uri("https://chatgpt.com/");
         }
         catch (Exception exception)
