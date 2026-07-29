@@ -198,3 +198,14 @@ Build a disabled-by-default native compatibility adapter whose copied-profile ex
 ## Next
 
 Build the disabled native compatibility adapter on the copied-profile test harness, then add adapter-level replay/rejection tests before considering any opt-in live routing.
+
+## Isolated native project adapter
+
+- Added `NativeProjectCommandAdapter`, a copied-profile-only adapter that accepts only a `ValidatedNativeCommand` of the finite `create-project` type. It rejects unknown payload fields and non-text/non-numeric field types before the transaction handler is called.
+- The adapter derives its durable idempotency key solely from the validated envelope correlation ID. A retry can therefore receive a fresh one-use capability without duplicating a project, while a provider or renderer payload cannot bypass the envelope validator.
+- Native fixture proof covers validated-envelope execution, adapter idempotent replay and rejection of an unrecognised payload field. The adapter is deliberately absent from dependency injection, WebView message handling, loopback health, Node routes and the installed profile.
+- Installed acceptance: the silent installer built from clean `f6f87ab78b9e98001e1e387f674b79cf0f27b79f` completed at 2026-07-29T12:16Z (SHA-256 `C884E4771BC904B8F48A7FB9B63F434C3309C656AF8A9692C98F0E73E2DCE87A`). Installed `/api/version` reports that exact commit, and the existing `app/data/life-planner.sqlite` remains at 192512 bytes with its pre-update timestamp.
+
+## Next
+
+Extend the copied-profile adapter test corpus to the governed project-update command, then evaluate whether an opt-in native bridge can preserve the existing approval workflow without granting the renderer a write channel.
