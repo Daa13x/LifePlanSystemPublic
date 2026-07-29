@@ -7023,10 +7023,28 @@ function runDevTaskScan(reason) {
   }
 }
 
+async function warmManagedLlamaServerAtStartup() {
+  try {
+    const status = await localModelStatus();
+    if (!status.assigned || !status.llamaServerExists || status.managedServerReady) return;
+    console.log('Warming the assigned local model in the background…');
+    await startManagedLlamaServer();
+    console.log('Assigned local model is warmed and ready for Chat.');
+  } catch (error) {
+    // Model warm-up is an optimisation only: a failed warm-up must never block
+    // the desktop shell, Settings repair flow, or a later explicit chat retry.
+    console.warn(`Background local-model warm-up skipped: ${error.message}`);
+  }
+}
+
 app.listen(port, '127.0.0.1', () => {
   console.log(`Life Planner running at http://127.0.0.1:${port}`);
   // Autonomous dev-task scan on startup, deferred so it never blocks boot, then
   // a light periodic re-scan. Dedupe keeps repeat runs from re-staging anything.
   setTimeout(() => runDevTaskScan('startup'), 1500);
+  // Start loading the selected local model after the HTTP server is accepting
+  // requests. This moves the one-time model-to-memory cost away from the first
+  // user message while keeping startup responsive.
+  setTimeout(() => warmManagedLlamaServerAtStartup(), 2500);
   setInterval(() => runDevTaskScan('interval'), DEV_TASK_SCAN_INTERVAL_MS).unref();
 });
