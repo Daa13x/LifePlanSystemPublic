@@ -53,3 +53,13 @@ Define the first native-owned read contract and its compatibility fixture corpus
 ## Next
 
 Create a formal compatibility fixture from the current Node health/workboard response, compare native and Node values against an isolated database copy, and only then select a first read route for native routing.
+
+## Native runtime lifecycle
+
+- Added NativeHealthService as a cancellation-aware Generic Host BackgroundService on loopback 127.0.0.1:4178.
+- Source-runtime smoke evidence: LifePlanSystem.Native.exe --health-smoke returned native health JSON with runtime identity, compatibility database state and Node compatibility label; the bounded smoke process then exited cleanly.
+- The native health endpoint intentionally has no application commands and no database access.
+
+## Next
+
+Make the native shell packageable and add a native launcher alongside the existing Node tray path. Keep it opt-in until installed evidence proves WebView runtime, health, clean exit and profile isolation.
