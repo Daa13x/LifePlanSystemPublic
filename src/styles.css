@@ -603,14 +603,31 @@ h3 { font-size: 14px; font-weight: 700; }
 }
 .session-list { min-height: 0; height: 100%; padding: 12px; overflow: auto; }
 .session-list .primary { width: 100%; margin-bottom: 10px; }
+.session-entry { position: relative; margin-bottom: 6px; }
 .session-row {
   display: grid;
+  width: 100%;
   height: auto;
   padding: 10px;
-  margin-bottom: 6px;
+  padding-right: 68px;
+  margin: 0;
 }
 .session-row span { color: var(--muted); font-size: 11px; }
 .session-row strong { font-size: 13px; }
+.session-entry.selected .session-row { background: var(--selected); border-color: transparent; box-shadow: inset 3px 0 0 var(--accent); }
+.session-hover-actions {
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  display: flex;
+  gap: 3px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.session-entry:hover .session-hover-actions,
+.session-entry:focus-within .session-hover-actions { opacity: 1; pointer-events: auto; }
+.session-hover-actions .icon-button { width: 25px; height: 25px; padding: 0; background: var(--panel); }
 .chat-panel { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; position: relative; }
 .chat-header { padding: 16px; border-bottom: 1px solid var(--line); }
 .messages { padding: 16px; overflow: auto; display: grid; gap: 12px; align-content: start; scroll-behavior: auto; overflow-anchor: none; }

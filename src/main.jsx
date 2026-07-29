@@ -279,6 +279,20 @@ function App() {
     setRoute(next);
   }
 
+  function openRepositorySyncFromShell() {
+    navigate('system', 'repository');
+    setNotice('Open System / Repository to review the private repository target and run its safe fast-forward sync.');
+  }
+
+  async function openChatGptSyncFromShell() {
+    try {
+      await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: 'https://chatgpt.com/' }) });
+      setNotice('Opened ChatGPT in your normal browser. Sign in there, then keep the LPS Browser Agent enabled to connect the session.');
+    } catch (error) {
+      setNotice(`Could not open ChatGPT sign-in: ${error.message}`);
+    }
+  }
+
   async function refreshAll() {
     const [data, mem, pendingApprovals] = await Promise.all([
       api('/api/bootstrap'),
@@ -376,8 +390,8 @@ function App() {
             <p>{route.section === 'workboard' ? 'Plan, prioritise, review, and complete work from one operational space.' : route.section === 'knowledge' ? 'Review memory candidates, evidence, rules, and calibration without auto-promotion.' : route.section === 'system' ? 'Inspect real local status, repository, browser, tooling, and run state.' : route.section === 'settings' ? 'Configure local-only models, runtime paths, and application preferences.' : 'One source of truth, many views. Chat becomes candidate memory only after review.'}</p>
           </div>
           <div className="top-actions">
-            <button className="icon-button sync-service-button" onClick={openPrivateRepositorySync} aria-label="Open private GitHub repository sync" title="Private GitHub repository sync"><Github size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
-            <button className="icon-button sync-service-button" onClick={openChatGptSync} aria-label="Connect ChatGPT browser session" title="Connect ChatGPT browser session"><Sparkles size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
+            <button className="icon-button sync-service-button" onClick={openRepositorySyncFromShell} aria-label="Open private GitHub repository sync" title="Private GitHub repository sync"><Github size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
+            <button className="icon-button sync-service-button" onClick={openChatGptSyncFromShell} aria-label="Connect ChatGPT browser session" title="Connect ChatGPT browser session"><Sparkles size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
             <button className="icon-button" onClick={refreshCurrentView} disabled={refreshBusy} aria-label="Refresh" title={refreshBusy ? 'Refreshing current view...' : 'Refresh current view'}>
               <RefreshCcw size={18} />
             </button>
@@ -414,8 +428,8 @@ function App() {
             models={models}
             setModels={setModels}
             setNotice={setNotice}
-            openPrivateRepositorySync={openPrivateRepositorySync}
-            openChatGptSync={openChatGptSync}
+            openPrivateRepositorySync={openRepositorySyncFromShell}
+            openChatGptSync={openChatGptSyncFromShell}
           />
         )}
       </main>
@@ -1220,6 +1234,24 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     }
   }
 
+  async function syncSessionToMemory(session) {
+    try {
+      const result = await api(`/api/chat/sessions/${session.id}/memory-candidate`, { method: 'POST' });
+      refreshAll();
+      setNotice(result.reused
+        ? `A review-only memory candidate already exists for “${session.title}”.`
+        : `“${session.title}” was added to Knowledge as a review-only memory candidate.`);
+    } catch (err) {
+      setNotice(err.message);
+    }
+  }
+
+  function deleteSessionFromList(session) {
+    if (window.confirm(`Delete “${session.title}”? This hides the chat and its history from the app.`)) {
+      patchSession(session.id, { deleted: 1 });
+    }
+  }
+
   async function loadContext(sessionId = selectedSession) {
     if (!sessionId) return;
     try {
@@ -1307,10 +1339,16 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         <div className="session-list">
           <button className="primary" onClick={newSession}><Plus size={16} /> New chat</button>
           {sessions.map((session) => (
-            <button key={session.id} className={cx('session-row', session.id === selectedSession && 'selected')} onClick={() => { setSelectedSession(session.id); navigate('chat', null, session.id); }}>
-              <span>{session.pinned ? 'Pinned' : 'Chat'}</span>
-              <strong>{session.title}</strong>
-            </button>
+            <div key={session.id} className={cx('session-entry', session.id === selectedSession && 'selected')}>
+              <button className="session-row" onClick={() => { setSelectedSession(session.id); navigate('chat', null, session.id); }}>
+                <span>{session.pinned ? 'Pinned' : 'Chat'}</span>
+                <strong>{session.title}</strong>
+              </button>
+              <div className="session-hover-actions" aria-label={`Actions for ${session.title}`}>
+                <button className="icon-button" onClick={() => syncSessionToMemory(session)} aria-label={`Sync ${session.title} to memory`} title="Sync chat to review-only memory"><Brain size={15} /></button>
+                <button className="icon-button danger" onClick={() => deleteSessionFromList(session)} aria-label={`Delete ${session.title}`} title="Delete chat"><X size={16} /></button>
+              </div>
+            </div>
           ))}
         </div>
       </div>

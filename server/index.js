@@ -2561,6 +2561,33 @@ app.get('/api/chat/sessions/:id/messages', (req, res) => {
   ok(res, allRows('SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC, id ASC', [req.params.id]));
 });
 
+// A deliberate, review-only handoff from a chat to Knowledge. This is bounded
+// and idempotent: it includes only user-authored turns, never auto-approves
+// them, and does not create another pending candidate on a repeated click.
+app.post('/api/chat/sessions/:id/memory-candidate', (req, res) => {
+  const sessionId = Number(req.params.id);
+  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [sessionId]);
+  if (!session) return fail(res, 404, 'Chat session not found.');
+  const existing = row(`SELECT * FROM memory_candidates
+    WHERE session_id = ? AND source = 'chat session sync' AND status IN ('candidate', 'deferred', 'processing')
+    ORDER BY created_at DESC, id DESC LIMIT 1`, [sessionId]);
+  if (existing) return ok(res, { candidate: existing, reused: true });
+  const messages = allRows(`SELECT id, content FROM chat_messages
+    WHERE session_id = ? AND role = 'user' AND TRIM(content) <> ''
+    ORDER BY created_at ASC, id ASC LIMIT 40`, [sessionId]);
+  if (!messages.length) return fail(res, 409, 'Add a user message before syncing this chat to review-only memory.');
+  const body = messages.map((message) => `[User]\n${String(message.content).trim()}`).join('\n\n').slice(0, 12000);
+  const type = classifyCandidate(body);
+  const title = `Chat sync: ${String(session.title || 'Untitled chat').slice(0, 78)}`;
+  const sensitivity = /health|medical|diagnos|accessib/i.test(body) ? 'sensitive' : 'personal';
+  const candidateId = db.prepare(`INSERT INTO memory_candidates
+    (session_id, source_message_id, type, title, body, source, evidence, confidence, category, sensitivity)
+    VALUES (?, ?, ?, ?, ?, 'chat session sync', ?, 0.45, ?, ?)`)
+    .run(sessionId, messages[0].id, type, title, body, `Explicit chat sync; ${messages.length} user message(s); review required`, type, sensitivity).lastInsertRowid;
+  writeChatAudit(sessionId, 'memory.sync', 'ok', `candidate ${candidateId}; ${messages.length} user message(s)`);
+  ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [candidateId]), reused: false });
+});
+
 app.get('/api/chat/sessions/:id/context', (req, res) => {
   ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
 });
