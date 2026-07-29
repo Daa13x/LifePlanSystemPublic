@@ -13,7 +13,6 @@ public sealed record NativeCommandCapability(string Token, Uri Origin, string Ty
 /// </summary>
 public sealed class NativeCommandEnvelopeValidator
 {
-    private const string MainShell = "main-shell";
     private static readonly HashSet<string> AllowedTypes = new(StringComparer.Ordinal)
     {
         "create-project"

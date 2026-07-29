@@ -199,6 +199,34 @@ try
     }
     await AssertInvalidProjectAsync(createProject);
 
+    var adapterValidator = new NativeCommandEnvelopeValidator();
+    var adapterCapability = adapterValidator.IssueForTesting(localOrigin, "create-project", TimeSpan.FromMinutes(1));
+    var adapterEnvelope = JsonSerializer.Serialize(new
+    {
+        version = 1,
+        type = "create-project",
+        correlationId = Guid.NewGuid(),
+        expiresAt = DateTimeOffset.UtcNow.AddMinutes(1),
+        capability = adapterCapability.Token,
+        payload = new { name = "Adapter fixture", next_action = "Review from adapter." }
+    });
+    if (!adapterValidator.TryValidate(localOrigin.AbsoluteUri, adapterEnvelope, DateTimeOffset.UtcNow, out var adapterCommand) || adapterCommand is null)
+        throw new InvalidOperationException("Native adapter fixture did not pass the envelope boundary.");
+    var adapter = new NativeProjectCommandAdapter(createProject);
+    var adapterCreated = await adapter.ExecuteAsync(adapterCommand, CancellationToken.None);
+    var adapterReplayed = await adapter.ExecuteAsync(adapterCommand, CancellationToken.None);
+    if (adapterCreated.Replayed || !adapterReplayed.Replayed || adapterCreated.ProjectId != adapterReplayed.ProjectId)
+        throw new InvalidOperationException("Native adapter did not turn a validated correlation ID into an idempotent command.");
+    using var rejectedPayload = JsonDocument.Parse("{\"name\":\"Rejected\",\"untrusted\":true}");
+    try
+    {
+        await adapter.ExecuteAsync(new ValidatedNativeCommand("create-project", Guid.NewGuid(), rejectedPayload.RootElement.Clone()), CancellationToken.None);
+        throw new InvalidOperationException("Native adapter accepted an unrecognised payload field.");
+    }
+    catch (ArgumentException)
+    {
+    }
+
     using var updateFixture = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(Directory.GetCurrentDirectory(), "native", "fixtures", "project-update-v1.json")));
     var updateFixtureRoot = updateFixture.RootElement;
     var previousFixture = updateFixtureRoot.GetProperty("previous");
