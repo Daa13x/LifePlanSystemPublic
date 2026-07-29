@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 // Deterministic, local-only Knowledge retrieval. This is deliberately
@@ -53,7 +54,7 @@ function safeRepositoryKnowledge(repoRoot = '') {
 function safePrivateRepositoryKnowledge(repoRoot = '') {
   if (!repoRoot) return [];
   const configured = String(process.env.LIFE_PLANNER_PRIVATE_REPO || '').trim();
-  const root = configured ? path.resolve(configured) : path.join(path.dirname(path.resolve(repoRoot)), 'LifePlanSystem');
+  const root = configured ? path.resolve(configured) : path.join(os.homedir(), 'Documents', 'LifePlanSystem');
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return [];
   const files = [];
   const visit = (target) => {
