@@ -83,3 +83,13 @@ Define a native launch manifest and portable-package verification that can ship 
 ## Next
 
 Add provider registry/policy contracts and an isolated provider WebView environment. The compatibility main view must remain message-deny by default.
+
+## Native provider policy evidence
+
+- Added provider registry entries for current ChatGPT, Gemini, Claude and Grok browser-assisted paths.
+- Each entry is HTTPS host allow-listed and explicitly classified BrowserAssistedManual plus UserReviewedPasteOnly; no consumer-site automation is represented as official API execution.
+- Fixture proof rejects unknown navigation and verifies the truthful capture classification.
+
+## Next
+
+Build an isolated provider WebView host only after a provider has an approved official API or explicit browser-assisted user flow. No provider WebView may share the main profile or receive native commands by default.

@@ -1,6 +1,7 @@
 using LifePlanSystem.Native.Persistence;
 using LifePlanSystem.Native.Contracts;
 using LifePlanSystem.Native.Security;
+using LifePlanSystem.Native.Providers;
 using Microsoft.Data.Sqlite;
 
 var root = Path.Combine(Path.GetTempPath(), "lps-native-db-" + Guid.NewGuid().ToString("N"));
@@ -22,6 +23,13 @@ try
     var wrongOrigin = capabilityStore.Issue("provider-a", providerOrigin, "capture-response", TimeSpan.FromMinutes(1));
     if (capabilityStore.TryConsume(wrongOrigin.Token, "provider-a", new Uri("https://evil.example"), "capture-response", DateTimeOffset.UtcNow))
         throw new InvalidOperationException("Provider capability accepted a different origin.");
+
+    var providers = new ProviderPolicyRegistry();
+    if (!providers.IsAllowedNavigation("chatgpt", new Uri("https://chatgpt.com/"))
+        || providers.IsAllowedNavigation("chatgpt", new Uri("https://evil.example/"))
+        || !providers.TryGet("chatgpt", out var chatGpt)
+        || chatGpt!.CaptureMode != ProviderCaptureMode.UserReviewedPasteOnly)
+        throw new InvalidOperationException("Provider policy did not enforce manual, allow-listed handling.");
 
     var database = new NativeDatabase(path);
     await database.MigrateAsync(CancellationToken.None);
