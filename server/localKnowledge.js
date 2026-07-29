@@ -18,6 +18,9 @@ const REPOSITORY_KNOWLEDGE_DIRECTORIES = ['docs', 'rules', 'source_of_truth', 't
 const REPOSITORY_KNOWLEDGE_EXTENSIONS = new Set(['.md', '.mdx', '.txt']);
 const MAX_REPOSITORY_FILES = 60;
 const MAX_REPOSITORY_FILE_CHARS = 8000;
+const PRIVATE_REPOSITORY_EXTENSIONS = new Set(['.md', '.mdx', '.txt', '.js', '.jsx', '.ts', '.tsx', '.json', '.yml', '.yaml']);
+const PRIVATE_REPOSITORY_SKIP = new Set(['.git', 'node_modules', 'dist', 'build', 'release', 'data', 'coverage', '.cache']);
+const PRIVATE_REPOSITORY_SECRET = /(?:^|[._-])(?:env|secret|credential|token|password|private|key)(?:[._-]|$)|\.(?:pem|pfx|p12|key)$/i;
 
 function safeRepositoryKnowledge(repoRoot = '') {
   if (!repoRoot) return [];
@@ -44,6 +47,32 @@ function safeRepositoryKnowledge(repoRoot = '') {
     }
   };
   for (const target of roots) visit(target);
+  return files;
+}
+
+function safePrivateRepositoryKnowledge(repoRoot = '') {
+  if (!repoRoot) return [];
+  const configured = String(process.env.LIFE_PLANNER_PRIVATE_REPO || '').trim();
+  const root = configured ? path.resolve(configured) : path.join(path.dirname(path.resolve(repoRoot)), 'LifePlanSystem');
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return [];
+  const files = [];
+  const visit = (target) => {
+    if (files.length >= 300 || !fs.existsSync(target)) return;
+    const stat = fs.lstatSync(target);
+    if (stat.isSymbolicLink()) return;
+    if (stat.isFile()) {
+      const relative = path.relative(root, target).replaceAll('\\', '/');
+      if (stat.size > 1024 * 1024 || PRIVATE_REPOSITORY_SECRET.test(relative) || !PRIVATE_REPOSITORY_EXTENSIONS.has(path.extname(target).toLowerCase())) return;
+      try {
+        const text = fs.readFileSync(target, 'utf8').slice(0, MAX_REPOSITORY_FILE_CHARS).trim();
+        if (text) files.push({ relative, text, updatedAt: stat.mtime.toISOString() });
+      } catch { /* unreadable local files are not searchable */ }
+      return;
+    }
+    if (!stat.isDirectory() || PRIVATE_REPOSITORY_SKIP.has(path.basename(target))) return;
+    for (const entry of fs.readdirSync(target, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) visit(path.join(target, entry.name));
+  };
+  visit(root);
   return files;
 }
 
@@ -96,6 +125,13 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
       canonicalId: `repository:${file.relative}`, category: 'repository knowledge', title: path.basename(file.relative), text: file.text,
       timestamp: file.updatedAt, updatedAt: file.updatedAt, sensitivity: 'public', chatReadable: true, chatProposable: false, state: 'reference',
       source: 'bundled GitHub knowledge base', provenance: `Repository document: ${file.relative}`, record: { path: file.relative }
+    });
+  }
+  for (const file of safePrivateRepositoryKnowledge(repoRoot)) {
+    records.push({
+      canonicalId: `private-repository:${file.relative}`, category: 'repository knowledge', title: path.basename(file.relative), text: file.text,
+      timestamp: file.updatedAt, updatedAt: file.updatedAt, sensitivity: 'personal', chatReadable: true, chatProposable: false, state: 'reference',
+      source: 'local private repository', provenance: `Private repository document: ${file.relative}`, record: { path: file.relative }
     });
   }
   return records;
