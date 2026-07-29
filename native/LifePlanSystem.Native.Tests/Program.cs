@@ -249,6 +249,8 @@ try
             throw new InvalidOperationException("Native project update did not reproduce the compatibility fixture.");
     }
     await AssertStaleProjectAsync(updateProject, projectUpdate);
+    await AssertCancelledProjectAsync(createProject);
+    await AssertMissingProjectAsync(updateProject, projectUpdate);
     Console.WriteLine("PASS native SQLite migration and transaction contract");
 }
 
@@ -277,6 +279,32 @@ static async Task AssertStaleProjectAsync(UpdateProjectCommandHandler handler, U
         throw new InvalidOperationException("Native project update accepted stale expected values.");
     }
     catch (ProjectStaleException)
+    {
+    }
+}
+
+static async Task AssertCancelledProjectAsync(CreateProjectCommandHandler handler)
+{
+    using var cancellation = new CancellationTokenSource();
+    cancellation.Cancel();
+    try
+    {
+        await handler.ExecuteAsync(new CreateProjectCommand("Cancelled", "active", "user", 0.5, "fixture", null, "cancelled-project"), cancellation.Token);
+        throw new InvalidOperationException("Native project command ignored cancellation.");
+    }
+    catch (OperationCanceledException)
+    {
+    }
+}
+
+static async Task AssertMissingProjectAsync(UpdateProjectCommandHandler handler, UpdateProjectCommand command)
+{
+    try
+    {
+        await handler.ExecuteAsync(command with { ProjectId = 999, IdempotencyKey = "missing-project-update" }, CancellationToken.None);
+        throw new InvalidOperationException("Native project update accepted a missing project.");
+    }
+    catch (KeyNotFoundException)
     {
     }
 }

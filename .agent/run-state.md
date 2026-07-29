@@ -181,6 +181,10 @@ Create the matching project-update fixture and native transaction contract, incl
 - The copied-profile suite seeds the exact previous project values, applies the fixture update, checks every persisted update field, verifies idempotent replay, and confirms a mismatched expected value throws a stale-project result.
 - Evidence: native contract tests passed. This handler remains unreachable from the compatibility host, and no installed project or approval was changed.
 
+## Transaction edge-case evidence
+
+- The copied-profile fixture also proves a pre-cancelled create command throws before transaction execution and a missing-project update throws without a write receipt.
+
 ## Next
 
-Add cancellation and missing-project transaction cases, then build a disabled-by-default native compatibility adapter whose copied-profile execution is isolated from the installed runtime.
+Build a disabled-by-default native compatibility adapter whose copied-profile execution is isolated from the installed runtime. It must accept only the validated envelope and must not be wired into WebView or Node routes yet.
