@@ -353,45 +353,29 @@ function App() {
 
   const candidateCount = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status)).length;
   const operationalApprovalCount = approvals.filter((approval) => !isMemoryApproval(approval)).length;
-  const activeNav = nav.find((entry) => entry.id === route.section);
+  const completedWorkboardCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
+  const navigation = (
+    <NavigationMenu
+      route={route}
+      navigate={navigate}
+      candidateCount={candidateCount}
+      operationalApprovalCount={operationalApprovalCount}
+      completedWorkboardCount={completedWorkboardCount}
+    />
+  );
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark"><img src="/life-planner-logo.png" alt="" /></div>
-          <div>
-            <strong>Life Planner</strong>
-            <span>Local-first assistant</span>
-          </div>
-        </div>
-        <nav>
-          {nav.map((entry) => {
-            const Icon = entry.icon;
-            return (
-              <button key={entry.id} className={cx('nav-item', route.section === entry.id && 'selected')} onClick={() => navigate(entry.id)} aria-current={route.section === entry.id ? 'page' : undefined}>
-                <Icon size={18} />
-                <span>{entry.label}</span>
-                {entry.id === 'workboard' && operationalApprovalCount > 0 && <span className="nav-badge" aria-label={`${operationalApprovalCount} operational approvals awaiting review`}>{operationalApprovalCount}</span>}
-                {entry.id === 'knowledge' && candidateCount > 0 && <span className="nav-badge" aria-label={`${candidateCount} memory candidates awaiting review`}>{candidateCount}</span>}
-              </button>
-            );
-          })}
-        </nav>
-        <div className="sidebar-footer">
-          <Pill tone="good">SQLite</Pill>
-          <span>{boot?.settings?.storageLocation || 'Local database'}</span>
-        </div>
-      </aside>
-
       <main className="main">
         <header className="topbar">
-          <div>
-            <h1>{route.section === 'settings' ? 'Settings' : activeNav?.label || 'Chat'}</h1>
+          <button className="app-logo" onClick={() => navigate('chat')} aria-label="Life Planner home" title="Life Planner home">
+            <img src="/life-planner-logo.png" alt="" />
+          </button>
+          {navigation}
+          <div className="topbar-heading">
             <p>{route.section === 'workboard' ? 'Plan, prioritise, review, and complete work from one operational space.' : route.section === 'knowledge' ? 'Review memory candidates, evidence, rules, and calibration without auto-promotion.' : route.section === 'system' ? 'Inspect real local status, repository, browser, tooling, and run state.' : route.section === 'settings' ? 'Configure local-only models, runtime paths, and application preferences.' : 'One source of truth, many views. Chat becomes candidate memory only after review.'}</p>
           </div>
           <div className="top-actions">
-            {notice && <span className="notice">{notice}</span>}
             <button className="icon-button" onClick={refreshCurrentView} disabled={refreshBusy} aria-label="Refresh" title={refreshBusy ? 'Refreshing current view...' : 'Refresh current view'}>
               <RefreshCcw size={18} />
             </button>
@@ -401,6 +385,7 @@ function App() {
             </button>
           </div>
         </header>
+        {notice && <div className="notice-banner" role="status">{notice}</div>}
 
         {route.section === 'workboard' && <Workboard route={route} navigate={navigate} planner={planner} projects={projects} setProjects={setProjects} refresh={reloadPlanner} refreshAll={refreshAll} runRefresh={runPlannerRefresh} setNotice={setNotice} refreshSignal={refreshSignal} />}
         {route.section === 'chat' && (
@@ -434,22 +419,45 @@ function App() {
   );
 }
 
-function SectionTabs({ section, activeTab, navigate, badges = {} }) {
+function NavigationMenu({ route, navigate, candidateCount, operationalApprovalCount, completedWorkboardCount }) {
+  const [open, setOpen] = useState(false);
+  const menuEntries = nav.filter((entry) => entry.id !== 'chat');
+  const selectedSection = route.section === 'chat' ? 'knowledge' : route.section;
+  const [previewSection, setPreviewSection] = useState(selectedSection);
+  const selected = nav.find((entry) => entry.id === selectedSection);
+  const preview = nav.find((entry) => entry.id === previewSection);
+  const SelectedIcon = selected?.icon || Route;
+  const tabBadges = { candidates: candidateCount || null, review: operationalApprovalCount || null, completed: completedWorkboardCount || null };
   return (
-    <div className="section-tabs" role="tablist" aria-label={`${section} navigation`}>
-      {SECTION_TABS[section].map((tab) => (
-        <button
-          key={tab.id}
-          className={cx('section-tab', activeTab === tab.id && 'active')}
-          role="tab"
-          aria-selected={activeTab === tab.id}
-          onClick={() => navigate(section, tab.id)}
-        >
-          {tab.label}
-          {badges[tab.id] ? <span className="section-tab-badge">{badges[tab.id]}</span> : null}
+    <nav className="navigation-menu" aria-label="Main navigation">
+      <button className={cx('nav-item', 'nav-chat-link', route.section === 'chat' && 'selected')} onClick={() => { navigate('chat'); setOpen(false); setPreviewSection('knowledge'); }} aria-current={route.section === 'chat' ? 'page' : undefined}>
+        <MessageSquareText size={18} /><span>Chat</span>
+      </button>
+      <div className="nav-menu-anchor">
+        <button className="nav-trigger" onClick={() => { setPreviewSection(selectedSection); setOpen((value) => !value); }} aria-expanded={open} aria-controls="main-navigation-options">
+          {SelectedIcon && <SelectedIcon size={18} />}
+          <span>{selected?.label || 'Menu'}</span>
+          <ChevronDown size={18} className={cx('nav-trigger-chevron', open && 'open')} aria-hidden="true" />
         </button>
-      ))}
-    </div>
+        {open && (
+          <div id="main-navigation-options" className="nav-options">
+            {menuEntries.map((entry) => {
+              const Icon = entry.icon;
+              return <button key={entry.id} className={cx('nav-item', route.section === entry.id && 'selected')} onMouseEnter={() => setPreviewSection(entry.id)} onFocus={() => setPreviewSection(entry.id)} onClick={() => { setPreviewSection(entry.id); navigate(entry.id); }} aria-current={route.section === entry.id ? 'page' : undefined}>
+                <Icon size={18} /><span>{entry.label}</span>
+                {entry.id === 'workboard' && operationalApprovalCount > 0 && <span className="nav-badge" aria-label={`${operationalApprovalCount} operational approvals awaiting review`}>{operationalApprovalCount}</span>}
+                {entry.id === 'knowledge' && candidateCount > 0 && <span className="nav-badge" aria-label={`${candidateCount} memory candidates awaiting review`}>{candidateCount}</span>}
+              </button>;
+            })}
+            {SECTION_TABS[previewSection] && <div className="nav-subpages" onMouseEnter={() => setPreviewSection(previewSection)} style={{ '--active-index': menuEntries.findIndex((entry) => entry.id === previewSection) }} aria-label={`${preview?.label} pages`}>
+              {SECTION_TABS[previewSection].map((tab) => <button key={tab.id} className={cx('nav-subpage', route.section === previewSection && route.tab === tab.id && 'selected')} onClick={() => { setPreviewSection(previewSection); navigate(previewSection, tab.id); }}>
+                <span>{tab.label}</span>{tabBadges[tab.id] ? <span className="nav-badge">{tabBadges[tab.id]}</span> : null}
+              </button>)}
+            </div>}
+          </div>
+        )}
+      </div>
+    </nav>
   );
 }
 
@@ -457,7 +465,6 @@ function Workboard({ route, navigate, planner, projects, setProjects, refresh, r
   const completedCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
   return (
     <section className="section-shell">
-      <SectionTabs section="workboard" activeTab={route.tab} navigate={navigate} badges={{ completed: completedCount || null }} />
       {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} setNotice={setNotice} />}
       {route.tab === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
       {route.tab === 'roadmap' && <DevRoadmap setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -471,7 +478,6 @@ function Knowledge({ route, navigate, memory, refresh, setNotice, refreshSignal 
   const candidateCount = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status)).length;
   return (
     <section className="section-shell">
-      <SectionTabs section="knowledge" activeTab={route.tab} navigate={navigate} badges={{ candidates: candidateCount || null }} />
       {route.tab === 'memory' && <Memory memory={memory} refresh={refresh} mode="memory" />}
       {route.tab === 'candidates' && (
         <div className="stacked-panels">
@@ -489,9 +495,8 @@ function Knowledge({ route, navigate, memory, refresh, setNotice, refreshSignal 
 function System({ route, navigate, boot, planner, sessions, models, setNotice, refresh, refreshSignal }) {
   return (
     <section className="section-shell">
-      <SectionTabs section="system" activeTab={route.tab} navigate={navigate} />
       {route.tab === 'status' && <SystemStatus boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refreshSignal={refreshSignal} />}
-      {route.tab === 'setup' && <SetupRecovery boot={boot} setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'setup' && <SetupRecovery boot={boot} navigate={navigate} setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'repository' && <RepositoryExplorer setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'browser' && <BrowserConsult setNotice={setNotice} refresh={refresh} refreshSignal={refreshSignal} />}
       {route.tab === 'tools' && <Tooling setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -586,7 +591,7 @@ function SystemStatus({ boot, planner, sessions, models, setNotice, refreshSigna
   );
 }
 
-function SetupRecovery({ boot, setNotice, refreshSignal }) {
+function SetupRecovery({ boot, navigate, setNotice, refreshSignal }) {
   const [state, setState] = useState({ setup: null, recovery: null });
   const [busy, setBusy] = useState('');
   const [proposal, setProposal] = useState(null);
@@ -630,7 +635,10 @@ function SetupRecovery({ boot, setNotice, refreshSignal }) {
       <div className="panel">
         <div className="panel-heading"><div><h2>Diagnostics</h2><p>Results are generated by the local server and omit secrets and filesystem paths.</p></div><Pill tone={environment?.ready ? 'good' : 'warn'}>{environment ? `${environment.checks?.filter((check) => check.ok).length || 0}/${environment.checks?.length || 0}` : '—'}</Pill></div>
         <div className="table-list">
-          {(environment?.checks || []).map((check) => <div className="item-row compact-row" key={check.id}><div className="item-main"><div className="item-title">{check.id.replace(/-/g, ' ')}</div><div className="item-meta"><span>{check.detail}</span></div></div><Pill tone={check.ok ? 'good' : check.required ? 'bad' : 'warn'}>{check.ok ? 'Healthy' : check.required ? 'Attention needed' : 'Not configured'}</Pill></div>)}
+          {(environment?.checks || []).map((check) => {
+            const setupTarget = check.id === 'local-model' || check.id === 'local-runtime' ? 'settings' : null;
+            return <div className="item-row compact-row" key={check.id}><div className="item-main"><div className="item-title">{check.id.replace(/-/g, ' ')}</div><div className="item-meta"><span>{check.detail}</span></div></div>{!check.ok && setupTarget ? <button className="pill warn diagnostic-action" onClick={() => navigate(setupTarget)} title="Open Local Model settings">Not configured</button> : <Pill tone={check.ok ? 'good' : check.required ? 'bad' : 'warn'}>{check.ok ? 'Healthy' : check.required ? 'Attention needed' : 'Not configured'}</Pill>}</div>;
+          })}
         </div>
       </div>
 
@@ -1004,7 +1012,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   async function dismissCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/dismiss`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function retryCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/retry`, { method: 'POST' }); await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   const cloudStateLabel = (status) => ({
-    'checking-sharing-permissions': 'Checking sharing permissions', prepared: 'Ready to send', active: 'Waiting for provider', completed: 'Completed', blocked: 'Blocked', failed: 'Failed', cancelled: 'Cancelled'
+    'checking-sharing-permissions': 'Checking sharing permissions', prepared: 'Prepared — connection required', active: 'Waiting for provider', completed: 'Completed', blocked: 'Blocked', failed: 'Failed', cancelled: 'Cancelled'
   }[status] || 'Preparing cloud prompt');
 
   async function loadContextRecords(sessionId = selectedSession) {
@@ -1277,14 +1285,16 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
 
   return (
     <section className="chat-layout">
-      <div className="session-list">
-        <button className="primary" onClick={newSession}><Plus size={16} /> New chat</button>
-        {sessions.map((session) => (
-          <button key={session.id} className={cx('session-row', session.id === selectedSession && 'selected')} onClick={() => { setSelectedSession(session.id); navigate('chat', null, session.id); }}>
-            <span>{session.pinned ? 'Pinned' : 'Chat'}</span>
-            <strong>{session.title}</strong>
-          </button>
-        ))}
+      <div className="chat-sidebar">
+        <div className="session-list">
+          <button className="primary" onClick={newSession}><Plus size={16} /> New chat</button>
+          {sessions.map((session) => (
+            <button key={session.id} className={cx('session-row', session.id === selectedSession && 'selected')} onClick={() => { setSelectedSession(session.id); navigate('chat', null, session.id); }}>
+              <span>{session.pinned ? 'Pinned' : 'Chat'}</span>
+              <strong>{session.title}</strong>
+            </button>
+          ))}
+        </div>
       </div>
       <div className="chat-panel">
         <div className="chat-header">
@@ -1361,7 +1371,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           {proposal && <ProposalCard proposal={proposal} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
-          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
+          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
               <span>assistant</span>
@@ -1392,7 +1402,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   );
 }
 
-function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidance, onSaveCandidate, onDismiss, onHistory }) {
+function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel, onRetry, onGuidance, onSaveCandidate, onDismiss, onHistory }) {
   let includedCount = 0;
   try { includedCount = JSON.parse(check.included_message_ids || '[]').length; } catch { /* malformed legacy metadata remains displayable */ }
   const sourceTurn = [check.user_message_id ? `user #${check.user_message_id}` : '', check.assistant_message_id ? `assistant #${check.assistant_message_id}` : ''].filter(Boolean).join(' → ') || 'session context';
@@ -1405,7 +1415,7 @@ function CloudCheckCard({ check, stateLabel, onSend, onCancel, onRetry, onGuidan
     <details><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>
     {check.response && <div className="message-body" aria-live="polite" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} />}
     {check.error_detail && <small role="status">{check.error_detail}</small>}
-    {check.status === 'prepared' && <button onClick={() => onSend(check.id)}>Send reviewed prompt</button>}
+    {check.status === 'prepared' && (providerConnected ? <button onClick={() => onSend(check.id)}>Send reviewed prompt</button> : <><small role="status">No signed-in provider tab is connected. No prompt has been sent.</small><button onClick={onHistory}>Open browser connection setup</button></>)}
     {check.status === 'active' && <button onClick={() => onCancel(check.id)}>Cancel cloud check</button>}
     {['failed', 'cancelled'].includes(check.status) && <button onClick={() => onRetry(check.id)}>Retry cloud check</button>}
     {check.status === 'completed' && <>{check.feedback_dismissed_at ? <small>Feedback dismissed; this historical card remains available for provenance.</small> : <><button onClick={() => onGuidance(check.id, !check.guidance_active)}>{check.guidance_active ? 'Remove guidance' : 'Use for next reply'}</button><button onClick={() => onDismiss(check.id)}>Dismiss</button></>}{check.memory_candidate_id ? <small>Memory candidate #{check.memory_candidate_id} is awaiting review.</small> : <button onClick={() => onSaveCandidate(check.id)}>Save as memory candidate</button>}</>}
