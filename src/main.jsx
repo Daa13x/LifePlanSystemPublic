@@ -1189,7 +1189,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       let acc = '';
       let runtimeLabel = '';
       let streamError = null;
-      for (;;) {
+      let terminalEvent = false;
+      readStream: for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
@@ -1205,8 +1206,25 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           try { data = JSON.parse(dataRaw); } catch { continue; }
           if (event === 'token') { acc += data.delta; setStreamingText(acc); setWarmupNote(''); }
           else if (event === 'status') { if (data.phase === 'warming') setWarmupNote(data.message || 'Starting the local model…'); }
-          else if (event === 'done') { runtimeLabel = data.runtime || ''; setWarmupNote(''); }
-          else if (event === 'error') { streamError = data.error; runtimeLabel = data.runtime || ''; setWarmupNote(''); }
+          else if (event === 'done') {
+            runtimeLabel = data.runtime || '';
+            setWarmupNote('');
+            terminalEvent = true;
+            break;
+          } else if (event === 'error') {
+            streamError = data.error;
+            runtimeLabel = data.runtime || '';
+            setWarmupNote('');
+            terminalEvent = true;
+            break;
+          }
+        }
+        // Native WebViews may keep an HTTP connection alive after the server
+        // has sent its terminal SSE frame. Do not leave Chat "Thinking" while
+        // waiting for that transport socket to close.
+        if (terminalEvent) {
+          await reader.cancel();
+          break readStream;
         }
       }
       setRuntimeMode(runtimeLabel);
