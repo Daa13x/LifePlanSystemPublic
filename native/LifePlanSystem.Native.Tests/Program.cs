@@ -13,6 +13,16 @@ try
         || WebViewSecurityPolicy.IsPermittedMainMessage("http://127.0.0.1:4177", "{\"action\":\"anything\"}"))
         throw new InvalidOperationException("Main WebView security policy did not deny untrusted capability use.");
 
+    var capabilityStore = new ProviderCapabilityStore();
+    var providerOrigin = new Uri("https://provider.example");
+    var capability = capabilityStore.Issue("provider-a", providerOrigin, "capture-response", TimeSpan.FromMinutes(1));
+    if (!capabilityStore.TryConsume(capability.Token, "provider-a", providerOrigin, "capture-response", DateTimeOffset.UtcNow)
+        || capabilityStore.TryConsume(capability.Token, "provider-a", providerOrigin, "capture-response", DateTimeOffset.UtcNow))
+        throw new InvalidOperationException("Provider capability was not one-use.");
+    var wrongOrigin = capabilityStore.Issue("provider-a", providerOrigin, "capture-response", TimeSpan.FromMinutes(1));
+    if (capabilityStore.TryConsume(wrongOrigin.Token, "provider-a", new Uri("https://evil.example"), "capture-response", DateTimeOffset.UtcNow))
+        throw new InvalidOperationException("Provider capability accepted a different origin.");
+
     var database = new NativeDatabase(path);
     await database.MigrateAsync(CancellationToken.None);
     await database.MigrateAsync(CancellationToken.None);

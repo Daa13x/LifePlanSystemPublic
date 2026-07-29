@@ -28,6 +28,7 @@ internal static class Program
             if (args.Contains("--health-smoke", StringComparer.Ordinal))
             {
                 Thread.Sleep(TimeSpan.FromSeconds(10));
+                host.StopAsync(TimeSpan.FromSeconds(3)).GetAwaiter().GetResult();
                 return;
             }
             Application.Run(host.Services.GetRequiredService<MainForm>());

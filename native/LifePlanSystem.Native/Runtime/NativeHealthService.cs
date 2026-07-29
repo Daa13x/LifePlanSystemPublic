@@ -9,6 +9,12 @@ internal sealed class NativeHealthService(NativeRuntimeIdentity identity) : Back
 {
     private readonly HttpListener _listener = new();
 
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        if (_listener.IsListening) _listener.Close();
+        await base.StopAsync(cancellationToken);
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _listener.Prefixes.Add("http://127.0.0.1:4178/native/");
@@ -26,8 +32,7 @@ internal sealed class NativeHealthService(NativeRuntimeIdentity identity) : Back
         }
         finally
         {
-            if (_listener.IsListening) _listener.Stop();
-            _listener.Close();
+            if (_listener.IsListening) _listener.Close();
         }
     }
 

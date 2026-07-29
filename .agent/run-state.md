@@ -73,3 +73,13 @@ Make the native shell packageable and add a native launcher alongside the existi
 ## Next
 
 Define a native launch manifest and portable-package verification that can ship the native artifact alongside, but never replace, the Node runtime until full parity evidence is recorded.
+
+## Native provider and shutdown evidence
+
+- Added ProviderCapabilityStore: cryptographically random 32-byte, provider/origin/action-bound capabilities with five-minute maximum lifetime, one-use consumption and provider-wide revocation.
+- Fixture proof rejects replay and wrong-origin use.
+- Fixed the native health smoke shutdown path: the listener is explicitly closed before Generic Host waits for its background service. Source and published smoke now serve health then exit without leaving a locked executable.
+
+## Next
+
+Add provider registry/policy contracts and an isolated provider WebView environment. The compatibility main view must remain message-deny by default.
