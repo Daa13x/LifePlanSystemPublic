@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "source": "Projects approval update contract",
+  "previous": {
+    "name": "Project before update",
+    "status": "active",
+    "owner": "user",
+    "confidence": 0.75,
+    "next_action": "Define next action.",
+    "shareability": "unknown"
+  },
+  "updates": {
+    "name": "Project after update",
+    "status": "blocked",
+    "owner": "Alex",
+    "confidence": 0.6,
+    "evidence": "Project update proposed from Projects view.",
+    "next_action": "Resolve the blocked dependency.",
+    "shareability": "local-shareable"
+  }
+}

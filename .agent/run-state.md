@@ -174,3 +174,13 @@ Extend the fixture corpus to project updates and rejection cases, then create a 
 ## Next
 
 Create the matching project-update fixture and native transaction contract, including stale/idempotency/cancellation outcomes. Keep it copied-profile-only until both create and update compatibility replays are complete.
+
+## Project update compatibility contract
+
+- Added `project-update-v1.json` from the Projects approval semantics, plus a native update handler with expected-value stale checks, bounded fields, shareability allow-list, transaction-scoped update and a distinct one-use update receipt.
+- The copied-profile suite seeds the exact previous project values, applies the fixture update, checks every persisted update field, verifies idempotent replay, and confirms a mismatched expected value throws a stale-project result.
+- Evidence: native contract tests passed. This handler remains unreachable from the compatibility host, and no installed project or approval was changed.
+
+## Next
+
+Add cancellation and missing-project transaction cases, then build a disabled-by-default native compatibility adapter whose copied-profile execution is isolated from the installed runtime.

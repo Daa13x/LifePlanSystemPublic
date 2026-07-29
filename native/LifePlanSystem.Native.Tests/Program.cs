@@ -152,7 +152,9 @@ try
               confidence REAL NOT NULL,
               last_reviewed TEXT,
               evidence TEXT,
-              next_action TEXT
+              next_action TEXT,
+              shareability TEXT NOT NULL DEFAULT 'unknown',
+              updated_at TEXT
             );
             """;
         await schema.ExecuteNonQueryAsync();
@@ -196,6 +198,57 @@ try
             throw new InvalidOperationException("Native project command did not reproduce the Node compatibility fixture.");
     }
     await AssertInvalidProjectAsync(createProject);
+
+    using var updateFixture = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(Directory.GetCurrentDirectory(), "native", "fixtures", "project-update-v1.json")));
+    var updateFixtureRoot = updateFixture.RootElement;
+    var previousFixture = updateFixtureRoot.GetProperty("previous");
+    var updatesFixture = updateFixtureRoot.GetProperty("updates");
+    await using (var seedUpdate = new SqliteConnection($"Data Source={commandPath};Pooling=False"))
+    {
+        await seedUpdate.OpenAsync();
+        await using var insert = seedUpdate.CreateCommand();
+        insert.CommandText = """
+            INSERT INTO projects (id, name, status, owner, source, confidence, last_reviewed, evidence, next_action, shareability)
+            VALUES (99, $name, $status, $owner, 'approved proposal', $confidence, date('now'), 'Before update', $nextAction, $shareability);
+            """;
+        insert.Parameters.AddWithValue("$name", previousFixture.GetProperty("name").GetString()!);
+        insert.Parameters.AddWithValue("$status", previousFixture.GetProperty("status").GetString()!);
+        insert.Parameters.AddWithValue("$owner", previousFixture.GetProperty("owner").GetString()!);
+        insert.Parameters.AddWithValue("$confidence", previousFixture.GetProperty("confidence").GetDouble());
+        insert.Parameters.AddWithValue("$nextAction", previousFixture.GetProperty("next_action").GetString()!);
+        insert.Parameters.AddWithValue("$shareability", previousFixture.GetProperty("shareability").GetString()!);
+        await insert.ExecuteNonQueryAsync();
+    }
+    var updateProject = new UpdateProjectCommandHandler(new NativeDatabase(commandPath));
+    var projectUpdate = new UpdateProjectCommand(
+        99,
+        new ProjectSnapshot(
+            previousFixture.GetProperty("name").GetString(), previousFixture.GetProperty("status").GetString(), previousFixture.GetProperty("owner").GetString(),
+            previousFixture.GetProperty("confidence").GetDouble(), previousFixture.GetProperty("next_action").GetString(), previousFixture.GetProperty("shareability").GetString()),
+        new ProjectUpdate(
+            updatesFixture.GetProperty("name").GetString(), updatesFixture.GetProperty("status").GetString(), updatesFixture.GetProperty("owner").GetString(),
+            updatesFixture.GetProperty("confidence").GetDouble(), updatesFixture.GetProperty("evidence").GetString(), updatesFixture.GetProperty("next_action").GetString(), updatesFixture.GetProperty("shareability").GetString()),
+        "project-update-fixture-1");
+    var updated = await updateProject.ExecuteAsync(projectUpdate, CancellationToken.None);
+    var replayedUpdate = await updateProject.ExecuteAsync(projectUpdate, CancellationToken.None);
+    if (updated.Replayed || !replayedUpdate.Replayed) throw new InvalidOperationException("Native project update was not idempotent.");
+    await using (var verifyUpdate = new SqliteConnection($"Data Source={commandPath};Pooling=False"))
+    {
+        await verifyUpdate.OpenAsync();
+        await using var row = verifyUpdate.CreateCommand();
+        row.CommandText = "SELECT name, status, owner, confidence, evidence, next_action, shareability FROM projects WHERE id = 99";
+        await using var reader = await row.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()
+            || !StringComparer.Ordinal.Equals(reader.GetString(0), updatesFixture.GetProperty("name").GetString())
+            || !StringComparer.Ordinal.Equals(reader.GetString(1), updatesFixture.GetProperty("status").GetString())
+            || !StringComparer.Ordinal.Equals(reader.GetString(2), updatesFixture.GetProperty("owner").GetString())
+            || Math.Abs(reader.GetDouble(3) - updatesFixture.GetProperty("confidence").GetDouble()) > 0.0001
+            || !StringComparer.Ordinal.Equals(reader.GetString(4), updatesFixture.GetProperty("evidence").GetString())
+            || !StringComparer.Ordinal.Equals(reader.GetString(5), updatesFixture.GetProperty("next_action").GetString())
+            || !StringComparer.Ordinal.Equals(reader.GetString(6), updatesFixture.GetProperty("shareability").GetString()))
+            throw new InvalidOperationException("Native project update did not reproduce the compatibility fixture.");
+    }
+    await AssertStaleProjectAsync(updateProject, projectUpdate);
     Console.WriteLine("PASS native SQLite migration and transaction contract");
 }
 
@@ -212,6 +265,18 @@ static async Task AssertInvalidProjectAsync(CreateProjectCommandHandler handler)
         throw new InvalidOperationException("Native project command accepted an invalid request.");
     }
     catch (ArgumentException)
+    {
+    }
+}
+
+static async Task AssertStaleProjectAsync(UpdateProjectCommandHandler handler, UpdateProjectCommand command)
+{
+    try
+    {
+        await handler.ExecuteAsync(command with { IdempotencyKey = "project-update-stale-1", Expected = command.Expected with { Name = "stale" } }, CancellationToken.None);
+        throw new InvalidOperationException("Native project update accepted stale expected values.");
+    }
+    catch (ProjectStaleException)
     {
     }
 }
