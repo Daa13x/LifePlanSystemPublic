@@ -414,7 +414,7 @@ function App() {
           </div>
           <div className="top-actions">
             <button className="icon-button sync-service-button" onClick={openRepositorySyncFromShell} aria-label="Open private GitHub repository sync" title="Private GitHub repository sync"><Github size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
-            <button className="icon-button sync-service-button" onClick={openChatGptSyncFromShell} aria-label="Connect ChatGPT browser session" title="Connect ChatGPT browser session"><ChatGptMark size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
+            <button className="icon-button sync-service-button" onClick={openChatGptSyncFromShell} aria-label="Open ChatGPT provider window" title="Open ChatGPT provider window"><ChatGptMark size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
             <button className="icon-button" onClick={refreshCurrentView} disabled={refreshBusy} aria-label="Refresh" title={refreshBusy ? 'Refreshing current view...' : 'Refresh current view'}>
               <RefreshCcw size={18} />
             </button>
@@ -4879,10 +4879,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
     <section className="settings-grid">
       <div className="panel service-sync-panel">
         <h2>Connected services</h2>
-        <p>Connect services deliberately. GitHub sync remains review-gated; ChatGPT sign-in happens only in your normal browser.</p>
+        <p>Connect services deliberately. GitHub sync remains review-gated; ChatGPT opens in its isolated Life Planner provider window and does not pair the Chrome Browser Agent automatically.</p>
         <div className="decision-row">
           <button onClick={openPrivateRepositorySync} title="Open the private repository sync controls"><Github size={16} /> Private repo sync <RefreshCcw size={14} /></button>
-          <button onClick={openChatGptSync} title="Open ChatGPT sign-in in your normal browser"><ChatGptMark size={16} /> Connect ChatGPT <RefreshCcw size={14} /></button>
+          <button onClick={openChatGptSync} title="Open ChatGPT provider window"><ChatGptMark size={16} /> Open ChatGPT <RefreshCcw size={14} /></button>
         </div>
       </div>
       <div className="panel">

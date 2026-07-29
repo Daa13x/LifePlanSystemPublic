@@ -17,5 +17,6 @@ assert.match(provider, /IsAllowedNavigation\(_providerId/, 'every provider navig
 assert.match(provider, /WebMessageReceived.*no native message channel/s, 'provider pages cannot invoke native commands');
 assert.match(policy, /"chatgpt\.com", "auth\.openai\.com"/, 'ChatGPT host policy remains explicit');
 assert.match(ui, /openNativeProviderWindow\('chatgpt'\)/, 'ChatGPT controls use native provider window when available');
+assert.match(ui, /Open ChatGPT provider window/, 'the UI does not misrepresent opening the isolated provider window as connector pairing');
 
 console.log('Native provider-window safety verification passed.');
