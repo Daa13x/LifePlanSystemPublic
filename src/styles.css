@@ -186,11 +186,30 @@ p, .item-meta, .message span, .model-row span, label, .review-card span { color:
   padding: 9px 12px;
   border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line));
   border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   color: var(--soft);
   background: color-mix(in srgb, var(--amber) 8%, var(--panel));
   font-size: 12px;
   line-height: 1.45;
 }
+.notice-banner > span { min-width: 0; }
+.notice-dismiss {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  margin: -4px -5px -4px auto;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+}
+.notice-dismiss:hover { color: var(--text); background: color-mix(in srgb, var(--text) 10%, transparent); }
+.notice-dismiss:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 72%, white); outline-offset: 2px; }
 .diagnostic-action { cursor: pointer; }
 .diagnostic-action:hover { filter: brightness(1.14); }
 h1, h2, h3 { margin: 0; letter-spacing: 0; }

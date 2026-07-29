@@ -413,7 +413,20 @@ function App() {
             </button>
           </div>
         </header>
-        {notice && <div className="notice-banner" role="status">{notice}</div>}
+        {notice && (
+          <div className="notice-banner" role="status">
+            <span>{notice}</span>
+            <button
+              className="notice-dismiss"
+              type="button"
+              onClick={() => setNotice('')}
+              aria-label="Dismiss notification"
+              title="Dismiss notification"
+            >
+              <X size={16} aria-hidden="true" />
+            </button>
+          </div>
+        )}
 
         {route.section === 'workboard' && <Workboard route={route} navigate={navigate} planner={planner} projects={projects} setProjects={setProjects} refresh={reloadPlanner} refreshAll={refreshAll} runRefresh={runPlannerRefresh} setNotice={setNotice} refreshSignal={refreshSignal} />}
         {route.section === 'chat' && (
