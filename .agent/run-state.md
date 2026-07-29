@@ -128,7 +128,9 @@ Continue native ownership work on a copied profile: add a controlled native read
 - Added a package-bound native read-profile locator. It can resolve only the companion layout's `../app/data/life-planner.sqlite`; it has no renderer, provider, command-line or environment path override.
 - Native loopback health now exposes only the existing Workboard aggregate contract through a read-only SQLite connection when that packaged profile exists. It never returns a database path, record content, settings, credentials or SQL error.
 - The Node runtime remains the only writer. The health route reports `compatibility-read-only`, `compatibility-no-profile`, or a redacted unavailable state; it does not migrate or repair the profile.
+- Installed acceptance: clean build `a7b35632efdc0adb2e65c12742f710264b5f05e3` was packaged, installed and reported by the installed Node health endpoint. The native loopback endpoint reported `compatibility-read-only` and aggregate counts only (`2` active projects, `1` blocker, `2` pending approvals, `15` candidates) from the same installed profile; no profile path or user content was exposed.
+- The installed `life-planner.sqlite` stayed at 192512 bytes with its existing 2026-07-27 timestamp through the update/read check. Browser-driven acceptance displayed the native shell and `Alt+F4` cleanly removed its process.
 
 ## Next
 
-Rebuild/install the companion, compare installed native aggregate health against the installed Node workboard summary, and prove clean native shutdown before considering any command migration.
+Add a formal native command/query boundary and architecture checks. No write route may be moved until a validated, transaction-bound native command has copied-profile replay and idempotency proof.
