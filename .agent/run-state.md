@@ -209,3 +209,9 @@ Build the disabled native compatibility adapter on the copied-profile test harne
 ## Next
 
 Extend the copied-profile adapter test corpus to the governed project-update command, then evaluate whether an opt-in native bridge can preserve the existing approval workflow without granting the renderer a write channel.
+
+## Isolated native project-update adapter
+
+- Added a finite update-project envelope type and a copied-profile-only update adapter. It accepts only validated command envelopes, requires a positive project ID plus previous and updates objects, rejects unknown fields and validates field JSON types before the transaction handler.
+- Fixture proof seeds a second project, routes the exact update fixture through a one-use local envelope, verifies correlation-derived idempotent replay, and rejects an unrecognised update field. It is unregistered from WebView, loopback, DI and Node compatibility routes.
+- Installed acceptance: the silent installer built from clean a46c6998eb3f1483f9fcb4e753900e57c6cd5a8e completed at 2026-07-29T12:23Z (SHA-256 C2BE64E3A754472C1EC21E0FFDAF2C4D1C53046C2EF0E6398F44769DCB3805CB). Installed /api/version reports that exact commit, and app/data/life-planner.sqlite remains 192512 bytes with its existing timestamp.
