@@ -116,3 +116,9 @@ Add an opt-in portable native companion package with an explicit manifest and cl
 ## Next
 
 Continue native ownership work on a copied profile: add a controlled native read parity harness for current Node response fixtures before selecting any native write migration. The installed Node/tray path and credentials remain untouched.
+
+## Native Workboard read parity
+
+- Corrected the native status contract to match the live Node `lightweightGroundingFacts` queries exactly: non-terminal projects, non-archived blockers by type or status, pending approvals, and candidate/deferred memories.
+- The copied-profile fixture now includes terminal projects, archived blockers, approved approvals and approved memory candidates; it proves the native reader excludes each one just like Node.
+- Evidence: `dotnet run --project native/LifePlanSystem.Native.Tests/LifePlanSystem.Native.Tests.csproj -c Release` passed after the parity fixture update. The reader remains unregistered from the installed shell and has no write path.

@@ -59,7 +59,8 @@ try
         {
             "CREATE TABLE projects (id INTEGER PRIMARY KEY, status TEXT NOT NULL)",
             "CREATE TABLE knowledge_items (id INTEGER PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL)",
-            "CREATE TABLE memory_candidates (id INTEGER PRIMARY KEY)"
+            "CREATE TABLE approvals (id INTEGER PRIMARY KEY, status TEXT NOT NULL)",
+            "CREATE TABLE memory_candidates (id INTEGER PRIMARY KEY, status TEXT NOT NULL)"
         })
         {
             await using var command = connection.CreateCommand();
@@ -70,16 +71,17 @@ try
         await using var seed = connection.CreateCommand();
         seed.Transaction = transaction;
         seed.CommandText = """
-            INSERT INTO projects (status) VALUES ('active'), ('archived');
-            INSERT INTO knowledge_items (type, status) VALUES ('blocker', 'active'), ('goal', 'review');
-            INSERT INTO memory_candidates DEFAULT VALUES;
+            INSERT INTO projects (status) VALUES ('active'), ('stable'), ('done'), ('completed'), ('archived');
+            INSERT INTO knowledge_items (type, status) VALUES ('blocker', 'blocked'), ('goal', 'blocked'), ('blocker', 'archived'), ('goal', 'active');
+            INSERT INTO approvals (status) VALUES ('pending'), ('approved');
+            INSERT INTO memory_candidates (status) VALUES ('candidate'), ('deferred'), ('approved');
             """;
         await seed.ExecuteNonQueryAsync(cancellationToken);
         return 0;
     }, CancellationToken.None);
 
     var status = await new RuntimeStatusReader(path).ReadAsync(CancellationToken.None);
-    if (status is not { DatabaseReady: true, ActiveProjects: 1, BlockedItems: 1, ReviewItems: 1, MemoryCandidates: 1 })
+    if (status is not { DatabaseReady: true, ActiveProjects: 2, BlockedItems: 2, ReviewItems: 1, MemoryCandidates: 2 })
         throw new InvalidOperationException("Native runtime status contract did not match fixture.");
 
     var backupRoot = Path.Combine(root, "backups");

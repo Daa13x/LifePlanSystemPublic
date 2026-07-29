@@ -34,10 +34,10 @@ public sealed class RuntimeStatusReader
         await connection.OpenAsync(cancellationToken);
         return new RuntimeStatus(
             DatabaseReady: true,
-            ActiveProjects: await CountAsync(connection, "SELECT COUNT(*) FROM projects WHERE status = 'active'", cancellationToken),
-            BlockedItems: await CountAsync(connection, "SELECT COUNT(*) FROM knowledge_items WHERE type = 'blocker' AND status = 'active'", cancellationToken),
-            ReviewItems: await CountAsync(connection, "SELECT COUNT(*) FROM knowledge_items WHERE status = 'review'", cancellationToken),
-            MemoryCandidates: await CountAsync(connection, "SELECT COUNT(*) FROM memory_candidates", cancellationToken));
+            ActiveProjects: await CountAsync(connection, "SELECT COUNT(*) FROM projects WHERE status NOT IN ('done', 'completed', 'archived')", cancellationToken),
+            BlockedItems: await CountAsync(connection, "SELECT COUNT(*) FROM knowledge_items WHERE (type = 'blocker' OR status = 'blocked') AND status NOT IN ('archived', 'deprecated', 'superseded')", cancellationToken),
+            ReviewItems: await CountAsync(connection, "SELECT COUNT(*) FROM approvals WHERE status = 'pending'", cancellationToken),
+            MemoryCandidates: await CountAsync(connection, "SELECT COUNT(*) FROM memory_candidates WHERE status IN ('candidate', 'deferred')", cancellationToken));
     }
 
     private static async Task<int> CountAsync(SqliteConnection connection, string sql, CancellationToken cancellationToken)
