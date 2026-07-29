@@ -33,5 +33,5 @@ export function guardEgressFiles(files, options = {}) {
   const safe = [], omissions = []; let redactions = 0;
   for (const file of files) { const result = guardEgressFile(file, options); redactions += result.redactions || 0; if (result.file) safe.push(result.file); else omissions.push({ path: result.path, reason: result.reason }); }
   const bytes = Buffer.byteLength(safe.map((file) => file.content).join(''));
-  return { files: safe, omissions, redactions, bytes, sha256: crypto.createHash('sha256').update(safe.map((file) => `${file.path}\0${file.content}`).join('\n')).digest('hex') };
+  return { files: safe, omissions, redactions, redactionCount: redactions, bytes, sha256: crypto.createHash('sha256').update(safe.map((file) => `${file.path}\0${file.content}`).join('\n')).digest('hex') };
 }
