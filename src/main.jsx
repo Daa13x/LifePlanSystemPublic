@@ -376,6 +376,8 @@ function App() {
             <p>{route.section === 'workboard' ? 'Plan, prioritise, review, and complete work from one operational space.' : route.section === 'knowledge' ? 'Review memory candidates, evidence, rules, and calibration without auto-promotion.' : route.section === 'system' ? 'Inspect real local status, repository, browser, tooling, and run state.' : route.section === 'settings' ? 'Configure local-only models, runtime paths, and application preferences.' : 'One source of truth, many views. Chat becomes candidate memory only after review.'}</p>
           </div>
           <div className="top-actions">
+            <button className="icon-button sync-service-button" onClick={openPrivateRepositorySync} aria-label="Open private GitHub repository sync" title="Private GitHub repository sync"><Github size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
+            <button className="icon-button sync-service-button" onClick={openChatGptSync} aria-label="Connect ChatGPT browser session" title="Connect ChatGPT browser session"><Sparkles size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
             <button className="icon-button" onClick={refreshCurrentView} disabled={refreshBusy} aria-label="Refresh" title={refreshBusy ? 'Refreshing current view...' : 'Refresh current view'}>
               <RefreshCcw size={18} />
             </button>
@@ -412,6 +414,8 @@ function App() {
             models={models}
             setModels={setModels}
             setNotice={setNotice}
+            openPrivateRepositorySync={openPrivateRepositorySync}
+            openChatGptSync={openChatGptSync}
           />
         )}
       </main>
@@ -1248,6 +1252,20 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   const refreshCloudProviders = () => api('/api/chat/cloud-providers').then((providers) => { setCloudProviders(providers); setCloudProvider((current) => providers.some((provider) => provider.provider === current) ? current : (providers[0]?.provider || '')); setCloudModel((current) => providers.flatMap((provider) => provider.models || []).includes(current) ? current : (providers.find((provider) => provider.provider === cloudProvider)?.model || providers[0]?.model || '')); }).catch(() => {});
+  function openPrivateRepositorySync() {
+    navigate('system', 'repository');
+    setNotice('Private repository sync is available in System → Repository. Review the target and confirm the safe fast-forward sync there.');
+  }
+
+  async function openChatGptSync() {
+    try {
+      await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: 'https://chatgpt.com/' }) });
+      setNotice('Opened ChatGPT in your normal browser. Sign in there, then keep the LPS Browser Agent enabled to connect the session.');
+    } catch (error) {
+      setNotice(`Could not open ChatGPT sign-in: ${error.message}`);
+    }
+  }
+
   useEffect(() => {
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
     api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
@@ -4519,7 +4537,7 @@ function recommendedQwenForHardware(hardware) {
   return MODEL_SUGGESTIONS[0];
 }
 
-function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
+function SettingsView({ settings, setSettings, models, setModels, setNotice, openPrivateRepositorySync, openChatGptSync }) {
   const [modelFolders, setModelFolders] = useState((settings.modelFolders || []).join('\n'));
   const [hfToken, setHfToken] = useState(settings.hfToken || '');
   const [localModelEndpoint, setLocalModelEndpoint] = useState(settings.localModelEndpoint || '');
@@ -4758,6 +4776,14 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice }) {
 
   return (
     <section className="settings-grid">
+      <div className="panel service-sync-panel">
+        <h2>Connected services</h2>
+        <p>Connect services deliberately. GitHub sync remains review-gated; ChatGPT sign-in happens only in your normal browser.</p>
+        <div className="decision-row">
+          <button onClick={openPrivateRepositorySync} title="Open the private repository sync controls"><Github size={16} /> Private repo sync <RefreshCcw size={14} /></button>
+          <button onClick={openChatGptSync} title="Open ChatGPT sign-in in your normal browser"><Sparkles size={16} /> Connect ChatGPT <RefreshCcw size={14} /></button>
+        </div>
+      </div>
       <div className="panel">
         <h2>Assistant response detail</h2>
         <p>Choose how much technical information Life Planner displays with assistant replies. Clean provides normal conversational answers. Detailed shows sources and memory actions. Developer shows full local runtime diagnostics.</p>
