@@ -85,6 +85,10 @@ function words(value) {
 function dateValue(value) { const time = Date.parse(value || ''); return Number.isFinite(time) ? time : 0; }
 function snippet(value, limit = 700) { const text = String(value || '').trim(); return text.length > limit ? `${text.slice(0, limit)}…` : text; }
 
+function permitsOverviewFallback(message) {
+  return /what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what am i (?:currently )?working on/i.test(String(message || ''));
+}
+
 export function sourceRegistry(db, { includeHistory = false, includeCandidates = false, repoRoot = '' } = {}) {
   const records = [];
   const active = includeHistory ? '' : "AND status NOT IN ('archived','deprecated','superseded')";
@@ -158,7 +162,9 @@ export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', 
       userChatMessages: count("SELECT COUNT(*) count FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id WHERE s.deleted=0 AND m.role='user'"),
       assistantChatMessagesExcluded: count("SELECT COUNT(*) count FROM chat_messages WHERE role='assistant'"),
       archivedOrSupersededKnowledgeExcluded: count("SELECT COUNT(*) count FROM knowledge_items WHERE status IN ('archived','deprecated','superseded')"),
-      indexedFileRecords: count("SELECT COUNT(*) count FROM knowledge_items WHERE lower(type) IN ('file','document','attachment')")
+      indexedFileRecords: count("SELECT COUNT(*) count FROM knowledge_items WHERE lower(type) IN ('file','document','attachment')"),
+      privateRepositoryFiles: registry.filter((record) => record.source === 'local private repository').length,
+      bundledRepositoryFiles: registry.filter((record) => record.source === 'bundled GitHub knowledge base').length
     },
     retrievableByCategory,
     totalRetrievable: registry.length,
@@ -170,7 +176,10 @@ function score(record, queryWords, rawQuery, now = Date.now()) {
   const haystack = `${record.category}\n${record.title}\n${record.text}`.toLowerCase();
   const matches = queryWords.reduce((total, word) => total + (haystack.includes(word) ? 1 : 0), 0);
   const broad = shouldGroundConversationInLocalKnowledge(rawQuery);
-  if (!matches && !broad) return -Infinity;
+  // Only an explicit personal overview may fall back to the most recent local
+  // facts. Specific questions must match, preventing unrelated records from
+  // being presented as an answer to "what did I say about X?".
+  if (!matches && !(broad && permitsOverviewFallback(rawQuery))) return -Infinity;
   const recency = Math.max(0, 1 - ((now - dateValue(record.updatedAt)) / (365 * 86400000)));
   // A question about the user must prefer their actual local records over the
   // public app documentation that happens to share generic words such as
@@ -190,11 +199,21 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
     // The just-saved user prompt must not be recycled as evidence for itself.
     && !(record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery));
   const broadPersonalRequest = shouldGroundConversationInLocalKnowledge(query);
+  const repositoryRequest = /\b(?:github|repository|repo|knowledge base|documentation)\b/i.test(String(query || ''));
   // Do not crowd a personal answer with source-code and product documents when
   // any eligible personal record exists. Public documentation remains a useful
   // fallback for repository questions or an otherwise empty personal profile.
-  const eligibleRows = broadPersonalRequest && rows.some((record) => record.category !== 'repository knowledge')
-    ? rows.filter((record) => record.category !== 'repository knowledge')
+  const eligibleRows = repositoryRequest
+    // Repository questions must search repository documents first. Otherwise a
+    // generic Knowledge item containing the word "knowledge" can hide the
+    // exact GitHub/private-repository document the user asked about.
+    ? rows.filter((record) => record.category === 'repository knowledge')
+    : broadPersonalRequest && rows.some((record) => record.category !== 'repository knowledge')
+    // Keep the user's local private-repository records available for personal
+    // questions. Only bundled public product documentation is suppressed when
+    // personal records exist; otherwise generic records can crowd out a
+    // directly relevant profile, CV, or decision document from the private repo.
+    ? rows.filter((record) => record.category !== 'repository knowledge' || record.source === 'local private repository')
     : rows;
   const ranked = eligibleRows.map((record) => ({ ...record, score: score(record, queryWords, String(query || '')) })).filter((record) => Number.isFinite(record.score)).sort((a, b) => b.score - a.score || dateValue(b.updatedAt) - dateValue(a.updatedAt));
   let remaining = options.budget || MAX_CHARS;
@@ -209,7 +228,7 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
 }
 
 export function isLocalKnowledgeQuestion(message) {
-  return /what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
+  return /what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i (?:currently )?working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
 }
 
 // Questions asking for a recommendation about the user need the same local

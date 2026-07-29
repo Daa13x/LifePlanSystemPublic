@@ -6,6 +6,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { answerLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, sourceRegistry } from '../server/localKnowledge.js';
 
 const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-personal-coverage-'));
+const priorPrivateRepository = process.env.LIFE_PLANNER_PRIVATE_REPO;
+const emptyPrivateRepository = path.join(probe, 'empty-private-repository');
+fs.mkdirSync(emptyPrivateRepository, { recursive: true });
+process.env.LIFE_PLANNER_PRIVATE_REPO = emptyPrivateRepository;
 const dbPath = path.join(probe, 'restored-copy', 'life-planner.sqlite');
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 process.env.LIFE_PLANNER_DB = dbPath;
@@ -70,10 +74,18 @@ try {
   assert.match(repositoryAnswer.content, /bundled GitHub knowledge base/i);
   assert.ok(repositoryAnswer.sources.some((source) => source.category === 'repository knowledge' && /MEMORY_ARCHITECTURE/.test(source.provenance)), 'repository knowledge carries file provenance');
 
+  const privateRepository = path.join(probe, 'private-repository');
+  fs.mkdirSync(privateRepository, { recursive: true });
+  fs.writeFileSync(path.join(privateRepository, 'career-profile.md'), '# Career profile\n\nAlex has practical frontend engineering and local AI application experience.');
+  process.env.LIFE_PLANNER_PRIVATE_REPO = privateRepository;
+  const careerContext = retrieveLocalKnowledge(db, 'What job should I do based on my career profile?', { repoRoot: repositoryRoot, limit: 6 });
+  assert.ok(careerContext.items.some((item) => item.source === 'local private repository' && /career-profile/.test(item.provenance)), 'a matching private-repository file remains available alongside saved personal records');
+
   const diagnostic = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath), repoRoot: repositoryRoot });
   assert.equal(diagnostic.resolvedDatabasePath, dbPath);
   assert.equal(diagnostic.resolvedUserDataPath, path.dirname(dbPath));
   assert.ok(diagnostic.counts.activeKnowledge >= 6 && diagnostic.counts.pendingCandidates === 1);
+  assert.equal(diagnostic.counts.privateRepositoryFiles, 1, 'private repository coverage is observable without exposing file contents');
   assert.equal(diagnostic.counts.assistantChatMessagesExcluded, 1);
   assert.ok(diagnostic.sourceAdapters.includes('knowledge_items'));
   assert.ok(diagnostic.sourceAdapters.includes('bundled_github_knowledge'));
@@ -82,5 +94,7 @@ try {
   console.log('Personal knowledge coverage verification passed.');
 } finally {
   db.close();
+  if (priorPrivateRepository === undefined) delete process.env.LIFE_PLANNER_PRIVATE_REPO;
+  else process.env.LIFE_PLANNER_PRIVATE_REPO = priorPrivateRepository;
   fs.rmSync(probe, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 });
 }
