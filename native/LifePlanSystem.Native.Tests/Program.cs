@@ -5,6 +5,7 @@ using LifePlanSystem.Native.Providers;
 using LifePlanSystem.Native.Recovery;
 using Microsoft.Data.Sqlite;
 using System.Text.Json;
+using System.Text;
 
 var root = Path.Combine(Path.GetTempPath(), "lps-native-db-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
@@ -68,6 +69,12 @@ try
         || !providers.TryGet("chatgpt", out var chatGpt)
         || chatGpt!.CaptureMode != ProviderCaptureMode.UserReviewedPasteOnly)
         throw new InvalidOperationException("Provider policy did not enforce manual, allow-listed handling.");
+    var secrets = new ProviderSecretStore(Path.Combine(root, "provider-secrets"));
+    secrets.Save("chatgpt", "fixture-secret");
+    if (secrets.Read("chatgpt") != "fixture-secret" || Encoding.UTF8.GetString(File.ReadAllBytes(Path.Combine(root, "provider-secrets", "chatgpt.bin"))).Contains("fixture-secret"))
+        throw new InvalidOperationException("Native provider secret store did not provide DPAPI ciphertext at rest.");
+    secrets.Remove("chatgpt");
+    if (secrets.Read("chatgpt") is not null) throw new InvalidOperationException("Native provider secret removal failed.");
 
     var database = new NativeDatabase(path);
     await database.MigrateAsync(CancellationToken.None);
