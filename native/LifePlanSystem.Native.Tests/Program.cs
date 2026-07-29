@@ -155,8 +155,20 @@ try
             """;
         await schema.ExecuteNonQueryAsync();
     }
+    using var projectFixture = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(Directory.GetCurrentDirectory(), "native", "fixtures", "project-create-v1.json")));
+    var projectFixtureRoot = projectFixture.RootElement;
+    var requestFixture = projectFixtureRoot.GetProperty("nodeRequest");
+    var defaultsFixture = projectFixtureRoot.GetProperty("nativeDefaults");
+    var expectedFixture = projectFixtureRoot.GetProperty("expected");
     var createProject = new CreateProjectCommandHandler(new NativeDatabase(commandPath));
-    var create = new CreateProjectCommand("Native contract", "active", "user", 0.8, "fixture", "Review contract", "project-fixture-1");
+    var create = new CreateProjectCommand(
+        requestFixture.GetProperty("name").GetString()!,
+        defaultsFixture.GetProperty("status").GetString()!,
+        defaultsFixture.GetProperty("owner").GetString()!,
+        defaultsFixture.GetProperty("confidence").GetDouble(),
+        defaultsFixture.GetProperty("evidence").GetString()!,
+        requestFixture.GetProperty("next_action").GetString(),
+        "project-fixture-1");
     var created = await createProject.ExecuteAsync(create, CancellationToken.None);
     var replayedProject = await createProject.ExecuteAsync(create, CancellationToken.None);
     if (created.Replayed || !replayedProject.Replayed || created.ProjectId != replayedProject.ProjectId)
@@ -168,6 +180,18 @@ try
         projectCount.CommandText = "SELECT COUNT(*) FROM projects";
         if (Convert.ToInt32(await projectCount.ExecuteScalarAsync()) != 1)
             throw new InvalidOperationException("Native project command duplicated an idempotent request.");
+        await using var projectRow = commandVerify.CreateCommand();
+        projectRow.CommandText = "SELECT name, status, owner, source, confidence, next_action FROM projects WHERE id = $id";
+        projectRow.Parameters.AddWithValue("$id", created.ProjectId);
+        await using var reader = await projectRow.ExecuteReaderAsync();
+        if (!await reader.ReadAsync()
+            || !StringComparer.Ordinal.Equals(reader.GetString(0), expectedFixture.GetProperty("name").GetString())
+            || !StringComparer.Ordinal.Equals(reader.GetString(1), expectedFixture.GetProperty("status").GetString())
+            || !StringComparer.Ordinal.Equals(reader.GetString(2), expectedFixture.GetProperty("owner").GetString())
+            || !StringComparer.Ordinal.Equals(reader.GetString(3), expectedFixture.GetProperty("source").GetString())
+            || Math.Abs(reader.GetDouble(4) - expectedFixture.GetProperty("confidence").GetDouble()) > 0.0001
+            || !StringComparer.Ordinal.Equals(reader.GetString(5), expectedFixture.GetProperty("next_action").GetString()))
+            throw new InvalidOperationException("Native project command did not reproduce the Node compatibility fixture.");
     }
     await AssertInvalidProjectAsync(createProject);
     Console.WriteLine("PASS native SQLite migration and transaction contract");

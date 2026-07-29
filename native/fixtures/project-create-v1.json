@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "source": "scripts/verify-installed-chat.mjs",
+  "nodeRequest": {
+    "name": "Browser coverage project",
+    "next_action": "Verify packaged Chat retrieval."
+  },
+  "nativeDefaults": {
+    "status": "active",
+    "owner": "user",
+    "confidence": 0.75,
+    "evidence": "Manual entry"
+  },
+  "expected": {
+    "name": "Browser coverage project",
+    "status": "active",
+    "owner": "user",
+    "source": "manual",
+    "confidence": 0.75,
+    "next_action": "Verify packaged Chat retrieval."
+  }
+}

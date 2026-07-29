@@ -44,7 +44,7 @@ public sealed class CreateProjectCommandHandler(NativeDatabase database)
             insert.Transaction = transaction;
             insert.CommandText = """
                 INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
-                VALUES ($name, $status, $owner, 'native-command', $confidence, date('now'), $evidence, $nextAction);
+                VALUES ($name, $status, $owner, 'manual', $confidence, date('now'), $evidence, $nextAction);
                 SELECT last_insert_rowid();
                 """;
             insert.Parameters.AddWithValue("$name", command.Name.Trim());

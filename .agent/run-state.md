@@ -154,3 +154,13 @@ Add a versioned native command envelope plus machine checks that prevent rendere
 ## Next
 
 Build the formal Node request/response fixture corpus for the first project command and compare the native handler on a copied source-compatible profile. Do not expose the command or alter the Node route until that replay parity is proven.
+
+## First Node/native command replay fixture
+
+- Added `native/fixtures/project-create-v1.json`, derived from the existing browser-driven installed Chat verifier's real `POST /api/projects` request (`name` plus `next_action`) and its canonical Node defaults.
+- The native copied-profile contract now reads that fixture, invokes the native handler, and compares name, status, owner, source, confidence and next action against the expected Node-compatible record. The native command uses `manual` as the same user-originated source marker.
+- Evidence: the native contract suite passed with the fixture replay, idempotency and invalid-request checks. The Node route remains the active production route; no project is created in the installed user database by this test.
+
+## Next
+
+Extend the fixture corpus to project updates and rejection cases, then create a controlled native-only compatibility adapter that is disabled by default and can be exercised against a copied profile before any live routing decision.
