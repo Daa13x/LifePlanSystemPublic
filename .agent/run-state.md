@@ -215,3 +215,8 @@ Extend the copied-profile adapter test corpus to the governed project-update com
 - Added a finite update-project envelope type and a copied-profile-only update adapter. It accepts only validated command envelopes, requires a positive project ID plus previous and updates objects, rejects unknown fields and validates field JSON types before the transaction handler.
 - Fixture proof seeds a second project, routes the exact update fixture through a one-use local envelope, verifies correlation-derived idempotent replay, and rejects an unrecognised update field. It is unregistered from WebView, loopback, DI and Node compatibility routes.
 - Installed acceptance: the silent installer built from clean a46c6998eb3f1483f9fcb4e753900e57c6cd5a8e completed at 2026-07-29T12:23Z (SHA-256 C2BE64E3A754472C1EC21E0FFDAF2C4D1C53046C2EF0E6398F44769DCB3805CB). Installed /api/version reports that exact commit, and app/data/life-planner.sqlite remains 192512 bytes with its existing timestamp.
+
+## Native provider credential foundation
+
+- Added a current-user Windows DPAPI provider secret store. It uses provider-bound entropy, stores only ciphertext in a native private directory, has no SQLite path, and supports removal. The native fixture proves round-trip, no plaintext fixture secret at rest, and removal.
+- Installed acceptance: the portable installer built from clean 86fe62ea90f7fb718b9afc7a191d0bad64555d44 completed and installed /api/version reports that exact commit. The native secret store is not yet wired to any provider API or UI, so no credentials were requested, created, or changed.
