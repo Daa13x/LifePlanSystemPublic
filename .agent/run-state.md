@@ -122,3 +122,13 @@ Continue native ownership work on a copied profile: add a controlled native read
 - Corrected the native status contract to match the live Node `lightweightGroundingFacts` queries exactly: non-terminal projects, non-archived blockers by type or status, pending approvals, and candidate/deferred memories.
 - The copied-profile fixture now includes terminal projects, archived blockers, approved approvals and approved memory candidates; it proves the native reader excludes each one just like Node.
 - Evidence: `dotnet run --project native/LifePlanSystem.Native.Tests/LifePlanSystem.Native.Tests.csproj -c Release` passed after the parity fixture update. The reader remains unregistered from the installed shell and has no write path.
+
+## Native installed-profile read route
+
+- Added a package-bound native read-profile locator. It can resolve only the companion layout's `../app/data/life-planner.sqlite`; it has no renderer, provider, command-line or environment path override.
+- Native loopback health now exposes only the existing Workboard aggregate contract through a read-only SQLite connection when that packaged profile exists. It never returns a database path, record content, settings, credentials or SQL error.
+- The Node runtime remains the only writer. The health route reports `compatibility-read-only`, `compatibility-no-profile`, or a redacted unavailable state; it does not migrate or repair the profile.
+
+## Next
+
+Rebuild/install the companion, compare installed native aggregate health against the installed Node workboard summary, and prove clean native shutdown before considering any command migration.

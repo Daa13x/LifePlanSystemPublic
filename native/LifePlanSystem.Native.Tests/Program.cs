@@ -88,6 +88,17 @@ try
     var backup = await new NativeBackupService().CreateAndVerifyAsync(path, backupRoot, CancellationToken.None);
     if (!File.Exists(backup.BackupPath) || backup.Sha256.Length != 64)
         throw new InvalidOperationException("Native backup evidence was not created.");
+
+    var companionRoot = Path.Combine(root, "companion");
+    var nativeRoot = Path.Combine(companionRoot, "native");
+    var dataRoot = Path.Combine(companionRoot, "app", "data");
+    Directory.CreateDirectory(nativeRoot);
+    Directory.CreateDirectory(dataRoot);
+    var packagedProfile = Path.Combine(dataRoot, "life-planner.sqlite");
+    File.Copy(path, packagedProfile);
+    var locatedProfile = new NativeReadProfileLocator(nativeRoot).TryLocateDatabase();
+    if (!StringComparer.OrdinalIgnoreCase.Equals(locatedProfile, packagedProfile))
+        throw new InvalidOperationException("Native companion profile locator did not resolve only the package data profile.");
     Console.WriteLine("PASS native SQLite migration and transaction contract");
 }
 finally

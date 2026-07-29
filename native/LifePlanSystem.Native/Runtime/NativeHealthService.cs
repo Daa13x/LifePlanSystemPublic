@@ -2,10 +2,11 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
+using LifePlanSystem.Native.Contracts;
 
 namespace LifePlanSystem.Native.Runtime;
 
-internal sealed class NativeHealthService(NativeRuntimeIdentity identity) : BackgroundService
+internal sealed class NativeHealthService(NativeRuntimeIdentity identity, NativeReadProfileLocator profileLocator) : BackgroundService
 {
     private readonly HttpListener _listener = new();
 
@@ -45,13 +46,15 @@ internal sealed class NativeHealthService(NativeRuntimeIdentity identity) : Back
             return;
         }
 
+        var workboard = await ReadWorkboardAsync(cancellationToken);
         var body = JsonSerializer.SerializeToUtf8Bytes(new
         {
             ok = true,
             data = new
             {
                 runtime = identity,
-                db = "compatibility-not-owned",
+                db = workboard.Status,
+                workboard = workboard.Value,
                 node = "compatibility-host"
             }
         });
@@ -59,5 +62,25 @@ internal sealed class NativeHealthService(NativeRuntimeIdentity identity) : Back
         context.Response.ContentLength64 = body.Length;
         await context.Response.OutputStream.WriteAsync(body, cancellationToken);
         context.Response.Close();
+    }
+
+    private async Task<(string Status, RuntimeStatus? Value)> ReadWorkboardAsync(CancellationToken cancellationToken)
+    {
+        var databasePath = profileLocator.TryLocateDatabase();
+        if (databasePath is null) return ("compatibility-no-profile", null);
+        try
+        {
+            var status = await new RuntimeStatusReader(databasePath).ReadAsync(cancellationToken);
+            return ("compatibility-read-only", status);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Do not disclose paths, SQL errors, or data through an unauthenticated loopback probe.
+            return ("compatibility-read-unavailable", null);
+        }
     }
 }

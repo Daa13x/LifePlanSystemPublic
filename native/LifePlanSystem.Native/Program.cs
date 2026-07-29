@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using LifePlanSystem.Native.Contracts;
 using LifePlanSystem.Native.Runtime;
 
 namespace LifePlanSystem.Native;
@@ -19,6 +20,7 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         var builder = Host.CreateApplicationBuilder();
         builder.Services.AddSingleton(NativeRuntimeIdentity.Current());
+        builder.Services.AddSingleton(new NativeReadProfileLocator(AppContext.BaseDirectory));
         builder.Services.AddHostedService<NativeHealthService>();
         builder.Services.AddSingleton<MainForm>();
         using var host = builder.Build();
