@@ -99,9 +99,58 @@ try
     var locatedProfile = new NativeReadProfileLocator(nativeRoot).TryLocateDatabase();
     if (!StringComparer.OrdinalIgnoreCase.Equals(locatedProfile, packagedProfile))
         throw new InvalidOperationException("Native companion profile locator did not resolve only the package data profile.");
+
+    var commandPath = Path.Combine(root, "command-profile.sqlite");
+    await using (var commandFixture = new SqliteConnection($"Data Source={commandPath};Pooling=False"))
+    {
+        await commandFixture.OpenAsync();
+        await using var schema = commandFixture.CreateCommand();
+        schema.CommandText = """
+            CREATE TABLE projects (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              owner TEXT NOT NULL,
+              source TEXT NOT NULL,
+              confidence REAL NOT NULL,
+              last_reviewed TEXT,
+              evidence TEXT,
+              next_action TEXT
+            );
+            """;
+        await schema.ExecuteNonQueryAsync();
+    }
+    var createProject = new CreateProjectCommandHandler(new NativeDatabase(commandPath));
+    var create = new CreateProjectCommand("Native contract", "active", "user", 0.8, "fixture", "Review contract", "project-fixture-1");
+    var created = await createProject.ExecuteAsync(create, CancellationToken.None);
+    var replayedProject = await createProject.ExecuteAsync(create, CancellationToken.None);
+    if (created.Replayed || !replayedProject.Replayed || created.ProjectId != replayedProject.ProjectId)
+        throw new InvalidOperationException("Native project command was not idempotent.");
+    await using (var commandVerify = new SqliteConnection($"Data Source={commandPath};Pooling=False"))
+    {
+        await commandVerify.OpenAsync();
+        await using var projectCount = commandVerify.CreateCommand();
+        projectCount.CommandText = "SELECT COUNT(*) FROM projects";
+        if (Convert.ToInt32(await projectCount.ExecuteScalarAsync()) != 1)
+            throw new InvalidOperationException("Native project command duplicated an idempotent request.");
+    }
+    await AssertInvalidProjectAsync(createProject);
     Console.WriteLine("PASS native SQLite migration and transaction contract");
 }
+
 finally
 {
     if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+}
+
+static async Task AssertInvalidProjectAsync(CreateProjectCommandHandler handler)
+{
+    try
+    {
+        await handler.ExecuteAsync(new CreateProjectCommand("", "active", "user", 0.8, "fixture", null, "invalid-project"), CancellationToken.None);
+        throw new InvalidOperationException("Native project command accepted an invalid request.");
+    }
+    catch (ArgumentException)
+    {
+    }
 }

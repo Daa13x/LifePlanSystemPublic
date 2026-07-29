@@ -134,3 +134,13 @@ Continue native ownership work on a copied profile: add a controlled native read
 ## Next
 
 Add a formal native command/query boundary and architecture checks. No write route may be moved until a validated, transaction-bound native command has copied-profile replay and idempotency proof.
+
+## Native command boundary preparation
+
+- Added a bounded `CreateProjectCommand` and handler, with request validation, a single native transaction and a durable native idempotency receipt. The handler is not registered with the shell or any loopback route.
+- Copied-profile proof creates one source-compatible project schema, executes a command twice with the same key, verifies one resulting row and the same project ID, and verifies an invalid request is rejected.
+- Evidence: the native contract executable passed after the transaction/idempotency fixture was added. No installed profile, Node route, renderer command or user record was changed.
+
+## Next
+
+Add a versioned native command envelope plus machine checks that prevent renderer/provider-originated payloads from reaching a native handler without schema, capability and correlation validation. Keep project creation fixture-only until a full Node compatibility replay is available.
