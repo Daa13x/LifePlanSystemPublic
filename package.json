@@ -35,6 +35,7 @@
     "verify:classified-export-import": "node scripts/verify-classified-export-import.mjs",
     "verify:native-coding-worker": "node scripts/verify-native-coding-worker.mjs",
     "verify:browser-assisted-coding": "node scripts/verify-browser-assisted-coding.mjs",
+    "verify:egress-guard": "node scripts/verify-egress-guard.mjs",
     "verify:runtime-safety": "npm run verify:maintainer-attribution && npm run verify:runcli-cwd && npm run verify:source-control-safety && npm run verify:source-control-api && npm run verify:git-authority-policy && npm run verify:governance-safety && npm run verify:browser-connector-safety && npm run verify:browser-extension-install && npm run verify:tray-launcher && npm run verify:executor-enforcement && npm run verify:openhands-invocation-all && npm run verify:openhands-stop-boundary && npm run verify:local-ai-docs && npm run verify:classified-export-import && npm run verify:native-coding-worker && npm run verify:browser-assisted-coding && npm run verify:mutation-csrf && npm run verify:durable-confirmations && npm run verify:setup-recovery && npm run verify:setup-recovery-http && npm run verify:setup-recovery-ui",
     "verify:lifeskillsystem-skills": "node scripts/verify-lifeskillsystem-skills.mjs",
     "verify:local-learning-event-schema": "node scripts/verify-local-learning-event-schema.mjs",

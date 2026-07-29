@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { guardEgressFiles, loadLpsIgnore } from './egressGuard.js';
 
 const DEFAULT_MAX_FILE_BYTES = 512 * 1024; // spec §2: skip files over ~512 KB
 const DEFAULT_TTL_MS = 120000; // spec §2: cache for a few minutes
@@ -198,13 +199,14 @@ export async function buildWorkspaceEvidence({ root, worktree, allowedPaths, for
   const index = cache || new FileIndexCache();
   const identity = { root, worktree: worktree || root, commit, searchRoots };
   const { files, hit } = await index.getOrBuild(identity, { forbiddenPath });
-  const anchors = terms.length ? rankAnchors(files, terms) : [];
-  const byPath = new Map(files.map((file) => [file.path, file]));
+  const guarded = guardEgressFiles(files, { extraDenied: loadLpsIgnore(worktree || root).map((value) => new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replaceAll('**', '.*').replaceAll('*', '[^/]*'))) });
+  const anchors = terms.length ? rankAnchors(guarded.files, terms) : [];
+  const byPath = new Map(guarded.files.map((file) => [file.path, file]));
   const excerpts = anchors.slice(0, 4).map((anchor) => ({
     path: anchor.path,
     excerpt: excerptFor(byPath.get(anchor.path)?.content || '', terms)
   }));
-  return { roots: searchRoots, terms, anchors, excerpts, cacheHit: hit, fileCount: files.length };
+  return { roots: searchRoots, terms, anchors, excerpts, cacheHit: hit, fileCount: guarded.files.length, omissions: guarded.omissions, redactionCount: guarded.redactions, outboundBytes: guarded.bytes, outboundSha256: guarded.sha256 };
 }
 
 // ---- Safeguard 1: task-solvability preflight ------------------------------
