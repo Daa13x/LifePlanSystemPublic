@@ -6,6 +6,8 @@ const portableRoot = path.resolve(process.argv[2] || 'release/LifePlannerPortabl
 const required = [
   'Start Life Planner.cmd',
   'Start Life Planner.vbs',
+  'Start Native Shell.cmd',
+  'Start-NativeShell.ps1',
   'LifePlannerTray.ps1',
   'life-planner-app.ico',
   'Install Local Model Runtime.cmd',
@@ -13,6 +15,7 @@ const required = [
   'llama/llama-server.exe',
   'llama/runtime-manifest.json',
   'node/node.exe',
+  'native/LifePlanSystem.Native.exe',
   'app/dist/index.html',
   'app/server/index.js',
   'app/server/browserExtensionInstall.js',
@@ -57,6 +60,7 @@ const packageScript = fs.readFileSync(path.join(portableRoot, 'app/scripts/packa
 const runtimeProvisioner = fs.readFileSync(path.join(portableRoot, 'app/scripts/windows/Install-LlamaRuntime.ps1'), 'utf8');
 const trayScript = fs.readFileSync(path.join(portableRoot, 'LifePlannerTray.ps1'), 'utf8');
 const vbsLauncher = fs.readFileSync(path.join(portableRoot, 'Start Life Planner.vbs'), 'utf8');
+const nativeLauncher = fs.readFileSync(path.join(portableRoot, 'Start-NativeShell.ps1'), 'utf8');
 assert.match(buildScript, /Start-Process[\s\S]*-Wait[\s\S]*ExitCode/);
 assert.match(packageScript, /bundledNodeRoot/);
 assert.match(packageScript, /npmCommand/);
@@ -74,6 +78,10 @@ assert.match(trayScript, /Pause environment/);
 assert.match(trayScript, /Resume environment/);
 assert.match(trayScript, /Exit environment/);
 assert.match(vbsLauncher, /WindowStyle Hidden/);
+assert.match(nativeLauncher, /LifePlannerTray\.ps1/);
+assert.match(nativeLauncher, /-NoAutoOpen/);
+assert.match(nativeLauncher, /LifePlanSystem\.Native\.exe/);
+assert.match(nativeLauncher, /127\.0\.0\.1:4177\/api\/health/);
 const modelInstaller = fs.readFileSync(path.join(portableRoot, 'Install Local Model Runtime.cmd'), 'utf8');
 assert.match(modelInstaller, /Install-LlamaRuntime\.ps1/);
 

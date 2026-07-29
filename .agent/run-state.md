@@ -103,3 +103,14 @@ Build an isolated provider WebView host only after a provider has an approved of
 ## Next
 
 Add an opt-in portable native companion package with an explicit manifest and clean-launch verification. It must remain separate from the installed Node/tray application until parity and ownership gates are complete.
+
+## Native companion packaging
+
+- The portable packaging pipeline now publishes the native WinForms artifact and includes it under `native/` alongside the unchanged Node/tray payload.
+- Added `Start Native Shell.cmd`. It launches the existing tray host with auto-open disabled, waits for the local health endpoint, then starts the isolated native WebView2 shell. This is explicitly opt-in and preserves the existing Node database owner, app data, credentials and default launcher.
+- Automated evidence: installer safety verification passed and portable-package verification requires the native executable plus the bounded health-gated launcher.
+- Installed acceptance remains pending: the existing installed app has not been overwritten while the new installer compilation completes and its payload identity is checked.
+
+## Next
+
+Complete the installer build, record its hash and build identity, then perform the installed update and native companion launch/restart checks without modifying user data or credentials.

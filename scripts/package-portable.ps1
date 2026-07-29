@@ -30,6 +30,9 @@ $npmCommand = if (Test-Path -LiteralPath (Join-Path $bundledNodeRoot "npm.cmd"))
 $trayScriptSource = Join-Path $repoRoot "scripts\windows\LifePlannerTray.ps1"
 $llamaProvisionerSource = Join-Path $repoRoot "scripts\windows\Install-LlamaRuntime.ps1"
 $trayIconSource = Join-Path $repoRoot "installer\assets\life-planner-app.ico"
+$nativeBuildScript = Join-Path $repoRoot "scripts\build-native.ps1"
+$nativePublishRoot = Join-Path $releaseRoot "LifePlannerNative"
+$nativePortableRoot = Join-Path $portableRoot "native"
 
 Write-Host "Preparing Life Planner portable bundle ($Configuration)"
 Write-Host "Repo: $repoRoot"
@@ -55,6 +58,15 @@ finally {
   Pop-Location
 }
 
+if (!(Test-Path -LiteralPath $nativeBuildScript)) {
+  throw "Native build script is missing: $nativeBuildScript"
+}
+& $nativeBuildScript
+if ($LASTEXITCODE -ne 0) { throw "Native publish failed with exit code $LASTEXITCODE" }
+if (!(Test-Path -LiteralPath (Join-Path $nativePublishRoot "LifePlanSystem.Native.exe"))) {
+  throw "Native publish output is missing: $nativePublishRoot"
+}
+
 if (!(Test-Path $nodeExtract)) {
   if (!(Test-Path $nodeZip)) {
     Write-Host "Downloading Node.js $NodeVersion..."
@@ -67,9 +79,10 @@ if (!(Test-Path $nodeExtract)) {
 if (Test-Path $portableRoot) {
   Remove-Item -LiteralPath $portableRoot -Recurse -Force
 }
-New-Item -ItemType Directory -Force -Path $appRoot, $nodeRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $appRoot, $nodeRoot, $nativePortableRoot | Out-Null
 
 Copy-Item -Path (Join-Path $nodeExtract "*") -Destination $nodeRoot -Recurse -Force
+Copy-Item -Path (Join-Path $nativePublishRoot "*") -Destination $nativePortableRoot -Recurse -Force
 
 $itemsToCopy = @(
   "dist",
@@ -183,6 +196,49 @@ start "" wscript.exe "%~dp0Start Life Planner.vbs"
 exit /b 0
 "@ | Set-Content -Path (Join-Path $portableRoot "Start Life Planner.cmd") -Encoding ASCII
 
+@"
+@echo off
+setlocal
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Start-NativeShell.ps1"
+exit /b %ERRORLEVEL%
+"@ | Set-Content -Path (Join-Path $portableRoot "Start Native Shell.cmd") -Encoding ASCII
+
+@'
+param()
+
+$ErrorActionPreference = 'Stop'
+$portableRoot = Split-Path -Parent $PSCommandPath
+$trayScript = Join-Path $portableRoot 'LifePlannerTray.ps1'
+$nativeExe = Join-Path $portableRoot 'native\LifePlanSystem.Native.exe'
+$healthUrl = 'http://127.0.0.1:4177/api/health'
+
+foreach ($requiredPath in @($trayScript, $nativeExe)) {
+  if (-not (Test-Path -LiteralPath $requiredPath)) {
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show("Life Planner native shell is missing a required file:`r`n$requiredPath", 'Life Planner', 'OK', 'Error') | Out-Null
+    exit 1
+  }
+}
+
+Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $trayScript, '-PortableRoot', $portableRoot, '-NoAutoOpen') -WindowStyle Hidden
+$deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+while ([DateTimeOffset]::UtcNow -lt $deadline) {
+  try {
+    $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
+    if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
+      Start-Process -FilePath $nativeExe -WorkingDirectory (Split-Path -Parent $nativeExe) | Out-Null
+      exit 0
+    }
+  }
+  catch { }
+  Start-Sleep -Milliseconds 300
+}
+
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.MessageBox]::Show('Life Planner did not become ready for the native shell within 30 seconds. Check the Life Planner tray status and logs.', 'Life Planner', 'OK', 'Error') | Out-Null
+exit 1
+'@ | Set-Content -Path (Join-Path $portableRoot "Start-NativeShell.ps1") -Encoding UTF8
+
 @'
 Option Explicit
 Dim shell, fso, root, scriptPath, command
@@ -241,6 +297,11 @@ Life Planner starts without a Node terminal and remains available from its app i
 The app opens at:
 
 http://127.0.0.1:4177/
+
+`Start Native Shell.cmd` is an opt-in compatibility shell. It starts the existing
+local server first, then opens the same React interface in the isolated native
+WebView2 window. It does not replace the tray launcher, own the database, or
+change provider credentials.
 
 Server output is written under:
 
