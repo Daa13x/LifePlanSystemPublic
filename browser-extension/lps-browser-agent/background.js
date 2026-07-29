@@ -79,30 +79,18 @@ async function tabForJob(job) {
   return created.id;
 }
 
-async function runContentSend(prompt) {
+async function runContentSend(targetAgent, prompt) {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const selectors = [
-    '[data-testid="prompt-textarea"]',
-    '#prompt-textarea',
-    'textarea[placeholder*="Message"]',
-    'textarea[aria-label*="Message"]',
-    'div[contenteditable="true"][role="textbox"]',
-    'div[contenteditable="true"]',
-    'textarea'
-  ];
-  const sendSelectors = [
-    '[data-testid="send-button"]',
-    '[data-testid="composer-submit-button"]',
-    'button[aria-label*="Send"]',
-    'button[type="submit"]'
-  ];
-  const responseSelectors = [
-    '[data-message-author-role="assistant"]',
-    'message-content',
-    '[data-testid="conversation-turn"]',
-    '.model-response-text',
-    'main'
-  ];
+  const adapters = {
+    ChatGPT: { composer: ['[data-testid="prompt-textarea"]', '#prompt-textarea'], send: ['[data-testid="send-button"]', '[data-testid="composer-submit-button"]'], assistant: '[data-message-author-role="assistant"]' },
+    Gemini: { composer: ['div[contenteditable="true"][aria-label*="prompt" i]', 'textarea[aria-label*="prompt" i]'], send: ['button[aria-label*="Send" i]', 'button[aria-label*="Submit" i]'], assistant: 'message-content' },
+    Grok: { composer: ['textarea[placeholder*="Ask" i]', 'div[contenteditable="true"][role="textbox"]'], send: ['button[aria-label*="Send" i]', 'button[type="submit"]'], assistant: '.model-response-text' },
+    Claude: { composer: ['div[contenteditable="true"][role="textbox"]', 'textarea[placeholder*="Message" i]'], send: ['button[aria-label*="Send" i]', 'button[type="submit"]'], assistant: '[data-testid="assistant-message"], [data-is-streaming="false"]' }
+  };
+  const adapter = adapters[targetAgent];
+  if (!adapter) return { status: 'blocked', error: `Unsupported browser-agent provider: ${targetAgent}` };
+  const selectors = adapter.composer;
+  const sendSelectors = adapter.send;
   const promptText = String(prompt || '').replace(/\s+/g, ' ').trim();
   // ChatGPT's reasoning UI renders status labels ("Thinking", "Thought for a couple
   // of seconds") inside the assistant turn. They hold still long enough to pass the
@@ -134,9 +122,9 @@ async function runContentSend(prompt) {
   // On ChatGPT pages capture is scoped to assistant turns at index >= minTurnIndex
   // (turns created after the prompt was sent), with no fallback to older turns or
   // generic containers — falling back returned stale answers from earlier turns.
-  const assistantTurnCount = () => document.querySelectorAll('[data-message-author-role="assistant"]').length;
+  const assistantTurnCount = () => document.querySelectorAll(adapter.assistant).length;
   const readLatestResponse = (minTurnIndex = 0) => {
-    const assistantNodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+    const assistantNodes = [...document.querySelectorAll(adapter.assistant)];
     if (assistantNodes.length) {
       const candidates = assistantNodes.slice(minTurnIndex).filter(isVisibleNode);
       for (const node of candidates.reverse()) {
@@ -144,13 +132,6 @@ async function runContentSend(prompt) {
         if (text) return text;
       }
       return '';
-    }
-    for (const selector of responseSelectors.slice(1)) {
-      const nodes = [...document.querySelectorAll(selector)].filter(isVisibleNode);
-      for (const node of nodes.reverse()) {
-        const text = extractResponseText(node);
-        if (text) return text;
-      }
     }
     return '';
   };
@@ -237,7 +218,7 @@ async function handleJob(job) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: runContentSend,
-      args: [job.prompt]
+      args: [job.targetAgent, job.prompt]
     }).then(async ([result]) => {
       const data = result?.result || { status: 'error', error: 'No content-script result.' };
       await api(`/api/browser/extension/jobs/${job.id}`, {
