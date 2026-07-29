@@ -144,3 +144,13 @@ Add a formal native command/query boundary and architecture checks. No write rou
 ## Next
 
 Add a versioned native command envelope plus machine checks that prevent renderer/provider-originated payloads from reaching a native handler without schema, capability and correlation validation. Keep project creation fixture-only until a full Node compatibility replay is available.
+
+## Native command-envelope security
+
+- Added a finite v1 main-view envelope for the future `create-project` command. It requires the trusted loopback origin, a GUID correlation ID, bounded future expiry, object payload and a cryptographically random one-use capability.
+- Main-view capabilities are deliberately separate from provider capabilities: provider tokens remain HTTPS-only, while local command tokens are origin-bound only to the trusted loopback shell. Neither token family can cross into the other trust domain.
+- Security fixture proof rejects replay, hostile origin, expired envelope, malformed JSON and an unknown command type. The main WebView still denies all messages and no command is dispatched in the installed application.
+
+## Next
+
+Build the formal Node request/response fixture corpus for the first project command and compare the native handler on a copied source-compatible profile. Do not expose the command or alter the Node route until that replay parity is proven.

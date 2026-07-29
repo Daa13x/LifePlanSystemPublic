@@ -4,6 +4,7 @@ using LifePlanSystem.Native.Security;
 using LifePlanSystem.Native.Providers;
 using LifePlanSystem.Native.Recovery;
 using Microsoft.Data.Sqlite;
+using System.Text.Json;
 
 var root = Path.Combine(Path.GetTempPath(), "lps-native-db-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
@@ -24,6 +25,40 @@ try
     var wrongOrigin = capabilityStore.Issue("provider-a", providerOrigin, "capture-response", TimeSpan.FromMinutes(1));
     if (capabilityStore.TryConsume(wrongOrigin.Token, "provider-a", new Uri("https://evil.example"), "capture-response", DateTimeOffset.UtcNow))
         throw new InvalidOperationException("Provider capability accepted a different origin.");
+
+    var commandValidator = new NativeCommandEnvelopeValidator();
+    var localOrigin = new Uri("http://127.0.0.1:4177/");
+    var commandCapability = commandValidator.IssueForTesting(localOrigin, "create-project", TimeSpan.FromMinutes(1));
+    var correlationId = Guid.NewGuid();
+    var validEnvelope = JsonSerializer.Serialize(new
+    {
+        version = 1,
+        type = "create-project",
+        correlationId,
+        expiresAt = DateTimeOffset.UtcNow.AddMinutes(1),
+        capability = commandCapability.Token,
+        payload = new { name = "Fixture" }
+    });
+    if (!commandValidator.TryValidate(localOrigin.AbsoluteUri, validEnvelope, DateTimeOffset.UtcNow, out var validatedCommand)
+        || validatedCommand?.Type != "create-project"
+        || commandValidator.TryValidate(localOrigin.AbsoluteUri, validEnvelope, DateTimeOffset.UtcNow, out _)
+        || commandValidator.TryValidate(localOrigin.AbsoluteUri, "{\"version\":1,\"type\":\"unbounded\"}", DateTimeOffset.UtcNow, out _))
+        throw new InvalidOperationException("Native command envelope did not enforce origin, schema and one-use capability validation.");
+    var wrongOriginCapability = commandValidator.IssueForTesting(localOrigin, "create-project", TimeSpan.FromMinutes(1));
+    var wrongOriginEnvelope = JsonSerializer.Serialize(new
+    {
+        version = 1, type = "create-project", correlationId = Guid.NewGuid(), expiresAt = DateTimeOffset.UtcNow.AddMinutes(1),
+        capability = wrongOriginCapability.Token, payload = new { name = "Fixture" }
+    });
+    var expiredCapability = commandValidator.IssueForTesting(localOrigin, "create-project", TimeSpan.FromMinutes(1));
+    var expiredEnvelope = JsonSerializer.Serialize(new
+    {
+        version = 1, type = "create-project", correlationId = Guid.NewGuid(), expiresAt = DateTimeOffset.UtcNow.AddMinutes(-1),
+        capability = expiredCapability.Token, payload = new { name = "Fixture" }
+    });
+    if (commandValidator.TryValidate("https://evil.example/", wrongOriginEnvelope, DateTimeOffset.UtcNow, out _)
+        || commandValidator.TryValidate(localOrigin.AbsoluteUri, expiredEnvelope, DateTimeOffset.UtcNow, out _))
+        throw new InvalidOperationException("Native command envelope accepted a hostile origin or expired message.");
 
     var providers = new ProviderPolicyRegistry();
     if (!providers.IsAllowedNavigation("chatgpt", new Uri("https://chatgpt.com/"))
