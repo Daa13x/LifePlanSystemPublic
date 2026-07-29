@@ -2975,7 +2975,7 @@ app.post('/api/memory/candidates/:id/:decision', async (req, res) => {
   const candidate = row('SELECT * FROM memory_candidates WHERE id = ?', [req.params.id]);
   if (!candidate) return fail(res, 404, 'Candidate not found.');
   const decision = req.params.decision;
-  if (!['approve', 'deny', 'defer'].includes(decision)) return fail(res, 400, 'Decision must be approve, deny, or defer.');
+  if (!['approve', 'deny', 'defer', 'temporary'].includes(decision)) return fail(res, 400, 'Decision must be approve, deny, defer, or temporary.');
   if (!['candidate', 'deferred'].includes(candidate.status)) return fail(res, 409, `Memory candidate was already ${candidate.status}.`);
   const claim = db.prepare("UPDATE memory_candidates SET status = 'processing' WHERE id = ? AND status IN ('candidate', 'deferred')").run(candidate.id);
   if (claim.changes !== 1) return fail(res, 409, 'Memory candidate is no longer pending.');
@@ -2997,7 +2997,7 @@ app.post('/api/memory/candidates/:id/:decision', async (req, res) => {
       }
       db.prepare("UPDATE memory_candidates SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'").run(candidate.id);
     } else {
-      db.prepare("UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'").run(decision === 'deny' ? 'denied' : 'deferred', candidate.id);
+      db.prepare("UPDATE memory_candidates SET status = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'processing'").run(decision === 'deny' ? 'denied' : decision === 'temporary' ? 'temporary' : 'deferred', candidate.id);
     }
   } catch (error) {
     db.prepare("UPDATE memory_candidates SET status = ? WHERE id = ? AND status = 'processing'").run(candidate.status, candidate.id);

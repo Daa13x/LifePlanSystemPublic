@@ -116,7 +116,7 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
 }
 
 export function isLocalKnowledgeQuestion(message) {
-  return /what do you know about me|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously/i.test(String(message || '').toLowerCase());
+  return /what do you know about(?:\s+me)?(?:\s+|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously/i.test(String(message || '').toLowerCase());
 }
 
 export function answerLocalKnowledgeQuestion(db, message) {

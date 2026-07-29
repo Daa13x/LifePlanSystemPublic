@@ -1585,12 +1585,13 @@ function CandidateReviewCard({ candidate, edits = {}, setEdits, onSave, onDecisi
           </div>
         </details>
       )}
-      <div className="decision-row">
+      {candidate.status === 'temporary' ? <p>Temporary information is shown separately from approved memory and is not treated as a canonical fact.</p> : <div className="decision-row">
         {canEdit && <button onClick={() => onSave(candidate)}><Check size={16} /> Save metadata</button>}
         <button className="primary" onClick={() => onDecision(candidate.id, 'approve')}><Check size={16} /> Approve</button>
         <button onClick={() => onDecision(candidate.id, 'defer')}><Clock3 size={16} /> Defer</button>
+        <button onClick={() => onDecision(candidate.id, 'temporary')}><Clock3 size={16} /> Temporary</button>
         <button className="danger" onClick={() => onDecision(candidate.id, 'deny')}><X size={16} /> Deny</button>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -1634,7 +1635,7 @@ function Memory({ memory, refresh, mode = 'memory' }) {
     refresh();
   }
 
-  const candidates = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status));
+  const candidates = memory.candidates.filter((candidate) => ['candidate', 'deferred', 'temporary'].includes(candidate.status));
   const approvedItems = memory.items.filter((item) => item.type !== 'rule');
 
   return (
