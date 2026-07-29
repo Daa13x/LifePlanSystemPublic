@@ -2981,7 +2981,7 @@ app.get('/api/chat/sessions/:id/connection', async (req, res) => {
     },
     available: {
       total: available.length,
-      knowledge: availableByCategory['current state'] || 0,
+      knowledge: available.filter((record) => !['project', 'repository knowledge', 'conversation history'].includes(record.category)).length,
       workboard: availableByCategory.project || 0,
       files: availableByCategory['repository knowledge'] || 0,
       sources: available.filter((record) => record.category === 'repository knowledge').slice(0, 20).map((record) => record.provenance)
