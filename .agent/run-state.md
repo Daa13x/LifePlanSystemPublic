@@ -31,3 +31,15 @@
 ## Next
 
 Resolve the WebView2 package warning, add native-only contract and database-migration services against disposable copied profiles, and prove they do not become a second writer before routing any live request to C#.
+
+## Phase 2 preparation
+
+- Added NativeDatabase using Microsoft.Data.Sqlite with an explicit non-pooled, foreign-key-enabled, cancellable transaction boundary and checksum-protected migration journal.
+- Added a disposable copied-profile console acceptance project. It proves migration idempotency, transaction completion and deterministic database cleanup.
+- Evidence: dotnet run native/LifePlanSystem.Native.Tests completed with PASS native SQLite migration and transaction contract.
+- Live database rule remains unchanged: this service is not registered in the shell and no installed request has been routed to it.
+- Dependency evidence: current stable Microsoft.Web.WebView2 1.0.3967.48 still emits MSB3277 because the package references its WPF assembly. This is documented as an unresolved package-level warning; no suppression has been applied.
+
+## Next
+
+Define the first native-owned read contract and its compatibility fixture corpus. Do not route or write live domain data until contract parity and copied-profile recovery tests cover it.
