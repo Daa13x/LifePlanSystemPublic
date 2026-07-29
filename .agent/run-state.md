@@ -109,8 +109,10 @@ Add an opt-in portable native companion package with an explicit manifest and cl
 - The portable packaging pipeline now publishes the native WinForms artifact and includes it under `native/` alongside the unchanged Node/tray payload.
 - Added `Start Native Shell.cmd`. It launches the existing tray host with auto-open disabled, waits for the local health endpoint, then starts the isolated native WebView2 shell. This is explicitly opt-in and preserves the existing Node database owner, app data, credentials and default launcher.
 - Automated evidence: installer safety verification passed and portable-package verification requires the native executable plus the bounded health-gated launcher.
-- Installed acceptance remains pending: the existing installed app has not been overwritten while the new installer compilation completes and its payload identity is checked.
+- Installed acceptance: `release/LifePlannerPortableSetup.exe` was built from clean `ea3d89d7ae07cd5cd30f68c1b1b5b756dca2fb37` at 2026-07-29T11:38Z (SHA-256 `82E6EB6370FDFADC977CD6AF273E86B7583EFF65ED1FAD44E77FF217BB59B48B`). The silent update completed, preserved the existing `app/data/life-planner.sqlite` path, and the installed health endpoint reports that exact clean commit.
+- Browser-driven installed check: launched `C:\Users\alexl\AppData\Local\Programs\Life Planner\native\LifePlanSystem.Native.exe`; it displayed the real Life Planner interface in a window titled `Life Planner (native-shell-compatibility)`, with no white screen. Closing its standard window control exited the native process cleanly.
+- The installed native executable and portable native executable matched the published smoke-tested SHA-256 `342CB7E2303CB1279662BE6200AEC0195E435D33781DDC21D26A7A90CFF23FB1` before installation.
 
 ## Next
 
-Complete the installer build, record its hash and build identity, then perform the installed update and native companion launch/restart checks without modifying user data or credentials.
+Continue native ownership work on a copied profile: add a controlled native read parity harness for current Node response fixtures before selecting any native write migration. The installed Node/tray path and credentials remain untouched.
