@@ -43,3 +43,13 @@ Resolve the WebView2 package warning, add native-only contract and database-migr
 ## Next
 
 Define the first native-owned read contract and its compatibility fixture corpus. Do not route or write live domain data until contract parity and copied-profile recovery tests cover it.
+
+## Phase 3 read-contract preparation
+
+- Added RuntimeStatusReader: a read-only, non-pooled SQLite status contract for active projects, active blockers, review items and memory-candidate counts.
+- Fixture proof: the copied-profile test seeds the source-compatible tables and verifies the native contract returns the expected values without a write connection.
+- Data safety: the native shell still does not register the contract against the installed database; the existing Node health endpoint remains canonical during compatibility.
+
+## Next
+
+Create a formal compatibility fixture from the current Node health/workboard response, compare native and Node values against an isolated database copy, and only then select a first read route for native routing.
