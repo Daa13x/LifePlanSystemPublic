@@ -188,3 +188,13 @@ Create the matching project-update fixture and native transaction contract, incl
 ## Next
 
 Build a disabled-by-default native compatibility adapter whose copied-profile execution is isolated from the installed runtime. It must accept only the validated envelope and must not be wired into WebView or Node routes yet.
+
+## Installed governed-project validation update
+
+- The direct `POST /api/projects` path and the reviewed `create_project` approval path now use the same bounded canonical project validator. Invalid names, statuses, owners, confidence values and oversized evidence/action text cannot reach a project write through either path.
+- The disposable-profile Node regression now proves both a successful reviewed proposal (including `approved proposal` provenance) and rejection of a malformed proposal before a governed write occurs. Existing Chat cloud-check and chat-behaviour suites still pass.
+- Installed acceptance: the silent installer built from clean `917e6e02ea3d4cfa754ae1e7fb44d718df38c2e1` completed at 2026-07-29T12:11Z (SHA-256 `BAC475C0726F68261E61E95655CDB33F694C9B2EBFB4298E3ECE2CA868918449`). The installed `/api/version` endpoint reported that exact clean commit. The existing installed `app/data/life-planner.sqlite` remained present at 192512 bytes with its prior timestamp.
+
+## Next
+
+Build the disabled native compatibility adapter on the copied-profile test harness, then add adapter-level replay/rejection tests before considering any opt-in live routing.
