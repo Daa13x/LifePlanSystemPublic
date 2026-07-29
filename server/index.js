@@ -24,7 +24,7 @@ import {
 } from './setupRecovery.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
-import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage } from './localKnowledge.js';
+import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, sourceRegistry } from './localKnowledge.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -2966,6 +2966,8 @@ app.get('/api/chat/sessions/:id/connection', async (req, res) => {
   const model = await localModelStatus();
   const contextRecords = allRows('SELECT id, kind, ref_id, label FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
   const files = allRows('SELECT id, path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
+  const available = sourceRegistry(db, { repoRoot: root });
+  const availableByCategory = Object.fromEntries([...new Set(available.map((record) => record.category))].map((category) => [category, available.filter((record) => record.category === category).length]));
   ok(res, {
     conversationId: sessionId,
     model: { assigned: model.assigned, name: model.model?.name || null, endpointConfigured: model.endpointConfigured },
@@ -2976,6 +2978,13 @@ app.get('/api/chat/sessions/:id/connection', async (req, res) => {
       files: files.length,
       records: contextRecords,
       fileList: files
+    },
+    available: {
+      total: available.length,
+      knowledge: availableByCategory['current state'] || 0,
+      workboard: availableByCategory.project || 0,
+      files: availableByCategory['repository knowledge'] || 0,
+      sources: available.filter((record) => record.category === 'repository knowledge').slice(0, 20).map((record) => record.provenance)
     },
     capabilities: capabilityRegistry.list().map((c) => c.name),
     generating: activeChatGenerations.has(String(sessionId))

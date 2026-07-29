@@ -1497,6 +1497,7 @@ function ChatConnectionBar({ connection, runtime, generating, navigate }) {
   const ready = connection?.runtime?.ready ?? Boolean(runtime?.managedServerRunning || runtime?.endpointConfigured || runtime?.assigned);
   const last = connection?.runtime?.lastResult;
   const attached = connection?.attached || { knowledge: 0, workboard: 0, files: 0 };
+  const available = connection?.available || { total: 0, knowledge: 0, workboard: 0, files: 0, sources: [] };
   const genStatus = generating ? 'generating…' : running ? 'ready · server running' : ready ? 'ready' : 'setup needed';
   return (
     <div className="connection-bar">
@@ -1511,6 +1512,9 @@ function ChatConnectionBar({ connection, runtime, generating, navigate }) {
         <button className="link" onClick={() => navigate('system', 'status')}>System status</button>
       </div>
       <div className="conn-item">
+        <span>Always-on local sources</span>
+        <strong>{available.knowledge} Knowledge · {available.workboard} Workboard · {available.files} file(s)</strong>
+        <small title={available.sources.join('\n')}>{available.total} safe records searchable</small>
         <span>Attached context</span>
         <strong>{attached.knowledge} Knowledge · {attached.workboard} Workboard · {attached.files} file(s)</strong>
       </div>
