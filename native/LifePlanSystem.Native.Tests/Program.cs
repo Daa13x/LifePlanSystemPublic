@@ -2,6 +2,7 @@ using LifePlanSystem.Native.Persistence;
 using LifePlanSystem.Native.Contracts;
 using LifePlanSystem.Native.Security;
 using LifePlanSystem.Native.Providers;
+using LifePlanSystem.Native.Recovery;
 using Microsoft.Data.Sqlite;
 
 var root = Path.Combine(Path.GetTempPath(), "lps-native-db-" + Guid.NewGuid().ToString("N"));
@@ -80,6 +81,11 @@ try
     var status = await new RuntimeStatusReader(path).ReadAsync(CancellationToken.None);
     if (status is not { DatabaseReady: true, ActiveProjects: 1, BlockedItems: 1, ReviewItems: 1, MemoryCandidates: 1 })
         throw new InvalidOperationException("Native runtime status contract did not match fixture.");
+
+    var backupRoot = Path.Combine(root, "backups");
+    var backup = await new NativeBackupService().CreateAndVerifyAsync(path, backupRoot, CancellationToken.None);
+    if (!File.Exists(backup.BackupPath) || backup.Sha256.Length != 64)
+        throw new InvalidOperationException("Native backup evidence was not created.");
     Console.WriteLine("PASS native SQLite migration and transaction contract");
 }
 finally

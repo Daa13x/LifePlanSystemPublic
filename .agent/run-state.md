@@ -93,3 +93,13 @@ Add provider registry/policy contracts and an isolated provider WebView environm
 ## Next
 
 Build an isolated provider WebView host only after a provider has an approved official API or explicit browser-assisted user flow. No provider WebView may share the main profile or receive native commands by default.
+
+## Native recovery evidence
+
+- Added NativeBackupService. It opens the source database read-only, creates an SQLite online backup in a caller-selected directory, runs `PRAGMA integrity_check`, and records a SHA-256 digest with the resulting evidence.
+- Fixture proof: the native copied-profile contract creates and verifies a backup without changing the source fixture.
+- Live database rule remains unchanged: no installed database has been opened, backed up, or migrated by this native service during this programme.
+
+## Next
+
+Add an opt-in portable native companion package with an explicit manifest and clean-launch verification. It must remain separate from the installed Node/tray application until parity and ownership gates are complete.
