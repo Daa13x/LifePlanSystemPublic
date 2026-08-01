@@ -9,6 +9,13 @@ import path from 'node:path';
 const MAX_ITEMS = 10;
 const MAX_CHARS = 4200;
 const STOP = new Set(['what', 'does', 'about', 'have', 'that', 'this', 'with', 'from', 'your', 'know', 'said', 'tell', 'life', 'planner', 'user']);
+// Words that name WHERE to look in a repository question ("the GitHub knowledge
+// base", "the documentation") rather than the topic being asked about. Every
+// LifePlanSystem document mentions "knowledge" and "github", so scoring on them
+// lets generic or merely-recent documents outrank the one that actually covers
+// the asked-about subject. They are dropped from repository-question scoring
+// whenever a real topic word remains.
+const REPOSITORY_META_WORDS = new Set(['github', 'repository', 'repositories', 'repo', 'repos', 'knowledge', 'base', 'documentation', 'docs', 'doc', 'document', 'documents', 'say', 'says', 'contain', 'contains', 'mention', 'mentions']);
 // Conversation history is useful local context, but it is not automatically
 // approved memory.  Keep health, credential, and similarly sensitive turns out
 // of broad "tell me about me" retrieval, even though they remain in their own
@@ -275,6 +282,13 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
     && !(record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery));
   const intent = classifyPersonalIntent(query);
   const broadPersonalRequest = shouldGroundConversationInLocalKnowledge(query);
+  const repositoryRequest = /\b(?:github|repository|repo|knowledge base|documentation)\b/i.test(String(query || ''));
+  // For a repository question, rank on the topic words (drop the source-indicator
+  // meta-words) so the document that covers the asked-about subject wins over
+  // generic documents that merely share "knowledge"/"github". Fall back to the
+  // full query when it carries no topic word (e.g. "what's in the repository?").
+  const topicWords = repositoryRequest ? queryWords.filter((word) => !REPOSITORY_META_WORDS.has(word)) : queryWords;
+  const scoringWords = topicWords.length ? topicWords : queryWords;
   const allowed = new Set(allowedSourceTypes(intent));
   const rejected = [];
   // Do not crowd a personal answer with source-code and product documents when
@@ -299,7 +313,7 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
     // directly relevant profile, CV, or decision document from the private repo.
     ? rows.filter((record) => record.category !== 'repository knowledge' || record.source === 'local private repository')
     : rows; */
-  const ranked = eligibleRows.map((record) => ({ ...record, score: score(record, queryWords, String(query || '')) })).filter((record) => {
+  const ranked = eligibleRows.map((record) => ({ ...record, score: score(record, scoringWords, String(query || '')) })).filter((record) => {
     if (Number.isFinite(record.score) && record.score >= 12) return true;
     rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'below calibrated relevance threshold' });
     return false;
@@ -311,7 +325,7 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
     if (items.some((item) => item.title === record.title || item.body === snippet(record.text, 280))) { rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'duplicate fact' }); continue; }
     const body = snippet(record.text, Math.min(280, remaining));
     remaining -= body.length;
-    items.push({ ...record, body, whySelected: queryWords.filter((word) => `${record.title} ${record.text}`.toLowerCase().includes(word)).join(', ') || 'requested personal overview' });
+    items.push({ ...record, body, whySelected: scoringWords.filter((word) => `${record.title} ${record.text}`.toLowerCase().includes(word)).join(', ') || 'requested personal overview' });
   }
   return { items, scanned: rows.length, contextBudget: options.budget || MAX_CHARS, intent, rejected };
 }

@@ -9,9 +9,19 @@ const root = path.resolve(import.meta.dirname, '..');
 const probe = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-local-knowledge-'));
 const db = path.join(probe, 'data', 'life-planner.sqlite');
 fs.mkdirSync(path.dirname(db), { recursive: true });
+// A controlled private repository so repository-knowledge retrieval is
+// deterministic. MEMORY_ARCHITECTURE carries the distinctive topic token
+// "zephyrmemory"; RECENT_RELEASE carries only source-indicator words ("github",
+// "knowledge base", "documentation") and a newer mtime. Without topic-aware
+// ranking the recent generic document would outrank the on-topic one.
+const privateRepo = path.join(probe, 'private-repo');
+fs.mkdirSync(path.join(privateRepo, 'docs'), { recursive: true });
+fs.writeFileSync(path.join(privateRepo, 'docs', 'MEMORY_ARCHITECTURE.md'), '# Memory architecture\n\nThe zephyrmemory architecture uses layered retrieval and reviewed-memory promotion before a fact becomes trusted.\n');
+fs.writeFileSync(path.join(privateRepo, 'docs', 'RECENT_RELEASE.md'), '# Release notes\n\nGitHub knowledge base release. Documentation for the repository knowledge base and its github mirror.\n');
+fs.utimesSync(path.join(privateRepo, 'docs', 'RECENT_RELEASE.md'), new Date(), new Date());
 const port = await new Promise((resolve, reject) => { const s = net.createServer(); s.on('error', reject); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
 const base = `http://127.0.0.1:${port}`;
-const child = spawn(process.execPath, ['server/index.js'], { cwd: root, env: { ...process.env, LIFE_PLANNER_DB: db, LIFE_PLANNER_PORT: String(port), LIFE_PLANNER_CONNECTOR_CONFIG: path.join(probe, 'pairing.json') }, stdio: 'ignore', windowsHide: true });
+const child = spawn(process.execPath, ['server/index.js'], { cwd: root, env: { ...process.env, LIFE_PLANNER_DB: db, LIFE_PLANNER_PORT: String(port), LIFE_PLANNER_CONNECTOR_CONFIG: path.join(probe, 'pairing.json'), LIFE_PLANNER_PRIVATE_REPO: privateRepo }, stdio: 'ignore', windowsHide: true });
 let ready = false;
 for (let i = 0; i < 150; i += 1) { try { if ((await fetch(`${base}/api/health`)).ok) { ready = true; break; } } catch {} if (child.exitCode !== null) throw new Error(`Verifier server exited early (${child.exitCode}).`); await new Promise((r) => setTimeout(r, 100)); }
 assert.ok(ready, 'verifier server became healthy');
@@ -53,6 +63,19 @@ try {
   await api(`/api/memory/items/${profile.body.data.id}`, 'DELETE');
   const deleted = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'What do you know about me?' });
   assert.doesNotMatch(deleted.body.data.messages.find((m) => m.role === 'assistant').content, /Preferred name/);
+  // Repository-topic ranking: a question about a subject must surface the
+  // on-topic document, not a generic or merely-recent one that only shares the
+  // source-indicator words ("github", "knowledge base").
+  const repoQuestion = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'What does the GitHub knowledge base say about zephyrmemory architecture?' });
+  const repoAnswer = repoQuestion.body.data.messages.find((m) => m.role === 'assistant');
+  const repoMeta = JSON.parse(repoAnswer.metadata || '{}');
+  assert.equal(repoMeta.endpointType, 'local-knowledge', 'repository question is answered from local knowledge');
+  assert.match(repoAnswer.content, /zephyrmemory/i, 'the on-topic repository document leads the answer');
+  const repoTitles = (repoMeta.localSources || []).map((s) => s.title);
+  const memoryIndex = repoTitles.findIndex((t) => /MEMORY_ARCHITECTURE/i.test(t));
+  const genericIndex = repoTitles.findIndex((t) => /RECENT_RELEASE/i.test(t));
+  assert.equal(memoryIndex, 0, 'the on-topic repository document is the top-ranked source, not a generic or merely-recent one');
+  assert.ok(genericIndex === -1 || memoryIndex < genericIndex, 'the on-topic document outranks the recent generic document that only shares source-indicator words');
   console.log('Local knowledge retrieval and reviewed-memory verification passed.');
 } finally {
   if (child.exitCode === null) child.kill();
