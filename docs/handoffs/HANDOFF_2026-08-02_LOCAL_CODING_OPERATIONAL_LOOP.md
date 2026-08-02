@@ -89,6 +89,24 @@ The first real production preparation call exposed an existing `server/egressGua
 
 The next production call exposed a state mismatch: the UI correctly offered Reject for a prepared task, but `NativeCodingWorker.reject` still recognized only the older pre-preparation states. Prepared, needs-scope, and awaiting-advice tasks are now explicitly rejectable and cleanable. `apply-interrupted` remains protected because the live checkout may have changed before the restart.
 
+The first complete production run exposed an evidence-display mismatch for an exact one-file scope with no extracted search terms. The evidence packet had the approved file count/content hash and the worker received the file, but the UI had no ranked anchor or excerpt. `buildWorkspaceEvidence` now always promotes exact approved file paths into bounded visible evidence before adding ranked term matches. The browser-assisted verifier protects the no-search-term exact-file case.
+
+## First real applied task
+
+Task `code-20260802210519224-00794e`, **Prevent coding objective overflow**, was sealed at base commit `1cf1bfe8a8b08a61e3cce42f69dfb4e977a9ba79` with only `src/styles.css`, one changed file, and the frontend validation profile.
+
+The installed checkout had no configured local coding model, so acceptance used a temporary deterministic OpenAI-compatible fixture bound only to `127.0.0.1:4319`; prior model settings were captured and restored in `finally`. This proves the real production controller/API/worktree/checker/apply wiring, not general model reasoning quality. Browser advice was skipped because repository evidence was sufficient.
+
+- Task hash: `56f3ab8455130ad2181400ac23129a2ca9866ce4ef257fd0e866a5342100d2f4`.
+- Prepared evidence hash: `173550cbfaba10c75a900c907979420977458754d5dc7d1bed972d1d5f39e914`.
+- The first inference transport attempt failed safely because port 4190 is a standards-forbidden Fetch port. The durable task stayed `failed`, no live file changed, and explicit retry used the same scope/base/evidence on allowed loopback port 4319.
+- Review changed only `src/styles.css` and independent frontend validation passed.
+- Validation evidence hash: `b2fb790107ccc48bc86ad18b5222211d4a29821dccaa46dceb9ddd7100701b24`.
+- Patch hash: `4cfadd97998388e8540b38b8507f9a5c40945adcf64e8f7c1cc06fc6fc3c7b85`.
+- The live stylesheet hash was identical before and after the local run.
+- Explicit patch-hash Apply changed the live stylesheet, unstaged, adding `overflow-wrap: anywhere` to the coding objective header.
+- `GET /api/source/status` then reported `{ status: "M", path: "src/styles.css", staged: false, protected: false }`.
+
 ## Verification evidence
 
 Observed before final commit:
@@ -101,6 +119,7 @@ Observed before final commit:
 - `npm.cmd run verify:egress-guard`: passed.
 - `npm.cmd run build`: passed; Vite transformed 1,580 modules.
 - Production API create/prepare returned a base commit, `prepared`, one ranked approved file, zero redactions, and a SHA-256 evidence hash; explicit reject then returned `rejected`.
+- The first real applied task produced review/validation/patch evidence above, proved the live checkout unchanged before Apply, and appeared in Source Control only after Apply.
 - Rendered `http://127.0.0.1:5173/#system/runs` was inspected at 1440x900 and 360x780. Desktop rendered 210px / flexible / 260px rails. Mobile rendered a single 321px column inside a 360px viewport with no horizontal body overflow.
 
 Run the final required gates after any follow-up edit:

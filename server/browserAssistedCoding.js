@@ -200,8 +200,10 @@ export async function buildWorkspaceEvidence({ root, worktree, allowedPaths, for
   const identity = { root, worktree: worktree || root, commit, searchRoots };
   const { files, hit } = await index.getOrBuild(identity, { forbiddenPath });
   const guarded = guardEgressFiles(files, { extraDenied: loadLpsIgnore(worktree || root).map((value) => new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replaceAll('**', '.*').replaceAll('*', '[^/]*'))) });
-  const anchors = terms.length ? rankAnchors(guarded.files, terms) : [];
   const byPath = new Map(guarded.files.map((file) => [file.path, file]));
+  const directAnchors = searchRoots.filter((candidate) => byPath.has(candidate)).map((candidate) => ({ path: candidate, nameScore: 1, hits: 0 }));
+  const rankedAnchors = terms.length ? rankAnchors(guarded.files, terms) : [];
+  const anchors = [...new Map([...directAnchors, ...rankedAnchors].map((anchor) => [anchor.path, anchor])).values()].slice(0, 10);
   const excerpts = anchors.slice(0, 4).map((anchor) => ({
     path: anchor.path,
     excerpt: excerptFor(byPath.get(anchor.path)?.content || '', terms)

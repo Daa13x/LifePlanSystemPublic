@@ -105,6 +105,9 @@ try {
   });
   assert.ok(evidence.anchors.length && evidence.anchors.every((a) => fs.existsSync(path.join(repo, a.path))), 'anchors are real existing paths');
   assert.ok(evidence.excerpts.length && evidence.excerpts[0].excerpt.length > 0, 'excerpts contain real content');
+  const exactEvidence = await buildWorkspaceEvidence({ root: repo, worktree: repo, allowedPaths: ['rootHelper.js'], forbiddenPath: forbidden, title: '', objective: '' });
+  assert.equal(exactEvidence.anchors[0]?.path, 'rootHelper.js', 'an exact approved file remains visible evidence when no search terms are extracted');
+  assert.ok(exactEvidence.excerpts[0]?.excerpt.length, 'exact-file scope receives a reviewable excerpt');
 
   // ---------------- Safeguard 1: solvability preflight ----------------
   for (const [target, allowed] of [

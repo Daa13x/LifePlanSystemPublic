@@ -1420,7 +1420,7 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
 .coding-review-area { padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
 .coding-review-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .coding-review-head h2 { margin: 2px 0; font-size: 18px; }
-.coding-review-head p { margin: 0; color: var(--muted); font-size: 12px; }
+.coding-review-head p { margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .coding-review-head small { color: var(--code-cyan); font-family: ui-monospace, Consolas, monospace; }
 .coding-evidence-section { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: var(--panel-2); }
 .coding-evidence-section > summary { min-height: 38px; justify-content: space-between; padding: 0 10px; font-weight: 650; }
