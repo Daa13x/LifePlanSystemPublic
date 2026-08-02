@@ -19,6 +19,11 @@ fs.mkdirSync(path.join(privateRepo, 'docs'), { recursive: true });
 fs.writeFileSync(path.join(privateRepo, 'docs', 'MEMORY_ARCHITECTURE.md'), '# Memory architecture\n\nThe zephyrmemory architecture uses layered retrieval and reviewed-memory promotion before a fact becomes trusted.\n');
 fs.writeFileSync(path.join(privateRepo, 'docs', 'RECENT_RELEASE.md'), '# Release notes\n\nGitHub knowledge base release. Documentation for the repository knowledge base and its github mirror.\n');
 fs.utimesSync(path.join(privateRepo, 'docs', 'RECENT_RELEASE.md'), new Date(), new Date());
+// A newer document that only MENTIONS the topic in its body under a generic
+// title. Without a title-relevance signal its recency would let it outrank the
+// document actually named after the subject.
+fs.writeFileSync(path.join(privateRepo, 'docs', 'RECENT_MENTIONS.md'), '# Weekly notes\n\nThe zephyrmemory architecture came up again this week and was briefly discussed.\n');
+fs.utimesSync(path.join(privateRepo, 'docs', 'RECENT_MENTIONS.md'), new Date(), new Date());
 const port = await new Promise((resolve, reject) => { const s = net.createServer(); s.on('error', reject); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
 const base = `http://127.0.0.1:${port}`;
 const child = spawn(process.execPath, ['server/index.js'], { cwd: root, env: { ...process.env, LIFE_PLANNER_DB: db, LIFE_PLANNER_PORT: String(port), LIFE_PLANNER_CONNECTOR_CONFIG: path.join(probe, 'pairing.json'), LIFE_PLANNER_PRIVATE_REPO: privateRepo }, stdio: 'ignore', windowsHide: true });
@@ -74,8 +79,10 @@ try {
   const repoTitles = (repoMeta.localSources || []).map((s) => s.title);
   const memoryIndex = repoTitles.findIndex((t) => /MEMORY_ARCHITECTURE/i.test(t));
   const genericIndex = repoTitles.findIndex((t) => /RECENT_RELEASE/i.test(t));
-  assert.equal(memoryIndex, 0, 'the on-topic repository document is the top-ranked source, not a generic or merely-recent one');
+  const mentionIndex = repoTitles.findIndex((t) => /RECENT_MENTIONS/i.test(t));
+  assert.equal(memoryIndex, 0, 'the document named after the topic is the top-ranked source, not a generic or merely-recent one');
   assert.ok(genericIndex === -1 || memoryIndex < genericIndex, 'the on-topic document outranks the recent generic document that only shares source-indicator words');
+  assert.ok(mentionIndex === -1 || memoryIndex < mentionIndex, 'a document named after the topic outranks a newer document that only mentions it in passing');
   console.log('Local knowledge retrieval and reviewed-memory verification passed.');
 } finally {
   if (child.exitCode === null) child.kill();

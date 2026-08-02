@@ -8,7 +8,7 @@ import path from 'node:path';
 
 const MAX_ITEMS = 10;
 const MAX_CHARS = 4200;
-const STOP = new Set(['what', 'does', 'about', 'have', 'that', 'this', 'with', 'from', 'your', 'know', 'said', 'tell', 'life', 'planner', 'user']);
+const STOP = new Set(['what', 'does', 'about', 'have', 'that', 'this', 'with', 'from', 'your', 'know', 'said', 'tell', 'life', 'planner', 'user', 'the', 'and', 'for']);
 // Words that name WHERE to look in a repository question ("the GitHub knowledge
 // base", "the documentation") rather than the topic being asked about. Every
 // LifePlanSystem document mentions "knowledge" and "github", so scoring on them
@@ -258,6 +258,12 @@ function score(record, queryWords, rawQuery, now = Date.now()) {
   // facts. Specific questions must match, preventing unrelated records from
   // being presented as an answer to "what did I say about X?".
   if (!matches && !domainSource && !(broad && permitsOverviewFallback(rawQuery))) return -Infinity;
+  // A topic word in the TITLE is a far stronger relevance signal than a passing
+  // mention in the body: many documents reference a subject, but the document
+  // named after it is usually its canonical reference. Among equal body matches
+  // this keeps that document above generic or merely-recent ones.
+  const title = String(record.title || '').toLowerCase();
+  const titleMatches = queryWords.reduce((total, word) => total + (title.includes(word) ? 1 : 0), 0);
   const recency = Math.max(0, 1 - ((now - dateValue(record.updatedAt)) / (365 * 86400000)));
   // A question about the user must prefer their actual local records over the
   // public app documentation that happens to share generic words such as
@@ -265,11 +271,12 @@ function score(record, queryWords, rawQuery, now = Date.now()) {
   const personalPriority = broad
     ? (record.category !== 'repository knowledge' ? 30 : record.source === 'local private repository' ? 6 : -8)
     : 0;
-  // Deterministic hybrid fusion: lexical match plus a compact semantic intent
-  // boost.  Metadata eligibility happens before this function, so a TODO can
-  // never win a health question merely by repeating the word "health".
+  // Deterministic hybrid fusion: lexical match, a title-name relevance bonus,
+  // and a compact semantic intent boost.  Metadata eligibility happens before
+  // this function, so a TODO can never win a health question merely by
+  // repeating the word "health".
   const semantic = allowedSourceTypes(intent).includes(record.sourceType) ? 8 : 0;
-  return matches * 10 + semantic + (domainSource ? 8 : 0) + personalPriority + (record.state === 'approved' ? 4 : record.state === 'pending' ? 1 : 0) + recency;
+  return matches * 10 + titleMatches * 15 + semantic + (domainSource ? 8 : 0) + personalPriority + (record.state === 'approved' ? 4 : record.state === 'pending' ? 1 : 0) + recency;
 }
 
 export function retrieveLocalKnowledge(db, query, options = {}) {
