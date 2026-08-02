@@ -4428,7 +4428,7 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
       {tab === 'coding' && (
         <div className="sc-tab-body coding-workspace-shell">
           <div className="coding-runtime-bar">
-            <div><span>Local worker</span><strong className={coding.model?.configured ? 'good' : 'warn'}>{coding.model?.configured ? coding.model.source : 'Unavailable'}</strong><small>{coding.model?.name || 'Select a local code model'}</small></div>
+            <div><span>Local worker</span><strong className={coding.model?.configured ? 'good' : 'warn'}>{coding.model?.configured ? coding.model.source : 'Unavailable'}</strong><small>{coding.model?.name || 'Select a local code model'}{coding.model?.source === 'bundled llama.cpp' ? ` · ${coding.model.managedContextSize || 0}/${coding.model.requiredCodingContextSize} context${coding.model.codingContextReady ? '' : ' · restarts on run'}` : ''}</small></div>
             <div><span>Browser advice</span><strong className={coding.browser?.connected ? 'good' : 'warn'}>{coding.browser?.connected ? 'Connector ready' : 'Optional / disconnected'}</strong><small>Advisory only, never a fallback worker</small></div>
             <div><span>Mutation boundary</span><strong>{coding.activeTaskIds?.length || 0} active</strong><small>Live checkout stays untouched until Apply</small></div>
           </div>
@@ -4806,7 +4806,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
   const [llamaCliPath, setLlamaCliPath] = useState(settings.llamaCliPath || '');
   const [llamaServerPath, setLlamaServerPath] = useState(settings.llamaServerPath || '');
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
-  const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 4096);
+  const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 16384);
   const [browserAgentMode, setBrowserAgentMode] = useState(settings.browserAgentMode || 'myChromeConnector');
   const [cloudEnabledProviders, setCloudEnabledProviders] = useState(settings.cloudEnabledProviders || ['ChatGPT']);
   const [cloudAccounts, setCloudAccounts] = useState([]);
@@ -5129,15 +5129,16 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
           />
           I confirm the configured coding/chat endpoint runs inference and model weights on this machine.
         </label>
-        <small>Loopback alone is not proof. Leave this clear for a proxy or cloud-backed endpoint; branch/worktree coding authority will fail closed.</small>
+        <small>Loopback alone is not proof. Leave this clear for a proxy or cloud-backed endpoint; local coding authority will fail closed. Bundled llama.cpp is verified automatically.</small>
         <label>llama-cli path</label>
         <input value={llamaCliPath} onChange={(event) => setLlamaCliPath(event.target.value)} placeholder="C:\\llama.cpp\\build\\bin\\llama-cli.exe" />
         <label>llama-server path</label>
         <input value={llamaServerPath} onChange={(event) => setLlamaServerPath(event.target.value)} placeholder="Bundled automatically; override only for a custom build" />
         <div className="inline-form">
           <input type="number" value={llamaServerPort} onChange={(event) => setLlamaServerPort(event.target.value)} placeholder="8080" />
-          <input type="number" value={llamaContextSize} onChange={(event) => setLlamaContextSize(event.target.value)} placeholder="4096" />
+          <input type="number" min="2048" max="131072" step="1024" value={llamaContextSize} onChange={(event) => setLlamaContextSize(event.target.value)} placeholder="16384" />
         </div>
+        <small>Use at least 16384 for local coding. LPS automatically restarts bundled llama.cpp at that minimum when a coding run needs it.</small>
         <div className="decision-row">
           <button onClick={saveSettings}><Check size={16} /> Save</button>
           <button className="primary" onClick={scan}><RefreshCcw size={16} /> Rescan GGUF</button>

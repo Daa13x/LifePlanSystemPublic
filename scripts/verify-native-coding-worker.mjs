@@ -50,6 +50,8 @@ try {
               : JSON.stringify({ summary: 'Used scoped evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }))
         : modelMode === 'tool-escape'
           ? JSON.stringify({ tool: { name: 'read_file', path: 'outside.js', startLine: 1, endLine: 20 } })
+          : modelMode === 'tool-loop'
+            ? JSON.stringify({ tool: { name: 'list_files', path: 'src' } })
           : modelMode === 'valid'
         ? JSON.stringify({ summary: 'Increment the fixture.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
         : modelMode === 'delete'
@@ -74,6 +76,9 @@ try {
   const productionServer = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
   assert.match(productionServer, /\['run', 'verify:runtime-safety'\]/, 'runtime validation must use the fixed runtime-safety command');
   assert.match(productionServer, /validation === 'project'/, 'full project validation profile must be wired');
+  assert.match(productionServer, /const DEFAULT_LLAMA_CONTEXT_SIZE = 16384;/, 'managed llama.cpp must default to a coding-capable context');
+  assert.match(productionServer, /managedContextSize.*MIN_CODING_CONTEXT_SIZE/s, 'coding route must detect and replace an undersized managed context');
+  assert.match(productionServer, /context size must be an integer from/, 'llama context settings must be bounded');
   assert.throws(() => worker.create({ title: 'Traversal', objective: 'Must fail.', allowedPaths: ['src/../../secret.txt'] }), /unsafe or protected/);
   const baseCommit = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
   const task = worker.create({ title: 'Increment fixture', objective: 'Change value from one to two.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax', baseCommit });
@@ -111,6 +116,11 @@ try {
   const toolEscape = worker.create({ title: 'Escape tool', objective: 'Attempt an out-of-scope tool read.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
   await assert.rejects(worker.run(toolEscape.id, { confirm: true, taskHash: toolEscape.taskHash }), /outside the approved scope/);
   assert.equal(worker.load(toolEscape.id).status, 'failed');
+
+  modelMode = 'tool-loop';
+  const toolLoop = worker.create({ title: 'Bound tool loop', objective: 'Prove endless tool requests stop.', allowedPaths: ['src'], maxFilesChanged: 1 });
+  await assert.rejects(worker.run(toolLoop.id, { confirm: true, taskHash: toolLoop.taskHash }), /8-tool-call limit/);
+  assert.equal(worker.load(toolLoop.id).toolTrace.length, 8);
 
   modelMode = 'delete';
   const deleteTask = worker.create({ title: 'Delete fixture', objective: 'Remove the approved obsolete file.', allowedPaths: ['src/obsolete.js'], maxFilesChanged: 1 });

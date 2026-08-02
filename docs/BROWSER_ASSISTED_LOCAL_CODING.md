@@ -61,13 +61,20 @@ The local coder may make at most eight controller-mediated calls before final
 edits: `list_files` for one approved directory, literal `search` within one
 approved path, and ranged `read_file` for one approved text file. Tool paths go
 through the same realpath, symlink/junction, protected-path, and allowed-scope
-checks as final edits. Results are capped at 50 KB, reads at 400 lines, searches
-at 100 matches/500 files, and files at 120 KB. Each call records name, path,
-query, result size, and SHA-256 result hash in the durable task and Runs UI.
+checks as final edits. Results are capped at 16 KB, initial context at 48 KB,
+reads at 400 lines, searches at 100 matches/500 files, and files at 120 KB.
+Detailed tool history rolls within 64 KB while durable hashes preserve the full
+audit identity. Each call records name, path, query, result size, and SHA-256
+result hash in the durable task and Runs UI.
 
 The worker has no shell, package install, network, browser, arbitrary command,
 Git mutation, commit, or push tool. Builds and syntax checks are independent
 controller validations after edits, never model-authored proof.
+
+Bundled llama.cpp defaults to a 16,384-token context. If an older installation
+is already running at a smaller context, the coding route restarts that owned
+runtime at 16,384 before source is sent. Settings accept only integer context
+sizes from 2,048 to 131,072, and System > Runs reports actual/required context.
 
 ---
 

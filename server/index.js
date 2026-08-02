@@ -125,6 +125,11 @@ let lastPersonalRetrieval = { at: null, sourceCount: 0, resultType: 'none' };
 let managedLlamaServer = null;
 let managedLlamaServerReady = false;
 let managedLlamaServerStartPromise = null;
+let managedLlamaServerLaunch = null;
+const DEFAULT_LLAMA_CONTEXT_SIZE = 16384;
+const MIN_LLAMA_CONTEXT_SIZE = 2048;
+const MAX_LLAMA_CONTEXT_SIZE = 131072;
+const MIN_CODING_CONTEXT_SIZE = 16384;
 const activeChatGenerations = new Map();
 // Last local Planner Assistant runtime outcome, surfaced through system.status
 // and the Chat connection state so the UI reflects reality (not a guess).
@@ -1691,6 +1696,7 @@ async function localModelStatus() {
   const llamaCliPath = String(getSetting('llamaCliPath', '') || '').trim();
   const llamaServerPath = String(getSetting('llamaServerPath', '') || '').trim();
   const llamaServerPort = Number(getSetting('llamaServerPort', 8080) || 8080);
+  const llamaContextSize = Number(getSetting('llamaContextSize', DEFAULT_LLAMA_CONTEXT_SIZE) || DEFAULT_LLAMA_CONTEXT_SIZE);
   return {
     assigned: Boolean(model && modelFile.available),
     model,
@@ -1705,6 +1711,8 @@ async function localModelStatus() {
     llamaServerPath,
     llamaServerExists: Boolean(llamaServerPath && fs.existsSync(llamaServerPath)),
     llamaServerPort,
+    llamaContextSize,
+    managedContextSize: managedLlamaServerLaunch?.contextSize || null,
     managedServerRunning: Boolean(managedLlamaServer && !managedLlamaServer.killed),
     managedServerReady: Boolean(managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady),
     managedEndpoint: managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady ? `http://127.0.0.1:${llamaServerPort}` : '',
@@ -1716,6 +1724,7 @@ async function stopManagedLlamaServer() {
   if (managedLlamaServer && !managedLlamaServer.killed) managedLlamaServer.kill();
   managedLlamaServer = null;
   managedLlamaServerReady = false;
+  managedLlamaServerLaunch = null;
 }
 
 async function waitForLlamaServer(endpoint, child, timeoutMs = 90000) {
@@ -1738,10 +1747,19 @@ async function startManagedLlamaServer(options = {}) {
     if (!status.assigned || !status.model?.path || !fs.existsSync(status.model.path)) throw new Error('Assign a downloaded Planner Assistant GGUF before starting llama-server.');
     const serverPath = String(options.serverPath || status.llamaServerPath || '').trim();
     const port = Number(options.port || status.llamaServerPort || 8080);
-    const contextSize = Number(options.contextSize || getSetting('llamaContextSize', 4096) || 4096);
+    const requestedContextSize = Number(options.contextSize || getSetting('llamaContextSize', DEFAULT_LLAMA_CONTEXT_SIZE) || DEFAULT_LLAMA_CONTEXT_SIZE);
+    if (!Number.isInteger(requestedContextSize) || requestedContextSize < MIN_LLAMA_CONTEXT_SIZE || requestedContextSize > MAX_LLAMA_CONTEXT_SIZE) {
+      throw new Error(`llama.cpp context size must be an integer from ${MIN_LLAMA_CONTEXT_SIZE} to ${MAX_LLAMA_CONTEXT_SIZE}.`);
+    }
+    const contextSize = requestedContextSize;
     if (!serverPath || !fs.existsSync(serverPath)) throw new Error('The bundled llama-server runtime is missing. Repair the local model runtime from Settings.');
     const endpoint = `http://127.0.0.1:${port}`;
-    if (managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady) return localModelStatus();
+    const requestedLaunch = { serverPath: path.resolve(serverPath), port, contextSize };
+    const launchMatches = managedLlamaServerLaunch
+      && managedLlamaServerLaunch.serverPath === requestedLaunch.serverPath
+      && managedLlamaServerLaunch.port === requestedLaunch.port
+      && managedLlamaServerLaunch.contextSize === requestedLaunch.contextSize;
+    if (managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady && launchMatches) return localModelStatus();
     await stopManagedLlamaServer();
 
     const logDir = path.join(root, 'data', 'logs');
@@ -1758,12 +1776,14 @@ async function startManagedLlamaServer(options = {}) {
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
     managedLlamaServer = child;
+    managedLlamaServerLaunch = requestedLaunch;
     managedLlamaServerReady = false;
     child.on('error', (error) => console.error('llama-server process error:', error.message));
     child.on('exit', () => {
       if (managedLlamaServer === child) {
         managedLlamaServer = null;
         managedLlamaServerReady = false;
+        managedLlamaServerLaunch = null;
       }
     });
     try {
@@ -1771,6 +1791,7 @@ async function startManagedLlamaServer(options = {}) {
     } catch (error) {
       if (!child.killed) child.kill();
       if (managedLlamaServer === child) managedLlamaServer = null;
+      managedLlamaServerLaunch = null;
       throw new Error(`${error.message} See data/logs/llama-server.stderr.log.`);
     }
     managedLlamaServerReady = true;
@@ -3817,8 +3838,9 @@ async function nativeCodingModelConfig(startIfNeeded = false) {
   const codeEndpoint = String(getSetting('localCodeModelEndpoint', '') || '').trim();
   const chatEndpoint = String(getSetting('localModelEndpoint', '') || '').trim();
   let runtime = await localModelStatus();
-  if (startIfNeeded && !codeEndpoint && !chatEndpoint && runtime.assigned && runtime.llamaServerExists && !runtime.managedServerReady) {
-    runtime = await startManagedLlamaServer();
+  if (startIfNeeded && !codeEndpoint && !chatEndpoint && runtime.assigned && runtime.llamaServerExists
+    && (!runtime.managedServerReady || Number(runtime.managedContextSize || 0) < MIN_CODING_CONTEXT_SIZE)) {
+    runtime = await startManagedLlamaServer({ contextSize: Math.max(MIN_CODING_CONTEXT_SIZE, Number(runtime.llamaContextSize || 0)) });
   }
   const candidate = codeEndpoint || chatEndpoint || runtime.managedEndpoint || '';
   const endpoint = candidate && isLoopbackEndpoint(candidate) ? candidate : '';
@@ -3834,6 +3856,9 @@ async function nativeCodingModelConfig(startIfNeeded = false) {
     provider: bundledRuntimeVerified ? 'llama.cpp' : 'local-openai-compatible',
     localInferenceVerified: Boolean(endpoint && (bundledRuntimeVerified || configuredRuntimeVerified)),
     verificationSource: bundledRuntimeVerified ? 'managed bundled runtime' : configuredRuntimeVerified ? 'explicit user verification' : 'unverified',
+    managedContextSize: runtime.managedContextSize || null,
+    requiredCodingContextSize: MIN_CODING_CONTEXT_SIZE,
+    codingContextReady: source !== 'bundled llama.cpp' || Number(runtime.managedContextSize || 0) >= MIN_CODING_CONTEXT_SIZE,
     rejectedRemoteEndpoint: Boolean(candidate && !endpoint)
   };
 }
@@ -4162,6 +4187,13 @@ app.get('/api/settings', (_req, res) => {
 app.post('/api/settings', (req, res) => {
   const secretKeys = Object.keys(req.body).filter((key) => SECRET_SETTING_KEYS.has(key));
   if (secretKeys.length) return fail(res, 400, `Secret settings require a dedicated endpoint: ${secretKeys.join(', ')}`);
+  if (Object.hasOwn(req.body, 'llamaContextSize')) {
+    const contextSize = Number(req.body.llamaContextSize);
+    if (!Number.isInteger(contextSize) || contextSize < MIN_LLAMA_CONTEXT_SIZE || contextSize > MAX_LLAMA_CONTEXT_SIZE) {
+      return fail(res, 400, `llama.cpp context size must be an integer from ${MIN_LLAMA_CONTEXT_SIZE} to ${MAX_LLAMA_CONTEXT_SIZE}. Use at least ${MIN_CODING_CONTEXT_SIZE} for local coding.`);
+    }
+    req.body.llamaContextSize = contextSize;
+  }
   for (const [key, value] of Object.entries(req.body)) {
     setSetting(key, value);
   }
