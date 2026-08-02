@@ -83,6 +83,13 @@ try {
   assert.equal(memoryIndex, 0, 'the document named after the topic is the top-ranked source, not a generic or merely-recent one');
   assert.ok(genericIndex === -1 || memoryIndex < genericIndex, 'the on-topic document outranks the recent generic document that only shares source-indicator words');
   assert.ok(mentionIndex === -1 || memoryIndex < mentionIndex, 'a document named after the topic outranks a newer document that only mentions it in passing');
+  // A correction to a memory is auditable, like a deletion: the revision history
+  // must reflect edits, not only deletes.
+  const auditItem = await api('/api/items', 'POST', { type: 'note', title: 'Audit edit item', body: 'Original body.', status: 'active' });
+  assert.equal(auditItem.response.status, 200);
+  await api(`/api/items/${auditItem.body.data.id}`, 'PATCH', { body: 'Corrected body.' });
+  const auditHistory = (await api(`/api/memory/items/${auditItem.body.data.id}/history`)).body.data;
+  assert.ok(auditHistory.some((revision) => revision.action === 'edited'), 'editing a memory records an auditable revision');
   console.log('Local knowledge retrieval and reviewed-memory verification passed.');
 } finally {
   if (child.exitCode === null) child.kill();

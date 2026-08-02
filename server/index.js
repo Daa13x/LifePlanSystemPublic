@@ -3603,9 +3603,17 @@ app.patch('/api/items/:id', (req, res) => {
   if (req.body.confidence !== undefined) fields.confidence = Number(req.body.confidence);
   if (req.body.reviewed) fields.last_reviewed = new Date().toISOString().slice(0, 10);
   if (!Object.keys(fields).length) return fail(res, 400, 'No recognised fields to update.');
+  // A correction to a memory's content is auditable, like a deletion: record the
+  // previous title/body in the revision history so the change is reviewable.
+  const contentChanged = (fields.title !== undefined && fields.title !== existing.title)
+    || (fields.body !== undefined && fields.body !== existing.body);
   fields.updated_at = new Date().toISOString();
   const sets = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
   db.prepare(`UPDATE knowledge_items SET ${sets} WHERE id = ?`).run(...Object.values(fields), req.params.id);
+  if (contentChanged) {
+    db.prepare('INSERT INTO memory_revisions (memory_id, action, previous_value) VALUES (?, ?, ?)')
+      .run(existing.id, 'edited', JSON.stringify({ title: existing.title, body: existing.body }));
+  }
   ok(res, row('SELECT * FROM knowledge_items WHERE id = ?', [req.params.id]));
 });
 
