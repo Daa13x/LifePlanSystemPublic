@@ -139,4 +139,17 @@ npm.cmd run build
 - Applied files remain unstaged. The user reviews Source Control and separately decides whether to stage, commit, and push.
 - Hosted CI, installer, and release artifacts require their own connected evidence; local worker verification does not prove release publication.
 
-GIT AUTHORITY POLICY ACTIVE — cloud models are permanently restricted to main; only approved supervised local-model workflows may create temporary branches.
+## Follow-up: branchless tools
+
+On 2026-08-02 all model branch authority was removed. Both native and legacy
+executor paths now use detached worktrees from the pinned `main` commit; policy
+tests deny model branch creation/switch/delegation and inspect production source
+to reject `git worktree add -b`.
+
+The native worker now supports a bounded iterative evidence loop: `list_files`,
+literal `search`, and ranged `read_file`. The controller executes these read-only
+operations inside approved paths, records result hashes/sizes, and displays the
+trace in System > Runs. Acceptance proves all three calls, final patch review,
+unchanged live checkout before Apply, and refusal of an out-of-scope tool read.
+
+GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

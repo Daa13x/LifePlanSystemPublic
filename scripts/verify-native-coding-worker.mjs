@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { NativeCodingWorker, parseNativeCodingResponse } from '../server/nativeCodingWorker.js';
+import { NATIVE_CODING_VALIDATIONS, NativeCodingWorker, parseNativeCodingResponse } from '../server/nativeCodingWorker.js';
 
 const execFileAsync = promisify(execFile);
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-native-code-'));
@@ -23,6 +23,7 @@ try {
   await run('git', ['config', 'user.email', 'lps-verifier@example.invalid']);
   fs.mkdirSync(path.join(temp, 'src'));
   fs.writeFileSync(path.join(temp, 'src', 'value.js'), 'export const value = 1;\n');
+  fs.writeFileSync(path.join(temp, 'src', 'obsolete.js'), 'export const obsolete = true;\n');
   fs.writeFileSync(path.join(temp, '.gitignore'), '.lps/\n');
   await run('git', ['add', '.']);
   await run('git', ['commit', '-m', 'fixture']);
@@ -33,14 +34,26 @@ try {
     root: temp,
     runGit: (args) => run('git', args),
     runValidation: async ({ worktree, changedFiles }) => ({
-      ok: changedFiles.length === 1 && changedFiles.every((file) => fs.existsSync(path.join(worktree, file))),
+      ok: changedFiles.length === 1,
       output: 'PASS fixture checker',
       checks: [{ name: 'fixture checker', ok: true }]
     }),
-    invokeModel: async () => ({
+    invokeModel: async ({ prompt }) => ({
       model: { name: 'fake-local-coder', endpoint: 'http://127.0.0.1:1', source: 'acceptance fixture' },
-      content: modelMode === 'valid'
+      content: modelMode === 'tools'
+        ? (!prompt.includes('Controller tool result')
+          ? JSON.stringify({ tool: { name: 'list_files', path: 'src' } })
+          : !prompt.includes('"query":"value"')
+            ? JSON.stringify({ tool: { name: 'search', path: 'src', query: 'value' } })
+            : !prompt.includes('"startLine":1')
+              ? JSON.stringify({ tool: { name: 'read_file', path: 'src/value.js', startLine: 1, endLine: 20 } })
+              : JSON.stringify({ summary: 'Used scoped evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }))
+        : modelMode === 'tool-escape'
+          ? JSON.stringify({ tool: { name: 'read_file', path: 'outside.js', startLine: 1, endLine: 20 } })
+          : modelMode === 'valid'
         ? JSON.stringify({ summary: 'Increment the fixture.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
+        : modelMode === 'delete'
+          ? JSON.stringify({ summary: 'Remove obsolete fixture.', edits: [{ path: 'src/obsolete.js', delete: true }] })
         : modelMode === 'new'
           ? JSON.stringify({ summary: 'Add the fixture.', edits: [{ path: 'src/new.js', content: 'export const added = true;\n' }] })
           : JSON.stringify({ summary: 'Escape scope.', edits: [{ path: 'outside.js', content: 'bad\n' }] })
@@ -57,6 +70,10 @@ try {
   });
 
   assert.throws(() => parseNativeCodingResponse('not json'), /valid JSON/);
+  assert.deepEqual(Object.keys(NATIVE_CODING_VALIDATIONS), ['syntax', 'frontend', 'runtime', 'project']);
+  const productionServer = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
+  assert.match(productionServer, /\['run', 'verify:runtime-safety'\]/, 'runtime validation must use the fixed runtime-safety command');
+  assert.match(productionServer, /validation === 'project'/, 'full project validation profile must be wired');
   assert.throws(() => worker.create({ title: 'Traversal', objective: 'Must fail.', allowedPaths: ['src/../../secret.txt'] }), /unsafe or protected/);
   const baseCommit = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
   const task = worker.create({ title: 'Increment fixture', objective: 'Change value from one to two.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax', baseCommit });
@@ -81,6 +98,27 @@ try {
   assert.match(status.stdout, /src\/value\.js|src\\value\.js/);
 
   await run('git', ['restore', '--worktree', '--', 'src/value.js']);
+  modelMode = 'tools';
+  const toolTask = worker.create({ title: 'Inspect fixture', objective: 'List, search, and read approved files before changing one.', allowedPaths: ['src'], maxFilesChanged: 1 });
+  const toolReview = await worker.run(toolTask.id, { confirm: true, taskHash: toolTask.taskHash });
+  assert.equal(toolReview.status, 'review');
+  assert.deepEqual(toolReview.toolTrace.map((entry) => entry.name), ['list_files', 'search', 'read_file']);
+  assert.ok(toolReview.toolTrace.every((entry) => /^[a-f0-9]{64}$/.test(entry.resultHash)));
+  assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'tool-loop review changed live checkout');
+  await worker.reject(toolTask.id);
+
+  modelMode = 'tool-escape';
+  const toolEscape = worker.create({ title: 'Escape tool', objective: 'Attempt an out-of-scope tool read.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(worker.run(toolEscape.id, { confirm: true, taskHash: toolEscape.taskHash }), /outside the approved scope/);
+  assert.equal(worker.load(toolEscape.id).status, 'failed');
+
+  modelMode = 'delete';
+  const deleteTask = worker.create({ title: 'Delete fixture', objective: 'Remove the approved obsolete file.', allowedPaths: ['src/obsolete.js'], maxFilesChanged: 1 });
+  const deleteReview = await worker.run(deleteTask.id, { confirm: true, taskHash: deleteTask.taskHash });
+  assert.match(deleteReview.diff, /deleted file mode/);
+  assert.equal(fs.existsSync(path.join(temp, 'src', 'obsolete.js')), true, 'review deletion reached live checkout before Apply');
+  await worker.reject(deleteTask.id);
+
   modelMode = 'new';
   const newFile = worker.create({ title: 'Add fixture', objective: 'Add one JavaScript fixture.', allowedPaths: ['src'], maxFilesChanged: 1 });
   const newReview = await worker.run(newFile.id, { confirm: true, taskHash: newFile.taskHash });
@@ -115,7 +153,7 @@ try {
   const recovered = new NativeCodingWorker({ root: temp, runGit: (args) => run('git', args), runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath });
   assert.equal(recovered.load(interrupted.id).status, 'interrupted');
 
-  console.log('Native coding worker acceptance passed: traversal rejection, base-commit/evidence sealing, single-flight execution, sealed approvals, isolated tracked/new edits, validation evidence, patch-hash apply, restart recovery, and out-of-scope rejection are real.');
+  console.log('Native coding worker acceptance passed: traversal rejection, base-commit/evidence sealing, bounded read-only tool loop, tool-scope refusal, safe deletion review, single-flight execution, sealed approvals, isolated tracked/new edits, validation evidence, patch-hash apply, restart recovery, and out-of-scope rejection are real.');
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

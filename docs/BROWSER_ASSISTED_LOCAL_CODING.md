@@ -4,10 +4,9 @@ How to let the LPS local coding worker take advice from a browser-based cloud
 assistant (ChatGPT, Claude, Gemini, and others) and still be trusted to change
 code.
 
-Status: specification and integration guide. Written 2026-07-22 from a working
-implementation of the same loop in a sibling product, including the failures
-that implementation hit and what fixed them. Every "why" below is a bug that
-actually happened, not a hypothetical.
+Status: implemented integration guide. Written 2026-07-22 from a working
+reference loop and updated after the native LPS loop reached production
+acceptance. Every "why" below is backed by an observed failure.
 
 LPS already owns both halves of this:
 
@@ -18,8 +17,9 @@ LPS already owns both halves of this:
   `docs/LOCAL_AI_BROWSER_AND_DOCUMENT_GUIDE.md` — which sends a confirmed
   prompt through the user's signed-in browser and captures the reply.
 
-What does not exist yet is the join: using the browser reply as the *advice*
-that shapes a `NativeCodingWorker` task. This document specifies that join.
+The join is implemented: validated browser output may be attached as untrusted,
+hash-bound advice, while repository evidence and the local worker remain the
+only inputs allowed to shape a patch.
 
 ---
 
@@ -50,12 +50,24 @@ Two rules govern the whole design:
 ### Git authority is not transferred with advice
 
 Browser advice is cloud-originated, so it cannot create, recommend, or delegate
-a Git branch. The cloud assistant remains restricted to `main`. A local coding
-worker may use a temporary proposal branch only when the LifePlanSystem
-controller independently proves local inference and satisfies
-`docs/GIT_AUTHORITY_POLICY.md`; otherwise the workflow is classified as cloud
-and branch/worktree creation is refused. Advice can never contain authoritative
-Git commands or expand the task card, editable paths, or permissions.
+a Git branch. All model automation is branchless. A verified local coding worker
+uses a detached worktree pinned to `main`; approved output is applied directly
+to still-matching `main`. Advice can never contain authoritative Git commands or
+expand the task card, editable paths, or permissions.
+
+### Native read-only tool loop
+
+The local coder may make at most eight controller-mediated calls before final
+edits: `list_files` for one approved directory, literal `search` within one
+approved path, and ranged `read_file` for one approved text file. Tool paths go
+through the same realpath, symlink/junction, protected-path, and allowed-scope
+checks as final edits. Results are capped at 50 KB, reads at 400 lines, searches
+at 100 matches/500 files, and files at 120 KB. Each call records name, path,
+query, result size, and SHA-256 result hash in the durable task and Runs UI.
+
+The worker has no shell, package install, network, browser, arbitrary command,
+Git mutation, commit, or push tool. Builds and syntax checks are independent
+controller validations after edits, never model-authored proof.
 
 ---
 

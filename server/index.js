@@ -3882,6 +3882,14 @@ async function invokeNativeCodingModel({ systemPrompt, prompt, signal, execution
   return { content, model: { name: config.model, endpoint: config.endpoint, source: config.source } };
 }
 
+function prepareNativeCodingDependencies(worktree) {
+  const sourceModules = path.join(root, 'node_modules');
+  const worktreeModules = path.join(worktree, 'node_modules');
+  if (!fs.existsSync(sourceModules)) return { ok: false, output: 'Run npm ci in the main checkout before project validation.' };
+  if (!fs.existsSync(worktreeModules)) fs.symlinkSync(sourceModules, worktreeModules, process.platform === 'win32' ? 'junction' : 'dir');
+  return { ok: true, output: 'Reused the main checkout dependency tree through an isolated worktree link; no install was run.' };
+}
+
 async function validateNativeCodingWorktree({ worktree, validation, changedFiles }) {
   const checks = [];
   const diffCheck = await runCli('git', ['-C', worktree, 'diff', '--check'], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
@@ -3904,13 +3912,22 @@ async function validateNativeCodingWorktree({ worktree, validation, changedFiles
       checks.push({ name: 'frontend scope gate', ok: false, output: 'Frontend build validation permits changed files under src/ only.' });
       return { ok: false, checks, output: checks.map((check) => `FAIL ${check.name}\n${check.output}`).join('\n\n') };
     }
-    const sourceModules = path.join(root, 'node_modules');
-    const worktreeModules = path.join(worktree, 'node_modules');
-    if (!fs.existsSync(sourceModules)) checks.push({ name: 'npm dependency gate', ok: false, output: 'Run npm ci in the main checkout before build validation.' });
-    else {
-      if (!fs.existsSync(worktreeModules)) fs.symlinkSync(sourceModules, worktreeModules, process.platform === 'win32' ? 'junction' : 'dir');
+    const dependencyGate = prepareNativeCodingDependencies(worktree);
+    checks.push({ name: 'npm dependency gate', ...dependencyGate });
+    if (dependencyGate.ok) {
       const result = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { cwd: worktree, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
       checks.push({ name: 'npm run build (src-only proposal)', ok: result.ok, output: result.stdout || result.stderr });
+    }
+  } else if (validation === 'runtime' || validation === 'project') {
+    const dependencyGate = prepareNativeCodingDependencies(worktree);
+    checks.push({ name: 'npm dependency gate', ...dependencyGate });
+    if (dependencyGate.ok) {
+      const runtimeResult = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'verify:runtime-safety'], { cwd: worktree, timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
+      checks.push({ name: 'npm run verify:runtime-safety', ok: runtimeResult.ok, output: runtimeResult.stdout || runtimeResult.stderr });
+      if (validation === 'project' && runtimeResult.ok) {
+        const buildResult = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { cwd: worktree, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+        checks.push({ name: 'npm run build', ok: buildResult.ok, output: buildResult.stdout || buildResult.stderr });
+      }
     }
   }
   const ok = checks.every((check) => check.ok);
@@ -6028,7 +6045,7 @@ app.get('/api/source/coding/status', async (_req, res) => {
       policy: 'Optional, one-shot advice only. Browser output cannot edit, widen scope, validate, apply, commit, or push.'
     },
     recoveredWorktrees,
-    policy: 'One isolated local worker; sealed scope and patch approvals; no commit, push, merge, delete, arbitrary command, browser, or cloud fallback.'
+    policy: 'One branchless local worker; sealed scope and patch approvals; bounded list/search/read tools only; no commit, push, merge, delete, arbitrary command, network, browser, or cloud fallback.'
   });
 });
 
