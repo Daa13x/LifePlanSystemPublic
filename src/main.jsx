@@ -519,7 +519,7 @@ function Workboard({ route, navigate, planner, projects, setProjects, refresh, r
   const completedCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
   return (
     <section className="section-shell">
-      {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} setNotice={setNotice} />}
+      {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} setNotice={setNotice} navigate={navigate} />}
       {route.tab === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
       {route.tab === 'roadmap' && <DevRoadmap setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'review' && <ApprovalQueue scope="operational" setNotice={setNotice} refreshPlanner={refresh} />}
@@ -769,7 +769,36 @@ function PlannerItemActions({ item, refresh }) {
   );
 }
 
-function Planner({ planner, refresh, runRefresh, setNotice }) {
+function CodingWorkQueue({ navigate, setNotice }) {
+  const [coding, setCoding] = useState({ tasks: [] });
+  const [draft, setDraft] = useState({ title: '', objective: '', allowedPaths: 'src', maxFilesChanged: 3, validation: 'frontend' });
+  const [busy, setBusy] = useState(false);
+  const load = () => api('/api/source/coding/status').then(setCoding).catch((error) => setNotice(error.message));
+  useEffect(() => { load(); }, []);
+  async function create() {
+    setBusy(true);
+    try {
+      await api('/api/source/coding/tasks', { method: 'POST', body: JSON.stringify(draft) });
+      setDraft((current) => ({ ...current, title: '', objective: '' }));
+      await load();
+      setNotice('Coding work queued with a sealed scope. Prepare it in System > Runs.');
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  }
+  return <div className="coding-workboard-card">
+    <div className="panel-heading"><div><h3>Local coding queue</h3><p>Narrow development work for the supervised local model.</p></div><Pill tone="info">{coding.tasks?.filter((task) => !['applied', 'rejected'].includes(task.status)).length || 0}</Pill></div>
+    <details><summary>Queue a coding task</summary>
+      <label>Title<input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Small code outcome" /></label>
+      <label>Objective<textarea value={draft.objective} onChange={(event) => setDraft({ ...draft, objective: event.target.value })} placeholder="Defect, constraints, and acceptance result" /></label>
+      <label>Allowed paths<textarea value={draft.allowedPaths} onChange={(event) => setDraft({ ...draft, allowedPaths: event.target.value })} /></label>
+      <button className="primary" onClick={create} disabled={busy || !draft.title.trim() || !draft.objective.trim() || !draft.allowedPaths.trim()}>Seal and queue</button>
+    </details>
+    <div className="coding-workboard-list">{(coding.tasks || []).slice(0, 4).map((task) => <button key={task.id} onClick={() => navigate('system', 'runs')}><span>{task.title}</span><small>{CODING_STATUS_LABELS[task.status] || task.status}</small></button>)}</div>
+    <button className="secondary" onClick={() => navigate('system', 'runs')}>Open coding workspace</button>
+  </div>;
+}
+
+function Planner({ planner, refresh, runRefresh, setNotice, navigate }) {
   if (!planner) return <div className="loading">Loading Workboard context...</div>;
   const nextBestBody = planner.nextBest?.body
     || (planner.nextBest?.action_type ? 'Review and approve, deny, or defer this proposed change.' : 'Add goals, projects, or memory candidates to feed the Workboard.');
@@ -820,6 +849,7 @@ function Planner({ planner, refresh, runRefresh, setNotice }) {
           </>
         )}
         <QuickAddItem refresh={refresh} setNotice={setNotice} />
+        <CodingWorkQueue navigate={navigate} setNotice={setNotice} />
         <button className="primary subtle" onClick={runRefresh}>Refresh Workboard</button>
       </div>
 
@@ -3765,6 +3795,39 @@ function SideBySideDiff({ data }) {
   );
 }
 
+const CODING_STATUS_LABELS = {
+  pending: 'Pending', prepared: 'Preparing complete', 'needs-scope': 'Needs Scope',
+  'awaiting-advice': 'Awaiting Browser Advice', running: 'Local Run', review: 'Review Ready',
+  applied: 'Applied', failed: 'Failed', interrupted: 'Interrupted',
+  'apply-interrupted': 'Apply Interrupted', cancelled: 'Cancelled', rejected: 'Rejected'
+};
+
+function codingTone(status) {
+  if (status === 'applied') return 'good';
+  if (['review', 'awaiting-advice', 'prepared'].includes(status)) return 'warn';
+  if (['failed', 'cancelled', 'interrupted', 'apply-interrupted', 'needs-scope'].includes(status)) return 'bad';
+  return 'default';
+}
+
+function HighlightedCode({ content = '', mode = 'source' }) {
+  const lines = String(content || '').split('\n');
+  return <div className="coding-code" role="region" aria-label={mode === 'diff' ? 'Reviewed patch' : 'Scoped source excerpt'} tabIndex={0}>
+    {lines.map((line, index) => {
+      const kind = mode === 'diff' ? (line.startsWith('+') && !line.startsWith('+++') ? 'add' : line.startsWith('-') && !line.startsWith('---') ? 'del' : line.startsWith('@@') ? 'hunk' : line.startsWith('diff ') ? 'head' : '') : '';
+      const parts = mode === 'source'
+        ? line.split(/(\/\/.*$|"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|\b(?:const|let|var|function|class|return|if|else|for|while|import|export|from|async|await|new|throw|try|catch)\b)/g)
+        : [line];
+      return <div className={cx('coding-line', kind && `coding-line-${kind}`)} key={`${index}-${line.slice(0, 24)}`}>
+        <span className="coding-lnum">{index + 1}</span>
+        <code>{parts.map((part, partIndex) => {
+          const token = /^\/\//.test(part) ? 'comment' : /^(?:"|'|`)/.test(part) ? 'string' : /^(?:const|let|var|function|class|return|if|else|for|while|import|export|from|async|await|new|throw|try|catch)$/.test(part) ? 'keyword' : '';
+          return token ? <span className={`coding-token-${token}`} key={partIndex}>{part}</span> : part;
+        })}</code>
+      </div>;
+    })}
+  </div>;
+}
+
 function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', availableTabs = null }) {
   const [source, setSource] = useState(null);
   const [diff, setDiff] = useState(null);
@@ -3799,6 +3862,8 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
   const [publicationCheckBusy, setPublicationCheckBusy] = useState(false);
   const [coding, setCoding] = useState({ tasks: [], validations: {}, model: {}, activeTaskIds: [] });
   const [codingDraft, setCodingDraft] = useState({ title: '', objective: '', allowedPaths: 'src', maxFilesChanged: 3, validation: 'frontend' });
+  const [selectedCodingTaskId, setSelectedCodingTaskId] = useState('');
+  const [codingAdviceDraft, setCodingAdviceDraft] = useState({ provider: 'ChatGPT', question: '', temporaryChatConfirmed: false });
 
   useEffect(() => { setTab(initialTab); }, [initialTab]);
 
@@ -3810,6 +3875,13 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
     } catch (err) {
       if (announce) setNotice(err.message);
     }
+  }
+
+  async function refreshCoding() {
+    const next = await api('/api/source/coding/status');
+    setCoding(next);
+    setSelectedCodingTaskId((current) => current && next.tasks.some((task) => task.id === current) ? current : next.tasks[0]?.id || '');
+    return next;
   }
 
   async function runPublicationCheck() {
@@ -3843,7 +3915,7 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
       try { setStashes((await api('/api/source/stash')).entries || []); } catch { /* stash list is best-effort */ }
       try { setTags((await api('/api/source/tags')).tags || []); } catch { /* tags are best-effort */ }
       try { setInstallerBuild(await api('/api/source/build-installer')); } catch { /* installer status is best-effort */ }
-      try { setCoding(await api('/api/source/coding/status')); } catch { /* coding worker status is best-effort */ }
+      try { await refreshCoding(); } catch { /* coding worker status is best-effort */ }
       if (announce) setNotice('Source status refreshed.');
     } catch (err) {
       setNotice(err.message);
@@ -3865,6 +3937,11 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
 
   useEffect(() => { refresh(); }, [refreshSignal]);
   useEffect(() => {
+    if (!(coding.tasks || []).some((task) => ['running', 'awaiting-advice', 'applying'].includes(task.status))) return undefined;
+    const timer = setInterval(() => { refreshCoding().catch(() => {}); }, 2000);
+    return () => clearInterval(timer);
+  }, [coding.tasks]);
+  useEffect(() => {
     if (!installerBuild?.running) return undefined;
     const timer = setInterval(() => { refreshInstallerBuild(false); }, 2500);
     return () => clearInterval(timer);
@@ -3883,6 +3960,7 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
     } catch (err) {
       setNotice(err.message);
       setOperationOutput(err.message);
+      try { await refresh(); } catch { /* preserve the original action error */ }
     } finally {
       setSourceBusy(false);
     }
@@ -3940,6 +4018,33 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
     } finally {
       setSourceBusy(false);
     }
+  }
+
+  async function prepareCodingTask(task) {
+    await action(`/api/source/coding/tasks/${task.id}/prepare`, {}, 'Scoped workspace evidence prepared without calling a model or browser.');
+    setSelectedCodingTaskId(task.id);
+  }
+
+  async function previewCodingAdvice(task) {
+    if (!codingAdviceDraft.question.trim()) return;
+    await action(`/api/source/coding/tasks/${task.id}/advice/preview`, {
+      provider: codingAdviceDraft.provider,
+      question: codingAdviceDraft.question.trim()
+    }, 'Browser advice prompt prepared for review. Nothing was sent.');
+  }
+
+  function sendCodingAdvice(task) {
+    requestSourceConfirmation({
+      title: `Send one advisory question to ${task.browserAdvice.provider}?`,
+      detail: `This sends the exact redacted prompt bound to ${task.browserAdvice.promptHash}. The response is untrusted advice and cannot alter scope or apply code.`,
+      path: `/api/source/coding/tasks/${task.id}/advice/send`,
+      body: {
+        provider: task.browserAdvice.provider,
+        promptHash: task.browserAdvice.promptHash,
+        temporaryChatConfirmed: codingAdviceDraft.temporaryChatConfirmed
+      },
+      success: 'One browser advisory request was dispatched.'
+    });
   }
 
   async function saveToken() {
@@ -4000,6 +4105,7 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
         ? source.publication?.reason || 'Publishing is blocked until this checkout is verified as the public app repository.'
       : '';
   const hasChanges = changedFiles.length > 0;
+  const selectedCodingTask = (coding.tasks || []).find((task) => task.id === selectedCodingTaskId) || coding.tasks?.[0] || null;
   const protectedFiles = changedFiles.filter((file) => file.protected);
   const canStageAll = hasChanges && !sourceBusy && !source?.hasConflicts && protectedFiles.length === 0;
   const canCommit = !sourceBusy && Boolean(commitMessage.trim()) && changedFiles.some((file) => file.staged) && !source?.hasConflicts;
@@ -4320,61 +4426,107 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
       )}
 
       {tab === 'coding' && (
-        <div className="sc-tab-body">
-          <div className="source-warning info">
-            <strong>Native local coding worker</strong>
-            <small>{coding.policy || 'The worker edits only an isolated Git worktree, validates the result, and waits for separate patch approval.'}</small>
+        <div className="sc-tab-body coding-workspace-shell">
+          <div className="coding-runtime-bar">
+            <div><span>Local worker</span><strong className={coding.model?.configured ? 'good' : 'warn'}>{coding.model?.configured ? coding.model.source : 'Unavailable'}</strong><small>{coding.model?.name || 'Select a local code model'}</small></div>
+            <div><span>Browser advice</span><strong className={coding.browser?.connected ? 'good' : 'warn'}>{coding.browser?.connected ? 'Connector ready' : 'Optional / disconnected'}</strong><small>Advisory only, never a fallback worker</small></div>
+            <div><span>Mutation boundary</span><strong>{coding.activeTaskIds?.length || 0} active</strong><small>Live checkout stays untouched until Apply</small></div>
           </div>
-          <div className="connection-grid">
-            <div><span>Endpoint</span><strong>{coding.model?.configured ? coding.model.source : 'Not ready'}</strong><small>{coding.model?.endpoint || 'Configure a local coding endpoint or start bundled llama.cpp.'}</small></div>
-            <div><span>Model</span><strong>{coding.model?.name || 'Not selected'}</strong><small>No Ollama or OpenHands dependency.</small></div>
-            <div><span>Active</span><strong>{coding.activeTaskIds?.length || 0}</strong><small>Single-flight mutation lock.</small></div>
-          </div>
-          <div className="panel">
-            <h2>Stage a coding task</h2>
-            <label>Title</label>
-            <input value={codingDraft.title} onChange={(event) => setCodingDraft({ ...codingDraft, title: event.target.value })} placeholder="Small, specific outcome" disabled={sourceBusy} />
-            <label>Objective and acceptance criteria</label>
-            <textarea value={codingDraft.objective} onChange={(event) => setCodingDraft({ ...codingDraft, objective: event.target.value })} placeholder="Describe the change and what must be true when it is complete." disabled={sourceBusy} />
-            <label>Allowed repository paths, one per line</label>
-            <textarea value={codingDraft.allowedPaths} onChange={(event) => setCodingDraft({ ...codingDraft, allowedPaths: event.target.value })} placeholder={'src/components\nserver/helper.js'} disabled={sourceBusy} />
-            <div className="inline-form">
-              <select value={codingDraft.validation} onChange={(event) => setCodingDraft({ ...codingDraft, validation: event.target.value })} disabled={sourceBusy}>
-                {Object.entries(coding.validations || {}).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
-              </select>
-              <select value={codingDraft.maxFilesChanged} onChange={(event) => setCodingDraft({ ...codingDraft, maxFilesChanged: Number(event.target.value) })} disabled={sourceBusy}>
-                {[1, 2, 3, 4, 5].map((count) => <option value={count} key={count}>Maximum {count} file{count === 1 ? '' : 's'}</option>)}
-              </select>
-              <button className="primary" onClick={createCodingTask} disabled={sourceBusy || !codingDraft.title.trim() || !codingDraft.objective.trim() || !codingDraft.allowedPaths.trim()}><Plus size={15} /> Stage task</button>
+
+          <details className="panel coding-create-panel">
+            <summary><Plus size={15} /> Create a narrow coding task</summary>
+            <div className="coding-create-grid">
+              <label>Title<input value={codingDraft.title} onChange={(event) => setCodingDraft({ ...codingDraft, title: event.target.value })} placeholder="Small, specific outcome" disabled={sourceBusy} /></label>
+              <label className="coding-create-objective">Objective and acceptance criteria<textarea value={codingDraft.objective} onChange={(event) => setCodingDraft({ ...codingDraft, objective: event.target.value })} placeholder="Describe the defect and the observable result." disabled={sourceBusy} /></label>
+              <label>Allowed paths, one per line<textarea value={codingDraft.allowedPaths} onChange={(event) => setCodingDraft({ ...codingDraft, allowedPaths: event.target.value })} placeholder={'src/component.jsx\nserver/helper.js'} disabled={sourceBusy} /></label>
+              <label>Independent validation<select value={codingDraft.validation} onChange={(event) => setCodingDraft({ ...codingDraft, validation: event.target.value })} disabled={sourceBusy}>{Object.entries(coding.validations || {}).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+              <label>Maximum changed files<select value={codingDraft.maxFilesChanged} onChange={(event) => setCodingDraft({ ...codingDraft, maxFilesChanged: Number(event.target.value) })} disabled={sourceBusy}>{[1, 2, 3, 4, 5].map((count) => <option value={count} key={count}>{count}</option>)}</select></label>
+              <button className="primary" onClick={createCodingTask} disabled={sourceBusy || !codingDraft.title.trim() || !codingDraft.objective.trim() || !codingDraft.allowedPaths.trim()}><Plus size={15} /> Seal task scope</button>
             </div>
-          </div>
-          {(coding.tasks || []).length === 0 ? (
-            <Empty title="No local coding tasks" body="Stage a bounded task here. LPS will not run it until you approve its sealed scope." />
-          ) : (coding.tasks || []).map((task) => (
-            <div className="panel" key={task.id}>
-              <div className="panel-heading">
-                <h2>{task.title}</h2>
-                <Pill tone={task.status === 'review' ? 'warn' : task.status === 'applied' ? 'good' : ['failed', 'cancelled'].includes(task.status) ? 'bad' : 'default'}>{task.status}</Pill>
-              </div>
-              <p>{task.objective}</p>
-              <div className="connection-grid">
-                <div><span>Phase</span><strong>{task.phase}</strong></div>
-                <div><span>Scope</span><strong>{task.allowedPaths.join(', ')}</strong><small>Task hash {task.taskHash?.slice(0, 16)}</small></div>
-                <div><span>Validation</span><strong>{coding.validations?.[task.validation] || task.validation}</strong><small>Limit {task.maxFilesChanged} files</small></div>
-              </div>
-              {task.summary && <div className="source-warning info"><strong>Coder summary</strong><small>{task.summary}</small></div>}
-              {task.error && <div className="source-warning bad"><strong>Worker stopped safely</strong><small>{task.error}</small></div>}
-              {task.validationResult && <pre className="code-block compact-code">{task.validationResult.output}</pre>}
-              {task.diff && <pre className="code-block compact-code">{task.diff}</pre>}
-              <div className="decision-row">
-                {['pending', 'failed', 'interrupted', 'cancelled'].includes(task.status) && <button className="primary" onClick={() => requestSourceConfirmation({ title: `Run ${task.title}?`, detail: `Approve the sealed scope ${task.taskHash}. LPS will create an isolated worktree, send only approved file context to ${coding.model?.source || 'the configured local endpoint'}, validate the result, and stop for patch review.`, path: `/api/source/coding/tasks/${task.id}/run`, body: { taskHash: task.taskHash, approvedBy: 'user' }, success: 'Local coding task reached review or stopped safely.' })} disabled={sourceBusy || !coding.model?.configured || hasChanges}><Play size={15} /> Approve and run</button>}
-                {task.status === 'running' && <button className="danger" onClick={() => action(`/api/source/coding/tasks/${task.id}/cancel`, {}, 'Cancellation requested.')} disabled={sourceBusy}><X size={15} /> Cancel</button>}
-                {task.status === 'review' && <button className="primary" onClick={() => requestSourceConfirmation({ title: `Apply reviewed patch for ${task.title}?`, detail: `This approval is bound to patch ${task.patchHash}. The patch will be applied unstaged to the clean live checkout; LPS will not commit or push it.`, path: `/api/source/coding/tasks/${task.id}/apply`, body: { patchHash: task.patchHash, approvedBy: 'user' }, success: 'Reviewed coding patch applied unstaged.' })} disabled={sourceBusy || hasChanges}><Check size={15} /> Approve patch</button>}
-                {['pending', 'failed', 'interrupted', 'cancelled', 'review'].includes(task.status) && <button className="danger" onClick={() => requestSourceConfirmation({ title: `Reject ${task.title}?`, detail: 'The proposal and isolated worktree will be discarded. The live checkout will not change.', path: `/api/source/coding/tasks/${task.id}/reject`, body: {}, success: 'Coding proposal rejected.' })} disabled={sourceBusy}><Trash2 size={15} /> Reject</button>}
-              </div>
-              {task.audit?.length > 0 && <small>Latest governor evidence: {task.audit[task.audit.length - 1].verdict} / {task.audit[task.audit.length - 1].phase} / {task.audit[task.audit.length - 1].evidenceHash.slice(0, 16)}</small>}
+          </details>
+
+          {!selectedCodingTask ? <Empty title="No local coding tasks" body="Create a bounded task. Preparation reads only approved source and makes no model or browser call." /> : (
+            <div className="coding-ide">
+              <aside className="coding-task-rail" aria-label="Coding tasks">
+                <div className="coding-rail-title"><strong>Task queue</strong><span>{coding.tasks.length}</span></div>
+                {coding.tasks.map((task) => <button key={task.id} className={cx('coding-task-button', selectedCodingTask.id === task.id && 'selected')} onClick={() => setSelectedCodingTaskId(task.id)}>
+                  <span>{task.title}</span><small>{CODING_STATUS_LABELS[task.status] || task.status}</small>
+                </button>)}
+              </aside>
+
+              <main className="coding-review-area">
+                <div className="coding-review-head">
+                  <div><small>{selectedCodingTask.id}</small><h2>{selectedCodingTask.title}</h2><p>{selectedCodingTask.objective}</p></div>
+                  <Pill tone={codingTone(selectedCodingTask.status)}>{CODING_STATUS_LABELS[selectedCodingTask.status] || selectedCodingTask.status}</Pill>
+                </div>
+                <div className="source-warning info"><strong>Live checkout boundary</strong><small>{selectedCodingTask.status === 'applied' ? 'This reviewed patch was explicitly applied unstaged. Source Control now owns any commit or push.' : 'The live checkout is untouched. Preparation, browser advice, local inference, and validation occur before a separate patch-hash Apply approval.'}</small></div>
+                {selectedCodingTask.error && <div className="source-warning bad"><strong>Stopped honestly</strong><small>{selectedCodingTask.error}</small></div>}
+
+                <details className="coding-evidence-section" open={!selectedCodingTask.diff}>
+                  <summary>Scoped evidence <span>{selectedCodingTask.preparation?.evidence?.anchors?.length || 0} ranked files</span></summary>
+                  {!selectedCodingTask.preparation ? <Empty title="Evidence not prepared" body="Prepare reads bounded text from the sealed allowed paths only. It does not call a model." /> : <>
+                    <div className="coding-evidence-stats"><span>Hash <code>{selectedCodingTask.preparation.evidenceHash?.slice(0, 16)}</code></span><span>{selectedCodingTask.preparation.evidence.fileCount} eligible files</span><span>{selectedCodingTask.preparation.evidence.redactionCount || 0} redactions</span></div>
+                    {(selectedCodingTask.preparation.evidence.excerpts || []).map((excerpt) => {
+                      const anchor = selectedCodingTask.preparation.evidence.anchors.find((item) => item.path === excerpt.path);
+                      return <details className="coding-file-preview" key={excerpt.path}><summary><code>{excerpt.path}</code><span>{anchor?.reason || 'Selected from approved scope.'}</span></summary><HighlightedCode content={excerpt.excerpt} /></details>;
+                    })}
+                  </>}
+                </details>
+
+                <details className="coding-evidence-section" open={Boolean(selectedCodingTask.diff)}>
+                  <summary>Reviewed patch <span>{selectedCodingTask.changedFiles?.length || 0} changed files</span></summary>
+                  {selectedCodingTask.diff ? <HighlightedCode content={selectedCodingTask.diff} mode="diff" /> : <Empty title="No patch yet" body="A patch appears only after the local worker returns bounded JSON and independent validation passes." />}
+                </details>
+
+                {selectedCodingTask.validationResult && <details className="coding-evidence-section" open><summary>Independent validation <span>{selectedCodingTask.validationResult.ok ? 'Passed' : 'Failed'}</span></summary><pre className="code-block compact-code">{selectedCodingTask.validationResult.output}</pre></details>}
+                {selectedCodingTask.summary && <div className="source-warning info"><strong>Local coder summary</strong><small>{selectedCodingTask.summary}</small></div>}
+              </main>
+
+              <aside className="coding-inspector">
+                <h3>Inspection</h3>
+                <dl>
+                  <dt>Scope seal</dt><dd><code>{selectedCodingTask.taskHash?.slice(0, 20)}</code></dd>
+                  <dt>Base commit</dt><dd><code>{selectedCodingTask.baseCommit?.slice(0, 12) || 'not pinned'}</code></dd>
+                  <dt>Allowed paths</dt><dd>{selectedCodingTask.allowedPaths.map((item) => <code key={item}>{item}</code>)}</dd>
+                  <dt>Validation</dt><dd>{coding.validations?.[selectedCodingTask.validation] || selectedCodingTask.validation}</dd>
+                  <dt>File limit</dt><dd>{selectedCodingTask.maxFilesChanged}</dd>
+                  <dt>Evidence hash</dt><dd><code>{selectedCodingTask.preparation?.evidenceHash?.slice(0, 20) || 'not prepared'}</code></dd>
+                  <dt>Patch hash</dt><dd><code>{selectedCodingTask.patchHash?.slice(0, 20) || 'not generated'}</code></dd>
+                  <dt>Browser advice</dt><dd>{selectedCodingTask.browserAdvice?.status || 'skipped'}</dd>
+                </dl>
+
+                <div className="coding-actions">
+                  {['pending', 'needs-scope'].includes(selectedCodingTask.status) && <button className="primary" onClick={() => prepareCodingTask(selectedCodingTask)} disabled={sourceBusy}><SearchCheck size={15} /> Prepare evidence</button>}
+                  {['prepared', 'failed', 'interrupted', 'cancelled'].includes(selectedCodingTask.status) && <button className="primary" onClick={() => requestSourceConfirmation({ title: `Run ${selectedCodingTask.title}?`, detail: `Approve sealed scope ${selectedCodingTask.taskHash} with evidence ${selectedCodingTask.preparation?.evidenceHash}. The local model receives only this prepared context and any hash-bound validated advice; it works in an isolated worktree and stops for review.`, path: `/api/source/coding/tasks/${selectedCodingTask.id}/run`, body: { taskHash: selectedCodingTask.taskHash, evidenceHash: selectedCodingTask.preparation?.evidenceHash, adviceHash: selectedCodingTask.browserAdvice?.status === 'validated' ? selectedCodingTask.browserAdvice.answerHash : '', approvedBy: 'user' }, success: 'Local coding task reached review or stopped safely.' })} disabled={sourceBusy || !coding.model?.configured || hasChanges || !selectedCodingTask.preparation?.evidenceHash} title={!coding.model?.configured ? 'The configured local coding endpoint is unavailable.' : hasChanges ? 'The live checkout must be clean before a local run.' : !selectedCodingTask.preparation?.evidenceHash ? 'Prepare scoped evidence first.' : 'Run the local worker'}><Play size={15} /> Approve local run</button>}
+                  {selectedCodingTask.status === 'running' && <button className="danger" onClick={() => action(`/api/source/coding/tasks/${selectedCodingTask.id}/cancel`, {}, 'Cancellation requested.')} disabled={sourceBusy}><X size={15} /> Cancel run</button>}
+                  {selectedCodingTask.status === 'review' && <button className="primary" onClick={() => requestSourceConfirmation({ title: `Apply reviewed patch for ${selectedCodingTask.title}?`, detail: `This one-shot approval is bound to patch ${selectedCodingTask.patchHash}. It applies unstaged and performs no commit or push.`, path: `/api/source/coding/tasks/${selectedCodingTask.id}/apply`, body: { patchHash: selectedCodingTask.patchHash, approvedBy: 'user' }, success: 'Reviewed coding patch applied unstaged.' })} disabled={sourceBusy || hasChanges} title={hasChanges ? 'The live checkout must be clean before Apply.' : 'Apply this exact reviewed patch'}><Check size={15} /> Apply reviewed patch</button>}
+                  {['pending', 'prepared', 'needs-scope', 'awaiting-advice', 'failed', 'interrupted', 'cancelled', 'review'].includes(selectedCodingTask.status) && <button className="danger" onClick={() => requestSourceConfirmation({ title: `Reject ${selectedCodingTask.title}?`, detail: 'The proposal and isolated worktree will be discarded. The live checkout will not change.', path: `/api/source/coding/tasks/${selectedCodingTask.id}/reject`, body: {}, success: 'Coding proposal rejected.' })} disabled={sourceBusy}><Trash2 size={15} /> Reject</button>}
+                </div>
+
+                {selectedCodingTask.status === 'prepared' && <div className="coding-advice-box">
+                  <h4>Optional browser advice</h4>
+                  <p>Use only for one concrete missing fact. Local evidence remains primary.</p>
+                  <select value={codingAdviceDraft.provider} onChange={(event) => setCodingAdviceDraft({ ...codingAdviceDraft, provider: event.target.value })}>{(coding.browser?.providers || []).map((item) => <option key={item.provider} value={item.provider}>{item.provider}{item.connected ? ' (connected)' : ' (offline)'}</option>)}</select>
+                  <textarea value={codingAdviceDraft.question} onChange={(event) => setCodingAdviceDraft({ ...codingAdviceDraft, question: event.target.value })} placeholder="What exact implementation fact is missing from the approved source?" />
+                  <button onClick={() => previewCodingAdvice(selectedCodingTask)} disabled={sourceBusy || codingAdviceDraft.question.trim().length < 12}>Preview exact prompt</button>
+                </div>}
+                {selectedCodingTask.browserAdvice?.status === 'preview' && <div className="coding-advice-box">
+                  <h4>Review advisory egress</h4><p>Provider: {selectedCodingTask.browserAdvice.provider}<br />Prompt hash: <code>{selectedCodingTask.browserAdvice.promptHash?.slice(0, 16)}</code><br />Files: {selectedCodingTask.browserAdvice.suppliedFiles?.join(', ') || 'none'}</p>
+                  <details><summary>Exact redacted prompt</summary><pre className="code-block compact-code">{selectedCodingTask.browserAdvice.prompt}</pre></details>
+                  {selectedCodingTask.browserAdvice.provider === 'ChatGPT' && <label className="temporary-chat-option"><input type="checkbox" checked={codingAdviceDraft.temporaryChatConfirmed} onChange={(event) => setCodingAdviceDraft({ ...codingAdviceDraft, temporaryChatConfirmed: event.target.checked })} />Temporary Chat is enabled in ChatGPT</label>}
+                  <button onClick={() => sendCodingAdvice(selectedCodingTask)} disabled={sourceBusy || (selectedCodingTask.browserAdvice.provider === 'ChatGPT' && !codingAdviceDraft.temporaryChatConfirmed)}>Confirm and send once</button>
+                </div>}
+                {selectedCodingTask.status === 'awaiting-advice' && <button onClick={() => action(`/api/source/coding/tasks/${selectedCodingTask.id}/advice/poll`, {}, 'Browser advice status refreshed.')} disabled={sourceBusy}><RefreshCcw size={15} /> Poll same advice job</button>}
+                {selectedCodingTask.browserAdvice?.validation && <div className={cx('source-warning', selectedCodingTask.browserAdvice.validation.ok ? 'info' : 'bad')}><strong>{selectedCodingTask.browserAdvice.validation.ok ? 'Advice validated as untrusted' : 'Advice rejected'}</strong><small>{selectedCodingTask.browserAdvice.validation.reason || 'Scope authority remains unchanged.'}</small></div>}
+              </aside>
+
+              <section className="coding-console">
+                <div className="coding-console-head"><strong>Run console</strong><span>Durable audit order</span></div>
+                {(selectedCodingTask.audit || []).length ? selectedCodingTask.audit.map((event, index) => <div className="coding-console-row" key={`${event.at}-${index}`}><time>{new Date(event.at).toLocaleTimeString()}</time><span className={event.verdict === 'allow' ? 'good' : 'bad'}>{event.verdict}</span><strong>{event.phase.replaceAll('_', ' ')}</strong><p>{event.detail}</p><code>{event.evidenceHash?.slice(0, 12)}</code></div>) : <p>No events recorded.</p>}
+                <details><summary>Raw task record</summary><pre className="code-block compact-code">{JSON.stringify(selectedCodingTask, null, 2)}</pre></details>
+              </section>
             </div>
-          ))}
+          )}
         </div>
       )}
 

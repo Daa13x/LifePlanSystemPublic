@@ -58,9 +58,16 @@ try {
 
   assert.throws(() => parseNativeCodingResponse('not json'), /valid JSON/);
   assert.throws(() => worker.create({ title: 'Traversal', objective: 'Must fail.', allowedPaths: ['src/../../secret.txt'] }), /unsafe or protected/);
-  const task = worker.create({ title: 'Increment fixture', objective: 'Change value from one to two.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax' });
+  const baseCommit = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
+  const task = worker.create({ title: 'Increment fixture', objective: 'Change value from one to two.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax', baseCommit });
   await assert.rejects(worker.run(task.id, { confirm: true, taskHash: 'wrong' }), /sealed task scope/);
-  const review = await worker.run(task.id, { confirm: true, taskHash: task.taskHash, approvedBy: 'acceptance' });
+  await assert.rejects(worker.run(task.id, { confirm: true, taskHash: task.taskHash }), /Prepare and review scoped workspace evidence/);
+  task.preparation = { status: 'ready', baseCommit, evidenceHash: 'a'.repeat(64), evidence: { anchors: [{ path: 'src/value.js' }] } };
+  task.status = 'prepared';
+  task.phase = 'evidence_ready';
+  worker.save(task);
+  await assert.rejects(worker.run(task.id, { confirm: true, taskHash: task.taskHash, evidenceHash: 'b'.repeat(64) }), /prepared workspace evidence/);
+  const review = await worker.run(task.id, { confirm: true, taskHash: task.taskHash, evidenceHash: task.preparation.evidenceHash, adviceHash: '', approvedBy: 'acceptance' });
   assert.equal(review.status, 'review');
   assert.equal(review.changedFiles[0], 'src/value.js');
   assert.match(review.validationResult.evidenceHash, /^[a-f0-9]{64}$/);
@@ -108,7 +115,7 @@ try {
   const recovered = new NativeCodingWorker({ root: temp, runGit: (args) => run('git', args), runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath });
   assert.equal(recovered.load(interrupted.id).status, 'interrupted');
 
-  console.log('Native coding worker acceptance passed: traversal rejection, single-flight execution, sealed approvals, isolated tracked/new edits, validation evidence, patch-hash apply, restart recovery, and out-of-scope rejection are real.');
+  console.log('Native coding worker acceptance passed: traversal rejection, base-commit/evidence sealing, single-flight execution, sealed approvals, isolated tracked/new edits, validation evidence, patch-hash apply, restart recovery, and out-of-scope rejection are real.');
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

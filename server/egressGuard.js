@@ -8,7 +8,8 @@ const SECRET_PATTERNS = [
 ];
 const DENIED = [/(^|\/)\.env[^/]*$/i, /\.(pem|key|pfx|sqlite|db)$/i, /(^|\/)id_rsa[^/]*$/i, /(^|\/)secrets\//i, /(^|\/)credentials[^/]*$/i];
 const entropy = (value) => {
-  const counts = new Map([...value].map((c) => [c, (counts.get(c) || 0) + 1]));
+  const counts = new Map();
+  for (const character of value) counts.set(character, (counts.get(character) || 0) + 1);
   return [...counts.values()].reduce((sum, count) => sum - (count / value.length) * Math.log2(count / value.length), 0);
 };
 export function isDeniedEgressPath(rel, extra = []) {

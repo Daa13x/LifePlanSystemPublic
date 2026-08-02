@@ -44,6 +44,7 @@ function taskSeal(task) {
     allowedPaths: task.allowedPaths,
     maxFilesChanged: task.maxFilesChanged,
     validation: task.validation,
+    baseCommit: task.baseCommit || '',
     createdAt: task.createdAt
   });
 }
@@ -179,11 +180,14 @@ export class NativeCodingWorker {
     const maxFilesChanged = Math.max(1, Math.min(5, Math.floor(Number(input.maxFilesChanged) || 3)));
     const validation = Object.hasOwn(NATIVE_CODING_VALIDATIONS, input.validation) ? input.validation : 'syntax';
     const createdAt = new Date().toISOString();
+    const baseCommit = String(input.baseCommit || '').trim();
+    if (baseCommit && !/^[a-f0-9]{40}$/i.test(baseCommit)) throw new Error('A valid current base commit is required.');
     const task = {
       id: `code-${createdAt.replace(/[^0-9]/g, '')}-${crypto.randomBytes(3).toString('hex')}`,
       title, objective, allowedPaths, maxFilesChanged, validation,
       status: 'pending', phase: 'awaiting_run_approval', createdAt, updatedAt: createdAt,
-      summary: '', changedFiles: [], validationResult: null, diff: '', error: '', baseCommit: '', model: null,
+      summary: '', changedFiles: [], validationResult: null, diff: '', error: '', baseCommit, model: null,
+      preparation: null, browserAdvice: null,
       executionType: 'unclassified', gitAuthority: null, audit: []
     };
     task.taskHash = taskSeal(task);
@@ -246,7 +250,11 @@ export class NativeCodingWorker {
     const task = this.load(id);
     if (approval.confirm !== true) throw new Error('Explicit run approval is required.');
     if (taskSeal(task) !== task.taskHash || approval.taskHash !== task.taskHash) throw new Error('Run approval does not match the current sealed task scope. Refresh and approve again.');
-    if (!['pending', 'failed', 'interrupted', 'cancelled'].includes(task.status)) throw new Error(`Task cannot run from status ${task.status}.`);
+    if (!['pending', 'prepared', 'failed', 'interrupted', 'cancelled'].includes(task.status)) throw new Error(`Task cannot run from status ${task.status}.`);
+    if (task.baseCommit && !task.preparation?.evidenceHash) throw new Error('Prepare and review scoped workspace evidence before running this task.');
+    if (task.baseCommit && approval.evidenceHash !== task.preparation?.evidenceHash) throw new Error('Run approval does not match the prepared workspace evidence. Refresh and approve again.');
+    const adviceHash = task.browserAdvice?.status === 'validated' ? String(task.browserAdvice.answerHash || '') : '';
+    if (task.baseCommit && String(approval.adviceHash || '') !== adviceHash) throw new Error('Run approval does not match the current validated browser advice. Refresh and approve again.');
     if (this.reserved || this.active.size) throw new Error('Another native coding task is active. LPS runs one mutation-capable worker at a time.');
     this.reserved = true;
     let status;
@@ -264,6 +272,7 @@ export class NativeCodingWorker {
         this.getExecutionContext()
       ]);
       if (!head.ok) throw new Error(head.stderr || 'Unable to pin the task base commit.');
+      if (task.baseCommit && head.stdout.trim() !== task.baseCommit) throw new Error('Live HEAD changed after the task scope was sealed. Create a new task from the current base commit.');
       const authority = evaluateGitAuthority({
         operation: 'detached_worktree',
         ...executionContext,
@@ -289,7 +298,7 @@ export class NativeCodingWorker {
     const controller = new AbortController();
     this.active.set(task.id, controller);
     this.reserved = false;
-    task.baseCommit = head.stdout.trim();
+    if (!task.baseCommit) task.baseCommit = head.stdout.trim();
     task.status = 'running'; task.phase = 'creating_isolated_worktree'; task.error = '';
     task.runApprovedAt = new Date().toISOString(); task.runApprovedBy = String(approval.approvedBy || 'user').slice(0, 80);
     this.record(task, 'run_approval', 'allow', `One-shot approval matched task hash ${task.taskHash}.`);
@@ -309,8 +318,8 @@ export class NativeCodingWorker {
       // can never expand scope: resolveAllowed, the checker, and no-diff
       // detection remain the only authorities. Absent advice, the prompt is
       // byte-for-byte unchanged.
-      const adviceContext = typeof approval.adviceContext === 'string' && approval.adviceContext.trim()
-        ? approval.adviceContext.trim() : '';
+      const adviceContext = task.browserAdvice?.status === 'validated' && typeof task.browserAdvice.context === 'string'
+        ? task.browserAdvice.context.trim() : '';
       const promptParts = [`Task: ${task.title}`, task.objective];
       if (adviceContext) { promptParts.push('', adviceContext); task.adviceUsed = true; this.record(task, 'advice_context', 'allow', 'Untrusted browser advice attached as context; scope authority unchanged.'); }
       promptParts.push('', 'Approved repository files:', ...context.map((file) => `\n--- ${file.path} ---\n${file.content}`));
@@ -420,7 +429,7 @@ export class NativeCodingWorker {
 
   async reject(id) {
     const task = this.load(id);
-    if (!['review', 'failed', 'pending', 'interrupted', 'cancelled'].includes(task.status)) throw new Error(`Task cannot be rejected from status ${task.status}.`);
+    if (!['review', 'failed', 'pending', 'prepared', 'needs-scope', 'awaiting-advice', 'interrupted', 'cancelled'].includes(task.status)) throw new Error(`Task cannot be rejected from status ${task.status}.`);
     task.status = 'rejected'; task.phase = 'complete'; task.rejectedAt = new Date().toISOString();
     this.record(task, 'reject', 'allow', 'User rejected the proposal; no live checkout change was accepted.');
     this.save(task);

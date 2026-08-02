@@ -45,6 +45,14 @@ import {
 import { resolveRunCliCwd } from './runCliCwd.js';
 import { chromeProfileArgument, probeChromeExtension } from './browserExtensionInstall.js';
 import { NativeCodingWorker, NATIVE_CODING_VALIDATIONS } from './nativeCodingWorker.js';
+import {
+  FileIndexCache,
+  buildWorkspaceEvidence,
+  renderAdviceContext,
+  solvabilityPreflight,
+  validateAdvice
+} from './browserAssistedCoding.js';
+import { BrowserConsultationStore } from './browserConsultationState.js';
 import { evaluateGitAuthority, generatedLocalBranch } from './gitAuthorityPolicy.js';
 import {
   canUseGitHubToken,
@@ -3928,6 +3936,100 @@ const nativeCodingWorker = new NativeCodingWorker({
   }
 });
 
+const nativeCodingEvidenceCache = new FileIndexCache();
+const nativeCodingConsultations = new BrowserConsultationStore({
+  baseDir: path.join(root, '.lps', 'native-code', 'consultations')
+});
+const nativeCodingForbiddenPath = (candidate) => violatesMandatoryForbidden(candidate) || isProtectedWorkspacePath(candidate);
+
+function nativeCodingEvidenceHash(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+async function prepareNativeCodingTask(task) {
+  if (!['pending', 'prepared', 'needs-scope', 'failed', 'interrupted', 'cancelled'].includes(task.status)) {
+    throw new Error(`Task cannot be prepared from status ${task.status}.`);
+  }
+  const head = await runCli('git', ['rev-parse', 'HEAD'], { timeout: 30000, maxBuffer: 1024 * 1024 });
+  if (!head.ok) throw new Error(head.stderr || 'Unable to read the current base commit.');
+  const currentCommit = head.stdout.trim();
+  if (task.baseCommit && task.baseCommit !== currentCommit) {
+    throw new Error('Live HEAD changed after this task was sealed. Create a new task against the current source.');
+  }
+  const preflight = await solvabilityPreflight({
+    root,
+    worktree: root,
+    allowedPaths: task.allowedPaths,
+    forbiddenPath: nativeCodingForbiddenPath,
+    title: task.title,
+    objective: task.objective,
+    namedTargets: task.allowedPaths.filter((item) => path.extname(item)),
+    cache: nativeCodingEvidenceCache
+  });
+  const evidence = await buildWorkspaceEvidence({
+    root,
+    worktree: root,
+    allowedPaths: task.allowedPaths,
+    forbiddenPath: nativeCodingForbiddenPath,
+    title: task.title,
+    objective: task.objective,
+    commit: currentCommit,
+    cache: nativeCodingEvidenceCache
+  });
+  const visibleEvidence = {
+    roots: evidence.roots,
+    terms: evidence.terms,
+    anchors: evidence.anchors.map((anchor) => ({
+      ...anchor,
+      reason: anchor.nameScore > 0 ? 'Filename matches the task.' : `${anchor.hits} task term match${anchor.hits === 1 ? '' : 'es'} in this file.`
+    })),
+    excerpts: evidence.excerpts,
+    fileCount: evidence.fileCount,
+    cacheHit: evidence.cacheHit,
+    omissions: evidence.omissions,
+    redactionCount: evidence.redactionCount,
+    outboundBytes: evidence.outboundBytes,
+    outboundSha256: evidence.outboundSha256
+  };
+  task.preparation = {
+    status: preflight.outcome === 'ok' ? 'ready' : 'needs-scope',
+    preparedAt: new Date().toISOString(),
+    baseCommit: currentCommit,
+    preflight,
+    evidence: visibleEvidence,
+    evidenceHash: nativeCodingEvidenceHash({ currentCommit, preflight, evidence: visibleEvidence })
+  };
+  task.status = preflight.outcome === 'ok' ? 'prepared' : 'needs-scope';
+  task.phase = preflight.outcome === 'ok' ? 'evidence_ready' : 'needs_scope';
+  task.error = preflight.outcome === 'ok' ? '' : preflight.reason;
+  nativeCodingWorker.record(task, 'workspace_evidence', preflight.outcome === 'ok' ? 'allow' : 'deny',
+    preflight.outcome === 'ok'
+      ? `Scoped evidence ${task.preparation.evidenceHash} contains ${visibleEvidence.anchors.length} ranked file(s).`
+      : preflight.reason);
+  return nativeCodingWorker.save(task);
+}
+
+function buildNativeCodingAdvicePrompt(task, provider, question) {
+  const evidence = task.preparation?.evidence;
+  if (!evidence || task.preparation?.status !== 'ready') throw new Error('Prepare scoped workspace evidence before requesting browser advice.');
+  if (!evidence.excerpts?.length) throw new Error('No safe relevant source excerpt is available for browser advice. Run locally from the approved scope or narrow the task; LPS will not send an ungrounded question.');
+  const excerpts = evidence.excerpts.map((item) => `--- ${item.path} ---\n${item.excerpt}`).join('\n\n');
+  return [
+    'You are an advisory reviewer for a local coding worker. You cannot edit files, run commands, expand scope, approve, apply, commit, or push.',
+    `Task id: ${task.id}`,
+    `Task: ${task.title}`,
+    `Objective: ${task.objective}`,
+    `Allowed paths: ${task.allowedPaths.join(', ')}`,
+    `Question: ${question}`,
+    '',
+    'Return exactly one JSON object with: summary, recommended_files, implementation_guidance, risks, suggested_checks, confidence, taskId.',
+    'recommended_files must contain only existing files from the supplied allowed paths. confidence must be low, medium, or high.',
+    '',
+    `Minimum reviewed source context for ${provider}:`,
+    excerpts || '(No excerpt was selected.)'
+  ].join('\n');
+}
+
 async function publishedHfFileMetadata(repo, file, token) {
   const response = await fetch(`https://huggingface.co/api/models/${repo}/tree/main?recursive=1&expand=1`, {
     headers: token ? { Authorization: `Bearer ${token}` } : {}
@@ -5934,22 +6036,179 @@ app.post('/api/source/build-installer', async (_req, res) => {
 app.get('/api/source/coding/status', async (_req, res) => {
   const model = await nativeCodingModelConfig();
   const recoveredWorktrees = await nativeCodingWorker.cleanupOrphanedWorktrees();
+  const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
+  const providerTabs = agentTabsFromUrls(browserExtensionState.tabs);
   ok(res, {
     tasks: nativeCodingWorker.list(),
     validations: NATIVE_CODING_VALIDATIONS,
     model: { ...model, configured: Boolean(model.endpoint) },
     activeTaskIds: [...nativeCodingWorker.active.keys()],
+    browser: {
+      connected: connectorConnected,
+      providers: Object.keys(cloudAgentHosts).map((provider) => ({ provider, connected: Boolean(connectorConnected && providerTabs[provider]?.open) })),
+      pendingConsultations: nativeCodingConsultations.activeCount(),
+      policy: 'Optional, one-shot advice only. Browser output cannot edit, widen scope, validate, apply, commit, or push.'
+    },
     recoveredWorktrees,
     policy: 'One isolated local worker; sealed scope and patch approvals; no commit, push, merge, delete, arbitrary command, browser, or cloud fallback.'
   });
 });
 
-app.post('/api/source/coding/tasks', (req, res) => {
+app.post('/api/source/coding/tasks', async (req, res) => {
   try {
-    const task = nativeCodingWorker.create(req.body || {});
+    const head = await runCli('git', ['rev-parse', 'HEAD'], { timeout: 30000, maxBuffer: 1024 * 1024 });
+    if (!head.ok) return fail(res, 409, head.stderr || 'Unable to seal the current base commit.');
+    const task = nativeCodingWorker.create({ ...(req.body || {}), baseCommit: head.stdout.trim() });
     ok(res, { task, note: 'Coding task staged. Nothing runs until the sealed task scope is explicitly approved.' });
   } catch (error) {
     fail(res, 400, error.message);
+  }
+});
+
+app.post('/api/source/coding/tasks/:id/prepare', async (req, res) => {
+  try {
+    const task = await prepareNativeCodingTask(nativeCodingWorker.load(req.params.id));
+    ok(res, {
+      task,
+      note: task.status === 'prepared'
+        ? 'Scoped workspace evidence is ready. No model or browser request was made.'
+        : `The task needs narrower or corrected scope: ${task.error}`
+    });
+  } catch (error) {
+    fail(res, 409, error.message);
+  }
+});
+
+app.post('/api/source/coding/tasks/:id/advice/preview', (req, res) => {
+  try {
+    const task = nativeCodingWorker.load(req.params.id);
+    const provider = String(req.body?.provider || 'ChatGPT').trim();
+    const question = String(req.body?.question || '').trim().slice(0, 2000);
+    if (!Object.hasOwn(cloudAgentHosts, provider)) throw new Error('Select a configured browser provider.');
+    if (question.length < 12) throw new Error('Enter one concrete browser-advice question.');
+    const assembled = buildNativeCodingAdvicePrompt(task, provider, question);
+    const classified = classifyAndRedactCloudPrompt(assembled);
+    const promptHash = crypto.createHash('sha256').update(`${provider}\0${classified.prompt}`, 'utf8').digest('hex');
+    task.browserAdvice = {
+      status: classified.blocked ? 'blocked' : 'preview',
+      provider,
+      question,
+      prompt: classified.prompt,
+      promptHash,
+      suppliedFiles: task.preparation.evidence.excerpts.map((item) => item.path),
+      findings: classified.findings,
+      changedByRedaction: classified.changed,
+      previewedAt: new Date().toISOString(),
+      jobId: null,
+      answer: '',
+      validation: null,
+      context: ''
+    };
+    task.phase = classified.blocked ? 'browser_advice_blocked' : 'browser_advice_preview';
+    nativeCodingWorker.record(task, 'browser_advice_preview', classified.blocked ? 'deny' : 'allow',
+      classified.blocked ? 'Cloud egress classifier blocked this prompt.' : `Provider-bound prompt ${promptHash} is ready for review.`);
+    nativeCodingWorker.save(task);
+    ok(res, { task, preview: task.browserAdvice, note: classified.blocked ? 'Browser advice is blocked by cloud-egress classification.' : 'Review the exact prompt and confirm the provider-bound hash before sending.' });
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+app.post('/api/source/coding/tasks/:id/advice/send', async (req, res) => {
+  try {
+    const task = nativeCodingWorker.load(req.params.id);
+    const advice = task.browserAdvice;
+    if (!advice || advice.status !== 'preview') throw new Error('Create and review a browser-advice preview first.');
+    if (req.body?.confirm !== true || req.body?.provider !== advice.provider || req.body?.promptHash !== advice.promptHash) {
+      return fail(res, 428, 'Browser advice confirmation must match the exact provider and prompt hash.');
+    }
+    if (advice.provider === 'ChatGPT' && req.body?.temporaryChatConfirmed !== true) {
+      return fail(res, 428, 'Confirm ChatGPT Temporary Chat before sending coding context. LPS cannot verify that setting automatically.');
+    }
+    const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
+    const providerConnected = Boolean(connectorConnected && agentTabsFromUrls(browserExtensionState.tabs)[advice.provider]?.open);
+    if (!providerConnected) {
+      advice.status = 'unavailable';
+      advice.error = `No connected ${advice.provider} provider tab. The task remains resumable and nothing was sent.`;
+      task.status = 'prepared';
+      task.phase = 'browser_advice_unavailable';
+      nativeCodingWorker.record(task, 'browser_advice_dispatch', 'deny', advice.error);
+      nativeCodingWorker.save(task);
+      return fail(res, 409, advice.error);
+    }
+    const dispatch = await nativeCodingConsultations.dispatchOnce(task.id, 'advice', advice.promptHash, async () => {
+      const job = {
+        id: browserAgentJobSeq++,
+        status: 'pending',
+        targetAgent: advice.provider,
+        url: defaultCloudAgentUrl(advice.provider),
+        prompt: advice.prompt,
+        codingTaskId: task.id,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        result: null,
+        error: ''
+      };
+      browserAgentJobs.set(job.id, job);
+      return job.id;
+    });
+    advice.status = 'awaiting';
+    advice.jobId = dispatch.record.browserJobId;
+    advice.sentAt = new Date().toISOString();
+    task.status = 'awaiting-advice';
+    task.phase = 'awaiting_browser_advice';
+    nativeCodingWorker.record(task, 'browser_advice_dispatch', dispatch.dispatched ? 'allow' : 'deny',
+      dispatch.dispatched ? `Dispatched one provider job ${advice.jobId}.` : `No redispatch: ${dispatch.reason}.`);
+    nativeCodingWorker.save(task);
+    ok(res, { task, note: dispatch.dispatched ? 'One advisory request was sent. Polling will reuse this job and never resend it.' : `The existing consultation was retained (${dispatch.reason}).` });
+  } catch (error) {
+    fail(res, 409, error.message);
+  }
+});
+
+app.post('/api/source/coding/tasks/:id/advice/poll', async (req, res) => {
+  try {
+    const task = nativeCodingWorker.load(req.params.id);
+    if (task.browserAdvice?.status !== 'awaiting') throw new Error('This task has no pending browser advice to poll.');
+    const result = await nativeCodingConsultations.poll(task.id, 'advice', async (jobId) => {
+      const job = browserAgentJobs.get(Number(jobId));
+      if (!job) return { state: 'error', error: 'The browser job is unavailable after restart.', forJobId: jobId, forTaskId: task.id };
+      if (job.status === 'answered') return { state: 'answered', result: job.result?.answer || '', forJobId: job.id, forTaskId: task.id };
+      if (['blocked', 'error'].includes(job.status)) return { state: 'error', error: job.error || job.result?.message || `Provider returned ${job.status}.`, forJobId: job.id, forTaskId: task.id };
+      return { state: ['claimed', 'sent'].includes(job.status) ? 'processing' : 'pending', forJobId: job.id, forTaskId: task.id };
+    });
+    if (!result.terminal) return ok(res, { task, pending: true, note: 'The same provider job is still pending; no request was resent.' });
+    if (result.record.state !== 'answered') {
+      task.browserAdvice.status = 'incomplete';
+      task.browserAdvice.error = result.record.error || `Consultation ended as ${result.record.state}.`;
+      task.status = 'prepared';
+      task.phase = 'browser_advice_incomplete';
+      nativeCodingWorker.record(task, 'browser_advice_result', 'deny', task.browserAdvice.error);
+      nativeCodingWorker.save(task);
+      return ok(res, { task, pending: false, note: 'Browser advice was incomplete. The prepared local task remains runnable without it.' });
+    }
+    const validated = validateAdvice(result.record.result, {
+      root,
+      worktree: root,
+      allowedPaths: task.allowedPaths,
+      forbiddenPath: nativeCodingForbiddenPath,
+      expectedTaskId: task.id
+    });
+    task.browserAdvice.answer = String(result.record.result || '').slice(0, 64000);
+    task.browserAdvice.answerHash = nativeCodingEvidenceHash(task.browserAdvice.answer);
+    task.browserAdvice.validation = { ok: validated.ok, reason: validated.reason, findings: validated.findings };
+    task.browserAdvice.status = validated.ok ? 'validated' : 'rejected';
+    task.browserAdvice.context = validated.ok ? renderAdviceContext(validated.advice) : '';
+    task.browserAdvice.validatedAdvice = validated.ok ? validated.advice : null;
+    task.browserAdvice.completedAt = new Date().toISOString();
+    task.status = 'prepared';
+    task.phase = validated.ok ? 'browser_advice_validated' : 'browser_advice_rejected';
+    nativeCodingWorker.record(task, 'browser_advice_validation', validated.ok ? 'allow' : 'deny',
+      validated.ok ? `Validated advisory answer ${task.browserAdvice.answerHash}.` : `Advice rejected: ${validated.reason}`);
+    nativeCodingWorker.save(task);
+    ok(res, { task, pending: false, note: validated.ok ? 'Browser advice was validated as untrusted context. It did not alter task scope.' : `Browser advice was rejected: ${validated.reason}` });
+  } catch (error) {
+    fail(res, 409, error.message);
   }
 });
 

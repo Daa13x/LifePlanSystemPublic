@@ -11,6 +11,7 @@
 
 import { solvabilityPreflight, buildWorkspaceEvidence, validateAdvice, renderAdviceContext } from './browserAssistedCoding.js';
 import { classifyFailure } from './infraProbe.js';
+import crypto from 'node:crypto';
 
 export async function runBrowserAssistedTask({
   worker, task, approval, root, worktree, forbiddenPath, cache,
@@ -74,7 +75,21 @@ export async function runBrowserAssistedTask({
   //    owns scope enforcement, checker validation, no-diff detection, and the
   //    explicit review/apply boundary.
   const adviceContext = renderAdviceContext(validated.advice);
-  const workerResult = await worker.run(task.id, { ...approval, adviceContext });
+  const durableTask = worker.load(task.id);
+  durableTask.browserAdvice = {
+    status: 'validated',
+    provider: terminal.provider || 'browser consultation',
+    suppliedFiles: evidence.excerpts.map((item) => item.path),
+    answer: String(terminal.result || '').slice(0, 64000),
+    answerHash: crypto.createHash('sha256').update(String(terminal.result || '')).digest('hex'),
+    validation: { ok: true, reason: '', findings: [] },
+    validatedAdvice: validated.advice,
+    context: adviceContext,
+    completedAt: new Date().toISOString()
+  };
+  worker.record(durableTask, 'browser_advice_validation', 'allow', 'Validated browser advice persisted as untrusted context; scope authority unchanged.');
+  worker.save(durableTask);
+  const workerResult = await worker.run(task.id, approval);
   return {
     outcome: 'ran',
     workerStatus: workerResult.status,
