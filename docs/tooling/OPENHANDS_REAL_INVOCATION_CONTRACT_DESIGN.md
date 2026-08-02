@@ -73,7 +73,7 @@ consumed by any code in this PR:
 ```jsonc
 {
   "requestId": "oh-req-<timestamp>-<n>",
-  "branch": "local-agent/<requestId>",     // controller-generated local proposal branch from main
+  "branch": null,                          // model automation never creates a branch
   "baseBranch": "main",                      // read-only reference
   "baseCommit": "<pinned 40-hex sha>",       // resolved, recorded, never HEAD
   "worktreePath": ".lps/tooling/openhands/worktrees/<requestId>",
@@ -163,7 +163,7 @@ Each dry-run, refusal, or (future, approved) invocation records:
 - **who approved** — approver identity for the single-use approval (empty for
   refusals/dry-runs);
 - **timestamp** — ISO time of the event;
-- **branch / worktree** — exec branch and worktree path;
+- **branch / worktree** — branch is always null; record the detached worktree path;
 - **safety checks** — the §4 `safetyChecks` outcomes;
 - **result** — `dry-run` / `refused` / `setup-gated` / `blocked` /
   `validation-failed` / (future) `invoked`;
@@ -188,7 +188,7 @@ merges, deletes branches, or touches the main working tree:
 - user approval missing or not matching the exact request/commit;
 - post-run review missing (diff exists but has not been human-reviewed).
 
-If a future approved call produces a real diff, the worktree and branch are
+If a future approved call produces a real diff, the detached worktree is
 **preserved** for human review; cleanup stays a separate human-gated action.
 
 ## 10. Required tests before implementation

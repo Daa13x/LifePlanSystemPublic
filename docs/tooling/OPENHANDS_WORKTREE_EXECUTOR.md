@@ -9,13 +9,12 @@ or edited in this build.
 ## Flow (`POST /api/tooling/openhands/requests/:id/execute`)
 
 1. Re-evaluate every dry-run gate (`evaluateExecutionPlan`): approval, second
-   confirmation, allowedPaths present, protected-path scan, branch not
-   main/master, branch free, maxFilesChanged 1–5, validation allowlisted. If any
+   confirmation, allowedPaths present, protected-path scan, detached isolation,
+   maxFilesChanged 1–5, validation allowlisted. If any
    gate fails → **403 refused**.
-2. Extra guards: execution branch is never `main`/`master`, never the user's
-   current branch, and must not already exist.
-3. Create an **isolated git worktree** at `.lps/tooling/openhands/worktrees/<id>`
-   on a controller-generated `local-agent/<id>` branch from pinned `main`, only
+2. The Git authority gate denies all automated branch operations.
+3. Create an **isolated detached git worktree** at `.lps/tooling/openhands/worktrees/<id>`
+   from the pinned `main` commit, with no branch or ref created, only
    after local inference provenance passes the Git authority gate
    commit, never from the caller's current `HEAD`. The main working tree,
    main/master, and the user's current branch are never touched.
@@ -38,7 +37,7 @@ or edited in this build.
    explicit runtime/output limits and the report names timeout or output-cap
    failures instead of treating them as generic validation failures.
 7. Write a report to `.lps/tooling/openhands/reports/<id>.md`.
-8. Teardown removes the throwaway worktree (never deletes the branch).
+8. Teardown removes the throwaway worktree when no diff needs review.
 
 ## Server-derived OpenHands wiring (request JSON can never override)
 
@@ -66,8 +65,8 @@ stored base branch differs across creation, approval, confirmation, or execution
 time. The gate also resolves the base branch to a commit before execution.
 
 The real worktree command uses argument-array `git` invocation and a `--`
-separator, then creates the execution branch from the resolved pinned commit:
-`git worktree add -b <exec-branch> <worktree-path> -- <base-commit>`. A malicious
+separator, then creates detached isolation at the resolved pinned commit:
+`git worktree add --detach <worktree-path> -- <base-commit>`. A malicious
 request therefore cannot smuggle flags through the base branch or make the
 executor silently run from the user's current branch.
 
@@ -93,11 +92,11 @@ executor silently run from the user's current branch.
   text files appear inline and binary files as base85, so the `.patch` includes
   new-file contents and stays re-appliable. The report states how many untracked
   files were captured.
-- **Worktree preservation on real diffs:** teardown now PRESERVES the worktree
-  and branch whenever a real diff exists (`changedFiles.length > 0`), so a human
+- **Worktree preservation on real diffs:** teardown PRESERVES the detached worktree
+  whenever a real diff exists (`changedFiles.length > 0`), so a human
   can review the actual edits in place. With invocation OFF the diff is empty,
-  so the worktree is still removed to keep the repo clean. The branch is never
-  auto-deleted either way. (The `.patch` alone is not treated as a substitute
+  so the worktree is still removed to keep the repo clean. No branch is created.
+  (The `.patch` alone is not treated as a substitute
   for the working tree.)
 
 ## allowedPaths boundary matching (blocker #4 — addressed)
@@ -254,7 +253,7 @@ slice produces a real diff.
 
 ## Report fields
 
-request id, execution branch, pinned base branch, resolved base commit,
+request id, branchless detached isolation, pinned base branch, resolved base commit,
 worktree path, worktree-after-run (preserved/removed), whether OpenHands was
 invoked, model config, changed files, path-enforcement result
 (allowed/forbidden/protected), max-files result, diff summary, full-diff
@@ -284,8 +283,7 @@ commits or pushes.
   reported as setup-gated. This slice deliberately does not install, copy, or
   link dependencies; choosing such a provisioning strategy remains a separate
   approval decision. `node --check` works as-is.
-- Controller-created `local-agent/<id>` branches are never auto-deleted; a
-  future human-gated cleanup can prune them. Preserved worktrees also require a
+- Model automation creates no branches. Preserved detached worktrees require a
   human-gated cleanup after review.
 
 ## Agent Mode integration boundary

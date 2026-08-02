@@ -90,9 +90,9 @@ one never cascades into the next. Model-created pull requests are denied.
 The OpenHands worker is an *implementation mechanism*, not the brain. A future
 Agent Mode plan may use its gated worktree executor only when the controller
 proves local inference, starts from clean `main`, records the required authority
-receipt, and generates a `local-agent/<task-id>` or
-`local-model/<model>/<task-id>` proposal branch. Unknown or remote inference is
-cloud-controlled and branch creation is denied. The worker enforces
+receipt, and creates a detached worktree pinned to the recorded `main` commit.
+No model workflow creates a branch. Unknown or remote inference is
+cloud-controlled and worktree creation is denied. The worker enforces
 allowed/forbidden/protected paths and `maxFilesChanged` against the real diff,
 runs only allowlisted validation, and writes a report. **Real OpenHands
 invocation is currently OFF.** Agent Mode scaffolding does not authorize
@@ -100,7 +100,7 @@ execution.
 
 ## Relationship to the Source Control panel
 
-Agent Mode never commits, pushes, merges, deletes a branch, opens a pull request,
+Agent Mode never creates branches, commits, pushes, merges, deletes a branch, opens a pull request,
 or force-pushes on its own. The Source Control panel is a human tool; it does not
 grant a model extra authority. A cloud reviewer integrates approved work
 directly on `main`, and the local proposal controller remains non-publishing.

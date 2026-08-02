@@ -23,9 +23,8 @@ every safety gate before any real code-editing executor is built.
 - `protected_path_scan` — no allowed/forbidden path may touch
   `source_of_truth/`, `memory/`, `.env`, `secrets/`, `data/`, `rules/`,
   `.git/`, `.lps/`, or `credentials`.
-- `execution_branch_not_main_master` — a proven-local worker would use the
-  controller-generated `local-agent/<id>` proposal branch from `main`.
-- `execution_branch_available` — that branch must not already exist.
+- `detached_worktree_isolation` — a proven-local worker uses a detached
+  worktree pinned to the approved `main` commit and creates no branch.
 - `max_files_changed` — must be 1–5.
 - `validation_command_allowlisted` — post-change validation must be
   `node --check server/index.js` or `npm run build` (exact match); arbitrary
@@ -34,7 +33,7 @@ every safety gate before any real code-editing executor is built.
 ## What the dry run does NOT do
 
 - Does not invoke OpenHands (no code is generated or applied).
-- Does not create the worktree/branch, edit files, or run the validation.
+- Does not create the worktree, edit files, or run the validation.
 - Never commits, pushes, merges, resets, deletes branches, force-pushes, or
   pushes to `main`/`master`.
 - Never runs arbitrary request-supplied shell commands.
@@ -53,7 +52,7 @@ paths, or any Git operation.
 ## Report
 
 Written to `.lps/tooling/openhands/reports/<id>.md`, including: request id,
-proposed execution branch/worktree, changed files (none in dry run), diff
+detached worktree and pinned commit, changed files (none in dry run), diff
 summary (none), validation output (planned only), refused/blocked actions,
 protected-path scan result, max-files-changed result, and human next steps.
 

@@ -53,7 +53,7 @@ import {
   validateAdvice
 } from './browserAssistedCoding.js';
 import { BrowserConsultationStore } from './browserConsultationState.js';
-import { evaluateGitAuthority, generatedLocalBranch } from './gitAuthorityPolicy.js';
+import { evaluateGitAuthority } from './gitAuthorityPolicy.js';
 import {
   canUseGitHubToken,
   detectHighConfidenceSecrets,
@@ -5007,7 +5007,7 @@ app.post('/api/tooling/openhands/requests', async (req, res) => {
   ]);
   const modelConfig = openHandsExecConfig();
   const gitAuthority = evaluateGitAuthority({
-    operation: 'branch_worktree',
+    operation: 'detached_worktree',
     executionType: 'local',
     modelProvider: modelConfig.modelProvider,
     modelId: modelConfig.modelId,
@@ -5022,8 +5022,7 @@ app.post('/api/tooling/openhands/requests', async (req, res) => {
     taskId: id,
     taskCardValid: true,
     allowedPaths,
-    protectedPathHits: blockedAllowed,
-    targetBranch: proposedExecutionBranch(id)
+    protectedPathHits: blockedAllowed
   });
   request.executionType = gitAuthority.receipt.executionType;
   request.gitAuthority = gitAuthority.receipt;
@@ -5216,18 +5215,8 @@ app.get('/api/tooling/openhands/requests/:id/report', (req, res) => {
 // SECOND explicit human confirmation beyond approval, and (b) produces an
 // execution PLAN after verifying every safety gate, writing a report a human
 // reviews. Real code editing is a later, separately-approved layer.
-const PROTECTED_EXEC_BRANCHES = ['main', 'master'];
 
 // Fixed OpenHands wiring — request JSON can never override any of this.
-
-function proposedExecutionBranch(id) {
-  return generatedLocalBranch({ taskId: String(id), namespace: 'agent' });
-}
-
-async function branchExists(name) {
-  const result = await runCli('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]);
-  return result.ok && Boolean(result.stdout);
-}
 
 async function resolveBaseBranchCommit(baseBranch) {
   const result = await runCli('git', ['rev-parse', '--verify', '--quiet', '--end-of-options', `${baseBranch}^{commit}`]);
@@ -5294,11 +5283,8 @@ async function evaluateExecutionPlan(request) {
     ? await resolveBaseBranchCommit(baseBranch)
     : { ok: false, sha: '', detail: 'base branch syntax is invalid, so it was not resolved' };
   const baseRefResolves = pass('base_branch_resolves', baseResolution.ok, baseResolution.detail);
-  const execBranch = proposedExecutionBranch(request.id);
-  const execNameSafe = pass('execution_branch_not_main_master', !PROTECTED_EXEC_BRANCHES.includes(execBranch.toLowerCase()),
-    `dedicated execution branch would be "${execBranch}"`);
-  const execBranchFree = !(await branchExists(execBranch));
-  pass('execution_branch_available', execBranchFree, execBranchFree ? `"${execBranch}" does not exist yet` : `"${execBranch}" already exists`);
+  const detachedIsolation = pass('detached_worktree_isolation', true,
+    'execution uses a detached worktree at the pinned commit and creates no branch');
 
   const maxFilesCheck = checkExecutorMaxFilesChanged(request.maxFilesChanged);
   const maxFiles = maxFilesCheck.maxFiles;
@@ -5316,7 +5302,7 @@ async function evaluateExecutionPlan(request) {
   ]);
   const modelConfig = openHandsExecConfig();
   const gitAuthority = evaluateGitAuthority({
-    operation: 'branch_worktree',
+    operation: 'detached_worktree',
     executionType: 'local',
     modelProvider: modelConfig.modelProvider,
     modelId: modelConfig.modelId,
@@ -5331,24 +5317,23 @@ async function evaluateExecutionPlan(request) {
     taskId: request.id,
     taskCardValid: Boolean(request.title && request.objective && allowedPaths.length),
     allowedPaths,
-    protectedPathHits: protectedHits,
-    targetBranch: execBranch
+    protectedPathHits: protectedHits
   });
   const gitAuthorityAllowed = pass('git_authority_policy', gitAuthority.allowed, gitAuthority.reason);
 
   const eligible = approved && confirmed && allowedNonEmpty && protectedClean && baseSyntaxOk
     && baseIsMain && baseCreatedPinned && baseApprovedPinned && baseConfirmedPinned && baseRefResolves
-    && execNameSafe && execBranchFree && maxFilesSane && validationAllowlisted && gitAuthorityAllowed;
+    && detachedIsolation && maxFilesSane && validationAllowlisted && gitAuthorityAllowed;
 
   return {
     eligible,
     gates,
     plan: {
       dryRun: true,
-      executionBranch: execBranch,
+      executionBranch: null,
       baseBranch,
       baseCommit: baseResolution.sha,
-      isolation: 'approved local-model proposal worktree/branch from pinned main (not created in this dry run)',
+      isolation: 'approved detached local-model worktree from pinned main; no branch is created',
       gitAuthority: gitAuthority.receipt,
       allowedPaths,
       forbiddenPaths,
@@ -5456,8 +5441,8 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
     `- Execution confirmed by: ${request.executionConfirmedBy || 'unknown'} at ${request.executionConfirmedAt || 'unknown'}`,
     `- Planned at: ${new Date().toISOString()}`,
     '',
-    '## Execution branch / worktree (would be created; NOT created here)',
-    `- Dedicated branch: ${evaluation.plan.executionBranch}`,
+    '## Detached worktree (would be created; NOT created here)',
+    '- Dedicated branch: none (automated branch creation is disabled)',
     `- Isolation: ${evaluation.plan.isolation}`,
     `- Base reference (pinned, read-only): ${evaluation.plan.baseBranch || '(invalid)'}`,
     `- Base commit: ${evaluation.plan.baseCommit || '(not resolved)'}`,
@@ -5553,8 +5538,8 @@ app.post('/api/tooling/openhands/requests/:id/execution-plan', async (req, res) 
 // change-enforcement + validation + report flow, but the actual OpenHands
 // invocation is DISABLED behind this server-side constant. Nothing here edits
 // the user's working tree, main/master, or the user's current branch: all work
-// happens in a throwaway git worktree on a policy-generated local-agent/<id>
-// branch, and only after local inference provenance is verified.
+// happens in a throwaway detached git worktree at the pinned commit, creates no
+// branch, and runs only after local inference provenance is verified.
 const OPENHANDS_EXECUTOR_INVOCATION_ENABLED = false;
 const OPENHANDS_WORKTREE_DIR = path.join(LPS_TOOLING_DIR, 'worktrees');
 
@@ -5612,7 +5597,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
   const { file, request } = loaded;
 
   // Gate 1: every dry-run gate must pass (approval, second confirmation,
-  // allowedPaths, protected scan, branch-not-main/master, branch-free,
+  // allowedPaths, protected scan, detached isolation,
   // maxFiles, allowlisted validation).
   const evaluation = await evaluateExecutionPlan(request);
   if (!evaluation.eligible) {
@@ -5633,15 +5618,8 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
     return fail(res, 428, `Executor refused: future OpenHands invocation constraints are setup-gated (${toolConstraints.missing.join(', ')}). Fix approval, paths, base pin, limits, or model config before execution.`);
   }
 
-  const execBranch = proposedExecutionBranch(request.id);
   const pinnedBaseBranch = evaluation.plan.baseBranch;
   const pinnedBaseCommit = evaluation.plan.baseCommit;
-  // Gate 2: never main/master, never the user's current branch, never an
-  // existing branch.
-  const currentBranch = (await runCli('git', ['branch', '--show-current'])).stdout.trim();
-  if (PROTECTED_EXEC_BRANCHES.includes(execBranch.toLowerCase())) return fail(res, 403, 'Executor refused: execution branch resolves to main/master.');
-  if (execBranch === currentBranch) return fail(res, 403, 'Executor refused: execution branch equals the current working branch.');
-  if (await branchExists(execBranch)) return fail(res, 409, `Executor refused: branch ${execBranch} already exists. Review or remove it first (never auto-deleted).`);
 
   const worktreePath = path.join(OPENHANDS_WORKTREE_DIR, String(request.id).replace(/[^A-Za-z0-9._-]/g, ''));
   const worktreeRel = path.relative(root, worktreePath).replaceAll('\\', '/');
@@ -5649,10 +5627,10 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
   const refusedActions = ['auto-commit', 'auto-push', 'auto-merge', 'reset --hard', 'delete branch', 'force-push', 'push to main/master', 'arbitrary request shell', 'edit outside allowedPaths', 'base branch changes after approval', 'future invocation without tool-level constraints'];
 
   try {
-    // Isolated worktree on a fresh dedicated branch from the pinned base commit
-    // (never touches main tree; never uses the caller's current HEAD).
+    // Detached isolation at the pinned base commit creates no branch and never
+    // touches the main checkout before a separately reviewed apply operation.
     fs.mkdirSync(OPENHANDS_WORKTREE_DIR, { recursive: true });
-    const add = await runCli('git', ['worktree', 'add', '-b', execBranch, worktreePath, '--', pinnedBaseCommit], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeCreateTimeoutMs });
+    const add = await runCli('git', ['worktree', 'add', '--detach', worktreePath, '--', pinnedBaseCommit], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeCreateTimeoutMs });
     if (!add.ok) return fail(res, 500, `Executor could not create the isolated worktree: ${add.stderr || add.stdout}`);
     worktreeCreated = true;
 
@@ -5766,7 +5744,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       `- Run at: ${new Date().toISOString()}`,
       '',
       '## Execution isolation',
-      `- Execution branch: ${execBranch}`,
+      '- Execution branch: none (detached worktree)',
       `- Base reference (pinned, read-only): ${pinnedBaseBranch}`,
       `- Base commit used for worktree: ${pinnedBaseCommit}`,
       `- Worktree path: ${worktreeRel}`,
@@ -5832,7 +5810,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       '',
       '## Human next steps',
       hasRealDiff
-        ? `- The worktree (${worktreeRel}) and branch (${execBranch}) are PRESERVED. Review the .patch, then use the gated Source Control panel for any commit/push/PR. The executor never commits, pushes, or merges.`
+        ? `- The detached worktree (${worktreeRel}) is PRESERVED. Review the .patch, then explicitly apply approved changes to main. The executor never creates branches, commits, pushes, or merges.`
         : '- Real OpenHands invocation is OFF, so no code was edited and there is nothing to review; the worktree was removed. When invocation is later enabled and produces a diff, the worktree is preserved for review instead.',
       ''
     ];
@@ -5891,7 +5869,7 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       openHandsInvoked: invocation.invoked,
       toolConstraints,
       invocationReadiness: readiness,
-      executionBranch: execBranch,
+      executionBranch: null,
       baseBranch: pinnedBaseBranch,
       baseCommit: pinnedBaseCommit,
       worktreePath: worktreeRel,
@@ -5906,14 +5884,14 @@ app.post('/api/tooling/openhands/requests/:id/execute', async (req, res) => {
       untrackedFiles: untrackedFiles.length,
       refusedActions,
       message: hasRealDiff
-        ? `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. A diff exists, so the worktree (${worktreeRel}) and branch ${execBranch} are PRESERVED for human review; the full diff is at ${patchRel}. Nothing was committed, pushed, or merged.`
-        : `Executor harness ran in an isolated worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. Real OpenHands invocation is DISABLED, so no code was edited; the worktree was removed and branch ${execBranch} left in place (never auto-deleted). Full (empty) diff written to ${patchRel}. ${validationResult.setupGated ? validationSetup.reason : 'Allowlisted validation setup was checked.'} Nothing was committed, pushed, or merged.`
+        ? `Executor harness ran in a detached worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. A diff exists, so the worktree (${worktreeRel}) is PRESERVED for human review; the full diff is at ${patchRel}. No branch was created and nothing was committed, pushed, or merged.`
+        : `Executor harness ran in a detached worktree from pinned base ${pinnedBaseBranch}@${pinnedBaseCommit.slice(0, 12)}. Real OpenHands invocation is DISABLED, so no code was edited and the worktree was removed. No branch was created. Full (empty) diff written to ${patchRel}. ${validationResult.setupGated ? validationSetup.reason : 'Allowlisted validation setup was checked.'} Nothing was committed, pushed, or merged.`
     });
   } catch (error) {
     fail(res, 500, `Executor harness error: ${error.message}`);
   } finally {
     // Error-path safety net: if teardown did not already run (an error was
-    // thrown before it), remove the throwaway worktree. Never deletes a branch.
+    // thrown before it), remove the throwaway worktree. No branch exists.
     if (worktreeCreated) {
       await runCli('git', ['worktree', 'remove', '--force', worktreePath], { timeout: OPENHANDS_EXECUTOR_LIMITS.worktreeRemoveTimeoutMs });
       await runCli('git', ['worktree', 'prune']);

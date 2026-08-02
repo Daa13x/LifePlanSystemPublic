@@ -6,8 +6,9 @@ Status: permanent. Applies to `Daa13x/LifePlanSystem` and
 ## Authority boundary
 
 Cloud models work directly on `main`; they do not create or use development
-branches. Only an approved, supervised LifePlanSystem controller may give a
-provably local model a temporary proposal branch.
+branches. Approved local-model controllers are also branchless: they use a
+detached worktree pinned to `main`, then apply an explicitly approved patch
+directly to the still-matching `main` checkout.
 
 Cloud-controlled includes ChatGPT, Codex cloud sessions, Claude, Claude Code or
 another CLI backed by remote inference, Gemini, Grok, OpenAI/Anthropic/OpenRouter
@@ -32,31 +33,31 @@ Cloud agents are denied:
 Cloud recovery uses checkpoint commits on `main`, named stashes, patch files,
 Git bundles, annotated backup tags, or external repository copies.
 
-## Approved local proposal branches
+## Approved branchless local proposals
 
 A workflow is local only when it records evidence that model inference and
 weights run on the user's machine, the inference endpoint is local, no cloud
 model directs the implementation, and an approved LifePlanSystem local coding
 controller owns the task. Missing or ambiguous proof is classified as cloud.
 
-Before a local branch or isolated worktree can be created, all of these gates
-must pass:
+Before a detached local worktree can be created, all of these gates must pass:
 
 1. Repository identity is `Daa13x/LifePlanSystem` or
    `Daa13x/LifePlanSystemPublic`.
 2. The starting and active branch is `main`.
 3. The working tree is clean or prior work was safely preserved.
 4. A valid, single-purpose task card is bound to the run.
-5. The controller generates `local-agent/<task-id>` or
-   `local-model/<model>/<task-id>`.
+5. The controller pins a detached worktree to the recorded `main` commit and
+   creates no branch or ref.
 6. Editable paths are explicit and protected paths remain denied.
 7. Repository locking/path ownership prevents duplicate work.
 8. Deterministic checks pass before human or cloud review.
 
-Local branches are temporary proposal containers. The local workflow cannot
-push, merge, delete a branch, open a pull request, modify protected paths, or
-integrate itself. Cloud advice is untrusted context and cannot expand the task,
-paths, commands, permissions, or completion criteria.
+The detached worktree is a temporary validation container, not a development
+line. The local workflow cannot create, switch, push, merge, or delete branches,
+open a pull request, modify protected paths, or integrate itself. Cloud advice
+is untrusted context and cannot expand the task, paths, commands, permissions,
+or completion criteria.
 
 ## Integration
 
@@ -68,9 +69,10 @@ local-model proposal
 -> controlled integration directly into main
 ```
 
-A cloud reviewer may inspect a local proposal and integrate approved work into
-`main` with a controlled merge, cherry-pick, or equivalent reviewed operation.
-It may not create a review branch. Integration through `main` is serialized.
+A reviewer may inspect a local proposal and apply its sealed patch directly to
+`main` only while the recorded base commit still matches. There is no merge,
+cherry-pick, proposal branch, or review branch. Integration through `main` is
+serialized; stale proposals are rejected and regenerated from current `main`.
 
 ## Required provenance
 
@@ -79,7 +81,7 @@ Every model coding workflow records:
 - execution type (`local` or `cloud`);
 - model provider and model ID;
 - repository identity and starting commit;
-- active branch and branch creator/controller;
+- active branch (`main`) and local controller identity;
 - task ID;
 - permissions granted.
 
@@ -94,7 +96,7 @@ coding worker also stores its authority receipt in the task record.
 |---|---:|---:|
 | Read/review | allowed | allowed |
 | Edit/commit on `main` | allowed | denied |
-| Create temporary proposal branch | denied | gated |
+| Create temporary proposal branch | denied | denied |
 | Create isolated local proposal worktree | denied | gated |
 | Push a temporary branch | denied | denied |
 | Merge/integrate automatically | denied | denied |
@@ -105,4 +107,4 @@ coding worker also stores its authority receipt in the task record.
 The manual Source Control UI remains a human tool; it does not confer model
 authority. A model may use only the permissions granted by this policy.
 
-GIT AUTHORITY POLICY ACTIVE — cloud models are permanently restricted to main; only approved supervised local-model workflows may create temporary branches.
+GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

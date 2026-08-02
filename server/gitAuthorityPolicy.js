@@ -24,6 +24,10 @@ const CLOUD_BRANCH_OPERATIONS = new Set([
   'delegate_branch'
 ]);
 const LOCAL_FORBIDDEN_OPERATIONS = new Set([
+  'create_branch',
+  'switch_branch',
+  'branch_worktree',
+  'delegate_branch',
   'push',
   'push_main',
   'merge',
@@ -47,15 +51,6 @@ const COMMIT_SHA = /^[0-9a-f]{40}$/i;
 
 function text(value) {
   return String(value || '').trim();
-}
-
-function slug(value, fallback = 'local-model') {
-  const normalized = text(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[.-]+|[.-]+$/g, '')
-    .slice(0, 48);
-  return normalized || fallback;
 }
 
 export function repositoryIdentity(value = '') {
@@ -86,21 +81,6 @@ export function isLoopbackInferenceEndpoint(value = '') {
   } catch {
     return false;
   }
-}
-
-export function generatedLocalBranch({ taskId, modelId = '', namespace = 'agent' } = {}) {
-  const task = text(taskId);
-  if (!SAFE_TASK_ID.test(task)) throw new Error('A safe task ID is required before generating a local-model branch.');
-  if (namespace === 'model') return `local-model/${slug(modelId)}/${task}`;
-  if (namespace === 'agent') return `local-agent/${task}`;
-  throw new Error('Local branch namespace must be "agent" or "model".');
-}
-
-export function isGeneratedLocalBranch(branch, { taskId, modelId = '' } = {}) {
-  const candidate = text(branch);
-  if (!candidate || !SAFE_TASK_ID.test(text(taskId))) return false;
-  return candidate === generatedLocalBranch({ taskId, namespace: 'agent' })
-    || candidate === generatedLocalBranch({ taskId, modelId, namespace: 'model' });
 }
 
 export function classifyExecutionAuthority(input = {}) {
@@ -135,15 +115,14 @@ export function classifyExecutionAuthority(input = {}) {
 
 function permissionsFor({ authority, operation, allowed }) {
   const cloudMain = authority.executionType === 'cloud' && CLOUD_MAIN_OPERATIONS.has(operation) && allowed;
-  const localBranch = authority.executionType === 'local' && ['create_branch', 'branch_worktree'].includes(operation) && allowed;
   const localDetached = authority.executionType === 'local' && operation === 'detached_worktree' && allowed;
   return {
     writeMain: cloudMain,
     commitMain: cloudMain && operation === 'commit_main',
     pushMain: cloudMain && operation === 'push_main',
     integrateToMain: cloudMain && operation === 'integrate_main',
-    createBranch: localBranch,
-    createBranchBackedWorktree: localBranch && operation === 'branch_worktree',
+    createBranch: false,
+    createBranchBackedWorktree: false,
     createDetachedWorktree: localDetached,
     pushBranch: false,
     mergeBranch: false,
@@ -182,10 +161,10 @@ export function evaluateGitAuthority(input = {}) {
   } else {
     check('local_forbidden_operations_denied', !LOCAL_FORBIDDEN_OPERATIONS.has(operation),
       LOCAL_FORBIDDEN_OPERATIONS.has(operation) ? `${operation} is never granted to a local-model workflow` : `${operation} stays inside the proposal boundary`);
-    check('local_operation_supported', ['read', 'review', 'create_branch', 'branch_worktree', 'detached_worktree'].includes(operation),
-      `${operation || '(missing)'} must be a supported local proposal operation`);
+    check('local_operation_supported', ['read', 'review', 'detached_worktree'].includes(operation),
+      `${operation || '(missing)'} must be read/review or detached worktree isolation; automated branch operations are disabled`);
 
-    if (['create_branch', 'branch_worktree', 'detached_worktree'].includes(operation)) {
+    if (operation === 'detached_worktree') {
       check('approved_repository', APPROVED_REPOSITORIES.has(repository), repository || 'repository identity missing or unapproved');
       check('starting_branch_main', startingBranch === REQUIRED_CLOUD_BRANCH, startingBranch || '(detached)');
       check('active_branch_main_before_isolation', activeBranch === REQUIRED_CLOUD_BRANCH, activeBranch || '(detached)');
@@ -194,10 +173,7 @@ export function evaluateGitAuthority(input = {}) {
       check('task_card_valid', input.taskCardValid === true && SAFE_TASK_ID.test(taskId), taskId || 'missing/invalid task ID');
       check('allowed_paths_present', allowedPaths.length > 0, `${allowedPaths.length} path(s)`);
       check('protected_paths_denied', protectedPathHits.length === 0, protectedPathHits.join(', ') || 'none');
-      check('approved_branch_creator', APPROVED_LOCAL_CONTROLLERS.has(authority.controller), authority.controller || 'missing');
-      if (operation !== 'detached_worktree') {
-        check('generated_local_branch_name', isGeneratedLocalBranch(targetBranch, { taskId, modelId: authority.modelId }), targetBranch || 'missing');
-      }
+      check('approved_local_controller', APPROVED_LOCAL_CONTROLLERS.has(authority.controller), authority.controller || 'missing');
     }
   }
 
