@@ -103,11 +103,17 @@ export function planDay(tasks, mode = DEFAULT_CAPACITY_MODE, now = Date.now()) {
     };
   }).sort((a, b) => b.score - a.score || String(a.title || '').localeCompare(String(b.title || '')));
 
-  const visible = scored.slice(0, profile.visible);
-  const deferred = scored.slice(profile.visible).map((task) => ({
+  // Pinned tasks are the user's explicit override: they stay visible even beyond
+  // the mode's limit. Remaining slots are filled by score; the rest are deferred.
+  const pinned = scored.filter((task) => task.pinned);
+  const rest = scored.filter((task) => !task.pinned);
+  const remainingSlots = Math.max(0, profile.visible - pinned.length);
+  const visible = [...pinned, ...rest.slice(0, remainingSlots)]
+    .sort((a, b) => b.score - a.score || String(a.title || '').localeCompare(String(b.title || '')));
+  const deferred = rest.slice(remainingSlots).map((task) => ({
     ...task,
     state: 'deferred',
     deferReason: 'held for another day to keep today manageable — this is a choice, not a failure'
   }));
-  return { mode: resolvedMode, visibleLimit: profile.visible, visible, deferred };
+  return { mode: resolvedMode, visibleLimit: profile.visible, pinnedCount: pinned.length, visible, deferred };
 }

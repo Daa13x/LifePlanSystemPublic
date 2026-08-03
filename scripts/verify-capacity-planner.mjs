@@ -84,6 +84,15 @@ line(overwhelmedPlan.visible.every((t) => Array.isArray(t.reasons) && t.reasons.
   line(Boolean(blocked) && blocked.reasons.some((r) => /blocked/i.test(r)), 'a blocked task stays present and is shown as blocked, not hidden');
 }
 
+// pinning is an explicit user override: a low-priority pinned task stays visible
+// even in a mode that would otherwise defer it
+{
+  const withPin = tasks.map((task) => (task.title === 'Read' ? { ...task, pinned: true } : task));
+  const plan = planDay(withPin, 'overwhelmed', NOW);
+  line(plan.visible.some((t) => t.title === 'Read'), 'a pinned task stays visible even in overwhelmed mode (user override)');
+  line(plan.pinnedCount === 1, 'the plan reports how many tasks are pinned');
+}
+
 // no hidden clinical score: the only numeric ranking field is `score`, always paired with reasons
 line(normalPlan.visible.every((t) => typeof t.score === 'number' && Array.isArray(t.reasons)), 'ordering exposes only a transparent score with reasons (no hidden clinical rating)');
 

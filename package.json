@@ -56,6 +56,7 @@
     "verify:setup-recovery-ui": "node scripts/verify-setup-recovery-ui.mjs",
     "verify:chat-behavior": "node scripts/verify-chat-behavior.mjs",
     "verify:capacity-planner": "node scripts/verify-capacity-planner.mjs",
+    "verify:capacity-planner-http": "node scripts/verify-capacity-planner-http.mjs",
     "verify:chat-session-memory-sync": "node scripts/verify-chat-session-memory-sync.mjs",
     "verify:chat-cloud-checks": "node scripts/verify-chat-cloud-checks.mjs",
     "verify:project-contract": "node scripts/verify-project-contract.mjs",

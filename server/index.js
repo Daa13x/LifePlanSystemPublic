@@ -23,6 +23,7 @@ import {
   importLegacyAsBackup
 } from './setupRecovery.js';
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
+import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
 import { openFolderInExplorer } from './openFolder.js';
@@ -2591,6 +2592,110 @@ app.post('/api/planner/refresh', async (_req, res) => {
   } catch (error) {
     fail(res, 500, error.message || 'Planner refresh failed.');
   }
+});
+
+// --- Capacity-Aware Daily Planner -------------------------------------------
+// The current capacity mode is an explicit, persisted user choice (a setting),
+// never inferred. The day view is computed transparently by capacityPlanner.js.
+const CAPACITY_MODE_SETTING = 'capacityMode';
+function currentCapacityMode() { return normalizeCapacityMode(getSetting(CAPACITY_MODE_SETTING, DEFAULT_CAPACITY_MODE)); }
+
+function plannerTaskToEngine(taskRow) {
+  return {
+    id: taskRow.id, title: taskRow.title, importance: taskRow.importance, effort: taskRow.effort,
+    deadline: taskRow.deadline || null, blocker: taskRow.blocker || null,
+    needsOthers: Boolean(taskRow.needs_others), isRecovery: Boolean(taskRow.is_recovery),
+    nextAction: taskRow.next_action || null, easierVersion: taskRow.easier_version || null,
+    pausePoint: taskRow.pause_point || null, recoveryStep: taskRow.recovery_step || null,
+    definitionOfDone: taskRow.definition_of_done || null, why: taskRow.why || null,
+    estimatedMinutes: taskRow.estimated_minutes ?? null, consequenceOfDelay: taskRow.consequence_of_delay || null,
+    pinned: Boolean(taskRow.pinned), status: taskRow.status
+  };
+}
+
+const PLANNER_TASK_FIELDS = {
+  title: (v) => String(v || '').trim(),
+  why: (v) => String(v || ''),
+  next_action: (v) => String(v || ''),
+  definition_of_done: (v) => String(v || ''),
+  easier_version: (v) => String(v || ''),
+  pause_point: (v) => String(v || ''),
+  recovery_step: (v) => String(v || ''),
+  importance: (v) => Math.min(5, Math.max(1, Number(v) || 3)),
+  effort: (v) => Math.min(5, Math.max(1, Number(v) || 3)),
+  estimated_minutes: (v) => (v === null || v === undefined || v === '' ? null : Math.max(0, Number(v) || 0)),
+  deadline: (v) => (v ? String(v) : null),
+  blocker: (v) => String(v || ''),
+  needs_others: (v) => (v ? 1 : 0),
+  is_recovery: (v) => (v ? 1 : 0),
+  consequence_of_delay: (v) => String(v || '')
+};
+const PLANNER_TASK_ALIASES = { nextAction: 'next_action', definitionOfDone: 'definition_of_done', easierVersion: 'easier_version', pausePoint: 'pause_point', recoveryStep: 'recovery_step', estimatedMinutes: 'estimated_minutes', needsOthers: 'needs_others', isRecovery: 'is_recovery', consequenceOfDelay: 'consequence_of_delay' };
+
+function readPlannerTaskFields(body) {
+  const fields = {};
+  for (const [key, value] of Object.entries(body || {})) {
+    const column = PLANNER_TASK_ALIASES[key] || key;
+    if (PLANNER_TASK_FIELDS[column]) fields[column] = PLANNER_TASK_FIELDS[column](value);
+  }
+  return fields;
+}
+
+app.get('/api/planner/day', (_req, res) => {
+  const mode = currentCapacityMode();
+  const tasks = allRows("SELECT * FROM planner_tasks WHERE status = 'active' ORDER BY updated_at DESC").map(plannerTaskToEngine);
+  ok(res, { mode, modes: CAPACITY_MODES, ...planDay(tasks, mode) });
+});
+
+app.get('/api/planner/capacity', (_req, res) => ok(res, { mode: currentCapacityMode(), modes: CAPACITY_MODES }));
+
+app.post('/api/planner/capacity', (req, res) => {
+  const requested = String(req.body?.mode || '');
+  if (!CAPACITY_MODES.includes(requested)) return fail(res, 400, `Unknown capacity mode. Choose one of: ${CAPACITY_MODES.join(', ')}.`);
+  setSetting(CAPACITY_MODE_SETTING, requested);
+  ok(res, { mode: requested, modes: CAPACITY_MODES });
+});
+
+app.get('/api/planner/tasks', (_req, res) => ok(res, allRows('SELECT * FROM planner_tasks ORDER BY status, updated_at DESC')));
+
+app.post('/api/planner/tasks', (req, res) => {
+  const fields = readPlannerTaskFields(req.body);
+  if (!fields.title) return fail(res, 400, 'A task title is required.');
+  const columns = Object.keys(fields);
+  const id = db.prepare(`INSERT INTO planner_tasks (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).run(...Object.values(fields)).lastInsertRowid;
+  ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [id]));
+});
+
+app.patch('/api/planner/tasks/:id', (req, res) => {
+  const existing = row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]);
+  if (!existing) return fail(res, 404, 'Task not found.');
+  const fields = readPlannerTaskFields(req.body);
+  if (typeof req.body?.pinned === 'boolean') fields.pinned = req.body.pinned ? 1 : 0;
+  if (req.body?.status && ['active', 'completed', 'deferred', 'parked'].includes(req.body.status)) fields.status = req.body.status;
+  if (!Object.keys(fields).length) return fail(res, 400, 'No recognised fields to update.');
+  fields.updated_at = new Date().toISOString();
+  const sets = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
+  db.prepare(`UPDATE planner_tasks SET ${sets} WHERE id = ?`).run(...Object.values(fields), req.params.id);
+  ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]));
+});
+
+app.post('/api/planner/tasks/:id/complete', (req, res) => {
+  if (!row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.id])) return fail(res, 404, 'Task not found.');
+  db.prepare("UPDATE planner_tasks SET status = 'completed', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(req.params.id);
+  ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]));
+});
+
+app.post('/api/planner/tasks/:id/pin', (req, res) => {
+  const existing = row('SELECT pinned FROM planner_tasks WHERE id = ?', [req.params.id]);
+  if (!existing) return fail(res, 404, 'Task not found.');
+  db.prepare('UPDATE planner_tasks SET pinned = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(existing.pinned ? 0 : 1, req.params.id);
+  ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]));
+});
+
+app.post('/api/planner/tasks/:id/defer', (req, res) => {
+  if (!row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.id])) return fail(res, 404, 'Task not found.');
+  db.prepare("UPDATE planner_tasks SET status = 'deferred', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(req.params.id);
+  ok(res, { ...row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]), note: 'Deferred by choice — not a failure. Reactivate it any time.' });
 });
 
 app.get('/api/chat/sessions', (_req, res) => ok(res, allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC')));

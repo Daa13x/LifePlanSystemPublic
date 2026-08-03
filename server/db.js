@@ -357,6 +357,40 @@ export function migrate() {
   // Durable confirmation + replay-protection store (see server/confirmations.js).
   createConfirmationsTable(db);
 
+  // Capacity-Aware Daily Planner tasks (see server/capacityPlanner.js). Each task
+  // carries the low-capacity-friendly fields the planner needs: an exact next
+  // action, why it matters, a definition of done, an easier version, a pause
+  // point, a recovery step, effort/importance/time, deadline, blocker, and
+  // whether it needs another person. Ordering/visibility is computed
+  // transparently from the user's current capacity mode; nothing here is a score.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS planner_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      why TEXT NOT NULL DEFAULT '',
+      next_action TEXT NOT NULL DEFAULT '',
+      definition_of_done TEXT NOT NULL DEFAULT '',
+      easier_version TEXT NOT NULL DEFAULT '',
+      pause_point TEXT NOT NULL DEFAULT '',
+      recovery_step TEXT NOT NULL DEFAULT '',
+      importance INTEGER NOT NULL DEFAULT 3,
+      effort INTEGER NOT NULL DEFAULT 3,
+      estimated_minutes INTEGER,
+      deadline TEXT,
+      blocker TEXT NOT NULL DEFAULT '',
+      needs_others INTEGER NOT NULL DEFAULT 0,
+      is_recovery INTEGER NOT NULL DEFAULT 0,
+      consequence_of_delay TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active','completed','deferred','parked')),
+      pinned INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_planner_tasks_status ON planner_tasks(status);
+  `);
+
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
   if (projectCount === 0) {
     const insertProject = db.prepare(`
