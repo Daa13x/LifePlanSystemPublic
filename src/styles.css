@@ -745,6 +745,12 @@ h3 { font-size: 14px; font-weight: 700; }
 
 /* Per-message action row (text-to-speech play control). */
 .message-actions { margin-top: 6px; display: flex; gap: 6px; align-items: center; }
+.message-sources { margin-top: .65rem; border-top: 1px solid var(--border); padding-top: .45rem; }
+.message-sources summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
+.message-source-card { margin-top: .45rem; padding: .5rem .65rem; border-radius: .45rem; background: color-mix(in srgb, var(--panel) 86%, var(--accent) 14%); }
+.message-source-card strong, .message-source-card small { display: block; }
+.message-source-card small { color: var(--muted); font-size: .76rem; }
+.message-source-card p { margin: .3rem 0 0; font-size: .82rem; white-space: normal; }
 .voice-button {
   width: auto;
   display: inline-flex;

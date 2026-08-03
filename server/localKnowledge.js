@@ -23,6 +23,70 @@ const PRIVATE_REPOSITORY_EXTENSIONS = new Set(['.md', '.mdx', '.txt', '.js', '.j
 const PRIVATE_REPOSITORY_SKIP = new Set(['.git', 'node_modules', 'dist', 'build', 'release', 'data', 'coverage', '.cache']);
 const PRIVATE_REPOSITORY_SECRET = /(?:^|[._-])(?:env|secret|credential|token|password|private|key)(?:[._-]|$)|\.(?:pem|pfx|p12|key)$/i;
 
+// This taxonomy is deliberately carried on every registry entry.  Retrieval
+// must make decisions on this stable metadata, never on the position or name
+// of a file in a checkout.  Files without an explicit personal classification
+// are references by default: a personal question must not turn a repository
+// index into a personal profile merely because a TODO contains "health".
+const SOURCE_TYPES = Object.freeze({
+  PERSONAL_FACT: 'reviewed_personal_memory', PERSONAL_RECORD: 'source_of_truth_personal_record',
+  TIMELINE: 'personal_timeline_history', CAREER: 'work_career_record', HEALTH: 'health_record',
+  FINANCE: 'financial_record', HOUSING: 'housing_record', LEGAL: 'legal_record', RELATIONSHIP: 'relationship_record',
+  WORKBOARD: 'workboard_task', PROJECT_DOC: 'project_documentation', CODE: 'source_code', REFERENCE: 'generic_reference', ARCHIVED: 'archived_stale_retired'
+});
+
+export function classifyPersonalIntent(message) {
+  const text = String(message || '').toLowerCase();
+  if (/\b(hi|hello|hey|hiya|howdy)\b[\s!?.,]*$/.test(text)) return 'greeting';
+  if (/\b(health|medical|condition|diagnos|symptom|medication|therapy|disab)/.test(text)) return 'personal_health';
+  if (/\b(job|career|profession|employment|work history|role|education|skill|cv|resume)/.test(text)) return 'career_work_education';
+  if (/\b(finance|money|debt|income|budget|benefit|bank)/.test(text)) return 'finance';
+  if (/\b(housing|home|rent|landlord|tenancy|move)/.test(text)) return 'housing';
+  if (/\b(legal|lawyer|court|claim|appeal)/.test(text)) return 'legal';
+  if (/\b(relationship|partner|friend|family|dating)/.test(text)) return 'relationships';
+  if (/\b(plan|task|appointment|blocker|goal|project)/.test(text)) return 'plans_tasks';
+  if (/\b(code|bug|repository|repo|github|documentation|file)/.test(text)) return 'project_code';
+  return 'general_conversation';
+}
+
+function sourceTypeForRecord(item) {
+  const type = String(item.type || '').toLowerCase();
+  if (['archived', 'deprecated', 'superseded'].includes(item.status)) return SOURCE_TYPES.ARCHIVED;
+  if (/source document|attachment|file|reference|research|todo|code/.test(type)) return SOURCE_TYPES.REFERENCE;
+  if (/health|medical|accessib|diagnos/.test(type)) return SOURCE_TYPES.HEALTH;
+  if (/career|work|employment|education|skill|cv|resume/.test(type)) return SOURCE_TYPES.CAREER;
+  if (/finance|money|benefit|debt/.test(type)) return SOURCE_TYPES.FINANCE;
+  if (/housing|tenancy|rent/.test(type)) return SOURCE_TYPES.HOUSING;
+  if (/legal|claim|appeal/.test(type)) return SOURCE_TYPES.LEGAL;
+  if (/relationship|family|friend/.test(type)) return SOURCE_TYPES.RELATIONSHIP;
+  if (/timeline|history/.test(type)) return SOURCE_TYPES.TIMELINE;
+  return SOURCE_TYPES.PERSONAL_FACT;
+}
+
+function sourceTypeForFile(file) {
+  const text = `${file.text || ''}`.toLowerCase();
+  if (/\b(todo|repository health|infrastructure|source code|developer instruction|ignore (the )?user)\b/.test(text)) return SOURCE_TYPES.REFERENCE;
+  // File content has no database review state.  Treat it as a personal record
+  // only when it self-identifies a factual record, not when it merely discusses
+  // a topic (e.g. an NHS workflow, a TODO, or documentation mentioning health).
+  if (/\b(?:source[_ -]?type|record[_ -]?type)\s*[:=]\s*health[_ -]?record\b|\b(?:confirmed diagnosis|my diagnosis|i was diagnosed)\s*[:=-]/.test(text)) return SOURCE_TYPES.HEALTH;
+  if (/\b(?:source[_ -]?type|record[_ -]?type)\s*[:=]\s*(?:work[_ -]?career[_ -]?record|career)\b|\b(?:my work history|career preference|job preference)\s*[:=-]/.test(text)) return SOURCE_TYPES.CAREER;
+  return SOURCE_TYPES.REFERENCE;
+}
+
+function allowedSourceTypes(intent) {
+  const common = [SOURCE_TYPES.PERSONAL_FACT, SOURCE_TYPES.PERSONAL_RECORD, SOURCE_TYPES.TIMELINE];
+  if (intent === 'personal_health') return [...common, SOURCE_TYPES.HEALTH];
+  if (intent === 'career_work_education') return [...common, SOURCE_TYPES.CAREER, SOURCE_TYPES.HEALTH, SOURCE_TYPES.HOUSING, SOURCE_TYPES.FINANCE];
+  if (intent === 'finance') return [...common, SOURCE_TYPES.FINANCE];
+  if (intent === 'housing') return [...common, SOURCE_TYPES.HOUSING, SOURCE_TYPES.FINANCE];
+  if (intent === 'legal') return [...common, SOURCE_TYPES.LEGAL];
+  if (intent === 'relationships') return [...common, SOURCE_TYPES.RELATIONSHIP];
+  if (intent === 'plans_tasks') return [...common, SOURCE_TYPES.WORKBOARD];
+  if (intent === 'project_code') return [SOURCE_TYPES.PROJECT_DOC, SOURCE_TYPES.CODE, SOURCE_TYPES.REFERENCE];
+  return common;
+}
+
 function safeRepositoryKnowledge(repoRoot = '') {
   if (!repoRoot) return [];
   const root = path.resolve(repoRoot);
@@ -101,7 +165,7 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
       // reviewed, current state. "pending review" is deliberately not a fact.
       chatReadable: ['active', 'stable', 'stale', 'blocked'].includes(item.status), chatProposable: true,
       state: item.status === 'superseded' ? 'historical' : item.status === 'pending review' ? 'pending' : 'approved',
-      source: item.source || 'local Knowledge', provenance: item.evidence || '', record: item
+      source: item.source || 'local Knowledge', provenance: item.evidence || '', record: item, sourceType: sourceTypeForRecord(item)
     });
   }
   if (includeCandidates) for (const candidate of db.prepare("SELECT * FROM memory_candidates WHERE status IN ('candidate','deferred','temporary')").all()) {
@@ -109,12 +173,12 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
       canonicalId: `candidate:${candidate.id}`, category: candidate.type || 'memory candidate', title: candidate.title,
       text: `${candidate.title}\n${candidate.body}`, timestamp: candidate.created_at, updatedAt: candidate.reviewed_at || candidate.created_at,
       sensitivity: 'personal', chatReadable: true, chatProposable: false, state: candidate.status === 'temporary' ? 'temporary' : 'pending',
-      source: candidate.source || 'chat', provenance: candidate.evidence || `Chat message ${candidate.source_message_id || 'unknown'}`, record: candidate
+      source: candidate.source || 'chat', provenance: candidate.evidence || `Chat message ${candidate.source_message_id || 'unknown'}`, record: candidate, sourceType: SOURCE_TYPES.PERSONAL_FACT
     });
   }
   for (const project of db.prepare("SELECT * FROM projects WHERE status NOT IN ('done','completed','archived')").all()) {
     records.push({ canonicalId: `project:${project.id}`, category: 'project', title: project.name, text: `${project.name}\n${project.next_action || ''}\n${project.evidence || ''}`,
-      timestamp: project.created_at, updatedAt: project.updated_at || project.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: false, state: 'approved', source: project.source || 'Workboard', provenance: project.evidence || '', record: project });
+      timestamp: project.created_at, updatedAt: project.updated_at || project.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: false, state: 'approved', source: project.source || 'Workboard', provenance: project.evidence || '', record: project, sourceType: SOURCE_TYPES.WORKBOARD });
   }
   for (const message of db.prepare(`SELECT m.*, s.title AS session_title,
     EXISTS(SELECT 1 FROM chat_cloud_checks cc
@@ -123,20 +187,20 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
     WHERE s.deleted = 0 AND m.role='user' ORDER BY m.created_at DESC LIMIT 200`).all()) {
     if (message.cloud_egress_blocked || SENSITIVE_CHAT_HISTORY.test(String(message.content || ''))) continue;
     records.push({ canonicalId: `chat:${message.id}`, category: 'conversation history', title: message.session_title || 'Chat', text: message.content,
-      timestamp: message.created_at, updatedAt: message.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: true, state: 'historical', source: 'saved Chat', provenance: `Conversation: ${message.session_title || 'Chat'}`, record: message });
+      timestamp: message.created_at, updatedAt: message.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: true, state: 'historical', source: 'saved Chat', provenance: `Conversation: ${message.session_title || 'Chat'}`, record: message, sourceType: SOURCE_TYPES.TIMELINE });
   }
   for (const file of safeRepositoryKnowledge(repoRoot)) {
     records.push({
       canonicalId: `repository:${file.relative}`, category: 'repository knowledge', title: path.basename(file.relative), text: file.text,
       timestamp: file.updatedAt, updatedAt: file.updatedAt, sensitivity: 'public', chatReadable: true, chatProposable: false, state: 'reference',
-      source: 'bundled GitHub knowledge base', provenance: `Repository document: ${file.relative}`, record: { path: file.relative }
+      source: 'bundled GitHub knowledge base', provenance: `Repository document: ${file.relative}`, record: { path: file.relative }, sourceType: SOURCE_TYPES.PROJECT_DOC
     });
   }
   for (const file of safePrivateRepositoryKnowledge(repoRoot)) {
     records.push({
       canonicalId: `private-repository:${file.relative}`, category: 'repository knowledge', title: path.basename(file.relative), text: file.text,
       timestamp: file.updatedAt, updatedAt: file.updatedAt, sensitivity: 'personal', chatReadable: true, chatProposable: false, state: 'reference',
-      source: 'local private repository', provenance: `Private repository document: ${file.relative}`, record: { path: file.relative }
+      source: 'local private repository', provenance: `Private repository document: ${file.relative}`, record: { path: file.relative }, sourceType: sourceTypeForFile(file)
     });
   }
   return records;
@@ -176,10 +240,17 @@ function score(record, queryWords, rawQuery, now = Date.now()) {
   const haystack = `${record.category}\n${record.title}\n${record.text}`.toLowerCase();
   const matches = queryWords.reduce((total, word) => total + (haystack.includes(word) ? 1 : 0), 0);
   const broad = shouldGroundConversationInLocalKnowledge(rawQuery);
+  const intent = classifyPersonalIntent(rawQuery);
+  const domainSource = (intent === 'career_work_education' && record.sourceType === SOURCE_TYPES.CAREER)
+    || (intent === 'personal_health' && record.sourceType === SOURCE_TYPES.HEALTH)
+    || (intent === 'finance' && record.sourceType === SOURCE_TYPES.FINANCE)
+    || (intent === 'housing' && record.sourceType === SOURCE_TYPES.HOUSING)
+    || (intent === 'legal' && record.sourceType === SOURCE_TYPES.LEGAL)
+    || (intent === 'relationships' && record.sourceType === SOURCE_TYPES.RELATIONSHIP);
   // Only an explicit personal overview may fall back to the most recent local
   // facts. Specific questions must match, preventing unrelated records from
   // being presented as an answer to "what did I say about X?".
-  if (!matches && !(broad && permitsOverviewFallback(rawQuery))) return -Infinity;
+  if (!matches && !domainSource && !(broad && permitsOverviewFallback(rawQuery))) return -Infinity;
   const recency = Math.max(0, 1 - ((now - dateValue(record.updatedAt)) / (365 * 86400000)));
   // A question about the user must prefer their actual local records over the
   // public app documentation that happens to share generic words such as
@@ -187,7 +258,11 @@ function score(record, queryWords, rawQuery, now = Date.now()) {
   const personalPriority = broad
     ? (record.category !== 'repository knowledge' ? 30 : record.source === 'local private repository' ? 6 : -8)
     : 0;
-  return matches * 10 + personalPriority + (record.state === 'approved' ? 4 : record.state === 'pending' ? 1 : 0) + recency;
+  // Deterministic hybrid fusion: lexical match plus a compact semantic intent
+  // boost.  Metadata eligibility happens before this function, so a TODO can
+  // never win a health question merely by repeating the word "health".
+  const semantic = allowedSourceTypes(intent).includes(record.sourceType) ? 8 : 0;
+  return matches * 10 + semantic + (domainSource ? 8 : 0) + personalPriority + (record.state === 'approved' ? 4 : record.state === 'pending' ? 1 : 0) + recency;
 }
 
 export function retrieveLocalKnowledge(db, query, options = {}) {
@@ -198,12 +273,21 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
     && !disabled.has(record.category)
     // The just-saved user prompt must not be recycled as evidence for itself.
     && !(record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery));
+  const intent = classifyPersonalIntent(query);
   const broadPersonalRequest = shouldGroundConversationInLocalKnowledge(query);
-  const repositoryRequest = /\b(?:github|repository|repo|knowledge base|documentation)\b/i.test(String(query || ''));
+  const allowed = new Set(allowedSourceTypes(intent));
+  const rejected = [];
   // Do not crowd a personal answer with source-code and product documents when
   // any eligible personal record exists. Public documentation remains a useful
   // fallback for repository questions or an otherwise empty personal profile.
-  const eligibleRows = repositoryRequest
+  const eligibleRows = intent === 'greeting' ? [] : rows.filter((record) => {
+    if (allowed.has(record.sourceType)) return true;
+    rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: `excluded by ${intent} eligibility` });
+    return false;
+  });
+  /* legacy broad fallback is intentionally gone: generic private repository
+     files are references until their metadata classifies them as a record. */
+  /* const legacyEligibleRows = repositoryRequest
     // Repository questions must search repository documents first. Otherwise a
     // generic Knowledge item containing the word "knowledge" can hide the
     // exact GitHub/private-repository document the user asked about.
@@ -214,17 +298,22 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
     // personal records exist; otherwise generic records can crowd out a
     // directly relevant profile, CV, or decision document from the private repo.
     ? rows.filter((record) => record.category !== 'repository knowledge' || record.source === 'local private repository')
-    : rows;
-  const ranked = eligibleRows.map((record) => ({ ...record, score: score(record, queryWords, String(query || '')) })).filter((record) => Number.isFinite(record.score)).sort((a, b) => b.score - a.score || dateValue(b.updatedAt) - dateValue(a.updatedAt));
+    : rows; */
+  const ranked = eligibleRows.map((record) => ({ ...record, score: score(record, queryWords, String(query || '')) })).filter((record) => {
+    if (Number.isFinite(record.score) && record.score >= 12) return true;
+    rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'below calibrated relevance threshold' });
+    return false;
+  }).sort((a, b) => b.score - a.score || dateValue(b.updatedAt) - dateValue(a.updatedAt));
   let remaining = options.budget || MAX_CHARS;
   const items = [];
   for (const record of ranked) {
     if (items.length >= (options.limit || MAX_ITEMS) || remaining < 100) break;
-    const body = snippet(record.text, Math.min(700, remaining));
+    if (items.some((item) => item.title === record.title || item.body === snippet(record.text, 280))) { rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'duplicate fact' }); continue; }
+    const body = snippet(record.text, Math.min(280, remaining));
     remaining -= body.length;
     items.push({ ...record, body, whySelected: queryWords.filter((word) => `${record.title} ${record.text}`.toLowerCase().includes(word)).join(', ') || 'requested personal overview' });
   }
-  return { items, scanned: rows.length, contextBudget: options.budget || MAX_CHARS };
+  return { items, scanned: rows.length, contextBudget: options.budget || MAX_CHARS, intent, rejected };
 }
 
 export function isLocalKnowledgeQuestion(message) {
@@ -239,20 +328,21 @@ export function shouldGroundConversationInLocalKnowledge(message) {
   const text = String(message || '').toLowerCase();
   return isLocalKnowledgeQuestion(text)
     || /\b(?:what|which|where|how)\b[^?]{0,100}\b(?:job|career|role|profession|work)\b[^?]{0,100}\b(?:should|recommend|best|fit|suit|right)\b/i.test(text)
-    || /\b(?:recommend|suggest|help me choose|help me find)\b[^?]{0,100}\b(?:job|career|role|profession|work)\b/i.test(text);
+    || /\b(?:recommend|suggest|help me choose|help me find)\b[^?]{0,100}\b(?:job|career|role|profession|work)\b/i.test(text)
+    || ['personal_health', 'finance', 'housing', 'legal', 'relationships', 'plans_tasks', 'project_code'].includes(classifyPersonalIntent(text));
 }
 
-export function answerLocalKnowledgeQuestion(db, message, options = {}) {
+function answerLocalKnowledgeQuestionLegacy(db, message, options = {}) {
   const includeCandidates = /\b(pending|candidate|review)\b/i.test(String(message || ''));
   const result = retrieveLocalKnowledge(db, message, { ...options, includeCandidates });
-  if (!result.items.length) return { content: 'I searched the active LPS records available to Chat, but I did not find a matching saved record.', sources: [] };
+  if (!result.items.length) return { content: 'I searched the relevant saved local records, but I did not find evidence that answers that question.', sources: [], diagnostics: result };
   const grouped = new Map();
   for (const item of result.items) {
     const label = item.category === 'current state' ? 'Profile' : item.category === 'rule' ? 'Preferences and rules' : item.category === 'conversation history' ? 'Previously in Chat' : item.category;
     if (!grouped.has(label)) grouped.set(label, []);
     grouped.get(label).push(item);
   }
-  const lines = [/what do you know about me|about me/i.test(message) ? '### What I know from saved local information' : '### Relevant saved local information', ''];
+  const lines = [/what do you know about me|about me/i.test(message) ? '### What I know from saved local information' : '### Answer from saved local information', ''];
   for (const [label, items] of grouped) {
     lines.push(`**${label}**`);
     for (const item of items) lines.push(`- ${item.body.replace(/\s+/g, ' ')}  \n  _Source: ${item.title} · ${item.state} · updated ${item.updatedAt || 'unknown'}_`);
@@ -260,5 +350,22 @@ export function answerLocalKnowledgeQuestion(db, message, options = {}) {
   }
   const conflicts = result.items.filter((item) => item.state === 'pending');
   if (conflicts.length) lines.push('_Pending items are not treated as approved facts; review them in Knowledge before relying on them._');
-  return { content: lines.join('\n').trim(), sources: result.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, updatedAt: item.updatedAt, state: item.state, whySelected: item.whySelected, source: item.source, provenance: item.provenance })) };
+  return { content: lines.join('\n').trim(), sources: result.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, sourceType: item.sourceType, updatedAt: item.updatedAt, state: item.state, excerpt: item.body, whySelected: item.whySelected, source: item.source, provenance: item.provenance })), diagnostics: result };
+}
+
+// The answer body is intentionally fact-first.  Provenance stays in structured
+// metadata for the compact, collapsed source cards rather than consuming the
+// conversation viewport with raw retrieved documents.
+export function answerLocalKnowledgeQuestion(db, message, options = {}) {
+  const result = retrieveLocalKnowledge(db, message, { ...options, includeCandidates: /\b(pending|candidate|review)\b/i.test(String(message || '')) });
+  if (!result.items.length) return { content: 'I searched the relevant saved local records, but I did not find evidence that answers that question.', sources: [], diagnostics: result };
+  const facts = result.items.map((item) => item.body.replace(/\s+/g, ' ').replace(/^#+\s*/, '').trim());
+  const content = facts.length === 1
+    ? `From your saved local record: ${facts[0]}`
+    : `From your saved local records:\n\n${facts.map((fact) => `- ${fact}`).join('\n')}`;
+  return {
+    content,
+    sources: result.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, sourceType: item.sourceType, updatedAt: item.updatedAt, state: item.state, excerpt: item.body, whySelected: item.whySelected, source: item.source, provenance: item.provenance })),
+    diagnostics: result
+  };
 }

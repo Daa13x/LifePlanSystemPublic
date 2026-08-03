@@ -993,12 +993,27 @@ function MessageBubble({ message, mode }) {
     <div className={cx('message', message.role)}>
       <span>{message.role}</span>
       <div className="message-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
+      {message.role === 'assistant' && Array.isArray(parseMessageMetadata(message.metadata)?.localSources) && (
+        <SourceCards sources={parseMessageMetadata(message.metadata).localSources} />
+      )}
       {message.role === 'assistant' && body.trim() && (
         <div className="message-actions"><MessageVoice text={body} /></div>
       )}
       {details}
     </div>
   );
+}
+
+function SourceCards({ sources }) {
+  if (!sources.length) return null;
+  return <details className="message-sources">
+    <summary>Sources used ({sources.length})</summary>
+    {sources.slice(0, 5).map((source) => <div className="message-source-card" key={source.sourceId || source.title}>
+      <strong>{source.title || 'Local record'}</strong>
+      <small>{source.sourceType || source.category || 'local record'} · {source.updatedAt ? new Date(source.updatedAt).toLocaleDateString() : 'date unknown'}</small>
+      {source.excerpt && <p>{String(source.excerpt).slice(0, 280)}</p>}
+    </div>)}
+  </details>;
 }
 
 function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice, navigate, settings }) {
