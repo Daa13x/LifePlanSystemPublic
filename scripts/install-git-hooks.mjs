@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const root = process.cwd();
-const sourceHook = path.join(root, '.githooks', 'commit-msg');
+const hookNames = ['commit-msg', 'pre-commit', 'pre-push'];
 
 function git(args) {
   return String(execFileSync('git', args, {
@@ -24,20 +24,29 @@ try {
   process.exit(0);
 }
 
-if (!fs.existsSync(sourceHook)) {
-  throw new Error(`Required ownership guard hook is missing: ${sourceHook}`);
+for (const hookName of hookNames) {
+  const sourceHook = path.join(root, '.githooks', hookName);
+  if (!fs.existsSync(sourceHook)) {
+    throw new Error(`Required LifePlanSystem Git guard hook is missing: ${sourceHook}`);
+  }
 }
 
 // --git-path resolves both ordinary checkouts and linked Git worktrees.
 const hooksPath = git(['rev-parse', '--git-path', 'hooks']);
 const hooksDir = path.isAbsolute(hooksPath) ? hooksPath : path.resolve(root, hooksPath);
-const installedHook = path.join(hooksDir, 'commit-msg');
 fs.mkdirSync(hooksDir, { recursive: true });
-fs.copyFileSync(sourceHook, installedHook);
-try {
-  fs.chmodSync(installedHook, 0o755);
-} catch {
-  // Git for Windows can execute the shebang hook without POSIX mode changes.
+
+const installed = [];
+for (const hookName of hookNames) {
+  const sourceHook = path.join(root, '.githooks', hookName);
+  const installedHook = path.join(hooksDir, hookName);
+  fs.copyFileSync(sourceHook, installedHook);
+  try {
+    fs.chmodSync(installedHook, 0o755);
+  } catch {
+    // Git for Windows can execute the shebang hook without POSIX mode changes.
+  }
+  installed.push(installedHook);
 }
 
 try {
@@ -50,4 +59,4 @@ try {
   // No custom hooksPath was configured, which is already the desired state.
 }
 
-console.log(`Git ownership guard installed: ${installedHook}`);
+console.log(`LifePlanSystem Git guards installed:\n${installed.map((item) => `- ${item}`).join('\n')}`);
