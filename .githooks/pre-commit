@@ -1,0 +1,14 @@
+#!/bin/sh
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "Commit blocked: could not resolve the repository root." >&2
+  exit 1
+}
+cd "$root" || exit 1
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "Commit blocked: Node.js is required to run the LifePlanSystem sync guard." >&2
+  exit 1
+fi
+
+exec node scripts/sync-main.mjs --pre-commit
