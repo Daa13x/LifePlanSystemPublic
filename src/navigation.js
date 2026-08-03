@@ -8,6 +8,7 @@ export const PRIMARY_NAVIGATION = [
 export const SECTION_TABS = {
   workboard: [
     { id: 'overview', label: 'Overview' },
+    { id: 'today', label: 'Today' },
     { id: 'projects', label: 'Projects' },
     { id: 'roadmap', label: 'Roadmap' },
     { id: 'review', label: 'Review' },

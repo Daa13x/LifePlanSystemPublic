@@ -520,11 +520,292 @@ function Workboard({ route, navigate, planner, projects, setProjects, refresh, r
   return (
     <section className="section-shell">
       {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} setNotice={setNotice} navigate={navigate} />}
+      {route.tab === 'today' && <DailyPlanner setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
       {route.tab === 'roadmap' && <DevRoadmap setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'review' && <ApprovalQueue scope="operational" setNotice={setNotice} refreshPlanner={refresh} />}
       {route.tab === 'completed' && <CompletedWorkboard setNotice={setNotice} refreshSignal={refreshSignal} />}
     </section>
+  );
+}
+
+const CAPACITY_MODE_LABELS = {
+  'normal': 'Normal',
+  'low-energy': 'Low energy',
+  'overwhelmed': 'Overwhelmed',
+  'urgent-deadline': 'Urgent deadline',
+  'recovery-day': 'Recovery day',
+  'pain-illness': 'Pain / illness',
+  'high-focus': 'High focus'
+};
+
+const EMPTY_PLANNER_FORM = {
+  title: '', why: '', nextAction: '', definitionOfDone: '', easierVersion: '', pausePoint: '', recoveryStep: '',
+  importance: 3, effort: 3, estimatedMinutes: '', deadline: '', blocker: '', consequenceOfDelay: '', needsOthers: false, isRecovery: false
+};
+
+// Build the edit form's controlled values from a server task object. The day
+// view returns engine tasks in camelCase (see plannerTaskToEngine); we mirror
+// those field names so edits PATCH straight back through the aliases the server
+// already accepts — the frontend never invents its own contract.
+function plannerFormFromTask(task) {
+  return {
+    title: task.title || '',
+    why: task.why || '',
+    nextAction: task.nextAction || '',
+    definitionOfDone: task.definitionOfDone || '',
+    easierVersion: task.easierVersion || '',
+    pausePoint: task.pausePoint || '',
+    recoveryStep: task.recoveryStep || '',
+    importance: task.importance ?? 3,
+    effort: task.effort ?? 3,
+    estimatedMinutes: task.estimatedMinutes ?? '',
+    deadline: task.deadline ? String(task.deadline).slice(0, 10) : '',
+    blocker: task.blocker || '',
+    consequenceOfDelay: task.consequenceOfDelay || '',
+    needsOthers: Boolean(task.needsOthers),
+    isRecovery: Boolean(task.isRecovery)
+  };
+}
+
+// Shared field set for the create and edit forms. Kept as one component so the
+// full guidance model the backend supports is editable in both places.
+function PlannerTaskFields({ form, setForm, disabled }) {
+  const set = (key) => (event) => {
+    const target = event.target;
+    const value = target.type === 'checkbox' ? target.checked : target.value;
+    setForm((current) => ({ ...current, [key]: value }));
+  };
+  const setNumber = (key) => (event) => setForm((current) => ({ ...current, [key]: Number(event.target.value) }));
+  return (
+    <>
+      <label className="field">Title
+        <input value={form.title} disabled={disabled} onChange={set('title')} placeholder="What is the task?" required />
+      </label>
+      <label className="field">The exact next action
+        <input value={form.nextAction} disabled={disabled} onChange={set('nextAction')} placeholder="The single next physical step" />
+      </label>
+      <label className="field">Why it matters
+        <input value={form.why} disabled={disabled} onChange={set('why')} placeholder="Optional — the reason this is worth doing" />
+      </label>
+      <label className="field">Definition of done
+        <input value={form.definitionOfDone} disabled={disabled} onChange={set('definitionOfDone')} placeholder="Optional — how you'll know it's finished" />
+      </label>
+      <label className="field">An easier version
+        <input value={form.easierVersion} disabled={disabled} onChange={set('easierVersion')} placeholder="Optional — a smaller version for low-capacity days" />
+      </label>
+      <label className="field">Pause point
+        <input value={form.pausePoint} disabled={disabled} onChange={set('pausePoint')} placeholder="Optional — a safe place to stop partway" />
+      </label>
+      <label className="field">Recovery step
+        <input value={form.recoveryStep} disabled={disabled} onChange={set('recoveryStep')} placeholder="Optional — a restorative follow-up" />
+      </label>
+      <label className="field">Blocker
+        <input value={form.blocker} disabled={disabled} onChange={set('blocker')} placeholder="Optional — what must clear before this can move" />
+      </label>
+      <label className="field">If it slips
+        <input value={form.consequenceOfDelay} disabled={disabled} onChange={set('consequenceOfDelay')} placeholder="Optional — the honest consequence of delay" />
+      </label>
+      <div className="quick-add-row">
+        <label className="field">Importance
+          <select value={form.importance} disabled={disabled} onChange={setNumber('importance')}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select>
+        </label>
+        <label className="field">Effort
+          <select value={form.effort} disabled={disabled} onChange={setNumber('effort')}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select>
+        </label>
+        <label className="field">Estimated minutes
+          <input type="number" min="0" step="5" value={form.estimatedMinutes} disabled={disabled} onChange={set('estimatedMinutes')} placeholder="Optional" />
+        </label>
+        <label className="field">Deadline
+          <input type="date" value={form.deadline} disabled={disabled} onChange={set('deadline')} />
+        </label>
+      </div>
+      <div className="quick-add-row">
+        <label className="field checkbox-field"><input type="checkbox" checked={form.needsOthers} disabled={disabled} onChange={set('needsOthers')} /> Needs someone else</label>
+        <label className="field checkbox-field"><input type="checkbox" checked={form.isRecovery} disabled={disabled} onChange={set('isRecovery')} /> Recovery / self-care</label>
+      </div>
+    </>
+  );
+}
+
+// One task card, sharing its layout across the Now, Blocked and Later sections.
+// It renders whatever guidance fields are populated and, when this task is being
+// edited, swaps in the shared edit form in place.
+function PlannerTaskCard({ task, section, busy, editing, editForm, setEditForm, onEdit, onCancelEdit, onSaveEdit, onAction }) {
+  if (editing) {
+    return (
+      <div className="item-row" key={task.id}>
+        <form className="propose-form" onSubmit={(event) => { event.preventDefault(); onSaveEdit(task.id); }}>
+          <PlannerTaskFields form={editForm} setForm={setEditForm} disabled={Boolean(busy)} />
+          <div className="button-row">
+            <button type="submit" className="primary" disabled={Boolean(busy) || !editForm.title.trim()}>{busy === `edit:${task.id}` ? 'Saving…' : 'Save changes'}</button>
+            <button type="button" className="secondary" disabled={Boolean(busy)} onClick={onCancelEdit}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+  const meta = [];
+  if (task.deadline) meta.push(`Due ${String(task.deadline).slice(0, 10)}`);
+  if (Number.isFinite(task.effort)) meta.push(`Effort ${task.effort}/5`);
+  if (Number.isFinite(task.importance)) meta.push(`Importance ${task.importance}/5`);
+  if (task.estimatedMinutes) meta.push(`~${task.estimatedMinutes} min`);
+  return (
+    <div className="item-row" key={task.id}>
+      <div className="item-main">
+        <div className="item-title">{task.pinned ? '📌 ' : ''}{task.title}{task.presentedAs === 'easier' ? ' · easier version' : ''}</div>
+        {task.activeStep && <div className="item-meta"><span><strong>Next:</strong> {task.activeStep}</span></div>}
+        {task.why && <div className="item-meta"><span><strong>Why:</strong> {task.why}</span></div>}
+        {task.definitionOfDone && <div className="item-meta"><span><strong>Done when:</strong> {task.definitionOfDone}</span></div>}
+        {task.presentedAs !== 'easier' && task.easierVersion && <div className="item-meta"><span><strong>Easier option:</strong> {task.easierVersion}</span></div>}
+        {task.pausePoint && <div className="item-meta"><span><strong>Pause point:</strong> {task.pausePoint}</span></div>}
+        {task.recoveryStep && <div className="item-meta"><span><strong>Recovery:</strong> {task.recoveryStep}</span></div>}
+        {task.blocker && <div className="item-meta"><span>⛔ <strong>Blocked:</strong> {task.blocker}</span></div>}
+        {task.consequenceOfDelay && <div className="item-meta"><span><strong>If it slips:</strong> {task.consequenceOfDelay}</span></div>}
+        {meta.length > 0 && <div className="item-meta"><span>{meta.join(' · ')}</span></div>}
+        {Array.isArray(task.reasons) && task.reasons.length > 0 && <div className="item-meta"><span><em>Why here: {task.reasons.join('; ')}</em></span></div>}
+        {section === 'later' && task.deferReason && <div className="item-meta"><span><em>{task.deferReason}</em></span></div>}
+      </div>
+      <div className="button-row">
+        {section !== 'later' && <button type="button" className="secondary" disabled={Boolean(busy)} onClick={() => onAction(task.id, 'complete')}>{busy === `complete:${task.id}` ? 'Saving…' : 'Done'}</button>}
+        <button type="button" className="secondary" disabled={Boolean(busy)} onClick={() => onAction(task.id, 'pin')}>{task.pinned ? 'Unpin' : (section === 'later' ? 'Pin to today' : 'Pin')}</button>
+        {section !== 'later' && <button type="button" className="secondary" disabled={Boolean(busy)} onClick={() => onAction(task.id, 'defer')}>Not today</button>}
+        <button type="button" className="secondary" disabled={Boolean(busy)} onClick={() => onEdit(task)}>Edit</button>
+      </div>
+    </div>
+  );
+}
+
+// Capacity-Aware Daily Planner. The user picks the capacity mode; the server
+// shapes the day transparently (every task carries its own `reasons`), and the
+// user can override anything — pin a task to keep it, defer it as a choice, or
+// edit its guidance. The frontend renders the server's order verbatim; it never
+// re-ranks or re-scores tasks itself.
+function DailyPlanner({ refreshSignal }) {
+  const [day, setDay] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState(EMPTY_PLANNER_FORM);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(EMPTY_PLANNER_FORM);
+
+  const load = async () => {
+    try { setDay(await api('/api/planner/day')); setError(null); }
+    catch (err) { setError(err.message); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, [refreshSignal]);
+
+  // Run a mutation, then reload the day. Returns whether the mutation itself
+  // succeeded so callers can keep a form's values intact when a request fails.
+  async function act(label, work) {
+    setBusy(label);
+    setError(null);
+    let succeeded = false;
+    try { await work(); succeeded = true; }
+    catch (err) { setError(err.message); }
+    await load();
+    setBusy(null);
+    return succeeded;
+  }
+
+  const setMode = (mode) => act(`mode:${mode}`, () => api('/api/planner/capacity', { method: 'POST', body: JSON.stringify({ mode }) }));
+  const taskAction = (id, path) => act(`${path}:${id}`, () => api(`/api/planner/tasks/${id}/${path}`, { method: 'POST', body: JSON.stringify({}) }));
+
+  async function addTask(event) {
+    event.preventDefault();
+    if (!form.title.trim()) return;
+    const ok = await act('create', () => api('/api/planner/tasks', { method: 'POST', body: JSON.stringify(form) }));
+    if (ok) { setForm(EMPTY_PLANNER_FORM); setShowAdd(false); }
+  }
+  function startEdit(task) { setEditingId(task.id); setEditForm(plannerFormFromTask(task)); }
+  async function saveEdit(id) {
+    if (!editForm.title.trim()) return;
+    const ok = await act(`edit:${id}`, () => api(`/api/planner/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(editForm) }));
+    if (ok) setEditingId(null);
+  }
+
+  if (loading && !day) return <Empty title="Loading your day" body="Preparing a capacity-aware plan." />;
+  if (!day) {
+    return (
+      <div className="panel">
+        <p className="form-error" role="alert">Couldn't load your day: {error || 'unknown error'}.</p>
+        <div className="button-row"><button className="primary" onClick={() => { setLoading(true); load(); }}>Try again</button></div>
+      </div>
+    );
+  }
+
+  const { mode, modes, visible, deferred, visibleLimit, pinnedCount } = day;
+  // Split the server's tasks into sections WITHOUT reordering: blocked work is
+  // pulled out so it is never silently mixed into (or hidden from) the day.
+  const blocked = [...visible, ...deferred].filter((task) => task.blocker);
+  const nowTasks = visible.filter((task) => !task.blocker);
+  const laterTasks = deferred.filter((task) => !task.blocker);
+
+  const cardProps = (task, section) => ({
+    task, section, busy,
+    editing: editingId === task.id,
+    editForm, setEditForm,
+    onEdit: startEdit, onCancelEdit: () => setEditingId(null), onSaveEdit: saveEdit, onAction: taskAction
+  });
+
+  return (
+    <div className="stacked-panels">
+      <div className="panel wide-panel">
+        <div className="panel-heading">
+          <div><h2>Today</h2><p>A capacity-aware plan. You choose the mode; it shapes the day, and you can override anything.</p></div>
+          <Pill tone={mode === 'normal' ? 'good' : 'info'}>{CAPACITY_MODE_LABELS[mode] || mode}</Pill>
+        </div>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="button-row">
+          <label className="field">Capacity mode
+            <select value={mode} disabled={Boolean(busy)} onChange={(event) => setMode(event.target.value)} aria-label="Capacity mode">
+              {modes.map((option) => <option key={option} value={option}>{CAPACITY_MODE_LABELS[option] || option}</option>)}
+            </select>
+          </label>
+          <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => setShowAdd((value) => !value)}>{showAdd ? 'Close' : 'Add task'}</button>
+          {busy && busy.startsWith('mode:') && <span className="muted" role="status">Saving…</span>}
+        </div>
+        <p><small>Showing up to {visibleLimit} task(s) in <strong>{CAPACITY_MODE_LABELS[mode] || mode}</strong>{pinnedCount ? `, ${pinnedCount} pinned` : ''}. Deferring is a choice, not a failure — nothing is lost.</small></p>
+        {showAdd && (
+          <form className="propose-form" onSubmit={addTask}>
+            <PlannerTaskFields form={form} setForm={setForm} disabled={Boolean(busy)} />
+            <div className="button-row">
+              <button type="submit" className="primary" disabled={Boolean(busy) || !form.title.trim()}>{busy === 'create' ? 'Adding…' : 'Add to plan'}</button>
+            </div>
+          </form>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="panel-heading"><div><h2>Now</h2><p>What today is shaped around. Every task shows why it is here.</p></div><Pill tone="info">{nowTasks.length}</Pill></div>
+        {nowTasks.length ? (
+          <div className="table-list">
+            {nowTasks.map((task) => <PlannerTaskCard key={task.id} {...cardProps(task, 'now')} />)}
+          </div>
+        ) : <Empty title="Nothing scheduled" body="Add a task above, or enjoy the space." />}
+      </div>
+
+      {blocked.length > 0 && (
+        <div className="panel">
+          <div className="panel-heading"><div><h2>Blocked</h2><p>Shown, not hidden — each one names what must clear first.</p></div><Pill tone="warn">{blocked.length}</Pill></div>
+          <div className="table-list">
+            {blocked.map((task) => <PlannerTaskCard key={task.id} {...cardProps(task, 'blocked')} />)}
+          </div>
+        </div>
+      )}
+
+      {laterTasks.length > 0 && (
+        <div className="panel">
+          <div className="panel-heading"><div><h2>Later</h2><p>Held for another day — a choice, not a failure.</p></div><Pill tone="default">{laterTasks.length}</Pill></div>
+          <div className="table-list">
+            {laterTasks.map((task) => <PlannerTaskCard key={task.id} {...cardProps(task, 'later')} />)}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
