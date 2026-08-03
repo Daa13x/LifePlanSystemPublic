@@ -28,10 +28,13 @@ on:
 
 permissions:
   contents: write # build artifacts plus rolling/versioned Release assets
+  issues: write # stale-build reporting when a main installer cannot be produced
 
 concurrency:
   group: build-installer-${{ github.event.release.tag_name || github.ref || github.run_id }}
-  cancel-in-progress: false
+  # Only the newest main commit should consume the rolling installer pipeline.
+  # Older in-progress main builds must never overwrite a newer release target.
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -44,6 +47,24 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      # As soon as main advances, the old executable is no longer current. Mark
+      # that state before the expensive build starts so a stale asset is never
+      # silently presented as the latest code.
+      - name: Mark rolling release as rebuilding
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $sha = $env:GITHUB_SHA
+          gh release view 'latest-main' --repo $repo --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $notes = "Main advanced to commit $sha and the replacement installer is being built. Existing assets belong to an older successful commit and must not be treated as current until this workflow succeeds."
+            gh release edit 'latest-main' --repo $repo --title 'Latest main build (REBUILDING)' --notes $notes
+          }
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -118,6 +139,15 @@ jobs:
           $installer = 'release/LifePlannerPortableSetup.exe'
           $portableZip = 'release/LifePlannerPortable.zip'
 
+          # A newer push may arrive during packaging. Never let this older run
+          # move latest-main backwards or overwrite assets for the newer commit.
+          $remoteMain = gh api "repos/$repo/git/ref/heads/main" --jq '.object.sha'
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to resolve the current remote main commit.' }
+          if ($remoteMain.Trim() -ne $sha) {
+            Write-Host "Skipping rolling publication because main advanced from $sha to $remoteMain. The newer workflow run owns publication."
+            exit 0
+          }
+
           if (Test-Path -LiteralPath $portableZip) {
             Remove-Item -LiteralPath $portableZip -Force
           }
@@ -141,6 +171,11 @@ jobs:
           } else {
             gh release create $tag $installer $portableZip --repo $repo --target $sha --title $title --notes $notes --latest
             if ($LASTEXITCODE -ne 0) { throw 'Failed to create the rolling GitHub Release.' }
+          }
+
+          $published = gh api "repos/$repo/git/ref/tags/$tag" --jq '.object.sha'
+          if ($LASTEXITCODE -ne 0 -or $published.Trim() -ne $sha) {
+            throw "Rolling release verification failed: expected $sha but latest-main resolves to $published."
           }
 
       # Release 1.0 was created with automatically generated notes that displayed
@@ -175,3 +210,21 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: release/LifePlannerPortableSetup.exe
+
+      # A failed build must leave an explicit warning on the rolling release.
+      # The older binary remains available for recovery but cannot masquerade as
+      # a current build.
+      - name: Mark rolling release stale after failure
+        if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $sha = $env:GITHUB_SHA
+          gh release view 'latest-main' --repo $repo --json tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $notes = "STALE INSTALLER: the build for current main commit $sha failed. Existing assets were produced by an older successful commit and are not the current application. Inspect the failed Build Installer workflow before using or distributing them."
+            gh release edit 'latest-main' --repo $repo --title 'Latest main build (STALE - BUILD FAILED)' --notes $notes
+          }
