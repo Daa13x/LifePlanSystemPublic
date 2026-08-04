@@ -522,6 +522,7 @@ function Workboard({ route, navigate, planner, projects, setProjects, refresh, r
       {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} setNotice={setNotice} navigate={navigate} />}
       {route.tab === 'today' && <DailyPlanner setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
+      {route.tab === 'cards' && <LayeredWorkboard setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'roadmap' && <DevRoadmap setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'review' && <ApprovalQueue scope="operational" setNotice={setNotice} refreshPlanner={refresh} />}
       {route.tab === 'completed' && <CompletedWorkboard setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -805,6 +806,152 @@ function DailyPlanner({ refreshSignal }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// --- Layered Workboard cards -------------------------------------------------
+// Each card is a layered VIEW of one canonical work order (server /api/workboard
+// /cards). The five layers are navigable by layer buttons (an ARIA tablist),
+// keyboard, or an intentional hover+wheel; empty layers are shown honestly as
+// "nothing recorded yet" rather than fabricated. Title/status/owner/blocker are
+// pinned across every layer.
+const CARD_LAYERS = [
+  { id: 'glance', label: 'Glance' },
+  { id: 'context', label: 'Context' },
+  { id: 'execution', label: 'Execution' },
+  { id: 'proof', label: 'Proof' },
+  { id: 'history', label: 'History' }
+];
+
+function LayerEmpty({ label }) {
+  return <p className="muted">Nothing recorded yet for {label}. This layer stays empty until canonical data exists.</p>;
+}
+
+function CardLayerBody({ card, layer }) {
+  if (layer === 'glance') {
+    const g = card.glance;
+    return (
+      <dl className="card-facts">
+        <div><dt>Status</dt><dd>{card.pinned.status}</dd></div>
+        <div><dt>Owner</dt><dd>{card.pinned.owner}</dd></div>
+        <div><dt>Confidence</dt><dd>{g.confidence != null ? `${Math.round(g.confidence * 100)}%` : '—'}</dd></div>
+        <div><dt>Progress</dt><dd>{g.progress ? `${g.progress.done}/${g.progress.total} done (${Math.round(g.progress.ratio * 100)}%)` : 'not tracked'}</dd></div>
+      </dl>
+    );
+  }
+  if (layer === 'context') {
+    const c = card.context;
+    if (!c.populated) return <LayerEmpty label="Context" />;
+    return (
+      <div className="card-lines">
+        {c.recap && <p><strong>Recap:</strong> {c.recap}</p>}
+        {c.latestEvidence && <p><strong>Latest evidence:</strong> {c.latestEvidence}</p>}
+        {c.sourceSummary && <p><strong>Source:</strong> {c.sourceSummary}</p>}
+        {c.lastReviewed && <p><strong>Last reviewed:</strong> {c.lastReviewed}</p>}
+        <p className="muted">{c.linkedItemCount} linked item(s).</p>
+      </div>
+    );
+  }
+  if (layer === 'execution') {
+    const e = card.execution;
+    if (!e.populated) return <LayerEmpty label="Execution" />;
+    return (
+      <div className="card-lines">
+        {e.activeAction && <p><strong>Active / next:</strong> {e.activeAction}</p>}
+        {e.blocker && <p><strong>⛔ Blocker:</strong> {e.blocker}</p>}
+        {e.subtasks.length > 0 && <ul className="card-subtasks">{e.subtasks.map((s) => <li key={s.id}>{s.title} <span className="muted">· {s.status || 'unknown'}</span></li>)}</ul>}
+      </div>
+    );
+  }
+  if (layer === 'proof') {
+    const p = card.proof;
+    if (!p.populated) return <LayerEmpty label="Proof" />;
+    return <ul className="card-subtasks">{p.verifications.map((v, i) => <li key={i}><strong>{v.kind || 'verification'}:</strong> {v.detail || '—'} <span className="muted">· {v.at || ''} {v.actor ? `· ${v.actor}` : ''}</span></li>)}</ul>;
+  }
+  const h = card.history;
+  if (!h.populated) return <LayerEmpty label="History" />;
+  return (
+    <ol className="card-history">
+      {h.events.map((ev) => <li key={ev.id}><strong>{ev.type}</strong>{ev.fromStatus || ev.toStatus ? ` (${ev.fromStatus || '—'} → ${ev.toStatus || '—'})` : ''}{ev.detail ? `: ${ev.detail}` : ''} <span className="muted">· {ev.at || ''} {ev.actor ? `· ${ev.actor}` : ''}</span></li>)}
+    </ol>
+  );
+}
+
+function LayeredCard({ card }) {
+  const storageKey = `lps-card-layer-${card.id}`;
+  const [index, setIndex] = useState(() => {
+    try { const saved = Number(localStorage.getItem(storageKey)); if (Number.isInteger(saved) && saved >= 0 && saved < CARD_LAYERS.length) return saved; } catch { /* no storage */ }
+    return 0;
+  });
+  const [hovered, setHovered] = useState(false);
+  const go = (next) => {
+    const clamped = Math.max(0, Math.min(CARD_LAYERS.length - 1, next));
+    setIndex(clamped);
+    try { localStorage.setItem(storageKey, String(clamped)); } catch { /* remember-last-layer is best-effort */ }
+  };
+  const onKeyDown = (event) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') { event.preventDefault(); go(index + 1); }
+    else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') { event.preventDefault(); go(index - 1); }
+    else if (event.key === 'Home') { event.preventDefault(); go(0); }
+    else if (event.key === 'End') { event.preventDefault(); go(CARD_LAYERS.length - 1); }
+  };
+  // Wheel changes layers ONLY while the card is intentionally hovered, and never
+  // hijacks normal page scrolling otherwise.
+  const onWheel = (event) => {
+    if (!hovered) return;
+    event.preventDefault();
+    go(index + (event.deltaY > 0 ? 1 : -1));
+  };
+  const layer = CARD_LAYERS[index];
+  const populated = card.populatedLayers || [];
+  const statusTone = card.pinned.status === 'active' ? 'info' : card.pinned.status === 'blocked' ? 'warn' : card.pinned.status === 'done' ? 'good' : 'default';
+  return (
+    <div className="layered-card" onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)} onWheel={onWheel}>
+      <div className="layered-card-pinned">
+        <div><h3>{card.pinned.title || 'Untitled card'}</h3><small>{card.pinned.owner}</small></div>
+        <Pill tone={statusTone}>{card.pinned.status}</Pill>
+      </div>
+      {card.pinned.blocker && <p className="card-pinned-blocker" role="status">⛔ {card.pinned.blocker}</p>}
+      <div className="layered-card-main">
+        <div className="card-scrub-rail" aria-hidden="true">
+          {CARD_LAYERS.map((l, i) => <span key={l.id} className={cx('scrub-seg', i === index && 'current', populated.includes(l.id) && 'has-data')} />)}
+        </div>
+        <div className="layered-card-content">
+          <div className="card-layer-tabs" role="tablist" aria-label="Card layers" aria-orientation="vertical" onKeyDown={onKeyDown}>
+            {CARD_LAYERS.map((l, i) => (
+              <button
+                key={l.id} role="tab" id={`tab-${card.id}-${l.id}`}
+                aria-selected={i === index} aria-controls={`panel-${card.id}`} tabIndex={i === index ? 0 : -1}
+                className={cx('card-layer-tab', i === index && 'selected', !populated.includes(l.id) && 'empty-layer')}
+                title={populated.includes(l.id) ? l.label : `${l.label} — nothing recorded yet`}
+                onClick={() => go(i)}
+              >{l.label}</button>
+            ))}
+          </div>
+          <div className="card-layer-panel" id={`panel-${card.id}`} role="tabpanel" aria-labelledby={`tab-${card.id}-${layer.id}`} tabIndex={0}>
+            <h4>{layer.label} <span className="muted">· layer {index + 1} of {CARD_LAYERS.length}</span></h4>
+            <CardLayerBody card={card} layer={layer.id} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LayeredWorkboard({ setNotice, refreshSignal }) {
+  const [cards, setCards] = useState(null);
+  useEffect(() => {
+    let live = true;
+    (async () => { try { const data = await api('/api/workboard/cards'); if (live) setCards(data); } catch (err) { setNotice(err.message); } })();
+    return () => { live = false; };
+  }, [refreshSignal]);
+  if (!cards) return <Empty title="Loading cards" body="Assembling canonical work orders." />;
+  if (!cards.length) return <Empty title="No Workboard cards yet" body="Create a project in the Projects tab; it becomes a layered card here." />;
+  return (
+    <div className="panel">
+      <div className="panel-heading"><div><h2>Cards</h2><p>Each card is a layered view of one canonical work order. Empty layers stay honestly empty.</p></div><Pill tone="info">{cards.length}</Pill></div>
+      <div className="layered-card-grid">{cards.map((card) => <LayeredCard key={card.id} card={card} />)}</div>
     </div>
   );
 }

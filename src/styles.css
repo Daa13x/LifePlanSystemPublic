@@ -1367,6 +1367,32 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
   display: flex; flex-direction: column; gap: 8px;
   padding: 10px; border: 1px dashed var(--line); border-radius: 12px; background: var(--panel-2);
 }
+.layered-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.layered-card { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); min-width: 0; }
+.layered-card-pinned { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.layered-card-pinned h3 { margin: 0; font-size: 0.98rem; }
+.layered-card-pinned small { color: var(--muted); }
+.card-pinned-blocker { margin: 0; color: var(--amber); font-size: 0.82rem; }
+.layered-card-main { display: flex; gap: 10px; }
+.card-scrub-rail { display: flex; flex-direction: column; gap: 4px; padding-top: 4px; }
+.scrub-seg { width: 4px; height: 22px; border-radius: 2px; background: color-mix(in srgb, var(--line) 80%, transparent); transition: background 0.2s, height 0.2s; }
+.scrub-seg.has-data { background: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.scrub-seg.current { background: var(--accent); height: 30px; }
+.layered-card-content { display: flex; flex-direction: column; gap: 8px; min-width: 0; flex: 1; }
+.card-layer-tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+.card-layer-tab { padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); font-size: 0.76rem; cursor: pointer; }
+.card-layer-tab.selected { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.card-layer-tab.empty-layer { opacity: 0.6; }
+.card-layer-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card-layer-panel { border-top: 1px solid var(--line); padding-top: 8px; min-height: 96px; }
+.card-layer-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.card-layer-panel h4 { margin: 0 0 6px; font-size: 0.85rem; }
+.card-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 0; }
+.card-facts dt { color: var(--muted); font-size: 0.72rem; }
+.card-facts dd { margin: 0; font-size: 0.85rem; }
+.card-lines p { margin: 0 0 6px; font-size: 0.85rem; }
+.card-subtasks, .card-history { margin: 4px 0 0; padding-left: 18px; font-size: 0.82rem; display: flex; flex-direction: column; gap: 3px; }
+@media (prefers-reduced-motion: reduce) { .scrub-seg { transition: none; } }
 .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 0.82rem; color: var(--muted); }
 .field > input, .field > select, .field > textarea { color: var(--text); }
 .checkbox-field { flex-direction: row; align-items: center; gap: 6px; }

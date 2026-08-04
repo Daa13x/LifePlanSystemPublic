@@ -10,6 +10,7 @@ export const SECTION_TABS = {
     { id: 'overview', label: 'Overview' },
     { id: 'today', label: 'Today' },
     { id: 'projects', label: 'Projects' },
+    { id: 'cards', label: 'Cards' },
     { id: 'roadmap', label: 'Roadmap' },
     { id: 'review', label: 'Review' },
     { id: 'completed', label: 'Completed' }
