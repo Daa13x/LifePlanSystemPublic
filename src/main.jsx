@@ -1277,10 +1277,28 @@ function MessageBubble({ message, mode }) {
       {message.role === 'assistant' && Array.isArray(parseMessageMetadata(message.metadata)?.localSources) && (
         <SourceCards sources={parseMessageMetadata(message.metadata).localSources} />
       )}
+      {message.role === 'assistant' && (
+        <EscalationHint answerability={parseMessageMetadata(message.metadata)?.localAnswerability} />
+      )}
       {message.role === 'assistant' && body.trim() && (
         <div className="message-actions"><MessageVoice text={body} /></div>
       )}
       {details}
+    </div>
+  );
+}
+
+// Surfaces the transparent local-answerability decision when local knowledge was
+// insufficient and policy permits a reviewed cloud check. It is informational and
+// points at the EXISTING Cloud control in the composer — it never sends anything
+// itself, and it appears only when the server marked escalation as suggested.
+function EscalationHint({ answerability }) {
+  const escalation = answerability?.escalation;
+  if (!escalation?.suggested) return null;
+  return (
+    <div className="source-warning info" role="status">
+      <strong>Local knowledge looked thin for this</strong>
+      <small>{escalation.reason || 'A reviewed cloud check is available.'} Use the Cloud control below to prepare one — nothing is sent until you review the exact prompt and approve it.</small>
     </div>
   );
 }
