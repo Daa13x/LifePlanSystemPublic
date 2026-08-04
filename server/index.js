@@ -27,6 +27,7 @@ import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE }
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
 import { assessLocalAnswerability } from './localAnswerability.js';
+import { buildWorkOrder } from './workOrder.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -3684,6 +3685,20 @@ function normalizeProjectUpdate(input) {
   return updates;
 }
 
+// Append one canonical event to a Workboard card's history. This is the ONLY
+// writer of project_events, and it only ever appends — card history is never
+// rewritten, so the layered card's History/Proof layers stay trustworthy.
+function recordProjectEvent(projectId, { type, fromStatus = null, toStatus = null, actor = 'user', detail = null, evidence = null }) {
+  db.prepare('INSERT INTO project_events (project_id, event_type, from_status, to_status, actor, detail, evidence) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(projectId, String(type), fromStatus, toStatus, actor || 'user', detail, evidence);
+}
+
+function assembleWorkOrder(project) {
+  const events = allRows('SELECT * FROM project_events WHERE project_id = ? ORDER BY id ASC', [project.id]);
+  const items = allRows('SELECT id, title, type, status, next_action FROM knowledge_items WHERE project_id = ? ORDER BY updated_at DESC', [project.id]);
+  return buildWorkOrder(project, { events, items });
+}
+
 app.post('/api/projects', (req, res) => {
   let project;
   try {
@@ -3695,7 +3710,21 @@ app.post('/api/projects', (req, res) => {
     INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
     VALUES (?, ?, ?, 'manual', ?, date('now'), ?, ?)
   `).run(project.name, project.status, project.owner, project.confidence, project.evidence, project.nextAction).lastInsertRowid;
+  recordProjectEvent(id, { type: 'created', toStatus: project.status, actor: project.owner || 'user', detail: `Card created: ${project.name}` });
   ok(res, row('SELECT * FROM projects WHERE id = ?', [id]));
+});
+
+// Layered Workboard cards: a canonical, read-only projection. Every layer is
+// assembled from the projects row, its append-only project_events, and the
+// knowledge_items linked to it — never a duplicated display copy.
+app.get('/api/workboard/cards', (_req, res) => {
+  ok(res, allRows('SELECT * FROM projects ORDER BY updated_at DESC').map(assembleWorkOrder));
+});
+
+app.get('/api/workboard/cards/:id', (req, res) => {
+  const project = row('SELECT * FROM projects WHERE id = ?', [req.params.id]);
+  if (!project) return fail(res, 404, 'Workboard card not found.');
+  ok(res, assembleWorkOrder(project));
 });
 
 // ── Knowledge items: direct CRUD ─────────────────────────────────────────────

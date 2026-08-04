@@ -389,6 +389,22 @@ export function migrate() {
       completed_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_planner_tasks_status ON planner_tasks(status);
+
+    -- Append-only canonical event stream for a Workboard card (project). It is
+    -- the single source for the layered card's History layer and any recorded
+    -- Proof evidence — never a display-only copy of the current project row.
+    CREATE TABLE IF NOT EXISTS project_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT,
+      actor TEXT NOT NULL DEFAULT 'user',
+      detail TEXT,
+      evidence TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_events_project ON project_events(project_id, id);
   `);
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
