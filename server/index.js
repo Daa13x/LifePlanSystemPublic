@@ -26,6 +26,7 @@ import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.j
 import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
+import { assessLocalAnswerability } from './localAnswerability.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -1574,14 +1575,32 @@ function readSelectedContextRecords(sessionId) {
 // status report. Explicit data questions are answered deterministically before
 // the model is ever called (see answerDataQuery). Attached records/files are
 // included only when the user deliberately attached them.
+// The reviewed cloud path is only ever *permitted* when the user has explicitly
+// enabled a provider in Settings. This is the single policy gate that the
+// local-answerability assessment consults before it may even suggest (never
+// send) a reviewed cloud escalation.
+function chatCloudPolicy() {
+  const enabled = getSetting('cloudEnabledProviders', []);
+  const allowed = Array.isArray(enabled) && enabled.length > 0;
+  return { allowed, reason: allowed ? '' : 'no cloud provider is enabled in Settings' };
+}
+
 async function buildConversationPrompt(sessionId, userMessage) {
   const files = readChatContextFiles(sessionId);
   const selected = readSelectedContextRecords(sessionId);
   const hasRecords = Boolean(selected);
   const hasFiles = files.length > 0;
-  const retrieved = shouldGroundConversationInLocalKnowledge(userMessage)
+  const grounded = shouldGroundConversationInLocalKnowledge(userMessage);
+  const retrieved = grounded
     ? retrieveLocalKnowledge(db, userMessage, { repoRoot: root, limit: 6, budget: 3600 })
     : { items: [] };
+  // Local-first: this decides only AFTER local retrieval whether local knowledge
+  // sufficed and, when it did not and policy permits, whether a reviewed cloud
+  // check may be *offered*. It is a knowledge-question concern only, so casual
+  // conversation carries no assessment (and never a cloud nudge).
+  const answerability = grounded
+    ? assessLocalAnswerability(retrieved, { question: userMessage, cloudPolicy: chatCloudPolicy() })
+    : null;
 
   const systemInstructions = [
     'You are the LifePlanSystem assistant — a local-first, on-device helper. Reply to the user naturally and directly, the way a normal chat assistant would. Local replies use the on-device model. If the user asks to use a cloud provider, explain that a reviewed Cloud check can be prepared from the visible Chat control; never claim cloud access is impossible and never send anything silently.',
@@ -1624,7 +1643,8 @@ async function buildConversationPrompt(sessionId, userMessage) {
   parts.push(`User: ${userMessage}`);
   return {
     prompt: parts.join('\n'),
-    localSources: retrieved.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, updatedAt: item.updatedAt, state: item.state, whySelected: item.whySelected, source: item.source, provenance: item.provenance }))
+    localSources: retrieved.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, updatedAt: item.updatedAt, state: item.state, whySelected: item.whySelected, source: item.source, provenance: item.provenance })),
+    answerability
   };
 }
 
@@ -1952,7 +1972,7 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken, onSt
         return {
           mode: `local endpoint (${status.endpointModelName})`,
           content,
-          localSources: conversation.localSources,
+          localSources: conversation.localSources, answerability: conversation.answerability,
           diagnostics: { endpointType: 'OpenAI-compatible local endpoint', endpoint: status.endpoint, model: status.endpointModelName || null, usage }
         };
       }
@@ -1969,13 +1989,13 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken, onSt
     }
     if (status.managedEndpoint) {
       const { content, usage } = await runEndpointModel(status.managedEndpoint, status.endpointModelName || status.model?.name, prompt, signal, onToken);
-      if (content) return { mode: 'bundled llama.cpp', content, localSources: conversation.localSources, diagnostics: { endpointType: 'bundled llama.cpp', endpoint: status.managedEndpoint, model: status.endpointModelName || status.model?.name || null, usage } };
+      if (content) return { mode: 'bundled llama.cpp', content, localSources: conversation.localSources, answerability: conversation.answerability, diagnostics: { endpointType: 'bundled llama.cpp', endpoint: status.managedEndpoint, model: status.endpointModelName || status.model?.name || null, usage } };
     }
     if (status.llamaCliConfigured && status.llamaCliExists) {
       // llama-cli/llama-completion runs as a buffered subprocess; deliver its
       // output as a single chunk so streaming clients still render the answer.
       const content = await runLlamaCli(status.llamaCliPath, status.model.path, prompt, signal);
-      if (content) { if (typeof onToken === 'function') onToken(content); return { mode: 'llama-cli', content, localSources: conversation.localSources, diagnostics: { endpointType: 'llama-cli', model: status.model?.name || null, modelPath: status.model?.path || null } }; }
+      if (content) { if (typeof onToken === 'function') onToken(content); return { mode: 'llama-cli', content, localSources: conversation.localSources, answerability: conversation.answerability, diagnostics: { endpointType: 'llama-cli', model: status.model?.name || null, modelPath: status.model?.path || null } }; }
     }
   } catch (error) {
     if (signal?.aborted) throw new Error('Local model generation was cancelled.');
@@ -2013,6 +2033,10 @@ function buildAssistantMetadata(sessionId, candidateId, assistant, elapsedMs) {
           message: 'Saved to chat history; no memory candidate was extracted from this short note.'
         },
     localSources: Array.isArray(assistant.localSources) ? assistant.localSources : [],
+    // Transparent local-answerability / controlled-escalation decision (null for
+    // casual conversation). The UI can render this and offer the EXISTING
+    // reviewed cloud-check control; it never triggers a send on its own.
+    localAnswerability: assistant.answerability || null,
     tokens: assistant.diagnostics?.usage || null,
     timingMs: typeof elapsedMs === 'number' ? elapsedMs : null,
     fallback: (assistant.mode === 'unavailable' || assistant.mode === 'runtime error') ? assistant.mode : null,
@@ -3250,6 +3274,21 @@ app.get('/api/chat/cloud-providers', (_req, res) => {
     configured: Boolean(connectorConnected && sessions[provider]?.open),
     action: connectorConnected ? `Open a signed-in ${provider} tab in Chrome.` : 'Install or reload the LPS Browser Agent extension, then open a signed-in provider tab.'
   })));
+});
+
+// Read-only local-answerability probe. Computes the transparent
+// coverage/escalation decision for a question WITHOUT calling the model, writing
+// anything, or sending to any cloud provider. The UI uses it to decide whether
+// to offer the EXISTING reviewed cloud-check control; it can never send.
+app.get('/api/chat/answerability', (req, res) => {
+  const question = String(req.query.q ?? req.query.question ?? '').trim();
+  if (!question) return fail(res, 400, 'A question (q) is required.');
+  const grounded = shouldGroundConversationInLocalKnowledge(question);
+  const retrieved = grounded
+    ? retrieveLocalKnowledge(db, question, { repoRoot: root, limit: 6, budget: 3600 })
+    : { items: [] };
+  const assessment = assessLocalAnswerability(retrieved, { question, cloudPolicy: chatCloudPolicy() });
+  ok(res, { grounded, question, localSourceCount: retrieved.items.length, ...assessment });
 });
 
 app.get('/api/cloud/accounts', (_req, res) => {
