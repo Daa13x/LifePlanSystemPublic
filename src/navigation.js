@@ -28,7 +28,8 @@ export const SECTION_TABS = {
     { id: 'repository', label: 'Repository' },
     { id: 'browser', label: 'Browser' },
     { id: 'tools', label: 'Tools' },
-    { id: 'runs', label: 'Runs' }
+    { id: 'runs', label: 'Runs' },
+    { id: 'feedback', label: 'Feedback' }
   ]
 };
 

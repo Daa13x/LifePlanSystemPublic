@@ -983,7 +983,92 @@ function System({ route, navigate, boot, planner, sessions, models, setNotice, r
       {route.tab === 'browser' && <BrowserConsult setNotice={setNotice} refresh={refresh} refreshSignal={refreshSignal} />}
       {route.tab === 'tools' && <Tooling setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'runs' && <SourceControl setNotice={setNotice} refreshSignal={refreshSignal} initialTab="coding" availableTabs={['coding']} />}
+      {route.tab === 'feedback' && <FeedbackReview setNotice={setNotice} refreshSignal={refreshSignal} />}
     </section>
+  );
+}
+
+// Low-friction capture: mark a chat reply useful, or flag a problem with an
+// optional expected-behaviour note. It POSTs to the review queue only and never
+// blocks the chat or changes behaviour; failures are swallowed silently.
+function FeedbackControl({ message }) {
+  const [mode, setMode] = useState('idle');
+  const [sentiment, setSentiment] = useState('wrong');
+  const [note, setNote] = useState('');
+  const [pending, setPending] = useState(false);
+  const [doneLabel, setDoneLabel] = useState('');
+  const metadata = parseMessageMetadata(message.metadata);
+  const submit = async (chosen) => {
+    setPending(true);
+    try {
+      await api('/api/feedback', { method: 'POST', body: JSON.stringify({ sentiment: chosen, surface: 'chat:reply', runId: String(message.id), provider: metadata?.model || metadata?.runtime || null, note: note.trim() || null }) });
+      setDoneLabel(chosen); setMode('done'); setNote('');
+    } catch { /* feedback capture must never disrupt the conversation */ }
+    setPending(false);
+  };
+  if (mode === 'done') return <span className="feedback-thanks" role="status">Thanks — “{doneLabel}” logged for review.</span>;
+  return (
+    <span className="feedback-control">
+      <button type="button" className="feedback-quick" title="Mark this reply useful" aria-label="Mark reply useful" disabled={pending} onClick={() => submit('useful')}>👍</button>
+      <button type="button" className="feedback-quick" title="Flag a problem with this reply" aria-label="Flag a problem with this reply" aria-expanded={mode === 'flag'} disabled={pending} onClick={() => setMode(mode === 'flag' ? 'idle' : 'flag')}>⚑</button>
+      {mode === 'flag' && (
+        <span className="feedback-flag">
+          <select aria-label="What was off with this reply" value={sentiment} onChange={(event) => setSentiment(event.target.value)} disabled={pending}>
+            <option value="wrong">Wrong</option>
+            <option value="confusing">Confusing</option>
+            <option value="broken">Broken</option>
+            <option value="incomplete">Incomplete</option>
+            <option value="unnecessary">Unnecessary</option>
+          </select>
+          <input placeholder="Optional: what did you expect?" value={note} onChange={(event) => setNote(event.target.value)} disabled={pending} />
+          <button type="button" className="feedback-send" disabled={pending} onClick={() => submit(sentiment)}>Send</button>
+        </span>
+      )}
+    </span>
+  );
+}
+
+function FeedbackReview({ setNotice, refreshSignal }) {
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = async () => { try { setData(await api('/api/feedback')); } catch (err) { setNotice(err.message); } };
+  useEffect(() => { load(); }, [refreshSignal]);
+  const triage = async (id, status) => {
+    setBusy(true);
+    try { await api(`/api/feedback/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); await load(); } catch (err) { setNotice(err.message); } finally { setBusy(false); }
+  };
+  if (!data) return <Empty title="Loading feedback" body="Gathering the review queue." />;
+  const { feedback, themes } = data;
+  const proposed = (themes || []).filter((theme) => theme.proposeConsolidation);
+  return (
+    <div className="stacked-panels">
+      <div className="panel">
+        <div className="panel-heading"><div><h2>Feedback review</h2><p>Captured feedback is queued here for review only. It never changes prompts, rules, memory, or behaviour automatically.</p></div><Pill tone="info">{feedback.length}</Pill></div>
+        {proposed.length > 0 && (
+          <div className="source-warning info" role="status">
+            <strong>Recurring themes worth a regression test or issue</strong>
+            <ul>{proposed.map((theme) => <li key={theme.themeKey}>{theme.count}× {theme.sentiment} on {theme.surface || 'unspecified surface'}</li>)}</ul>
+          </div>
+        )}
+        {feedback.length ? (
+          <div className="table-list">
+            {feedback.map((item) => (
+              <div className="item-row" key={item.id}>
+                <div className="item-main">
+                  <div className="item-title">{item.sentiment}{item.surface ? ` · ${item.surface}` : ''}{item.sensitive ? ' · 🔒 local only' : ''}</div>
+                  {item.note && <div className="item-meta"><span>{item.note}</span></div>}
+                  <div className="item-meta"><span>{item.provider ? `${item.provider} · ` : ''}{item.run_id ? `run ${item.run_id} · ` : ''}{item.created_at}</span></div>
+                </div>
+                <div className="button-row">
+                  <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'routed')}>Route to review</button>
+                  <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'dismissed')}>Dismiss</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : <Empty title="No feedback yet" body="Use 👍 or ⚑ on a chat reply to capture feedback." />}
+      </div>
+    </div>
   );
 }
 
@@ -1428,7 +1513,7 @@ function MessageBubble({ message, mode }) {
         <EscalationHint answerability={parseMessageMetadata(message.metadata)?.localAnswerability} />
       )}
       {message.role === 'assistant' && body.trim() && (
-        <div className="message-actions"><MessageVoice text={body} /></div>
+        <div className="message-actions"><MessageVoice text={body} /><FeedbackControl message={message} /></div>
       )}
       {details}
     </div>
