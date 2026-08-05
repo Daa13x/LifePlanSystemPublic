@@ -28,6 +28,7 @@ import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
 import { assessLocalAnswerability } from './localAnswerability.js';
 import { buildWorkOrder } from './workOrder.js';
+import { normalizeFeedback, summarizeThemes, FEEDBACK_SENTIMENTS } from './feedbackIntake.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -3725,6 +3726,45 @@ app.get('/api/workboard/cards/:id', (req, res) => {
   const project = row('SELECT * FROM projects WHERE id = ?', [req.params.id]);
   if (!project) return fail(res, 404, 'Workboard card not found.');
   ok(res, assembleWorkOrder(project));
+});
+
+// ── Continuous user feedback ────────────────────────────────────────────────
+// Structured, attributable feedback captured from any surface. It is queued for
+// review only; it NEVER changes prompts, rules, memory, or behaviour on its own,
+// and sensitive items stay local under the memory-approval boundary.
+const FEEDBACK_STATUSES = new Set(['open', 'triaged', 'routed', 'dismissed']);
+
+app.get('/api/feedback/sentiments', (_req, res) => ok(res, FEEDBACK_SENTIMENTS));
+
+app.post('/api/feedback', (req, res) => {
+  let record;
+  try {
+    record = normalizeFeedback(req.body);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  const id = db.prepare(`
+    INSERT INTO feedback (sentiment, surface, work_item, run_id, provider, app_version, note, evidence, sensitive, actionable, theme_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(record.sentiment, record.surface, record.workItem, record.runId, record.provider, record.appVersion, record.note, record.evidence, record.sensitive ? 1 : 0, record.actionable ? 1 : 0, record.themeKey).lastInsertRowid;
+  ok(res, row('SELECT * FROM feedback WHERE id = ?', [id]));
+});
+
+app.get('/api/feedback', (req, res) => {
+  const includeResolved = req.query.all === '1';
+  const rows = includeResolved
+    ? allRows('SELECT * FROM feedback ORDER BY created_at DESC')
+    : allRows("SELECT * FROM feedback WHERE status IN ('open','triaged') ORDER BY created_at DESC");
+  ok(res, { feedback: rows, themes: summarizeThemes(rows) });
+});
+
+app.patch('/api/feedback/:id', (req, res) => {
+  const existing = row('SELECT * FROM feedback WHERE id = ?', [req.params.id]);
+  if (!existing) return fail(res, 404, 'Feedback not found.');
+  const status = String(req.body?.status || '').toLowerCase();
+  if (!FEEDBACK_STATUSES.has(status)) return fail(res, 400, `Status must be one of: ${[...FEEDBACK_STATUSES].join(', ')}.`);
+  db.prepare('UPDATE feedback SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, existing.id);
+  ok(res, row('SELECT * FROM feedback WHERE id = ?', [existing.id]));
 });
 
 // ── Knowledge items: direct CRUD ─────────────────────────────────────────────

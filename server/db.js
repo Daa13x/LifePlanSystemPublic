@@ -405,6 +405,28 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_project_events_project ON project_events(project_id, id);
+
+    -- Continuous user feedback: structured, attributable signal routed to a
+    -- review queue. It never modifies production behaviour on its own; sensitive
+    -- items stay local under the memory-approval boundary.
+    CREATE TABLE IF NOT EXISTS feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sentiment TEXT NOT NULL CHECK (sentiment IN ('useful','wrong','confusing','broken','unnecessary','incomplete')),
+      surface TEXT NOT NULL DEFAULT '',
+      work_item TEXT,
+      run_id TEXT,
+      provider TEXT,
+      app_version TEXT,
+      note TEXT,
+      evidence TEXT,
+      sensitive INTEGER NOT NULL DEFAULT 0,
+      actionable INTEGER NOT NULL DEFAULT 0,
+      theme_key TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','triaged','routed','dismissed')),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback(status, theme_key);
   `);
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
