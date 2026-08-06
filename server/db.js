@@ -450,6 +450,24 @@ export function migrate() {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_failure_events_cat ON failure_events(category, status);
+
+    -- Adaptive cost-routing observations: measured model/effort outcomes used to
+    -- route future work to the cheapest route that meets the acceptance bar.
+    -- Recorded evidence only; routing decisions are computed, never stored as
+    -- authority over a run.
+    CREATE TABLE IF NOT EXISTS routing_observations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_class TEXT NOT NULL,
+      route TEXT NOT NULL,
+      cost REAL NOT NULL DEFAULT 0,
+      latency_ms INTEGER,
+      retries INTEGER NOT NULL DEFAULT 0,
+      review_minutes REAL NOT NULL DEFAULT 0,
+      verification_passed INTEGER NOT NULL DEFAULT 0,
+      accepted INTEGER,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_routing_obs_class ON routing_observations(task_class, route);
   `);
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;

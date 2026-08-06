@@ -30,6 +30,7 @@ import { assessLocalAnswerability } from './localAnswerability.js';
 import { buildWorkOrder } from './workOrder.js';
 import { normalizeFeedback, summarizeThemes, FEEDBACK_SENTIMENTS } from './feedbackIntake.js';
 import { normalizeFailure, proposeRemediation, summarizeByCategory, evaluateImprovement, FAILURE_CATEGORIES, FAILURE_STATUSES } from './failureTaxonomy.js';
+import { summarizeRoutes, recommendRoute, shouldEscalate, effectiveCost, DEFAULT_ROUTE_TIERS } from './costRouting.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -3815,6 +3816,49 @@ app.post('/api/failures/evaluate', (req, res) => {
   const { target, before, after } = req.body || {};
   ok(res, evaluateImprovement(target, before || {}, after || {}));
 });
+
+// ── Adaptive reasoning-effort & cost routing ─────────────────────────────────
+// Records measured route outcomes and computes routing recommendations from
+// them. Routing never fabricates a tier ordering from labels, and escalation is
+// evidence-driven — a passing route is not escalated on perceived complexity.
+function routingHistory() {
+  return allRows('SELECT task_class AS taskClass, route, cost, latency_ms AS latencyMs, retries, review_minutes AS reviewMinutes, verification_passed AS verificationPassed, accepted FROM routing_observations ORDER BY created_at DESC')
+    .map((r) => ({ ...r, verificationPassed: Boolean(r.verificationPassed), accepted: r.accepted === null ? null : Boolean(r.accepted) }));
+}
+
+app.post('/api/routing/observations', (req, res) => {
+  const taskClass = String(req.body?.taskClass ?? req.body?.task_class ?? '').trim();
+  const route = String(req.body?.route ?? '').trim();
+  if (!taskClass || !route) return fail(res, 400, 'A task class and route are required.');
+  const accepted = req.body?.accepted;
+  const id = db.prepare(`
+    INSERT INTO routing_observations (task_class, route, cost, latency_ms, retries, review_minutes, verification_passed, accepted)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    taskClass, route, Number(req.body?.cost) || 0,
+    req.body?.latencyMs ?? req.body?.latency_ms ?? null,
+    Math.max(0, Number(req.body?.retries) || 0),
+    Math.max(0, Number(req.body?.reviewMinutes ?? req.body?.review_minutes) || 0),
+    (req.body?.verificationPassed ?? req.body?.verification_passed) ? 1 : 0,
+    accepted === undefined || accepted === null ? null : (accepted ? 1 : 0)
+  ).lastInsertRowid;
+  ok(res, row('SELECT * FROM routing_observations WHERE id = ?', [id]));
+});
+
+app.get('/api/routing/summary', (_req, res) => {
+  const history = routingHistory();
+  ok(res, { tiers: DEFAULT_ROUTE_TIERS, routes: summarizeRoutes(history), observationCount: history.length });
+});
+
+app.get('/api/routing/recommend', (req, res) => {
+  const taskClass = String(req.query.taskClass || req.query.task_class || '').trim();
+  if (!taskClass) return fail(res, 400, 'A task class is required.');
+  const highRiskClasses = String(req.query.highRisk || '').split(',').map((s) => s.trim()).filter(Boolean);
+  ok(res, recommendRoute(taskClass, routingHistory(), { highRiskClasses }));
+});
+
+// Evidence-driven escalation decision for an in-flight route (pure compute).
+app.post('/api/routing/escalation', (req, res) => ok(res, shouldEscalate(req.body || {})));
 
 // ── Knowledge items: direct CRUD ─────────────────────────────────────────────
 // The planner was read-only over seed rows — every list rendered governance
