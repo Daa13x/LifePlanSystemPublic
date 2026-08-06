@@ -29,6 +29,7 @@ import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowled
 import { assessLocalAnswerability } from './localAnswerability.js';
 import { buildWorkOrder } from './workOrder.js';
 import { normalizeFeedback, summarizeThemes, FEEDBACK_SENTIMENTS } from './feedbackIntake.js';
+import { normalizeFailure, proposeRemediation, summarizeByCategory, evaluateImprovement, FAILURE_CATEGORIES, FAILURE_STATUSES } from './failureTaxonomy.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -3765,6 +3766,54 @@ app.patch('/api/feedback/:id', (req, res) => {
   if (!FEEDBACK_STATUSES.has(status)) return fail(res, 400, `Status must be one of: ${[...FEEDBACK_STATUSES].join(', ')}.`);
   db.prepare('UPDATE feedback SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, existing.id);
   ok(res, row('SELECT * FROM feedback WHERE id = ?', [existing.id]));
+});
+
+// ── Failure taxonomy & reviewed self-improvement ─────────────────────────────
+// Attributable failure records. Recording one changes nothing; only a confirmed
+// failure PROPOSES a reviewed regression/prompt candidate, and improvement is
+// claimed only after a before/after evaluation.
+app.get('/api/failures/categories', (_req, res) => ok(res, { categories: FAILURE_CATEGORIES, statuses: FAILURE_STATUSES }));
+
+app.post('/api/failures', (req, res) => {
+  let record;
+  try {
+    record = normalizeFailure(req.body);
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  const id = db.prepare(`
+    INSERT INTO failure_events (category, status, source, task_ref, run_id, inputs, evidence, correction, outcome)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(record.category, record.status, record.source, record.taskRef, record.runId, record.inputs, record.evidence, record.correction, record.outcome).lastInsertRowid;
+  ok(res, row('SELECT * FROM failure_events WHERE id = ?', [id]));
+});
+
+app.get('/api/failures', (req, res) => {
+  const includeResolved = req.query.all === '1';
+  const rows = includeResolved
+    ? allRows('SELECT * FROM failure_events ORDER BY created_at DESC')
+    : allRows("SELECT * FROM failure_events WHERE status IN ('observed','confirmed') ORDER BY created_at DESC");
+  const proposals = rows
+    .map((rowItem) => ({ id: rowItem.id, category: rowItem.category, ...proposeRemediation({ status: rowItem.status, category: rowItem.category }) }))
+    .filter((proposal) => proposal.propose);
+  ok(res, { failures: rows, categoryCounts: summarizeByCategory(rows), proposals });
+});
+
+app.patch('/api/failures/:id', (req, res) => {
+  const existing = row('SELECT * FROM failure_events WHERE id = ?', [req.params.id]);
+  if (!existing) return fail(res, 404, 'Failure not found.');
+  const status = String(req.body?.status || '').toLowerCase();
+  if (!FAILURE_STATUSES.includes(status)) return fail(res, 400, `Status must be one of: ${FAILURE_STATUSES.join(', ')}.`);
+  const regressionRef = req.body?.regressionRef !== undefined ? String(req.body.regressionRef || '').slice(0, 200) || null : existing.regression_ref;
+  db.prepare('UPDATE failure_events SET status = ?, regression_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, regressionRef, existing.id);
+  ok(res, { failure: row('SELECT * FROM failure_events WHERE id = ?', [existing.id]), remediation: proposeRemediation({ status, category: existing.category }) });
+});
+
+// Before/after evaluation: prove a refinement reduced the target failure class
+// without raising another. Pure compute over provided category→count maps.
+app.post('/api/failures/evaluate', (req, res) => {
+  const { target, before, after } = req.body || {};
+  ok(res, evaluateImprovement(target, before || {}, after || {}));
 });
 
 // ── Knowledge items: direct CRUD ─────────────────────────────────────────────

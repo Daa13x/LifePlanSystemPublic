@@ -427,6 +427,29 @@ export function migrate() {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback(status, theme_key);
+
+    -- Failure taxonomy: attributable failure records for reviewed self-improvement.
+    -- A single record never changes behaviour; only a confirmed failure may
+    -- PROPOSE a regression test or reviewed prompt/router candidate.
+    CREATE TABLE IF NOT EXISTS failure_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      category TEXT NOT NULL CHECK (category IN (
+        'repeated-question','wrong-question-type','missing-attachment','incorrect-attachment',
+        'stale-attachment','repeated-navigation','unsupported-answer','failed-test-or-contradiction',
+        'no-progress-loop','user-correction','unnecessary-cloud-escalation','missed-escalation')),
+      status TEXT NOT NULL DEFAULT 'observed' CHECK (status IN ('observed','confirmed','converted','dismissed')),
+      source TEXT NOT NULL DEFAULT 'manual',
+      task_ref TEXT,
+      run_id TEXT,
+      inputs TEXT,
+      evidence TEXT,
+      correction TEXT,
+      outcome TEXT,
+      regression_ref TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_failure_events_cat ON failure_events(category, status);
   `);
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
