@@ -12,7 +12,7 @@ import {
 assert.deepEqual(PRIMARY_NAVIGATION.map((entry) => entry.label), ['Chat', 'Knowledge', 'System', 'Workboard']);
 assert.deepEqual(SECTION_TABS.workboard.map((entry) => entry.label), ['Overview', 'Today', 'Projects', 'Cards', 'Roadmap', 'Review', 'Completed']);
 assert.deepEqual(SECTION_TABS.knowledge.map((entry) => entry.label), ['Memory', 'Candidates', 'Sources & Source Control', 'Rules', 'Calibration']);
-assert.deepEqual(SECTION_TABS.system.map((entry) => entry.label), ['Status', 'Setup & Recovery', 'Repository', 'Browser', 'Tools', 'Runs', 'Feedback']);
+assert.deepEqual(SECTION_TABS.system.map((entry) => entry.label), ['Status', 'Setup & Recovery', 'Repository', 'Browser', 'Tools', 'Runs', 'Feedback', 'Quality']);
 
 const expectedRoutes = [
   ['/planner', {}, { section: 'workboard', tab: 'overview' }],

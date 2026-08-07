@@ -29,7 +29,8 @@ export const SECTION_TABS = {
     { id: 'browser', label: 'Browser' },
     { id: 'tools', label: 'Tools' },
     { id: 'runs', label: 'Runs' },
-    { id: 'feedback', label: 'Feedback' }
+    { id: 'feedback', label: 'Feedback' },
+    { id: 'quality', label: 'Quality' }
   ]
 };
 

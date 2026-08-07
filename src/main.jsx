@@ -984,7 +984,80 @@ function System({ route, navigate, boot, planner, sessions, models, setNotice, r
       {route.tab === 'tools' && <Tooling setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'runs' && <SourceControl setNotice={setNotice} refreshSignal={refreshSignal} initialTab="coding" availableTabs={['coding']} />}
       {route.tab === 'feedback' && <FeedbackReview setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'quality' && <QualityReview setNotice={setNotice} refreshSignal={refreshSignal} />}
     </section>
+  );
+}
+
+// Unified review surface for the quality engines: the failure taxonomy (with
+// confirmation-gated remediation proposals) and the measured cost-routing
+// summary. Read + triage only — nothing here changes prompts, rules, or
+// behaviour automatically.
+function QualityReview({ setNotice, refreshSignal }) {
+  const [failures, setFailures] = useState(null);
+  const [routing, setRouting] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    try { setFailures(await api('/api/failures')); setRouting(await api('/api/routing/summary')); }
+    catch (err) { setNotice(err.message); }
+  };
+  useEffect(() => { load(); }, [refreshSignal]);
+  const triage = async (id, status) => {
+    setBusy(true);
+    try { await api(`/api/failures/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); await load(); }
+    catch (err) { setNotice(err.message); } finally { setBusy(false); }
+  };
+  if (!failures || !routing) return <Empty title="Loading quality signals" body="Gathering failures and routing evidence." />;
+  const proposals = failures.proposals || [];
+  return (
+    <div className="stacked-panels">
+      <div className="panel">
+        <div className="panel-heading"><div><h2>Failures</h2><p>Recorded failures for reviewed self-improvement. A single failure changes nothing; only a confirmed one proposes a reviewed candidate.</p></div><Pill tone="info">{failures.failures.length}</Pill></div>
+        {proposals.length > 0 && (
+          <div className="source-warning info" role="status">
+            <strong>Confirmed failures proposing reviewed follow-ups</strong>
+            <ul>{proposals.map((proposal) => <li key={proposal.id}>#{proposal.id} {proposal.category} → {proposal.kind}</li>)}</ul>
+          </div>
+        )}
+        {failures.failures.length ? (
+          <div className="table-list">
+            {failures.failures.map((item) => (
+              <div className="item-row" key={item.id}>
+                <div className="item-main">
+                  <div className="item-title">{item.category} <span className="muted">· {item.status}</span></div>
+                  {item.evidence && <div className="item-meta"><span>{item.evidence}</span></div>}
+                  <div className="item-meta"><span>{item.source ? `${item.source} · ` : ''}{item.task_ref ? `task ${item.task_ref} · ` : ''}{item.run_id ? `run ${item.run_id} · ` : ''}{item.created_at}</span></div>
+                </div>
+                <div className="button-row">
+                  {item.status === 'observed' && <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'confirmed')}>Confirm</button>}
+                  {item.status === 'confirmed' && <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'converted')}>Mark converted</button>}
+                  <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'dismissed')}>Dismiss</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : <Empty title="No open failures" body="Nothing recorded for review." />}
+      </div>
+
+      <div className="panel">
+        <div className="panel-heading"><div><h2>Routing evidence</h2><p>Measured route outcomes. Routing prefers the cheapest route meeting the acceptance bar; it never assumes a label equals a tier.</p></div><Pill tone="default">{routing.observationCount}</Pill></div>
+        {routing.routes.length ? (
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead><tr><th>Task class</th><th>Route</th><th>Attempts</th><th>Success rate</th><th>Avg effective cost</th></tr></thead>
+              <tbody>
+                {routing.routes.map((route) => (
+                  <tr key={`${route.taskClass}|${route.route}`}>
+                    <td>{route.taskClass || '—'}</td><td>{route.route}</td><td>{route.attempts}</td>
+                    <td>{Math.round(route.successRate * 100)}%</td><td>{route.avgEffectiveCost.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <Empty title="No routing evidence yet" body="Route outcomes appear here as they are recorded." />}
+      </div>
+    </div>
   );
 }
 
