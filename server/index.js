@@ -31,6 +31,7 @@ import { buildWorkOrder } from './workOrder.js';
 import { normalizeFeedback, summarizeThemes, FEEDBACK_SENTIMENTS } from './feedbackIntake.js';
 import { normalizeFailure, proposeRemediation, summarizeByCategory, evaluateImprovement, FAILURE_CATEGORIES, FAILURE_STATUSES } from './failureTaxonomy.js';
 import { summarizeRoutes, recommendRoute, shouldEscalate, effectiveCost, DEFAULT_ROUTE_TIERS } from './costRouting.js';
+import { evaluateUnattendedSend } from './unattendedLoopGuard.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -3859,6 +3860,19 @@ app.get('/api/routing/recommend', (req, res) => {
 
 // Evidence-driven escalation decision for an in-flight route (pure compute).
 app.post('/api/routing/escalation', (req, res) => ok(res, shouldEscalate(req.body || {})));
+
+// Read-only unattended-loop preparation gate. Given a work item, phase, proposed
+// question, attachment manifest, and attempt history, it returns whether the
+// send is READY plus transparent reasons. It only ever PROPOSES readiness — it
+// runs nothing, writes nothing, and sends nothing.
+app.post('/api/loop/evaluate', (req, res) => {
+  const { item, phase, question, manifest, available, attempts, limit } = req.body || {};
+  ok(res, evaluateUnattendedSend({
+    item: item || {}, phase, question: question || {},
+    manifest: manifest || [], available: available || [], attempts: attempts || [],
+    limit: limit ?? 3
+  }));
+});
 
 // ── Knowledge items: direct CRUD ─────────────────────────────────────────────
 // The planner was read-only over seed rows — every list rendered governance
