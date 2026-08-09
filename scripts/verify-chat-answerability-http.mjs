@@ -68,6 +68,7 @@ console.log('--- chat answerability HTTP verification ---');
   line(/import \{ assessLocalAnswerability \} from '\.\/localAnswerability\.js'/.test(server), 'the answerability engine is imported by the server');
   line(/function chatCloudPolicy\(\)[\s\S]*getSetting\('cloudEnabledProviders'/.test(server), 'the cloud policy gate reads cloudEnabledProviders');
   line(/const answerability = grounded\s*\?\s*assessLocalAnswerability\(retrieved, \{ question: userMessage, cloudPolicy: chatCloudPolicy\(\) \}\)/.test(server), 'the conversation prompt computes answerability local-first (only when grounded)');
+  line(/localSources: retrieved\.items\.map\(\(item\) => \(\{[^}]*sourceId: item\.canonicalId[^}]*sourceType: item\.sourceType/.test(server), 'the grounded model path preserves stable source IDs and source types');
   line(/localAnswerability: assistant\.answerability \|\| null/.test(server), 'the reply metadata carries the local-answerability decision');
 }
 

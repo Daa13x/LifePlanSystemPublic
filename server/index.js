@@ -1648,7 +1648,7 @@ async function buildConversationPrompt(sessionId, userMessage) {
   parts.push(`User: ${userMessage}`);
   return {
     prompt: parts.join('\n'),
-    localSources: retrieved.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, updatedAt: item.updatedAt, state: item.state, whySelected: item.whySelected, source: item.source, provenance: item.provenance })),
+    localSources: retrieved.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, sourceType: item.sourceType, updatedAt: item.updatedAt, state: item.state, whySelected: item.whySelected, source: item.source, provenance: item.provenance })),
     answerability
   };
 }
