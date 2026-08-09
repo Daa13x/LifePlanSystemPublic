@@ -39,7 +39,9 @@ console.log('--- chat behaviour verification ---');
     ['list everything blocked', 'blocked_query'],
     ['What date is it?', 'current_date'],
     ['What time is it?', 'current_time'],
-    ['Do you have live news today?', 'live_news']
+    ['Do you have live news today?', 'live_news'],
+    ['Where are my memories stored locally?', 'memory_storage'],
+    ['Where do you store my memory?', 'memory_storage']
   ];
   for (const [input, expected] of cases) {
     const got = classifyChatIntent(input);

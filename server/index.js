@@ -1663,6 +1663,19 @@ function markdownList(items) {
 
 async function answerDataQuery(intent) {
   const facts = lightweightGroundingFacts();
+  if (intent === 'memory_storage') {
+    const privateRepo = path.resolve(String(process.env.LIFE_PLANNER_PRIVATE_REPO || '').trim() || path.join(os.homedir(), 'Documents', 'LifePlanSystem'));
+    const safePath = (value) => String(value || '').replace(/[\r\n`]/g, '');
+    const content = [
+      'Your LifePlanSystem memory is stored locally in two governed places:',
+      '',
+      `- **Runtime state:** \`${safePath(dbPath)}\` (SQLite; Chat, reviewed Knowledge representations, memory candidates, revisions, and related app state).`,
+      `- **Reviewed source of truth:** \`${safePath(privateRepo)}\` (canonical private records read through the local allowlisted adapter).`,
+      '',
+      'Chat turns do not become approved memory automatically. They remain review candidates until you explicitly approve promotion.'
+    ].join('\n');
+    return { mode: 'memory storage (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'memory_storage' } };
+  }
   if (intent === 'current_date' || intent === 'current_time') {
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     const options = intent === 'current_date'

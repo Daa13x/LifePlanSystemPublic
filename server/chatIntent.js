@@ -16,6 +16,7 @@ export function classifyChatIntent(message) {
   if (/\bwhat(?:'s| is)?\s+(?:the )?(?:current )?date\b|\bwhat day is it\b|\btoday'?s date\b/.test(lower)) return 'current_date';
   if (/\bwhat(?:'s| is)?\s+(?:the )?(?:current )?time\b|\bwhat time is it\b/.test(lower)) return 'current_time';
   if (/\b(?:live|latest|today'?s)\s+news\b|\bdo you have live news\b/.test(lower)) return 'live_news';
+  if (/\bwhere (?:are|is) (?:my )?(?:memories|memory) stored(?: locally)?\b|\bwhere do you store (?:my )?(?:memories|memory)\b/.test(lower)) return 'memory_storage';
 
   // Active model.
   if (/\b(which|what)\s+model\b/.test(lower)

@@ -102,6 +102,17 @@ try {
   const health = (await api(HEALTH)).body.data;
   line(health.sensitive === true && health.escalation.suggested === false, 'a sensitive health question is never auto-suggested for cloud');
 
+  // Memory-storage provenance is runtime data, not a model guess. The answer
+  // must name the exact disposable paths supplied to this server and preserve
+  // the review-before-promotion boundary.
+  const session = (await api('/api/chat/sessions', { method: 'POST', json: { title: 'Memory storage fixture' } })).body.data;
+  const storageTurn = await api(`/api/chat/sessions/${session.id}/messages`, { method: 'POST', json: { content: 'Where are my memories stored locally?' } });
+  const storageAnswer = storageTurn.body.data.messages.find((message) => message.role === 'assistant');
+  const storageMetadata = JSON.parse(storageAnswer.metadata);
+  line(storageTurn.status === 200 && storageMetadata.runtime === 'memory storage (local data)' && storageMetadata.endpointType === 'local-data', 'memory-storage questions use deterministic local runtime data');
+  line(storageAnswer.content.includes(dbPath) && storageAnswer.content.includes(emptyPrivateRepo), 'the memory-storage answer names the exact active database and private-repository paths');
+  line(/review candidates[\s\S]*explicitly approve promotion/i.test(storageAnswer.content), 'the memory-storage answer preserves review-before-promotion governance');
+
   // The probe is READ-ONLY: it must not have created any cloud check.
   const checks = await api('/api/chat/sessions/1/cloud-checks');
   line(checks.status === 200 && Array.isArray(checks.body.data) && checks.body.data.length === 0, 'the read-only probe never created a cloud check or sent anything');
