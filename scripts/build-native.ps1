@@ -22,8 +22,14 @@ if (-not $DotNetPath -or -not (Test-Path -LiteralPath $DotNetPath)) {
 }
 
 $sdkVersion = (& $DotNetPath --version).Trim()
-if ($LASTEXITCODE -ne 0 -or $sdkVersion -notmatch '^9\.') {
-  throw "Native publishing requires a .NET 9 SDK; resolved '$DotNetPath' reported '$sdkVersion'."
+$sdkExit = $LASTEXITCODE
+# The native app targets net9.0-windows, which a .NET 9 OR NEWER SDK can build
+# (a newer SDK restores the net9.0 targeting/runtime packs from NuGet). CI
+# runners now ship .NET 10, so require major >= 9 rather than exactly 9.
+$sdkMajor = 0
+[void][int]::TryParse((($sdkVersion -split '[.\-]')[0]), [ref]$sdkMajor)
+if ($sdkExit -ne 0 -or $sdkMajor -lt 9) {
+  throw "Native publishing requires a .NET 9 or newer SDK; resolved '$DotNetPath' reported '$sdkVersion'."
 }
 
 Write-Host "Using .NET SDK $sdkVersion from $DotNetPath"

@@ -71,6 +71,15 @@ jobs:
         with:
           node-version: '24.15.0'
 
+      # The native host targets net9.0-windows. Runners now ship .NET 10, so
+      # install the net9.0 SDK explicitly; setup-dotnet sets DOTNET_ROOT, which
+      # scripts/build-native.ps1 resolves first, so the native build matches the
+      # local toolchain instead of failing the SDK version gate.
+      - name: Set up .NET 9 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
       - name: Verify maintainer-only attribution
         shell: pwsh
         run: >
