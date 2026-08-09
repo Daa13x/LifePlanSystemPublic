@@ -42,6 +42,22 @@ async function startServer(port) {
   }
   throw new Error(`Server did not become healthy.\n${output.join('')}`);
 }
+async function retryStart(attempts = 6) {
+  // The server binds a fixed port, and freePort() has an open->close->rebind
+  // window; under a busy CI runner that port can be taken, so the server exits
+  // early on EADDRINUSE. Retry on a fresh port before giving up.
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try { return await startServer(await freePort()); }
+    catch (error) {
+      lastError = error;
+      if (!/exited early|not become healthy/i.test(String(error && error.message))) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError;
+}
+
 async function stopServer(child) { if (child.exitCode === null) child.kill(); for (let i = 0; i < 40 && child.exitCode === null; i += 1) await new Promise((r) => setTimeout(r, 50)); }
 
 let base = '';
@@ -55,7 +71,7 @@ async function api(route, { method = 'GET', json, csrf = 'valid' } = {}) {
 }
 
 console.log('--- failures HTTP verification ---');
-const server = await startServer(await freePort());
+const server = await retryStart();
 base = server.base;
 try {
   token = (await (await fetch(`${base}/api/csrf-token`)).json()).data.token;
