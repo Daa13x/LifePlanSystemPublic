@@ -146,8 +146,9 @@ try {
     await page.goto(`${base}/#chat/${sessionId}`, { waitUntil: 'networkidle' });
     await page.getByText('Tell me something about myself.').last().waitFor({ timeout: 15000 });
     evidence.reopened = true;
+    await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
     await page.getByRole('button', { name: 'System', exact: true }).click();
-    await page.getByRole('tab', { name: 'Setup & Recovery' }).click();
+    await page.getByRole('button', { name: 'Setup & Recovery', exact: true }).click();
     await page.getByRole('heading', { name: 'Setup & Recovery', exact: true }).waitFor({ timeout: 15000 });
     evidence.setupRecoveryLoaded = true;
 
