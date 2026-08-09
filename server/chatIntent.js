@@ -13,6 +13,10 @@ export function classifyChatIntent(message) {
   const asksList = /\b(list|show|display|name|give me|what are|which are|tell me|how many)\b/.test(lower);
   const asksWhat = /\b(what|which|show|display|tell me|list|how many|any)\b/.test(lower);
 
+  if (/\bwhat(?:'s| is)?\s+(?:the )?(?:current )?date\b|\bwhat day is it\b|\btoday'?s date\b/.test(lower)) return 'current_date';
+  if (/\bwhat(?:'s| is)?\s+(?:the )?(?:current )?time\b|\bwhat time is it\b/.test(lower)) return 'current_time';
+  if (/\b(?:live|latest|today'?s)\s+news\b|\bdo you have live news\b/.test(lower)) return 'live_news';
+
   // Active model.
   if (/\b(which|what)\s+model\b/.test(lower)
     || /\bmodel\s+(is\s+)?(active|running|loaded|assigned|configured|in use)\b/.test(lower)

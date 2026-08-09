@@ -29,6 +29,16 @@ const MAX_REPOSITORY_FILE_CHARS = 8000;
 const PRIVATE_REPOSITORY_EXTENSIONS = new Set(['.md', '.mdx', '.txt', '.js', '.jsx', '.ts', '.tsx', '.json', '.yml', '.yaml']);
 const PRIVATE_REPOSITORY_SKIP = new Set(['.git', 'node_modules', 'dist', 'build', 'release', 'data', 'coverage', '.cache']);
 const PRIVATE_REPOSITORY_SECRET = /(?:^|[._-])(?:env|secret|credential|token|password|private|key)(?:[._-]|$)|\.(?:pem|pfx|p12|key)$/i;
+// Explicit, read-only registry of canonical promoted records. Inbox, pending,
+// and sensitive-context files remain ineligible even though they share a tree.
+const PRIVATE_CANONICAL_RECORDS = Object.freeze([
+  { path: 'source_of_truth/profile.md', sourceType: 'reviewed_personal_memory' },
+  { path: 'source_of_truth/career.md', sourceType: 'work_career_record' },
+  { path: 'source_of_truth/health_accessibility.md', sourceType: 'health_record' },
+  { path: 'source_of_truth/current_state.md', sourceType: 'reviewed_personal_memory' },
+  { path: 'source_of_truth/current_location_2026-06-27.md', sourceType: 'reviewed_personal_memory' },
+  { path: 'source_of_truth/career_direction_2026-06-27.md', sourceType: 'work_career_record' }
+]);
 
 // This taxonomy is deliberately carried on every registry entry.  Retrieval
 // must make decisions on this stable metadata, never on the position or name
@@ -59,7 +69,7 @@ export function classifyPersonalIntent(message) {
 function sourceTypeForRecord(item) {
   const type = String(item.type || '').toLowerCase();
   if (['archived', 'deprecated', 'superseded'].includes(item.status)) return SOURCE_TYPES.ARCHIVED;
-  if (/source document|attachment|file|reference|research|todo|code/.test(type)) return SOURCE_TYPES.REFERENCE;
+  if (/\b(?:source document|document|attachment|file|reference|research|todo|code)\b/.test(type)) return SOURCE_TYPES.REFERENCE;
   if (/health|medical|accessib|diagnos/.test(type)) return SOURCE_TYPES.HEALTH;
   if (/career|work|employment|education|skill|cv|resume/.test(type)) return SOURCE_TYPES.CAREER;
   if (/finance|money|benefit|debt/.test(type)) return SOURCE_TYPES.FINANCE;
@@ -77,7 +87,7 @@ function sourceTypeForFile(file) {
   // only when it self-identifies a factual record, not when it merely discusses
   // a topic (e.g. an NHS workflow, a TODO, or documentation mentioning health).
   if (/\b(?:source[_ -]?type|record[_ -]?type)\s*[:=]\s*health[_ -]?record\b|\b(?:confirmed diagnosis|my diagnosis|i was diagnosed)\s*[:=-]/.test(text)) return SOURCE_TYPES.HEALTH;
-  if (/\b(?:source[_ -]?type|record[_ -]?type)\s*[:=]\s*(?:work[_ -]?career[_ -]?record|career)\b|\b(?:my work history|career preference|job preference)\s*[:=-]/.test(text)) return SOURCE_TYPES.CAREER;
+  if (/\b(?:source[_ -]?type|record[_ -]?type)\s*[:=]\s*(?:work[_ -]?career[_ -]?record|career)\b|\b(?:my work history|career preference|job preference|career profile)\s*[:=-]?/.test(text)) return SOURCE_TYPES.CAREER;
   return SOURCE_TYPES.REFERENCE;
 }
 
@@ -148,6 +158,22 @@ function safePrivateRepositoryKnowledge(repoRoot = '') {
   return files;
 }
 
+function safeCanonicalPrivateRecords() {
+  const configured = String(process.env.LIFE_PLANNER_PRIVATE_REPO || '').trim();
+  const root = configured ? path.resolve(configured) : path.join(os.homedir(), 'Documents', 'LifePlanSystem');
+  if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return [];
+  return PRIVATE_CANONICAL_RECORDS.flatMap((definition) => {
+    const absolute = path.resolve(root, definition.path);
+    if (!absolute.startsWith(`${root}${path.sep}`) || !fs.existsSync(absolute)) return [];
+    try {
+      const stat = fs.statSync(absolute);
+      if (!stat.isFile() || stat.size > MAX_REPOSITORY_FILE_CHARS * 8) return [];
+      const text = fs.readFileSync(absolute, 'utf8').trim();
+      return text ? [{ ...definition, text, updatedAt: stat.mtime.toISOString() }] : [];
+    } catch { return []; }
+  });
+}
+
 function words(value) {
   const raw = String(value || '').toLowerCase().match(/[a-z0-9]{3,}/g)?.filter((word) => !STOP.has(word)) || [];
   return [...new Set(raw.flatMap((word) => word.length > 4 && word.endsWith('s') ? [word, word.slice(0, -1)] : [word]))];
@@ -156,8 +182,16 @@ function words(value) {
 function dateValue(value) { const time = Date.parse(value || ''); return Number.isFinite(time) ? time : 0; }
 function snippet(value, limit = 700) { const text = String(value || '').trim(); return text.length > limit ? `${text.slice(0, limit)}…` : text; }
 
+function evidenceExcerpt(record, queryWords, limit) {
+  const text = String(record.text || '').trim();
+  const blocks = text.split(/\r?\n\s*\r?\n/).map((block) => block.trim()).filter(Boolean);
+  const factBlocks = blocks.filter((block) => /(?:FACT-\d+|^- Fact:|^##\s+(?:Confirmed|Education|Work history|Target roles|Accessibility|Current))/im.test(block));
+  const matched = factBlocks.filter((block) => queryWords.some((word) => block.toLowerCase().includes(word)));
+  return snippet((matched.length ? matched : factBlocks.length ? factBlocks : blocks).slice(0, 3).join('\n\n') || text, limit);
+}
+
 function permitsOverviewFallback(message) {
-  return /what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what am i (?:currently )?working on/i.test(String(message || ''));
+  return /(?:do you know who i am|who am i|what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?you know about me|tell me (?:something )?about (?:myself|me)|tell me about myself|what information can you access about me|what information do you have about me|are you going to.*(?:tell|say).*(?:about myself|about me)|what am i (?:currently )?working on)/i.test(String(message || ''));
 }
 
 export function sourceRegistry(db, { includeHistory = false, includeCandidates = false, repoRoot = '' } = {}) {
@@ -210,6 +244,13 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
       source: 'local private repository', provenance: `Private repository document: ${file.relative}`, record: { path: file.relative }, sourceType: sourceTypeForFile(file)
     });
   }
+  for (const file of safeCanonicalPrivateRecords()) {
+    records.push({
+      canonicalId: `private-canonical:${file.path.replaceAll('\\', '/')}`, category: 'canonical personal record', title: path.basename(file.path), text: file.text,
+      timestamp: file.updatedAt, updatedAt: file.updatedAt, sensitivity: file.sourceType === SOURCE_TYPES.HEALTH ? 'sensitive' : 'personal', chatReadable: true, chatProposable: false, state: 'approved',
+      source: 'private canonical source of truth', provenance: `Canonical private record: ${file.path}`, record: { path: file.path }, sourceType: file.sourceType
+    });
+  }
   return records;
 }
 
@@ -222,7 +263,7 @@ export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', 
   return {
     resolvedDatabasePath: dbPath || null,
     resolvedUserDataPath: userDataPath || null,
-    sourceAdapters: ['knowledge_items', 'projects', 'chat_messages:user', 'bundled_github_knowledge', 'safe_private_repository_files'],
+    sourceAdapters: ['knowledge_items', 'projects', 'chat_messages:user', 'bundled_github_knowledge', 'safe_private_repository_files', 'allowlisted_private_canonical_records'],
     unavailableCategories: ['attachments (paths only; no persisted extracted text)', 'settings (runtime configuration and secrets excluded)', 'roadmap_items (product implementation roadmap, not confirmed personal context)', 'protected, secret, binary, and oversized private repository files'],
     counts: {
       activeKnowledge: count("SELECT COUNT(*) count FROM knowledge_items WHERE status IN ('active','stable','stale','blocked')"),
@@ -235,6 +276,7 @@ export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', 
       archivedOrSupersededKnowledgeExcluded: count("SELECT COUNT(*) count FROM knowledge_items WHERE status IN ('archived','deprecated','superseded')"),
       indexedFileRecords: count("SELECT COUNT(*) count FROM knowledge_items WHERE lower(type) IN ('file','document','attachment')"),
       privateRepositoryFiles: registry.filter((record) => record.source === 'local private repository').length,
+      privateCanonicalRecords: registry.filter((record) => record.source === 'private canonical source of truth').length,
       bundledRepositoryFiles: registry.filter((record) => record.source === 'bundled GitHub knowledge base').length
     },
     retrievableByCategory,
@@ -269,7 +311,10 @@ function score(record, queryWords, rawQuery, now = Date.now()) {
   // public app documentation that happens to share generic words such as
   // "knowledge" or "work". Private repository files are personal too.
   const personalPriority = broad
-    ? (record.category !== 'repository knowledge' ? 30 : record.source === 'local private repository' ? 6 : -8)
+    ? (record.source === 'private canonical source of truth' ? 60
+      : ['profile', 'preference'].includes(String(record.category || '').toLowerCase()) ? 45
+      : record.category !== 'repository knowledge' ? 30
+      : record.source === 'local private repository' ? 6 : -8)
     : 0;
   // Deterministic hybrid fusion: lexical match, a title-name relevance bonus,
   // and a compact semantic intent boost.  Metadata eligibility happens before
@@ -330,7 +375,7 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
   for (const record of ranked) {
     if (items.length >= (options.limit || MAX_ITEMS) || remaining < 100) break;
     if (items.some((item) => item.title === record.title || item.body === snippet(record.text, 280))) { rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'duplicate fact' }); continue; }
-    const body = snippet(record.text, Math.min(280, remaining));
+    const body = evidenceExcerpt(record, scoringWords, Math.min(420, remaining));
     remaining -= body.length;
     items.push({ ...record, body, whySelected: scoringWords.filter((word) => `${record.title} ${record.text}`.toLowerCase().includes(word)).join(', ') || 'requested personal overview' });
   }
@@ -338,7 +383,7 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
 }
 
 export function isLocalKnowledgeQuestion(message) {
-  return /what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?about (?:myself|me)|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i (?:currently )?working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
+  return /do you know who i am|who am i|what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?you know about me|tell me (?:something )?about (?:myself|me)|tell me about myself|what information (?:can you access|do you have) about me|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i (?:currently )?working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
 }
 
 // Questions asking for a recommendation about the user need the same local

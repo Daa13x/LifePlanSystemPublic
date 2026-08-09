@@ -36,7 +36,10 @@ console.log('--- chat behaviour verification ---');
     ['Which model is active?', 'model_query'],
     ['what model is loaded right now', 'model_query'],
     ['What is currently blocked?', 'blocked_query'],
-    ['list everything blocked', 'blocked_query']
+    ['list everything blocked', 'blocked_query'],
+    ['What date is it?', 'current_date'],
+    ['What time is it?', 'current_time'],
+    ['Do you have live news today?', 'live_news']
   ];
   for (const [input, expected] of cases) {
     const got = classifyChatIntent(input);

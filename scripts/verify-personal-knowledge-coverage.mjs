@@ -61,7 +61,7 @@ try {
   assert.match(pending.content, /Pending preference/);
   assert.match(pending.content, /pending/i);
   const noResult = answerLocalKnowledgeQuestion(db, 'What did I say about unfindable zephyr-lattice?');
-  assert.match(noResult.content, /searched the active LPS records/i);
+  assert.match(noResult.content, /searched the relevant saved local records/i);
   assert.doesNotMatch(noResult.content, /do not have access/i);
   const disabled = retrieveLocalKnowledge(db, 'Coverage preference', { disabledCategories: ['preference'] });
   assert.ok(!disabled.items.some((item) => item.category === 'preference'), 'disabled category cannot leak records');

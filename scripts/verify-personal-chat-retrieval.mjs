@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { classifyPersonalIntent, retrieveLocalKnowledge } from '../server/localKnowledge.js';
+import { classifyPersonalIntent, isLocalKnowledgeQuestion, retrieveLocalKnowledge } from '../server/localKnowledge.js';
 
 const db = new DatabaseSync(':memory:');
+const priorPrivateRepository = process.env.LIFE_PLANNER_PRIVATE_REPO;
+const emptyPrivateRepository = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-personal-chat-retrieval-'));
+process.env.LIFE_PLANNER_PRIVATE_REPO = emptyPrivateRepository;
 db.exec(`
   CREATE TABLE knowledge_items (id INTEGER PRIMARY KEY, type TEXT, title TEXT, body TEXT, next_action TEXT, created_at TEXT, updated_at TEXT, last_reviewed TEXT, source TEXT, evidence TEXT, status TEXT);
   CREATE TABLE memory_candidates (id INTEGER PRIMARY KEY, type TEXT, title TEXT, body TEXT, created_at TEXT, reviewed_at TEXT, source TEXT, evidence TEXT, source_message_id INTEGER, status TEXT);
@@ -20,10 +26,16 @@ insert.run('health record', 'Old diagnosis', 'Confirmed diagnosis: obsolete cond
 assert.equal(classifyPersonalIntent('hello?'), 'greeting');
 assert.equal(classifyPersonalIntent('What health condition do I have?'), 'personal_health');
 assert.equal(classifyPersonalIntent('What job should I do?'), 'career_work_education');
+assert.equal(isLocalKnowledgeQuestion('Do you know who I am?'), true);
+assert.equal(isLocalKnowledgeQuestion('Tell me something you know about me.'), true);
 const health = retrieveLocalKnowledge(db, 'What health condition do I have?');
 assert.deepEqual(health.items.map((item) => item.title), ['Confirmed diagnosis']);
 assert.ok(health.rejected.some((entry) => entry.sourceId === 'knowledge:2' && /eligibility/.test(entry.reason)));
 const career = retrieveLocalKnowledge(db, 'What job should I do?');
 assert.ok(career.items.some((item) => item.title === 'Work history'));
 assert.equal(retrieveLocalKnowledge(db, 'hello?').items.length, 0);
+db.close();
+if (priorPrivateRepository === undefined) delete process.env.LIFE_PLANNER_PRIVATE_REPO;
+else process.env.LIFE_PLANNER_PRIVATE_REPO = priorPrivateRepository;
+fs.rmSync(emptyPrivateRepository, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 });
 console.log('Personal chat retrieval taxonomy, rejection, and greeting fixtures passed.');

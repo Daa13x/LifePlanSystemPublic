@@ -1663,6 +1663,17 @@ function markdownList(items) {
 
 async function answerDataQuery(intent) {
   const facts = lightweightGroundingFacts();
+  if (intent === 'current_date' || intent === 'current_time') {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const options = intent === 'current_date'
+      ? { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone }
+      : { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone, hour12: false };
+    const value = new Intl.DateTimeFormat('en-GB', options).format(new Date());
+    return { mode: 'deterministic runtime', content: intent === 'current_date' ? `Today is **${value}** (${timeZone}).` : `The local time is **${value}** (${timeZone}).`, diagnostics: { endpointType: 'deterministic-runtime', routingReason: intent, timeZone } };
+  }
+  if (intent === 'live_news') {
+    return { mode: 'deterministic runtime', content: 'I do not have an approved live-news connection in this local session, so I cannot verify today\'s news.', diagnostics: { endpointType: 'deterministic-runtime', routingReason: 'live_news', liveNewsAvailable: false } };
+  }
   if (intent === 'workboard_list') {
     const content = facts.projectNames.length
       ? `Your active Workboard projects are:\n\n${markdownList(facts.projectNames)}`
@@ -1723,7 +1734,31 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
     if (typeof onToken === 'function' && answer.content) onToken(answer.content);
     return { mode: 'local knowledge', content: answer.content, localSources: answer.sources, diagnostics: { endpointType: 'local-knowledge', sourceCount: answer.sources.length, retrieval: answer.diagnostics } };
   }
-  return runPlannerAssistant(sessionId, userMessage, signal, onToken, onStatus);
+  try {
+    const generated = await runPlannerAssistant(sessionId, userMessage, signal, onToken, onStatus);
+    // A model may ignore instructions despite receiving facts.  Its output is
+    // never allowed to contradict successful local retrieval with a false
+    // access disclaimer; use the deterministic evidence answer in that case.
+    if (generated.localSources?.length && /\b(?:i (?:do not|don't|cannot|can't) (?:have|access)|no access to (?:your )?(?:personal )?(?:records|information)|cannot see (?:your )?(?:personal )?(?:records|information))\b/i.test(generated.content || '')) {
+      const fallback = answerLocalKnowledgeQuestion(db, userMessage, { repoRoot: root });
+      if (fallback.sources.length) {
+        return { mode: 'local knowledge guard', content: fallback.content, localSources: fallback.sources, answerability: generated.answerability, diagnostics: { ...generated.diagnostics, endpointType: 'grounded-response-guard', guardReason: 'model contradicted supplied local evidence' } };
+      }
+    }
+    return generated;
+  } catch (error) {
+    // A local model outage must not discard evidence already retrieved for a
+    // personal/recommendation question.  Return the same bounded, governed
+    // evidence answer rather than falsely claiming the records are unavailable.
+    if (shouldGroundConversationInLocalKnowledge(userMessage) && !signal?.aborted) {
+      const fallback = answerLocalKnowledgeQuestion(db, userMessage, { repoRoot: root });
+      if (fallback.sources.length) {
+        if (typeof onToken === 'function' && fallback.content) onToken(fallback.content);
+        return { mode: 'local knowledge fallback', content: fallback.content, localSources: fallback.sources, answerability: assessLocalAnswerability(fallback.diagnostics, { question: userMessage, cloudPolicy: chatCloudPolicy() }), diagnostics: { endpointType: 'local-knowledge-fallback', fallbackReason: error.message, sourceCount: fallback.sources.length } };
+      }
+    }
+    throw error;
+  }
 }
 
 async function localModelStatus() {
