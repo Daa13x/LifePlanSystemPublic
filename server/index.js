@@ -3211,7 +3211,7 @@ app.get('/api/chat/sessions/:id/connection', async (req, res) => {
   const model = await localModelStatus();
   const contextRecords = allRows('SELECT id, kind, ref_id, label FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
   const files = allRows('SELECT id, path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
-  const available = sourceRegistry(db, { repoRoot: root });
+  const available = sourceRegistry(db, { repoRoot: root }).filter((record) => record.chatReadable && record.evidenceEligible !== false);
   const availableByCategory = Object.fromEntries([...new Set(available.map((record) => record.category))].map((category) => [category, available.filter((record) => record.category === category).length]));
   ok(res, {
     conversationId: sessionId,

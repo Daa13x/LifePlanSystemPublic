@@ -44,6 +44,16 @@ try {
   assert.match(assistant.content, /Tea preference/);
   const metadata = JSON.parse(assistant.metadata);
   assert.ok(metadata.localSources?.length, 'local retrieval carries source provenance');
+  const identityQuestionIds = [send.body.data.messages.find((message) => message.role === 'user').id];
+  for (const content of ['Do you know who I am?', 'Tell me something you know about me.', 'What information can you access about me?']) {
+    const turn = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content });
+    identityQuestionIds.push(turn.body.data.messages.find((message) => message.role === 'user').id);
+  }
+  const persistedIdentityMessages = (await api(`/api/chat/sessions/${session.id}/messages`)).body.data;
+  const persistedIdentityAnswer = [...persistedIdentityMessages].reverse().find((message) => message.role === 'assistant');
+  const persistedIdentitySources = JSON.parse(persistedIdentityAnswer.metadata || '{}').localSources || [];
+  assert.ok(persistedIdentitySources.some((source) => String(source.sourceId || '').startsWith('knowledge:')), 'identity overview remains grounded in approved Knowledge');
+  for (const id of identityQuestionIds) assert.ok(!persistedIdentitySources.some((source) => source.sourceId === `chat:${id}`), `persisted identity answer excludes question chat:${id}`);
   const candidateMessage = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'when i say my brain i mean the knowledge system in LPS' });
   const candidateId = candidateMessage.body.data.candidateId;
   assert.ok(candidateId, 'direct terminology creates a review candidate');

@@ -35,8 +35,8 @@ try {
   insertCandidate.run('preference', 'Rejected preference', 'This must never become a fact.', 'denied');
   insertProject.run('Coverage project', 'active', 'Review current project information.');
   const sessionId = db.prepare(`INSERT INTO chat_sessions (title) VALUES ('Saved coverage chat')`).run().lastInsertRowid;
-  db.prepare(`INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', ?), (?, 'assistant', ?)`)
-    .run(sessionId, 'The user previously said the coverage topic matters.', sessionId, 'Assistant-only claim must not be a personal fact.');
+  db.prepare(`INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', ?), (?, 'user', ?), (?, 'assistant', ?)`)
+    .run(sessionId, 'The user previously said the coverage topic matters.', sessionId, 'What does the coverage topic mean?', sessionId, 'Assistant-only claim must not be a personal fact.');
 
   const records = sourceRegistry(db);
   const ids = new Set(records.map((record) => record.canonicalId));
@@ -45,6 +45,7 @@ try {
   assert.ok(!records.some((record) => /Pending preference|Rejected preference|Deleted profile|Assistant-only claim/.test(record.text)), 'pending, rejected, archived and assistant content are excluded');
   assert.ok(records.some((record) => record.category === 'project'), 'current projects are registered');
   assert.ok(records.some((record) => record.category === 'conversation history'), 'saved user Chat is registered');
+  assert.equal(records.filter((record) => record.category === 'conversation history' && record.evidenceEligible === false).length, 1, 'saved user questions are registered but evidence-ineligible');
   assert.ok(records.some((record) => record.category === 'document'), 'persisted extracted document Knowledge is registered');
   assert.equal(new Set(records.map((record) => record.canonicalId)).size, records.length, 'registry has no duplicate source IDs');
 
@@ -86,7 +87,12 @@ try {
   assert.equal(diagnostic.resolvedUserDataPath, path.dirname(dbPath));
   assert.ok(diagnostic.counts.activeKnowledge >= 6 && diagnostic.counts.pendingCandidates === 1);
   assert.equal(diagnostic.counts.privateRepositoryFiles, 1, 'private repository coverage is observable without exposing file contents');
+  assert.equal(diagnostic.counts.eligibleUserChatMessages, 1);
+  assert.equal(diagnostic.counts.indexedUserQuestionsOrRequestsExcludedFromEvidence, 1);
   assert.equal(diagnostic.counts.assistantChatMessagesExcluded, 1);
+  assert.equal(diagnostic.retrievableByCategory['conversation history'], 1, 'coverage counts only declarative Chat history as retrievable');
+  const diagnosticRecords = sourceRegistry(db, { repoRoot: repositoryRoot });
+  assert.equal(diagnostic.totalRetrievable, diagnosticRecords.filter((record) => record.chatReadable && record.evidenceEligible !== false).length);
   assert.ok(diagnostic.sourceAdapters.includes('knowledge_items'));
   assert.ok(diagnostic.sourceAdapters.includes('bundled_github_knowledge'));
   assert.ok(diagnostic.unavailableCategories.some((category) => category.startsWith('settings')));

@@ -179,6 +179,34 @@ function words(value) {
   return [...new Set(raw.flatMap((word) => word.length > 4 && word.endsWith('s') ? [word, word.slice(0, -1)] : [word]))];
 }
 
+function isUserQuestionOrRequestTurn(value) {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  if (/[?？]/.test(text)) return true;
+  if (/^(?:please|kindly)\b/i.test(text)) return true;
+  if (/^(?:who|what|where|when|why|how|which|whose|whom)\b/i.test(text)) {
+    // Preserve declarative wh-clauses such as "What I need is predictable
+    // work" and "When I say X, I mean Y", but not unpunctuated request
+    // fragments such as "What I should do next".
+    const declarativeSubject = text.match(/^(?:who|what|where|when|why|how|which|whose|whom)\s+(?:i|we|my|our)\b(.*)$/i);
+    if (!declarativeSubject) return true;
+    return !(/[:：]/.test(declarativeSubject[1]) || /\b(?:is|are|was|were|means?|matters?|affects?|depends?|helps?|works?)\b/i.test(declarativeSubject[1]));
+  }
+  return /^(?:do|does|did|can|could|would|should|will|is|are|am|was|were|have|has|had|may|might)\b/i.test(text)
+    || /^(?:tell|show|give|remind)\s+(?:me|us|my|our|the|this|that|these|those|it|a|an|what|which|whether|how|advice|feedback|information|info|details?|examples?|options?)\b/i.test(text)
+    || /^(?:recommend|suggest|advise|explain|describe|summari[sz]e)\b/i.test(text)
+    || /^(?:help|find|use|open|create|run|add|remove|delete|update|change|set|make|write|read|list|review|check)\s+(?:me|us|my|our|the|this|that|these|those|it|a|an|what|which|whether|how)\b/i.test(text)
+    || /^(?:any\s+)?(?:advice|feedback|thoughts?|ideas?|recommendations?|suggestions?)\s+(?:on|about|for|regarding)\b/i.test(text)
+    || /^(?:i|we)\s+(?:want|need)\s+you\s+to\b/i.test(text)
+    || /^(?:i|we)(?:['’]d|\s+would)\s+like\s+you\s+to\b/i.test(text)
+    || /^(?:i|we)\s+(?:want|need)\s+(?:some\s+)?(?:help|advice|feedback|ideas?|recommendations?|suggestions?)\b/i.test(text)
+    || /^(?:i|we)(?:['’]d|\s+would)\s+like\s+(?:some\s+)?(?:help|advice|feedback|ideas?|recommendations?|suggestions?)\b/i.test(text)
+    || /^(?:i|we)\s+(?:want|need|would\s+like)\s+(?:to\s+)?(?:know|ask|understand|find out)\b/i.test(text)
+    || /^(?:i|we)['’]d\s+like\s+(?:to\s+)?(?:know|ask|understand|find out)\b/i.test(text)
+    || /^(?:i|we)(?:'m| am|'re| are)\s+wondering\b/i.test(text)
+    || /^let(?:'|’)s\b/i.test(text);
+}
+
 function dateValue(value) { const time = Date.parse(value || ''); return Number.isFinite(time) ? time : 0; }
 function snippet(value, limit = 700) { const text = String(value || '').trim(); return text.length > limit ? `${text.slice(0, limit)}…` : text; }
 
@@ -227,8 +255,10 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
     FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id
     WHERE s.deleted = 0 AND m.role='user' ORDER BY m.created_at DESC LIMIT 200`).all()) {
     if (message.cloud_egress_blocked || SENSITIVE_CHAT_HISTORY.test(String(message.content || ''))) continue;
+    const evidenceEligible = !isUserQuestionOrRequestTurn(message.content);
     records.push({ canonicalId: `chat:${message.id}`, category: 'conversation history', title: message.session_title || 'Chat', text: message.content,
-      timestamp: message.created_at, updatedAt: message.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: true, state: 'historical', source: 'saved Chat', provenance: `Conversation: ${message.session_title || 'Chat'}`, record: message, sourceType: SOURCE_TYPES.TIMELINE });
+      timestamp: message.created_at, updatedAt: message.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: evidenceEligible, evidenceEligible,
+      state: 'historical', source: 'saved Chat', provenance: `Conversation: ${message.session_title || 'Chat'}`, record: message, sourceType: SOURCE_TYPES.TIMELINE });
   }
   for (const file of safeRepositoryKnowledge(repoRoot)) {
     records.push({
@@ -257,9 +287,10 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
 export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', repoRoot = '' } = {}) {
   const count = (sql, params = []) => Number(db.prepare(sql).get(...params)?.count || 0);
   const registry = sourceRegistry(db, { repoRoot });
-  const retrievableByCategory = Object.fromEntries([...new Set(registry.map((record) => record.category))]
+  const retrievableRegistry = registry.filter((record) => record.chatReadable && record.evidenceEligible !== false);
+  const retrievableByCategory = Object.fromEntries([...new Set(retrievableRegistry.map((record) => record.category))]
     .sort()
-    .map((category) => [category, registry.filter((record) => record.category === category).length]));
+    .map((category) => [category, retrievableRegistry.filter((record) => record.category === category).length]));
   return {
     resolvedDatabasePath: dbPath || null,
     resolvedUserDataPath: userDataPath || null,
@@ -272,6 +303,8 @@ export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', 
       rejectedCandidates: count("SELECT COUNT(*) count FROM memory_candidates WHERE status IN ('denied','rejected')"),
       activeProjects: count("SELECT COUNT(*) count FROM projects WHERE status NOT IN ('done','completed','archived')"),
       userChatMessages: count("SELECT COUNT(*) count FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id WHERE s.deleted=0 AND m.role='user'"),
+      eligibleUserChatMessages: retrievableRegistry.filter((record) => record.category === 'conversation history').length,
+      indexedUserQuestionsOrRequestsExcludedFromEvidence: registry.filter((record) => record.category === 'conversation history' && record.evidenceEligible === false).length,
       assistantChatMessagesExcluded: count("SELECT COUNT(*) count FROM chat_messages WHERE role='assistant'"),
       archivedOrSupersededKnowledgeExcluded: count("SELECT COUNT(*) count FROM knowledge_items WHERE status IN ('archived','deprecated','superseded')"),
       indexedFileRecords: count("SELECT COUNT(*) count FROM knowledge_items WHERE lower(type) IN ('file','document','attachment')"),
@@ -280,7 +313,7 @@ export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', 
       bundledRepositoryFiles: registry.filter((record) => record.source === 'bundled GitHub knowledge base').length
     },
     retrievableByCategory,
-    totalRetrievable: registry.length,
+    totalRetrievable: retrievableRegistry.length,
     refreshedAt: new Date().toISOString()
   };
 }
@@ -328,10 +361,21 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
   const queryWords = words(query);
   const disabled = new Set(options.disabledCategories || []);
   const exactQuery = String(query || '').trim().toLowerCase();
-  const rows = sourceRegistry(db, options).filter((record) => record.chatReadable
-    && !disabled.has(record.category)
-    // The just-saved user prompt must not be recycled as evidence for itself.
-    && !(record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery));
+  const rejected = [];
+  const rows = sourceRegistry(db, options).filter((record) => {
+    if (!record.chatReadable || disabled.has(record.category)) return false;
+    if (record.evidenceEligible === false) {
+      rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'user question/request turn is not evidence' });
+      return false;
+    }
+    // Defense in depth for a just-saved declarative prompt: the current user
+    // turn must never be recycled as evidence for itself.
+    if (record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery) {
+      rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'current user turn is not evidence for itself' });
+      return false;
+    }
+    return true;
+  });
   const intent = classifyPersonalIntent(query);
   const broadPersonalRequest = shouldGroundConversationInLocalKnowledge(query);
   const repositoryRequest = /\b(?:github|repository|repo|knowledge base|documentation)\b/i.test(String(query || ''));
@@ -342,7 +386,6 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
   const topicWords = repositoryRequest ? queryWords.filter((word) => !REPOSITORY_META_WORDS.has(word)) : queryWords;
   const scoringWords = topicWords.length ? topicWords : queryWords;
   const allowed = new Set(allowedSourceTypes(intent));
-  const rejected = [];
   // Do not crowd a personal answer with source-code and product documents when
   // any eligible personal record exists. Public documentation remains a useful
   // fallback for repository questions or an otherwise empty personal profile.
