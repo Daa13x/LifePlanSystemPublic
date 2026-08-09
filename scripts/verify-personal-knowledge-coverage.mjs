@@ -51,6 +51,13 @@ try {
 
   const broad = answerLocalKnowledgeQuestion(db, 'Tell me something about myself.');
   assert.match(broad.content, /Coverage profile|Coverage preference/);
+  // A personal-identity overview must not be polluted by workboard/plan items or
+  // recycled raw Chat turns (regression: "do you know who i am?" dumped goals,
+  // blockers and a past user question).
+  assert.doesNotMatch(broad.content, /Coverage project|Coverage task/, 'an identity overview excludes workboard project/task items');
+  const whoAmI = answerLocalKnowledgeQuestion(db, 'do you know who i am?');
+  assert.match(whoAmI.content, /Coverage profile|Coverage preference/, '"who am I?" answers from curated personal records');
+  assert.doesNotMatch(whoAmI.content, /Coverage project|Coverage task/, '"who am I?" excludes workboard items');
   const exactObservedWording = answerLocalKnowledgeQuestion(db, 'tell me something about me');
   assert.match(exactObservedWording.content, /Coverage profile|Coverage preference/, 'the observed real-app wording routes to local retrieval');
   assert.ok(broad.sources.every((source) => source.sourceId && source.provenance !== undefined), 'answers retain stable source provenance');

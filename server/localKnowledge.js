@@ -80,6 +80,19 @@ function sourceTypeForRecord(item) {
   return SOURCE_TYPES.PERSONAL_FACT;
 }
 
+// Knowledge-item categories that describe WHAT the user is doing (workboard
+// tasks and plans), rather than WHO they are. They are legitimate for planning
+// and specific questions but must not fill a broad "who am I?" identity
+// overview. (Rules/preferences are intentionally NOT here — they can be personal.)
+const NON_IDENTITY_OVERVIEW_CATEGORIES = new Set(['goal', 'project', 'task', 'milestone', 'blocker', 'waiting', 'dependency', 'reminder']);
+
+// A broad personal-IDENTITY overview ("who am I", "tell me about myself") — as
+// distinct from an activity overview ("what am I working on"), which legitimately
+// wants workboard items.
+function isIdentityOverview(message) {
+  return /(?:do you know who i am|who am i|what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?(?:you know )?about (?:myself|me)|tell me about myself|what information (?:can you access|do you have) about me)/i.test(String(message || ''));
+}
+
 function sourceTypeForFile(file) {
   const text = `${file.text || ''}`.toLowerCase();
   if (/\b(todo|repository health|infrastructure|source code|developer instruction|ignore (the )?user)\b/.test(text)) return SOURCE_TYPES.REFERENCE;
@@ -180,7 +193,12 @@ function words(value) {
 }
 
 function isUserQuestionOrRequestTurn(value) {
-  const text = String(value || '').trim();
+  // Strip leading conversational filler/greetings ("ok", "so", "hey", …) so a
+  // disguised request like "ok what can you access, give me info about me" is
+  // still recognised as a question/request and kept out of factual evidence.
+  const text = String(value || '').trim()
+    .replace(/^(?:(?:ok(?:ay)?|so|well|right|alright|hi|hey|hello|yo|um+|erm+|hmm+|thanks?|cheers)\b[\s,!.:;–—-]*)+/i, '')
+    .trim();
   if (!text) return false;
   if (/[?？]/.test(text)) return true;
   if (/^(?:please|kindly)\b/i.test(text)) return true;
@@ -210,6 +228,26 @@ function isUserQuestionOrRequestTurn(value) {
 function dateValue(value) { const time = Date.parse(value || ''); return Number.isFinite(time) ? time : 0; }
 function snippet(value, limit = 700) { const text = String(value || '').trim(); return text.length > limit ? `${text.slice(0, limit)}…` : text; }
 
+// Render a saved record as readable prose for a chat answer. Structured personal
+// records carry audit metadata (Status/Confidence/Evidence …) that is useful in
+// the Knowledge review UI but reads as a database dump in conversation, so it is
+// stripped here along with markdown section markers and internal fact ids. Only
+// spaced " - " field separators are split, so hyphenated words (e.g.
+// "non-driver") are preserved.
+function readableFact(text) {
+  const cleaned = String(text || '')
+    .replace(/\s+/g, ' ')
+    .replace(/#+/g, ' ')
+    .replace(/\bFACT-\d+\b\s*[—–-]?\s*/gi, '')
+    // Remove runs of inline/trailing audit metadata fields (e.g.
+    // " - Status: current - Confidence: 90% - Evidence score: 4/5 …") in place,
+    // leaving the actual fact statements untouched.
+    .replace(/(?:\s*[-–—]\s*(?:status|confidence(?:\s+score)?|evidence(?:\s+score|\s+basis)?|last\s+(?:confirmed|reviewed|updated)|source\s+refs?|owner|id|type)\s*[:：][^-–—]*(?:[-–]\d[^-–—]*)*)+/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || String(text || '').replace(/\s+/g, ' ').trim();
+}
+
 function evidenceExcerpt(record, queryWords, limit) {
   const text = String(record.text || '').trim();
   const blocks = text.split(/\r?\n\s*\r?\n/).map((block) => block.trim()).filter(Boolean);
@@ -220,6 +258,13 @@ function evidenceExcerpt(record, queryWords, limit) {
 
 function permitsOverviewFallback(message) {
   return /(?:do you know who i am|who am i|what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?you know about me|tell me (?:something )?about (?:myself|me)|tell me about myself|what information can you access about me|what information do you have about me|are you going to.*(?:tell|say).*(?:about myself|about me)|what am i (?:currently )?working on)/i.test(String(message || ''));
+}
+
+// Raw Chat turns are context, not reviewed facts, so they are only surfaced when
+// the user explicitly asks about the past conversation. Everything else is
+// answered from curated personal records (reviewed memory, canonical records).
+function asksAboutPastConversation(message) {
+  return /\b(?:what did i say|what have i (?:said|told)|previously|earlier|last time|a moment ago|we (?:discuss|talked|spoke|said)|i (?:mentioned|already (?:said|told)|said earlier))\b/i.test(String(message || ''));
 }
 
 export function sourceRegistry(db, { includeHistory = false, includeCandidates = false, repoRoot = '' } = {}) {
@@ -361,6 +406,11 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
   const queryWords = words(query);
   const disabled = new Set(options.disabledCategories || []);
   const exactQuery = String(query || '').trim().toLowerCase();
+  // For a broad personal-IDENTITY overview, raw Chat turns and workboard/plan
+  // items are noise — the answer should come from curated identity records.
+  // Specific and activity questions are unaffected.
+  const identityOverview = isIdentityOverview(query);
+  const suppressChatHistory = identityOverview && !asksAboutPastConversation(query);
   const rejected = [];
   const rows = sourceRegistry(db, options).filter((record) => {
     if (!record.chatReadable || disabled.has(record.category)) return false;
@@ -368,8 +418,19 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
       rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'user question/request turn is not evidence' });
       return false;
     }
-    // Defense in depth for a just-saved declarative prompt: the current user
-    // turn must never be recycled as evidence for itself.
+    // Raw Chat turns are unreviewed context, not curated facts. Unless the user
+    // explicitly asks about the past conversation, they are kept out of factual
+    // answers (the reviewed-memory pipeline is how a chat statement becomes a
+    // fact). This also covers the current turn being recycled as its own answer.
+    if (record.category === 'conversation history' && suppressChatHistory) {
+      rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'raw chat history is not surfaced for a broad personal overview' });
+      return false;
+    }
+    // Workboard/plan items answer "what am I working on?", not "who am I?".
+    if (identityOverview && NON_IDENTITY_OVERVIEW_CATEGORIES.has(String(record.category || '').toLowerCase())) {
+      rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'workboard/plan item is not part of a personal identity overview' });
+      return false;
+    }
     if (record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery) {
       rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'current user turn is not evidence for itself' });
       return false;
@@ -468,7 +529,7 @@ function answerLocalKnowledgeQuestionLegacy(db, message, options = {}) {
 export function answerLocalKnowledgeQuestion(db, message, options = {}) {
   const result = retrieveLocalKnowledge(db, message, { ...options, includeCandidates: /\b(pending|candidate|review)\b/i.test(String(message || '')) });
   if (!result.items.length) return { content: 'I searched the relevant saved local records, but I did not find evidence that answers that question.', sources: [], diagnostics: result };
-  const facts = result.items.map((item) => item.body.replace(/\s+/g, ' ').replace(/^#+\s*/, '').trim());
+  const facts = result.items.map((item) => readableFact(item.body));
   const content = facts.length === 1
     ? `From your saved local record: ${facts[0]}`
     : `From your saved local records:\n\n${facts.map((fact) => `- ${fact}`).join('\n')}`;
