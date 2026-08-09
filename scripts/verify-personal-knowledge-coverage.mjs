@@ -27,6 +27,7 @@ try {
   insertKnowledge.run('preference', 'Coverage preference', 'The user prefers concise weekly reviews.', 'manual', 'stable', 'fixture', 'Use concise reviews.');
   insertKnowledge.run('goal', 'Coverage goal', 'Complete the local coverage audit.', 'manual', 'active', 'fixture', 'Verify it.');
   insertKnowledge.run('task', 'Coverage task', 'Check the personal knowledge registry.', 'manual', 'active', 'fixture', 'Run the verifier.');
+  insertKnowledge.run('rule', 'Cloud workflow rule', 'Cloud consultations stay in a review workflow.', 'manual', 'active', 'fixture', 'Keep reviewed.');
   insertKnowledge.run('document', 'Coverage file', 'Imported document text is retained as a reviewed Knowledge record.', 'import', 'active', 'fixture', 'Review source.');
   const oldId = insertKnowledge.run('preference', 'Replaced preference', 'The old value must not be shown.', 'manual', 'superseded', 'fixture', '').lastInsertRowid;
   const newId = insertKnowledge.run('preference', 'Current preference', 'The current corrected value is shown.', 'manual', 'active', 'fixture', '').lastInsertRowid;
@@ -35,8 +36,16 @@ try {
   insertCandidate.run('preference', 'Rejected preference', 'This must never become a fact.', 'denied');
   insertProject.run('Coverage project', 'active', 'Review current project information.');
   const sessionId = db.prepare(`INSERT INTO chat_sessions (title) VALUES ('Saved coverage chat')`).run().lastInsertRowid;
-  db.prepare(`INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', ?), (?, 'user', ?), (?, 'assistant', ?)`)
-    .run(sessionId, 'The user previously said the coverage topic matters.', sessionId, 'What does the coverage topic mean?', sessionId, 'Assistant-only claim must not be a personal fact.');
+  db.prepare(`INSERT INTO chat_messages (session_id, role, content) VALUES
+    (?, 'user', ?), (?, 'user', ?), (?, 'user', ?), (?, 'user', ?), (?, 'user', ?), (?, 'assistant', ?)`)
+    .run(
+      sessionId, 'The user previously said the coverage topic matters.',
+      sessionId, 'What does the coverage topic mean?',
+      sessionId, 'ok what can you access give me any info about me',
+      sessionId, 'ok I prefer quiet, focused work.',
+      sessionId, 'okay',
+      sessionId, 'Assistant-only claim must not be a personal fact.'
+    );
 
   const records = sourceRegistry(db);
   const ids = new Set(records.map((record) => record.canonicalId));
@@ -45,7 +54,7 @@ try {
   assert.ok(!records.some((record) => /Pending preference|Rejected preference|Deleted profile|Assistant-only claim/.test(record.text)), 'pending, rejected, archived and assistant content are excluded');
   assert.ok(records.some((record) => record.category === 'project'), 'current projects are registered');
   assert.ok(records.some((record) => record.category === 'conversation history'), 'saved user Chat is registered');
-  assert.equal(records.filter((record) => record.category === 'conversation history' && record.evidenceEligible === false).length, 1, 'saved user questions are registered but evidence-ineligible');
+  assert.equal(records.filter((record) => record.category === 'conversation history' && record.evidenceEligible === false).length, 3, 'saved user questions, prefixed requests, and marker-only turns are registered but evidence-ineligible');
   assert.ok(records.some((record) => record.category === 'document'), 'persisted extracted document Knowledge is registered');
   assert.equal(new Set(records.map((record) => record.canonicalId)).size, records.length, 'registry has no duplicate source IDs');
 
@@ -60,6 +69,10 @@ try {
   assert.doesNotMatch(whoAmI.content, /Coverage project|Coverage task/, '"who am I?" excludes workboard items');
   const exactObservedWording = answerLocalKnowledgeQuestion(db, 'tell me something about me');
   assert.match(exactObservedWording.content, /Coverage profile|Coverage preference/, 'the observed real-app wording routes to local retrieval');
+  const naturalAccessWording = answerLocalKnowledgeQuestion(db, 'ok what can you access give me any info about me');
+  assert.match(naturalAccessWording.content, /Coverage profile|Coverage preference/, 'the exact natural access wording returns curated identity records');
+  assert.doesNotMatch(naturalAccessWording.content, /Coverage project|Coverage task|what can you access/, 'the natural access wording excludes workboard items and its own saved request');
+  assert.ok(naturalAccessWording.sources.every((source) => source.category !== 'conversation history'), 'identity overview excludes raw Chat history');
   assert.ok(broad.sources.every((source) => source.sourceId && source.provenance !== undefined), 'answers retain stable source provenance');
   const projects = answerLocalKnowledgeQuestion(db, 'What am I currently working on?');
   assert.match(projects.content, /Coverage project|Coverage task/);
@@ -85,19 +98,34 @@ try {
   const privateRepository = path.join(probe, 'private-repository');
   fs.mkdirSync(privateRepository, { recursive: true });
   fs.writeFileSync(path.join(privateRepository, 'career-profile.md'), '# Career profile\n\nAlex has practical frontend engineering and local AI application experience.');
+  const canonicalRoot = path.join(privateRepository, 'source_of_truth');
+  fs.mkdirSync(canonicalRoot, { recursive: true });
+  fs.writeFileSync(path.join(canonicalRoot, 'profile.md'), '# Profile\n\n## Confirmed facts\n\n### FACT-900001 — Practical constraint\n- Fact: The fixture user uses public transport.');
+  fs.writeFileSync(path.join(canonicalRoot, 'career.md'), '# Career\n\n## Education\n\n### FACT-900002 — Education\n- Fact: The fixture user completed a business degree.\n\n## Work history\n\n### FACT-900003 — Work\n- Fact: The fixture user has procurement experience.');
+  fs.writeFileSync(path.join(canonicalRoot, 'current_location_2026-06-27.md'), '# Current Location\n\n## Confirmed update\n\nThe fixture user lives in a connected city.');
+  fs.writeFileSync(path.join(canonicalRoot, 'career_direction_2026-06-27.md'), '# Career Direction\n\n## Current direction\n\nThe fixture user is exploring operations roles.');
+  fs.writeFileSync(path.join(canonicalRoot, 'current_state.md'), '# Current State\n\n## Current focus\n\nInternal app maintenance must not define the fixture user.');
+  fs.writeFileSync(path.join(canonicalRoot, 'health_accessibility.md'), '# Health\n\nA health-specific record must not appear in a broad identity overview.');
   process.env.LIFE_PLANNER_PRIVATE_REPO = privateRepository;
   const careerContext = retrieveLocalKnowledge(db, 'What job should I do based on my career profile?', { repoRoot: repositoryRoot, limit: 6 });
   assert.ok(careerContext.items.some((item) => item.source === 'local private repository' && /career-profile/.test(item.provenance)), 'a matching private-repository file remains available alongside saved personal records');
+  const canonicalIdentity = retrieveLocalKnowledge(db, 'who am i?', { repoRoot: repositoryRoot, limit: 10 });
+  assert.ok(canonicalIdentity.items.some((item) => item.canonicalId.endsWith('/profile.md')), 'identity overview uses the canonical profile');
+  assert.ok(canonicalIdentity.items.some((item) => item.canonicalId.endsWith('/career.md')), 'identity overview includes canonical education/work context');
+  assert.ok(canonicalIdentity.items.some((item) => item.canonicalId.endsWith('/career_direction_2026-06-27.md')), 'identity overview includes canonical career direction');
+  assert.ok(canonicalIdentity.items.some((item) => item.canonicalId.endsWith('/current_location_2026-06-27.md')), 'identity overview includes canonical location context');
+  assert.ok(!canonicalIdentity.items.some((item) => /current_state|health_accessibility/.test(item.canonicalId)), 'broad identity overview excludes operational current-state and sensitive health records');
+  assert.ok(!canonicalIdentity.items.some((item) => ['Coverage goal', 'Coverage task', 'Cloud workflow rule'].includes(item.title) || item.category === 'conversation history'), 'canonical identity overview excludes generic app items and raw Chat');
 
   const diagnostic = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath), repoRoot: repositoryRoot });
   assert.equal(diagnostic.resolvedDatabasePath, dbPath);
   assert.equal(diagnostic.resolvedUserDataPath, path.dirname(dbPath));
-  assert.ok(diagnostic.counts.activeKnowledge >= 6 && diagnostic.counts.pendingCandidates === 1);
-  assert.equal(diagnostic.counts.privateRepositoryFiles, 1, 'private repository coverage is observable without exposing file contents');
-  assert.equal(diagnostic.counts.eligibleUserChatMessages, 1);
-  assert.equal(diagnostic.counts.indexedUserQuestionsOrRequestsExcludedFromEvidence, 1);
+  assert.ok(diagnostic.counts.activeKnowledge >= 7 && diagnostic.counts.pendingCandidates === 1);
+  assert.ok(diagnostic.counts.privateRepositoryFiles >= 1, 'private repository coverage is observable without exposing file contents');
+  assert.equal(diagnostic.counts.eligibleUserChatMessages, 2);
+  assert.equal(diagnostic.counts.indexedUserQuestionsOrRequestsExcludedFromEvidence, 3);
   assert.equal(diagnostic.counts.assistantChatMessagesExcluded, 1);
-  assert.equal(diagnostic.retrievableByCategory['conversation history'], 1, 'coverage counts only declarative Chat history as retrievable');
+  assert.equal(diagnostic.retrievableByCategory['conversation history'], 2, 'coverage counts only declarative Chat history as retrievable');
   const diagnosticRecords = sourceRegistry(db, { repoRoot: repositoryRoot });
   assert.equal(diagnostic.totalRetrievable, diagnosticRecords.filter((record) => record.chatReadable && record.evidenceEligible !== false).length);
   assert.ok(diagnostic.sourceAdapters.includes('knowledge_items'));

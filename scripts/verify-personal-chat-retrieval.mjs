@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { classifyPersonalIntent, isLocalKnowledgeQuestion, retrieveLocalKnowledge, sourceRegistry } from '../server/localKnowledge.js';
+import { classifyPersonalIntent, isLocalKnowledgeQuestion, isPersonalOverviewRequest, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from '../server/localKnowledge.js';
 
 const db = new DatabaseSync(':memory:');
 const priorPrivateRepository = process.env.LIFE_PLANNER_PRIVATE_REPO;
@@ -52,27 +52,84 @@ insertChat.run(125, 'user', 'I need help choosing a job', '2026-02-01T10:24:00Z'
 insertChat.run(126, 'user', 'Thoughts on my work options', '2026-02-01T10:25:00Z');
 insertChat.run(127, 'user', 'Show business is not for me.', '2026-02-01T10:26:00Z');
 insertChat.run(128, 'user', 'Tell-tale signs worry me.', '2026-02-01T10:27:00Z');
+insertChat.run(129, 'user', 'ok what can you access give me any info about me', '2026-02-01T10:28:00Z');
+insertChat.run(130, 'user', 'okay, tell me something about me', '2026-02-01T10:29:00Z');
+insertChat.run(131, 'user', 'hi what information can you access about me', '2026-02-01T10:30:00Z');
+insertChat.run(132, 'user', 'ok give me any info about me', '2026-02-01T10:31:00Z');
+insertChat.run(133, 'user', 'ok, well, hi there, tell me facts about me', '2026-02-01T10:32:00Z');
+insertChat.run(134, 'user', 'ok', '2026-02-01T10:33:00Z');
+insertChat.run(135, 'user', 'okay', '2026-02-01T10:34:00Z');
+insertChat.run(136, 'user', 'hi', '2026-02-01T10:35:00Z');
+insertChat.run(137, 'user', 'ok I prefer quiet, focused work.', '2026-02-01T10:36:00Z');
+insertChat.run(138, 'user', 'hi my preferred job involves customer support.', '2026-02-01T10:37:00Z');
+insertChat.run(139, 'user', 'okay then what can you access give me any info about me', '2026-02-01T10:38:00Z');
+insertChat.run(140, 'user', 'ok but tell me something about me', '2026-02-01T10:39:00Z');
+insertChat.run(141, 'user', 'okay, now give me any info about me', '2026-02-01T10:40:00Z');
+insertChat.run(142, 'user', 'ok actually then what information do you have about me', '2026-02-01T10:41:00Z');
+insertChat.run(143, 'user', 'but I prefer written plans.', '2026-02-01T10:42:00Z');
+insertChat.run(144, 'user', 'then I prefer written plans.', '2026-02-01T10:43:00Z');
+insertChat.run(145, 'user', 'now I prefer written plans.', '2026-02-01T10:44:00Z');
+insertChat.run(146, 'user', 'ok but I prefer written plans.', '2026-02-01T10:45:00Z');
 
 assert.equal(classifyPersonalIntent('hello?'), 'greeting');
 assert.equal(classifyPersonalIntent('What health condition do I have?'), 'personal_health');
 assert.equal(classifyPersonalIntent('What job should I do?'), 'career_work_education');
 assert.equal(isLocalKnowledgeQuestion('Do you know who I am?'), true);
 assert.equal(isLocalKnowledgeQuestion('Tell me something you know about me.'), true);
+for (const content of [
+  'ok what can you access give me any info about me',
+  'okay, tell me something about me',
+  'hi what information can you access about me',
+  'ok give me any info about me',
+  'okay then what can you access give me any info about me',
+  'ok but tell me something about me',
+  'okay, now give me any info about me',
+  'ok actually then what information do you have about me',
+  'Tell me who I am.',
+  'Can you tell me who I am?',
+  'Could you tell me who I am?',
+  'Okay, can you tell me who I am?',
+  'Please tell me about myself.',
+  'Please tell me something you know about me.',
+  'Who am I, please?',
+]) {
+  assert.equal(isPersonalOverviewRequest(content), true, `natural personal-overview wording is classified narrowly: ${content}`);
+  assert.equal(isLocalKnowledgeQuestion(content), true, `natural personal-overview request routes locally: ${content}`);
+  assert.equal(shouldGroundConversationInLocalKnowledge(content), true, `natural personal-overview request is grounded: ${content}`);
+}
+for (const content of [
+  'What do you know about JavaScript?',
+  'What do you know about the weather?',
+  'Tell me a joke about me.',
+  'Give me advice about me.',
+  'Who am I kidding?',
+  'Who am I to judge?',
+  'Who am I supposed to contact?',
+  'Do you know who I am talking about?',
+  'What information is public about me?',
+  'What information did you send to Claude about me?',
+  'What information can Claude access about me?',
+  'Which facts are disputed about me?',
+  'What information should I delete about me?',
+]) {
+  assert.equal(isPersonalOverviewRequest(content), false, `non-factual wording is not an identity overview: ${content}`);
+  assert.equal(isLocalKnowledgeQuestion(content), false, `non-factual wording does not trigger a deterministic identity answer: ${content}`);
+}
 const chatRecords = sourceRegistry(db).filter((record) => record.category === 'conversation history');
 assert.deepEqual(chatRecords.filter((record) => record.evidenceEligible === false).map((record) => record.canonicalId).sort(),
-  ['chat:101', 'chat:102', 'chat:103', 'chat:104', 'chat:105', 'chat:110', 'chat:111', 'chat:112', 'chat:113', 'chat:114', 'chat:115', 'chat:116', 'chat:123', 'chat:124', 'chat:125', 'chat:126'], 'punctuated, unpunctuated, imperative, indirect, and nominal requests are evidence-ineligible');
+  ['chat:101', 'chat:102', 'chat:103', 'chat:104', 'chat:105', 'chat:110', 'chat:111', 'chat:112', 'chat:113', 'chat:114', 'chat:115', 'chat:116', 'chat:123', 'chat:124', 'chat:125', 'chat:126', 'chat:129', 'chat:130', 'chat:131', 'chat:132', 'chat:133', 'chat:134', 'chat:135', 'chat:136', 'chat:139', 'chat:140', 'chat:141', 'chat:142'], 'punctuated, unpunctuated, prefixed, compound, chained-transition, marker-only, imperative, indirect, and nominal requests are evidence-ineligible');
 assert.equal(chatRecords.find((record) => record.canonicalId === 'chat:106')?.evidenceEligible, true, 'a declarative user fact remains evidence-eligible');
-for (const id of [107, 108, 109, 117, 118, 119, 120, 121, 127, 128]) assert.equal(chatRecords.find((record) => record.canonicalId === `chat:${id}`)?.evidenceEligible, true, `declarative chat:${id} remains evidence-eligible`);
+for (const id of [107, 108, 109, 117, 118, 119, 120, 121, 127, 128, 137, 138, 143, 144, 145, 146]) assert.equal(chatRecords.find((record) => record.canonicalId === `chat:${id}`)?.evidenceEligible, true, `declarative chat:${id} remains evidence-eligible`);
 const health = retrieveLocalKnowledge(db, 'What health condition do I have?');
 assert.deepEqual(health.items.map((item) => item.title), ['Confirmed diagnosis']);
 assert.ok(health.rejected.some((entry) => entry.sourceId === 'knowledge:2' && /eligibility/.test(entry.reason)));
-for (const id of [101, 102, 103, 104, 105, 110, 111, 112, 113, 114, 115, 116, 123, 124, 125, 126]) {
+for (const id of [101, 102, 103, 104, 105, 110, 111, 112, 113, 114, 115, 116, 123, 124, 125, 126, 129, 130, 131, 132, 133, 134, 135, 136, 139, 140, 141, 142]) {
   assert.ok(health.rejected.some((entry) => entry.sourceId === `chat:${id}` && /question\/request turn is not evidence/.test(entry.reason)), `question/request chat:${id} is explicitly rejected`);
   assert.ok(!health.items.some((item) => item.canonicalId === `chat:${id}`), `question chat:${id} is not returned as health evidence`);
 }
 const career = retrieveLocalKnowledge(db, 'What job should I do?');
 assert.ok(career.items.some((item) => item.title === 'Work history'));
-assert.ok(career.items.some((item) => item.canonicalId === 'chat:106'), 'relevant declarative Chat history remains available');
+assert.ok(career.items.some((item) => item.canonicalId === 'chat:138'), 'a prefixed declarative career fact remains available');
 assert.ok(!career.items.some((item) => item.canonicalId === 'chat:105'), 'a prior matching career question is not evidence');
 assert.equal(retrieveLocalKnowledge(db, 'hello?').items.length, 0);
 db.close();

@@ -24,6 +24,18 @@ fs.utimesSync(path.join(privateRepo, 'docs', 'RECENT_RELEASE.md'), new Date(), n
 // document actually named after the subject.
 fs.writeFileSync(path.join(privateRepo, 'docs', 'RECENT_MENTIONS.md'), '# Weekly notes\n\nThe zephyrmemory architecture came up again this week and was briefly discussed.\n');
 fs.utimesSync(path.join(privateRepo, 'docs', 'RECENT_MENTIONS.md'), new Date(), new Date());
+// Broad identity overviews have a deliberately narrow canonical source set.
+// Include tempting generic, operational, and sensitive records so this HTTP
+// verifier proves they do not enter the answer or its persisted provenance.
+fs.writeFileSync(path.join(privateRepo, 'career-profile.md'), '# Generic career profile\n\nThis non-canonical profile must not ground a broad identity overview.\n');
+const canonicalRoot = path.join(privateRepo, 'source_of_truth');
+fs.mkdirSync(canonicalRoot, { recursive: true });
+fs.writeFileSync(path.join(canonicalRoot, 'profile.md'), '# Profile\n\n## Confirmed facts\n\n### FACT-900001 - Practical constraint\n- Fact: The fixture user uses public transport.\n');
+fs.writeFileSync(path.join(canonicalRoot, 'career.md'), '# Career\n\n## Education\n\n### FACT-900002 - Education\n- Fact: The fixture user completed a business degree.\n\n## Work history\n\n### FACT-900003 - Work\n- Fact: The fixture user has procurement experience.\n');
+fs.writeFileSync(path.join(canonicalRoot, 'current_location_2026-06-27.md'), '# Current Location\n\n## Confirmed update\n\nThe fixture user lives in a connected city.\n');
+fs.writeFileSync(path.join(canonicalRoot, 'career_direction_2026-06-27.md'), '# Career Direction\n\n## Current direction\n\nThe fixture user is exploring operations roles.\n');
+fs.writeFileSync(path.join(canonicalRoot, 'current_state.md'), '# Current State\n\nInternal app maintenance must not define the fixture user.\n');
+fs.writeFileSync(path.join(canonicalRoot, 'health_accessibility.md'), '# Health\n\nA sensitive health record must not appear in a broad identity overview.\n');
 const port = await new Promise((resolve, reject) => { const s = net.createServer(); s.on('error', reject); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
 const base = `http://127.0.0.1:${port}`;
 const child = spawn(process.execPath, ['server/index.js'], { cwd: root, env: { ...process.env, LIFE_PLANNER_DB: db, LIFE_PLANNER_PORT: String(port), LIFE_PLANNER_CONNECTOR_CONFIG: path.join(probe, 'pairing.json'), LIFE_PLANNER_PRIVATE_REPO: privateRepo }, stdio: 'ignore', windowsHide: true });
@@ -40,19 +52,49 @@ try {
   const session = (await api('/api/chat/sessions', 'POST', { title: 'knowledge verifier' })).body.data;
   const send = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'What do you know about me?' });
   const assistant = send.body.data.messages.find((m) => m.role === 'assistant');
-  assert.match(assistant.content, /Alex prefers to be called Alex/);
-  assert.match(assistant.content, /Tea preference/);
+  assert.match(assistant.content, /public transport|connected city|business degree|procurement experience/i, 'identity answer renders canonical facts, not headings alone');
   const metadata = JSON.parse(assistant.metadata);
   assert.ok(metadata.localSources?.length, 'local retrieval carries source provenance');
   const identityQuestionIds = [send.body.data.messages.find((message) => message.role === 'user').id];
-  for (const content of ['Do you know who I am?', 'Tell me something you know about me.', 'What information can you access about me?']) {
+  for (const content of ['Do you know who I am?', 'Tell me something you know about me.', 'What information can you access about me?', 'ok what can you access give me any info about me']) {
     const turn = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content });
-    identityQuestionIds.push(turn.body.data.messages.find((message) => message.role === 'user').id);
+    const userTurn = turn.body.data.messages.find((message) => message.role === 'user');
+    const assistantTurn = turn.body.data.messages.find((message) => message.role === 'assistant');
+    identityQuestionIds.push(userTurn.id);
+    const turnMetadata = JSON.parse(assistantTurn.metadata || '{}');
+    assert.equal(turnMetadata.endpointType, 'local-knowledge', `natural identity wording stays on deterministic local knowledge: ${content}`);
+    assert.ok(turnMetadata.localSources?.length, `natural identity wording retains curated sources: ${content}`);
+    assert.ok(!turnMetadata.localSources.some((source) => source.sourceId === `chat:${userTurn.id}`), `the just-saved request is not its own evidence: ${content}`);
   }
+  const exactWhoAmI = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'who am i?' });
+  const exactWhoUser = exactWhoAmI.body.data.messages.find((message) => message.role === 'user');
+  const exactWhoAssistant = exactWhoAmI.body.data.messages.find((message) => message.role === 'assistant');
+  identityQuestionIds.push(exactWhoUser.id);
+  const exactWhoMetadata = JSON.parse(exactWhoAssistant.metadata || '{}');
+  assert.equal(exactWhoMetadata.endpointType, 'local-knowledge', 'exact who am i? uses the deterministic local-knowledge endpoint');
+  assert.match(exactWhoAssistant.content, /public transport|connected city|business degree|procurement experience/i, 'exact who am i? renders canonical facts');
+  const allowedCanonicalSources = new Set([
+    'private-canonical:source_of_truth/profile.md',
+    'private-canonical:source_of_truth/career.md',
+    'private-canonical:source_of_truth/current_location_2026-06-27.md',
+    'private-canonical:source_of_truth/career_direction_2026-06-27.md',
+  ]);
+  const allowedKnowledgeSources = new Set([`knowledge:${profile.body.data.id}`, `knowledge:${preference.body.data.id}`]);
+  const assertIdentitySourceBoundary = (sources, label) => {
+    assert.ok(sources.length, `${label} retains identity provenance`);
+    assert.ok(sources.every((source) => allowedCanonicalSources.has(source.sourceId) || allowedKnowledgeSources.has(source.sourceId)), `${label} uses only the explicit canonical/profile/preference allowlist`);
+    assert.ok(!sources.some((source) => /^(chat|workboard|project|task):/i.test(String(source.sourceId || ''))), `${label} excludes raw Chat and workboard records`);
+    assert.ok(!sources.some((source) => /career-profile|current_state|health_accessibility/i.test(JSON.stringify(source))), `${label} excludes generic, operational, and sensitive private records`);
+    assert.ok(!sources.some((source) => Object.values(source).some((value) => typeof value === 'string' && path.win32.isAbsolute(value))), `${label} exposes no absolute host path in provenance`);
+  };
+  assertIdentitySourceBoundary(exactWhoMetadata.localSources || [], 'returned exact identity answer');
+  for (const id of identityQuestionIds) assert.ok(!exactWhoMetadata.localSources.some((source) => source.sourceId === `chat:${id}`), `later exact identity answer excludes prior question chat:${id}`);
   const persistedIdentityMessages = (await api(`/api/chat/sessions/${session.id}/messages`)).body.data;
-  const persistedIdentityAnswer = [...persistedIdentityMessages].reverse().find((message) => message.role === 'assistant');
+  const persistedIdentityAnswer = persistedIdentityMessages.find((message) => message.id === exactWhoAssistant.id);
+  assert.equal(persistedIdentityAnswer.content, exactWhoAssistant.content, 'exact who am i? answer persists unchanged');
   const persistedIdentitySources = JSON.parse(persistedIdentityAnswer.metadata || '{}').localSources || [];
-  assert.ok(persistedIdentitySources.some((source) => String(source.sourceId || '').startsWith('knowledge:')), 'identity overview remains grounded in approved Knowledge');
+  assert.deepEqual(persistedIdentitySources, exactWhoMetadata.localSources, 'exact who am i? provenance persists unchanged');
+  assertIdentitySourceBoundary(persistedIdentitySources, 'reloaded exact identity answer');
   for (const id of identityQuestionIds) assert.ok(!persistedIdentitySources.some((source) => source.sourceId === `chat:${id}`), `persisted identity answer excludes question chat:${id}`);
   const candidateMessage = await api(`/api/chat/sessions/${session.id}/messages`, 'POST', { content: 'when i say my brain i mean the knowledge system in LPS' });
   const candidateId = candidateMessage.body.data.candidateId;

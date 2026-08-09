@@ -32,12 +32,12 @@ const PRIVATE_REPOSITORY_SECRET = /(?:^|[._-])(?:env|secret|credential|token|pas
 // Explicit, read-only registry of canonical promoted records. Inbox, pending,
 // and sensitive-context files remain ineligible even though they share a tree.
 const PRIVATE_CANONICAL_RECORDS = Object.freeze([
-  { path: 'source_of_truth/profile.md', sourceType: 'reviewed_personal_memory' },
-  { path: 'source_of_truth/career.md', sourceType: 'work_career_record' },
-  { path: 'source_of_truth/health_accessibility.md', sourceType: 'health_record' },
-  { path: 'source_of_truth/current_state.md', sourceType: 'reviewed_personal_memory' },
-  { path: 'source_of_truth/current_location_2026-06-27.md', sourceType: 'reviewed_personal_memory' },
-  { path: 'source_of_truth/career_direction_2026-06-27.md', sourceType: 'work_career_record' }
+  { path: 'source_of_truth/profile.md', sourceType: 'reviewed_personal_memory', identityOverview: true },
+  { path: 'source_of_truth/career.md', sourceType: 'work_career_record', identityOverview: true },
+  { path: 'source_of_truth/health_accessibility.md', sourceType: 'health_record', identityOverview: false },
+  { path: 'source_of_truth/current_state.md', sourceType: 'reviewed_personal_memory', identityOverview: false },
+  { path: 'source_of_truth/current_location_2026-06-27.md', sourceType: 'reviewed_personal_memory', identityOverview: true },
+  { path: 'source_of_truth/career_direction_2026-06-27.md', sourceType: 'work_career_record', identityOverview: true }
 ]);
 
 // This taxonomy is deliberately carried on every registry entry.  Retrieval
@@ -86,11 +86,33 @@ function sourceTypeForRecord(item) {
 // overview. (Rules/preferences are intentionally NOT here — they can be personal.)
 const NON_IDENTITY_OVERVIEW_CATEGORIES = new Set(['goal', 'project', 'task', 'milestone', 'blocker', 'waiting', 'dependency', 'reminder']);
 
+// Classification ignores conversational lead-ins without changing the stored
+// Chat text. Natural messages such as "ok, well, who am I?" must route exactly
+// like "who am I?", while "ok I prefer quiet work" remains a declaration.
+function normalizedClassificationText(value) {
+  const original = String(value || '').trim();
+  const text = original.replace(/^(?:(?:ok(?:ay)?|so|well|right|alright|hi(?:\s+there)?|hey(?:\s+there)?|hello(?:\s+there)?|yo|um+|erm+|hmm+|thanks?|cheers)\b[\s,!.:;–—-]*(?:(?:then|but|now|actually)\b[\s,!.:;–—-]*)*)+/i, '').trim();
+  return { original, text, strippedLead: text !== original };
+}
+
 // A broad personal-IDENTITY overview ("who am I", "tell me about myself") — as
-// distinct from an activity overview ("what am I working on"), which legitimately
-// wants workboard items.
-function isIdentityOverview(message) {
-  return /(?:do you know who i am|who am i|what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?(?:you know )?about (?:myself|me)|tell me about myself|what information (?:can you access|do you have) about me)/i.test(String(message || ''));
+// distinct from a health/career question or an activity overview ("what am I
+// working on"). Reused by routing, fallback scoring, and evidence suppression so
+// natural phrasing cannot take a different path at each layer.
+export function isPersonalOverviewRequest(message) {
+  const { text } = normalizedClassificationText(message);
+  if (!text || classifyPersonalIntent(text) !== 'general_conversation') return false;
+  const terminal = '(?:(?:\\s*,\\s*|\\s+)(?:please|thanks?))?\\s*[?!.。？]*$';
+  const requestLead = '(?:(?:please|kindly)\\s+)?(?:(?:can|could|would|will)\\s+you\\s+(?:(?:please|kindly)\\s+)?)?';
+  return new RegExp(`^(?:do\\s+you\\s+know\\s+who\\s+i\\s+am|who\\s+am\\s+i)${terminal}`, 'i').test(text)
+    || new RegExp(`^${requestLead}(?:tell|show)\\s+me\\s+who\\s+i\\s+am${terminal}`, 'i').test(text)
+    || new RegExp(`^what\\s+do\\s+you\\s+know\\s+about\\s+(?:me|myself)${terminal}`, 'i').test(text)
+    || new RegExp(`^what\\s+can\\s+you\\s+tell\\s+me\\s+about\\s+(?:me|myself)${terminal}`, 'i').test(text)
+    || new RegExp(`^${requestLead}(?:tell|show)\\s+me\\s+about\\s+(?:me|myself)${terminal}`, 'i').test(text)
+    || new RegExp(`^(?:what|which)\\s+(?:information|info|details|facts)\\s+(?:(?:can|could)\\s+you\\s+(?:access|see|retrieve|find)|do\\s+you\\s+(?:have|know))\\s+about\\s+(?:me|myself)${terminal}`, 'i').test(text)
+    || new RegExp(`^what\\s+(?:can|could)\\s+you\\s+(?:access|see|retrieve|find|know)\\s+about\\s+(?:me|myself)${terminal}`, 'i').test(text)
+    || new RegExp(`^what\\s+can\\s+you\\s+access\\s+(?:(?:and|then)\\s+)?(?:tell|show|give)\\s+me\\s+(?:(?:any|some|the)\\s+)?(?:information|info|details|facts)\\s+about\\s+(?:me|myself)${terminal}`, 'i').test(text)
+    || new RegExp(`^${requestLead}(?:tell|show|give)\\s+me\\s+(?:(?:something|anything)(?:\\s+you\\s+know)?|(?:(?:any|some|the)\\s+)?(?:information|info|details|facts))(?:\\s+about)?\\s+(?:me|myself)${terminal}`, 'i').test(text);
 }
 
 function sourceTypeForFile(file) {
@@ -196,10 +218,8 @@ function isUserQuestionOrRequestTurn(value) {
   // Strip leading conversational filler/greetings ("ok", "so", "hey", …) so a
   // disguised request like "ok what can you access, give me info about me" is
   // still recognised as a question/request and kept out of factual evidence.
-  const text = String(value || '').trim()
-    .replace(/^(?:(?:ok(?:ay)?|so|well|right|alright|hi|hey|hello|yo|um+|erm+|hmm+|thanks?|cheers)\b[\s,!.:;–—-]*)+/i, '')
-    .trim();
-  if (!text) return false;
+  const { original, text, strippedLead } = normalizedClassificationText(value);
+  if (!text) return Boolean(original && strippedLead);
   if (/[?？]/.test(text)) return true;
   if (/^(?:please|kindly)\b/i.test(text)) return true;
   if (/^(?:who|what|where|when|why|how|which|whose|whom)\b/i.test(text)) {
@@ -235,17 +255,71 @@ function snippet(value, limit = 700) { const text = String(value || '').trim(); 
 // spaced " - " field separators are split, so hyphenated words (e.g.
 // "non-driver") are preserved.
 function readableFact(text) {
-  const cleaned = String(text || '')
+  let cleaned = String(text || '')
+    .replace(/\r?\n\s*\r?\n/g, '; ')
     .replace(/\s+/g, ' ')
     .replace(/#+/g, ' ')
     .replace(/\bFACT-\d+\b\s*[—–-]?\s*/gi, '')
+    .replace(/\s*[-–—]\s*Fact\s*[:：]\s*/gi, ': ')
+    .replace(/\bFact\s*[:：]\s*/gi, '')
     // Remove runs of inline/trailing audit metadata fields (e.g.
     // " - Status: current - Confidence: 90% - Evidence score: 4/5 …") in place,
     // leaving the actual fact statements untouched.
     .replace(/(?:\s*[-–—]\s*(?:status|confidence(?:\s+score)?|evidence(?:\s+score|\s+basis)?|last\s+(?:confirmed|reviewed|updated)|source\s+refs?|owner|id|type)\s*[:：][^-–—]*(?:[-–]\d[^-–—]*)*)+/gi, '')
+    .replace(/\.\s*;\s*/g, '; ')
+    .replace(/;\s*;/g, '; ')
     .replace(/\s+/g, ' ')
     .trim();
+  const personalSubject = /(?:^|;\s*)The user(?:'s|\s)/i.test(cleaned);
+  cleaned = cleaned
+    .replace(/(^|;\s*)The user should\b/gi, '$1You should')
+    .replace(/(^|;\s*)The user has\b/gi, '$1You have')
+    .replace(/(^|;\s*)The user worked\b/gi, '$1You worked')
+    .replace(/(^|;\s*)The user generally prefers\b/gi, '$1You generally prefer')
+    .replace(/(^|;\s*)The user's\b/gi, '$1Your');
+  if (personalSubject) cleaned = cleaned.replace(/\bthey\b/gi, 'you').replace(/\btheir\b/gi, 'your');
   return cleaned || String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function markdownSection(text, heading) {
+  const lines = String(text || '').split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim().toLowerCase() === `## ${heading.toLowerCase()}`);
+  if (start < 0) return '';
+  const selected = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^##\s+/.test(lines[index])) break;
+    const line = lines[index].trim();
+    if (!line || line === '---') continue;
+    selected.push(line.replace(/^[-*]\s+/, '').replace(/[;:]\s*$/, ''));
+  }
+  return selected.join('; ');
+}
+
+// A broad identity answer needs representative facts, not the first 420
+// characters of governance metadata. Canonical records expose fact statements
+// and reviewed summary sections; select those deterministically without
+// inventing or interpreting anything.
+function identityEvidenceExcerpt(record, limit) {
+  const text = String(record.text || '');
+  const title = String(record.title || '').toLowerCase();
+  const factStatements = text.split(/\r?\n/)
+    .map((line) => line.match(/^\s*-\s*Fact\s*[:：]\s*(.+)$/i)?.[1]?.trim())
+    .filter(Boolean);
+  if (title === 'career.md' && factStatements.length) {
+    const patterns = [/\b(?:degree|university|education)\b/i, /\b(?:worked|work history|procurement|employment)\b/i, /\b(?:target role|role families|career path)\b/i, /\b(?:remote|hybrid|work preference)\b/i];
+    const representative = patterns.map((pattern) => factStatements.find((fact) => pattern.test(fact))).filter(Boolean);
+    return snippet((representative.length ? representative : factStatements.slice(0, 4)).map((fact) => fact.replace(/[.;]\s*$/, '')).join('; ') + '.', limit);
+  }
+  if (factStatements.length) return snippet(factStatements.slice(0, 4).map((fact) => fact.replace(/[.;]\s*$/, '')).join('; ') + '.', limit);
+  if (/current_location/.test(title)) {
+    const location = markdownSection(text, 'Confirmed update').replace(/^\p{Lu}[\p{L}'’-]+\s+now lives\b/u, 'You now live');
+    if (location) return snippet(location, limit);
+  }
+  if (/career_direction/.test(title)) {
+    const direction = markdownSection(text, 'Current direction').replace(/^Prioritise\b/i, 'Your current direction is to prioritise');
+    if (direction) return snippet(direction, limit);
+  }
+  return evidenceExcerpt(record, [], limit);
 }
 
 function evidenceExcerpt(record, queryWords, limit) {
@@ -257,7 +331,8 @@ function evidenceExcerpt(record, queryWords, limit) {
 }
 
 function permitsOverviewFallback(message) {
-  return /(?:do you know who i am|who am i|what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?you know about me|tell me (?:something )?about (?:myself|me)|tell me about myself|what information can you access about me|what information do you have about me|are you going to.*(?:tell|say).*(?:about myself|about me)|what am i (?:currently )?working on)/i.test(String(message || ''));
+  return isPersonalOverviewRequest(message)
+    || /(?:are you going to.*(?:tell|say).*(?:about myself|about me)|what am i (?:currently )?working on)/i.test(String(message || ''));
 }
 
 // Raw Chat turns are context, not reviewed facts, so they are only surfaced when
@@ -323,7 +398,8 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
     records.push({
       canonicalId: `private-canonical:${file.path.replaceAll('\\', '/')}`, category: 'canonical personal record', title: path.basename(file.path), text: file.text,
       timestamp: file.updatedAt, updatedAt: file.updatedAt, sensitivity: file.sourceType === SOURCE_TYPES.HEALTH ? 'sensitive' : 'personal', chatReadable: true, chatProposable: false, state: 'approved',
-      source: 'private canonical source of truth', provenance: `Canonical private record: ${file.path}`, record: { path: file.path }, sourceType: file.sourceType
+      source: 'private canonical source of truth', provenance: `Canonical private record: ${file.path}`, record: { path: file.path }, sourceType: file.sourceType,
+      identityOverview: file.identityOverview === true
     });
   }
   return records;
@@ -409,10 +485,12 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
   // For a broad personal-IDENTITY overview, raw Chat turns and workboard/plan
   // items are noise — the answer should come from curated identity records.
   // Specific and activity questions are unaffected.
-  const identityOverview = isIdentityOverview(query);
+  const identityOverview = isPersonalOverviewRequest(query);
   const suppressChatHistory = identityOverview && !asksAboutPastConversation(query);
   const rejected = [];
-  const rows = sourceRegistry(db, options).filter((record) => {
+  const registry = sourceRegistry(db, options);
+  const hasCanonicalIdentity = identityOverview && registry.some((record) => record.source === 'private canonical source of truth' && record.identityOverview === true);
+  const rows = registry.filter((record) => {
     if (!record.chatReadable || disabled.has(record.category)) return false;
     if (record.evidenceEligible === false) {
       rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'user question/request turn is not evidence' });
@@ -431,6 +509,19 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
       rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'workboard/plan item is not part of a personal identity overview' });
       return false;
     }
+    // When canonical identity records exist, they are the reviewed authority for
+    // a broad overview. Keep explicit Knowledge profiles/preferences as useful
+    // supplements, but do not let generic app rules or runtime notes describe
+    // the person. Sensitive health records require a health-specific question.
+    if (hasCanonicalIdentity) {
+      const category = String(record.category || '').toLowerCase();
+      const canonicalIdentity = record.source === 'private canonical source of truth' && record.identityOverview === true;
+      const explicitProfile = ['profile', 'preference', 'identity', 'personal profile'].includes(category);
+      if (!canonicalIdentity && !explicitProfile) {
+        rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'not an approved identity-overview record' });
+        return false;
+      }
+    }
     if (record.category === 'conversation history' && String(record.text || '').trim().toLowerCase() === exactQuery) {
       rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'current user turn is not evidence for itself' });
       return false;
@@ -447,6 +538,7 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
   const topicWords = repositoryRequest ? queryWords.filter((word) => !REPOSITORY_META_WORDS.has(word)) : queryWords;
   const scoringWords = topicWords.length ? topicWords : queryWords;
   const allowed = new Set(allowedSourceTypes(intent));
+  if (identityOverview) allowed.add(SOURCE_TYPES.CAREER);
   // Do not crowd a personal answer with source-code and product documents when
   // any eligible personal record exists. Public documentation remains a useful
   // fallback for repository questions or an otherwise empty personal profile.
@@ -479,7 +571,9 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
   for (const record of ranked) {
     if (items.length >= (options.limit || MAX_ITEMS) || remaining < 100) break;
     if (items.some((item) => item.title === record.title || item.body === snippet(record.text, 280))) { rejected.push({ sourceId: record.canonicalId, sourceType: record.sourceType, reason: 'duplicate fact' }); continue; }
-    const body = evidenceExcerpt(record, scoringWords, Math.min(420, remaining));
+    const body = identityOverview
+      ? identityEvidenceExcerpt(record, Math.min(700, remaining))
+      : evidenceExcerpt(record, scoringWords, Math.min(420, remaining));
     remaining -= body.length;
     items.push({ ...record, body, whySelected: scoringWords.filter((word) => `${record.title} ${record.text}`.toLowerCase().includes(word)).join(', ') || 'requested personal overview' });
   }
@@ -487,7 +581,8 @@ export function retrieveLocalKnowledge(db, query, options = {}) {
 }
 
 export function isLocalKnowledgeQuestion(message) {
-  return /do you know who i am|who am i|what do you know about(?:\s+me)?(?:\b|$)|tell me (?:something )?you know about me|tell me (?:something )?about (?:myself|me)|tell me about myself|what information (?:can you access|do you have) about me|are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i (?:currently )?working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
+  if (isPersonalOverviewRequest(message)) return true;
+  return /are you going to.*(?:tell|say).*(?:about myself|about me)|what.*(health|condition|preference|goal|project|decision|task|appointment|blocker|risk|plan|file|pending|candidate|review)|what have i told you|what does .+ mean|what am i (?:currently )?working on|what did i say|why did we make|what (?:plans?|decisions?|files?) have i|remind me what i decided|saved (memory|information)|previously|(?:github|repository|repo|knowledge base|documentation).*(?:say|contain|about|have|mean)|(?:what|which).*(?:github|repository|repo|knowledge base|documentation)/i.test(String(message || '').toLowerCase());
 }
 
 // Questions asking for a recommendation about the user need the same local
@@ -530,9 +625,25 @@ export function answerLocalKnowledgeQuestion(db, message, options = {}) {
   const result = retrieveLocalKnowledge(db, message, { ...options, includeCandidates: /\b(pending|candidate|review)\b/i.test(String(message || '')) });
   if (!result.items.length) return { content: 'I searched the relevant saved local records, but I did not find evidence that answers that question.', sources: [], diagnostics: result };
   const facts = result.items.map((item) => readableFact(item.body));
-  const content = facts.length === 1
-    ? `From your saved local record: ${facts[0]}`
-    : `From your saved local records:\n\n${facts.map((fact) => `- ${fact}`).join('\n')}`;
+  let content;
+  if (isPersonalOverviewRequest(message)) {
+    const labelled = result.items.map((item, index) => {
+      const title = String(item.title || '').toLowerCase();
+      const category = String(item.category || '').toLowerCase();
+      const label = title === 'profile.md' || category === 'profile' ? 'Profile and practical needs'
+        : /current_location/.test(title) ? 'Location and practical context'
+          : /career_direction/.test(title) ? 'Career direction'
+            : item.sourceType === SOURCE_TYPES.CAREER ? 'Education and work'
+              : category === 'preference' ? 'Preferences'
+                : 'Reviewed personal information';
+      return `- **${label}:** ${facts[index]}`;
+    });
+    content = `Based on your reviewed local records, here is the clearest factual picture I have:\n\n${labelled.join('\n')}`;
+  } else {
+    content = facts.length === 1
+      ? `From your saved local record: ${facts[0]}`
+      : `From your saved local records:\n\n${facts.map((fact) => `- ${fact}`).join('\n')}`;
+  }
   return {
     content,
     sources: result.items.map((item) => ({ sourceId: item.canonicalId, title: item.title, category: item.category, sourceType: item.sourceType, updatedAt: item.updatedAt, state: item.state, excerpt: item.body, whySelected: item.whySelected, source: item.source, provenance: item.provenance })),
