@@ -14,6 +14,7 @@ const MAX_TOOL_READ_LINES = 400;
 const MAX_TOOL_EVIDENCE_PREVIEW_BYTES = 2400;
 const MAX_VALIDATION_REPAIR_ATTEMPTS = 1;
 const MAX_EVIDENCE_RECOVERY_ATTEMPTS = 3;
+const RUN_LEASE_MS = 30 * 60 * 1000;
 const MIN_EDIT_CONFIDENCE = 0.70;
 
 export const NATIVE_CODING_VALIDATIONS = Object.freeze({
@@ -155,6 +156,7 @@ export class NativeCodingWorker {
     this.baseDir = path.join(this.root, '.lps', 'native-code');
     this.taskDir = path.join(this.baseDir, 'tasks');
     this.worktreeDir = path.join(this.baseDir, 'worktrees');
+    this.leaseDir = path.join(this.baseDir, 'leases');
     this.active = new Map();
     this.reserved = false;
     this.recoverInterruptedTasks();
@@ -173,6 +175,7 @@ export class NativeCodingWorker {
           ? 'LPS stopped while applying this patch. Inspect Source changes before any further action; LPS will not guess whether the patch reached the live checkout.'
           : 'The LPS process stopped while this task was running. Reject it or explicitly rerun it; no model output from the interrupted process will be accepted.';
         this.record(task, 'restart_recovery', 'deny', task.error);
+        this.releaseRunLease(task, { recovery: true });
         this.save(task);
       } catch { /* unreadable task records stay inert and are omitted from the UI */ }
     }
@@ -308,6 +311,56 @@ export class NativeCodingWorker {
     return files;
   }
 
+  leaseFile(id) {
+    if (!TASK_ID.test(String(id || ''))) throw new Error('Invalid coding task id.');
+    return path.join(this.leaseDir, `${id}.json`);
+  }
+
+  acquireRunLease(task) {
+    fs.mkdirSync(this.leaseDir, { recursive: true });
+    const file = this.leaseFile(task.id);
+    const now = Date.now();
+    const lease = {
+      taskId: task.id,
+      token: crypto.randomBytes(24).toString('hex'),
+      acquiredAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + RUN_LEASE_MS).toISOString()
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        fs.writeFileSync(file, JSON.stringify(lease), { encoding: 'utf8', flag: 'wx' });
+        task.runLease = { acquiredAt: lease.acquiredAt, expiresAt: lease.expiresAt, tokenHash: digest(lease.token) };
+        this.record(task, 'run_lease', 'allow', `Durable execution lease acquired until ${lease.expiresAt}.`);
+        this.save(task);
+        return lease;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        let existing = null;
+        try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* unreadable lease is never silently trusted */ }
+        const expiresAt = Date.parse(existing?.expiresAt || '');
+        if (Number.isFinite(expiresAt) && expiresAt <= now) {
+          try { fs.unlinkSync(file); } catch { /* another process may have won the stale-lease cleanup */ }
+          continue;
+        }
+        throw new Error('Another LPS process holds the durable coding execution lease for this task. Wait for it to finish or let the lease expire before retrying.');
+      }
+    }
+    throw new Error('Unable to acquire the durable coding execution lease.');
+  }
+
+  releaseRunLease(task, { lease = null, recovery = false } = {}) {
+    const file = this.leaseFile(task.id);
+    let existing = null;
+    try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* missing/unreadable lease needs no local action */ }
+    if (existing && (!lease || existing.token === lease.token)) {
+      try { fs.unlinkSync(file); } catch { /* cleanup remains best-effort; expiry prevents permanent exclusion */ }
+    }
+    if (task.runLease) {
+      task.runLease = null;
+      this.record(task, recovery ? 'run_lease_recovery' : 'run_lease_release', 'allow', recovery ? 'Stale durable execution lease released during restart recovery.' : 'Durable execution lease released.');
+    }
+  }
+
   executeReadOnlyTool(task, worktree, request = {}) {
     const name = String(request.name || '').trim();
     const requestedPath = normalize(request.path || task.allowedPaths[0]);
@@ -388,6 +441,7 @@ export class NativeCodingWorker {
     let branch;
     let remote;
     let executionContext;
+    let lease = null;
     try {
       if (['interrupted', 'cancelled'].includes(task.status)) await this.cleanupWorktree(task);
       [status, head, branch, remote, executionContext] = await Promise.all([
@@ -417,6 +471,12 @@ export class NativeCodingWorker {
       this.record(task, 'git_authority_preflight', authority.allowed ? 'allow' : 'deny', authority.reason);
       this.save(task);
       if (!authority.allowed) throw new Error(authority.reason);
+    } catch (error) {
+      this.reserved = false;
+      throw error;
+    }
+    try {
+      lease = this.acquireRunLease(task);
     } catch (error) {
       this.reserved = false;
       throw error;
@@ -633,6 +693,8 @@ export class NativeCodingWorker {
     } finally {
       this.active.delete(task.id);
       if (!preserve && fs.existsSync(worktree)) await this.runGit(['worktree', 'remove', '--force', worktree]);
+      this.releaseRunLease(task, { lease });
+      this.save(task);
     }
   }
 

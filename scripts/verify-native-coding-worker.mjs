@@ -159,6 +159,19 @@ try {
   assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'tool-loop review changed live checkout');
   await worker.reject(toolTask.id);
 
+  const leasedTask = createPreparedTask({ title: 'Durable lease fixture', objective: 'Prove another process cannot enter the same sealed task while its execution lease exists.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const heldLease = worker.acquireRunLease(leasedTask);
+  await assert.rejects(runPreparedTask(leasedTask), /durable coding execution lease/, 'a durable lease blocks a second run even without an in-memory active worker');
+  worker.releaseRunLease(leasedTask, { lease: heldLease });
+  worker.save(leasedTask);
+  const staleLeaseTask = createPreparedTask({ title: 'Stale lease fixture', objective: 'Prove an expired execution lease is reclaimed rather than blocking recovery forever.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  fs.mkdirSync(worker.leaseDir, { recursive: true });
+  fs.writeFileSync(worker.leaseFile(staleLeaseTask.id), JSON.stringify({ taskId: staleLeaseTask.id, token: 'expired', expiresAt: new Date(Date.now() - 1000).toISOString() }));
+  const reclaimedLease = worker.acquireRunLease(staleLeaseTask);
+  assert.notEqual(reclaimedLease.token, 'expired', 'expired lease is atomically replaced with a new owner token');
+  worker.releaseRunLease(staleLeaseTask, { lease: reclaimedLease });
+  worker.save(staleLeaseTask);
+
   modelMode = 'evidence-recovery';
   const evidenceRecoveryTask = createPreparedTask({ title: 'Resolve own evidence gap', objective: 'Use an approved read to close a concrete gap before proposing the fixture edit.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
   const evidenceRecoveryReview = await runPreparedTask(evidenceRecoveryTask);

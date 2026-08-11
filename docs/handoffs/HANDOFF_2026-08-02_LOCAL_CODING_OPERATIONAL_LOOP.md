@@ -12,6 +12,8 @@ Recovery state is current-state only: when a later in-scope read resolves the ga
 
 Every independent checker result is persisted when it occurs, including a terminal failure after the one permitted repair attempt. The UI can therefore show the structured failed checks and capped checker output rather than reducing a failed run to an opaque error string.
 
+The worker also owns a per-task exclusive execution lease under `.lps/native-code/leases`. It is acquired atomically before a detached worktree is created, carries a bounded expiry, blocks a second LPS process from running the same task, and is released during terminal cleanup or restart recovery. This closes cross-process duplicate execution without misrepresenting the JSON task store as transactional SQLite; a future SQLite/CAS migration remains a separate capability.
+
 This implementation does not add another agent, command runner, browser controller, branch owner, or auto-apply path. The local model still returns bounded JSON file replacements. Browser consultation is optional untrusted advice and is never a coding fallback.
 
 ## User flow
