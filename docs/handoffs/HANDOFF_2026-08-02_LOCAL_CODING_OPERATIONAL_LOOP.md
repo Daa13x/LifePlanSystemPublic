@@ -8,6 +8,10 @@ The worker may continue unattended inside one sealed detached worktree: it selec
 
 Before `needs-evidence` is recorded, the sealed worker now gets up to three self-directed evidence-recovery passes. A concrete gap is not an unattended-completion failure by itself: the worker must use the available bounded read-only tools when an approved source can answer it. It stops only after that bounded recovery is exhausted, the model says no permitted read can answer the fact, or the missing evidence is genuinely outside the sealed scope.
 
+Recovery state is current-state only: when a later in-scope read resolves the gap and the task reaches review, the worker clears the current blocker and appends an `evidence_recovery_complete` audit event. The Runs UI therefore never presents a review-ready patch as still blocked; the prior gaps remain inspectable in the append-only audit.
+
+Every independent checker result is persisted when it occurs, including a terminal failure after the one permitted repair attempt. The UI can therefore show the structured failed checks and capped checker output rather than reducing a failed run to an opaque error string.
+
 This implementation does not add another agent, command runner, browser controller, branch owner, or auto-apply path. The local model still returns bounded JSON file replacements. Browser consultation is optional untrusted advice and is never a coding fallback.
 
 ## User flow
@@ -26,7 +30,7 @@ This implementation does not add another agent, command runner, browser controll
 - `pending`: sealed and waiting for evidence preparation.
 - `prepared`: scoped evidence is ready; local run or optional advisory preview is available.
 - `needs-scope`: preflight found an unresolved or out-of-manifest implementation target.
-- `needs-evidence`: bounded in-scope evidence recovery is exhausted or cannot answer the named fact, so no isolated or live edit was accepted.
+- `needs-evidence`: bounded in-scope evidence recovery is exhausted or cannot answer the named fact, so no isolated or live edit was accepted. The task cannot blindly rerun on the identical sealed evidence; use one optional, reviewed browser advisory question for a named missing fact, or reject and create a better-scoped task.
 - `awaiting-advice`: exactly one persisted browser job is being polled; polling never redispatches.
 - `running`: isolated worktree/local inference/validation is active.
 - `review`: independently validated patch is waiting for patch-hash approval.

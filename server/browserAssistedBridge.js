@@ -5,9 +5,9 @@
 // patch, or approve completion — the worker's own guards remain the authority.
 //
 // Flow: solvability preflight -> workspace evidence -> ONE consultation ->
-// poll the same job -> validate structured advice -> pass validated advice as
-// untrusted context to worker.run -> deterministic verification + review/apply
-// (owned entirely by NativeCodingWorker).
+// poll the same job -> validate structured advice -> persist it as untrusted
+// context -> stop for a fresh task/evidence/advice-hash run approval. The
+// worker then owns deterministic verification + review/apply.
 
 import { solvabilityPreflight, buildWorkspaceEvidence, validateAdvice, renderAdviceContext } from './browserAssistedCoding.js';
 import { classifyFailure } from './infraProbe.js';
@@ -40,6 +40,26 @@ export async function runBrowserAssistedTask({
     root, worktree, allowedPaths: task.allowedPaths, forbiddenPath,
     title: task.title, objective: task.objective, cache
   });
+  const durableTask = worker.load(task.id);
+  const visibleEvidence = {
+    anchors: evidence.anchors,
+    excerpts: evidence.excerpts,
+    fileCount: evidence.fileCount,
+    omissions: evidence.omissions,
+    redactionCount: evidence.redactionCount
+  };
+  durableTask.preparation = {
+    status: 'ready',
+    preparedAt: new Date().toISOString(),
+    baseCommit: durableTask.baseCommit,
+    preflight,
+    evidence: visibleEvidence,
+    evidenceHash: crypto.createHash('sha256').update(JSON.stringify({ baseCommit: durableTask.baseCommit, preflight, evidence: visibleEvidence })).digest('hex')
+  };
+  durableTask.status = 'prepared';
+  durableTask.phase = 'evidence_ready';
+  worker.record(durableTask, 'workspace_evidence', 'allow', `Browser bridge persisted scoped evidence ${durableTask.preparation.evidenceHash} before advice dispatch.`);
+  worker.save(durableTask);
 
   // 3) Dispatch exactly one consultation for this (task, phase).
   const fingerprint = requestFingerprint || `${task.id}:${phase}:${evidence.anchors.map((a) => a.path).join(',')}`;
@@ -75,7 +95,6 @@ export async function runBrowserAssistedTask({
   //    owns scope enforcement, checker validation, no-diff detection, and the
   //    explicit review/apply boundary.
   const adviceContext = renderAdviceContext(validated.advice);
-  const durableTask = worker.load(task.id);
   durableTask.browserAdvice = {
     status: 'validated',
     provider: terminal.provider || 'browser consultation',
@@ -89,11 +108,11 @@ export async function runBrowserAssistedTask({
   };
   worker.record(durableTask, 'browser_advice_validation', 'allow', 'Validated browser advice persisted as untrusted context; scope authority unchanged.');
   worker.save(durableTask);
-  const workerResult = await worker.run(task.id, approval);
   return {
-    outcome: 'ran',
-    workerStatus: workerResult.status,
+    outcome: 'awaiting_run_approval',
+    taskId: durableTask.id,
     advice: validated.advice,
-    evidence: { anchors: evidence.anchors.map((a) => a.path), fileCount: evidence.fileCount }
+    adviceHash: durableTask.browserAdvice.answerHash,
+    evidence: { anchors: evidence.anchors.map((a) => a.path), fileCount: evidence.fileCount, evidenceHash: durableTask.preparation.evidenceHash }
   };
 }

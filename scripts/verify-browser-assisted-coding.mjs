@@ -235,6 +235,7 @@ try {
   fs.writeFileSync(path.join(gitRepo, '.gitignore'), '.lps/\n');
   await git(['add', '.']); await git(['commit', '-m', 'fixture']);
   await git(['remote', 'add', 'origin', 'https://github.com/Daa13x/LifePlanSystemPublic.git']);
+  const gitBaseCommit = (await git(['rev-parse', 'HEAD'])).stdout.trim();
 
   let capturedPrompt = '';
   const bacWorker = new NativeCodingWorker({
@@ -249,7 +250,7 @@ try {
       branchCreator: 'lifeplansystem-native-coding-controller'
     })
   });
-  const bacTask = bacWorker.create({ title: 'Update valueHost', objective: 'Change valueHost to 2.', allowedPaths: ['src/valueHost.js'], maxFilesChanged: 1 });
+  const bacTask = bacWorker.create({ title: 'Update valueHost', objective: 'Change valueHost to 2.', allowedPaths: ['src/valueHost.js'], maxFilesChanged: 1, baseCommit: gitBaseCommit });
   bacTask.namedTargets = ['valueHost'];
   const approval = { confirm: true, taskHash: bacTask.taskHash };
 
@@ -268,9 +269,12 @@ try {
   const badAdvice = await runBrowserAssistedTask({ worker: bacWorker, task: bacTask, approval, root: gitRepo, worktree: gitRepo, forbiddenPath: forbidden, cache: new FileIndexCache(), consultationStore: new BrowserConsultationStore({ baseDir: path.join(temp, 'b3') }), dispatchConsultation: async () => 'job', pollConsultation: async () => ({ state: 'answered', result: JSON.stringify({ summary: 'x', recommended_files: ['../escape.js'], implementation_guidance: [], risks: [], suggested_checks: [], confidence: 'low', taskId: bacTask.id }) }) });
   assert.equal(badAdvice.outcome, 'blocked', 'bad advice is a bad-answer (blocked), not a transport failure');
 
-  // happy path -> validated advice reaches the worker as untrusted context; review produced
+  // happy path -> validated advice is persisted, then a fresh hash-bound run approval reaches the worker
   const happy = await runBrowserAssistedTask({ worker: bacWorker, task: bacTask, approval, root: gitRepo, worktree: gitRepo, forbiddenPath: forbidden, cache: new FileIndexCache(), consultationStore: new BrowserConsultationStore({ baseDir: path.join(temp, 'b4') }), dispatchConsultation: async () => 'job', pollConsultation: async () => ({ state: 'answered', result: JSON.stringify({ summary: 'set to 2', recommended_files: ['src/valueHost.js'], implementation_guidance: ['set valueHost to 2'], risks: [], suggested_checks: ['verify'], confidence: 'low', taskId: bacTask.id }) }) });
-  assert.equal(happy.outcome, 'ran'); assert.equal(happy.workerStatus, 'review', 'worker produced a reviewable result');
+  assert.equal(happy.outcome, 'awaiting_run_approval');
+  assert.equal(capturedPrompt, '', 'validated browser advice cannot auto-run the coding worker');
+  const bridgeReview = await bacWorker.run(bacTask.id, { confirm: true, taskHash: bacTask.taskHash, evidenceHash: happy.evidence.evidenceHash, adviceHash: happy.adviceHash, approvedBy: 'acceptance' });
+  assert.equal(bridgeReview.status, 'review', 'the separately approved worker run produced a reviewable result');
   assert.ok(capturedPrompt.includes(UNTRUSTED_ADVICE_BANNER), 'validated advice reached the worker as untrusted context');
   assert.ok(!capturedPrompt.includes('../escape.js'), 'rejected advice never reaches the worker');
   assert.equal(fs.readFileSync(path.join(gitRepo, 'src', 'valueHost.js'), 'utf8'), 'export const valueHost = 1;\n', 'live checkout unchanged before apply approval');

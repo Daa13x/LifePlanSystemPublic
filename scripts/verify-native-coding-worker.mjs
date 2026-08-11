@@ -34,7 +34,10 @@ try {
     root: temp,
     runGit: (args) => run('git', args),
     runValidation: async ({ worktree, changedFiles }) => {
-      if (modelMode === 'validation-repair') {
+      if (modelMode === 'validation-permanent-failure') {
+        return { ok: false, output: 'FAIL permanent fixture checker', checks: [{ name: 'permanent fixture checker', ok: false }] };
+      }
+      if (['validation-repair', 'validation-repair-low-confidence'].includes(modelMode)) {
         const value = fs.readFileSync(path.join(worktree, 'src', 'value.js'), 'utf8');
         const ok = value.includes('value = 3');
         return { ok, output: ok ? 'PASS repaired fixture checker' : 'FAIL fixture requires value = 3', checks: [{ name: 'repaired fixture checker', ok }] };
@@ -67,8 +70,14 @@ try {
               : !prompt.includes('Controller tool result')
                 ? JSON.stringify({ tool: { name: 'read_file', path: 'src/value.js', startLine: 1, endLine: 20 } })
                 : JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The recovered approved fixture read proves the exact bounded change.', summary: 'Apply the evidence-backed fixture change.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }))
-            : modelMode === 'evidence-exhaustion'
+          : modelMode === 'evidence-exhaustion'
               ? JSON.stringify({ action: 'propose_edits', confidence: 0.35, evidence_basis: 'The available fixture evidence remains insufficient to establish the required external contract.', evidence_gaps: ['Obtain the external contract that defines the required exported value.'], summary: 'The remaining evidence is outside the sealed scope.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
+          : modelMode === 'validation-permanent-failure'
+              ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved fixture source supports the same bounded change during checker diagnosis.', summary: 'Retain the bounded fixture proposal.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
+            : modelMode === 'validation-repair-low-confidence'
+              ? (prompt.includes('Independent checker failure')
+                ? JSON.stringify({ action: 'propose_edits', confidence: 0.35, evidence_basis: 'The checker failure identifies a mismatch but not the required production contract.', evidence_gaps: ['Read the production contract that defines the required corrected fixture value.'], summary: 'Stop with the concrete missing repair evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 3;\n' }] })
+                : JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved fixture source establishes the initial bounded change before checker feedback.', summary: 'Initial value change.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }))
           : modelMode === 'validation-repair'
             ? (prompt.includes('Independent checker failure')
               ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The checker explicitly requires the corrected fixture value of three.', summary: 'Repair the value from checker feedback.', edits: [{ path: 'src/value.js', content: 'export const value = 3;\n' }] })
@@ -89,6 +98,7 @@ try {
   });
 
   assert.throws(() => parseNativeCodingResponse('not json'), /valid JSON/);
+  assert.throws(() => parseNativeCodingResponse(JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'This deliberately contradictory fixture checks the confidence contract.', evidence_gaps: ['Read a concrete missing source fact before claiming review readiness.'], edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })), /cannot claim edit confidence/);
   assert.deepEqual(Object.keys(NATIVE_CODING_VALIDATIONS), ['syntax', 'frontend', 'runtime', 'project']);
   const productionServer = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
   assert.match(productionServer, /\['run', 'verify:runtime-safety'\]/, 'runtime validation must use the fixed runtime-safety command');
@@ -98,7 +108,18 @@ try {
   assert.match(productionServer, /context size must be an integer from/, 'llama context settings must be bounded');
   assert.throws(() => worker.create({ title: 'Traversal', objective: 'Must fail.', allowedPaths: ['src/../../secret.txt'] }), /unsafe or protected/);
   const baseCommit = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
-  const task = worker.create({ title: 'Increment fixture', objective: 'Change value from one to two.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax', baseCommit });
+  assert.throws(() => worker.create({ title: 'Unpinned task', objective: 'Must never acquire a base commit after user approval.', allowedPaths: ['src/value.js'] }), /base commit is required/);
+  const createTask = (input) => worker.create({ ...input, baseCommit });
+  const createPreparedTask = (input) => {
+    const prepared = createTask(input);
+    prepared.preparation = { status: 'ready', baseCommit, evidenceHash: 'c'.repeat(64), evidence: { anchors: [{ path: prepared.allowedPaths[0] }] } };
+    prepared.status = 'prepared';
+    prepared.phase = 'evidence_ready';
+    worker.save(prepared);
+    return prepared;
+  };
+  const runPreparedTask = (prepared, extra = {}) => worker.run(prepared.id, { confirm: true, taskHash: prepared.taskHash, evidenceHash: prepared.preparation.evidenceHash, adviceHash: '', ...extra });
+  const task = createTask({ title: 'Increment fixture', objective: 'Change value from one to two.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax' });
   await assert.rejects(worker.run(task.id, { confirm: true, taskHash: 'wrong' }), /sealed task scope/);
   await assert.rejects(worker.run(task.id, { confirm: true, taskHash: task.taskHash }), /Prepare and review scoped workspace evidence/);
   task.preparation = { status: 'ready', baseCommit, evidenceHash: 'a'.repeat(64), evidence: { anchors: [{ path: 'src/value.js' }] } };
@@ -124,8 +145,8 @@ try {
 
   await run('git', ['restore', '--worktree', '--', 'src/value.js']);
   modelMode = 'tools';
-  const toolTask = worker.create({ title: 'Inspect fixture', objective: 'List, search, and read approved files before changing one.', allowedPaths: ['src'], maxFilesChanged: 1 });
-  const toolReview = await worker.run(toolTask.id, { confirm: true, taskHash: toolTask.taskHash });
+  const toolTask = createPreparedTask({ title: 'Inspect fixture', objective: 'List, search, and read approved files before changing one.', allowedPaths: ['src'], maxFilesChanged: 1 });
+  const toolReview = await runPreparedTask(toolTask);
   assert.equal(toolReview.status, 'review');
   assert.deepEqual(toolReview.toolTrace.map((entry) => entry.name), ['list_files', 'search', 'read_file']);
   assert.ok(toolReview.toolTrace.every((entry) => /^[a-f0-9]{64}$/.test(entry.resultHash)));
@@ -135,19 +156,21 @@ try {
   await worker.reject(toolTask.id);
 
   modelMode = 'evidence-recovery';
-  const evidenceRecoveryTask = worker.create({ title: 'Resolve own evidence gap', objective: 'Use an approved read to close a concrete gap before proposing the fixture edit.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
-  const evidenceRecoveryReview = await worker.run(evidenceRecoveryTask.id, { confirm: true, taskHash: evidenceRecoveryTask.taskHash });
+  const evidenceRecoveryTask = createPreparedTask({ title: 'Resolve own evidence gap', objective: 'Use an approved read to close a concrete gap before proposing the fixture edit.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const evidenceRecoveryReview = await runPreparedTask(evidenceRecoveryTask);
   assert.equal(evidenceRecoveryReview.status, 'review');
   assert.equal(evidenceRecoveryReview.evidenceRecoveries, 1, 'a concrete in-scope evidence gap triggers unattended local recovery');
   assert.deepEqual(evidenceRecoveryReview.toolTrace.map((entry) => entry.name), ['read_file']);
   assert.ok(evidenceRecoveryReview.audit.some((event) => event.phase === 'evidence_recovery' && event.verdict === 'allow'), 'the recovery decision is durable operator evidence');
+  assert.ok(evidenceRecoveryReview.audit.some((event) => event.phase === 'evidence_recovery_complete' && event.verdict === 'allow'), 'successful self-recovery records a durable completion event');
+  assert.equal(evidenceRecoveryReview.recovery, null, 'a review-ready task does not retain stale current-blocker state after self-recovery');
   assert.match(evidenceRecoveryReview.assessment.evidenceBasis, /recovered approved fixture read/);
   assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'evidence recovery never changes the live checkout');
   await worker.reject(evidenceRecoveryTask.id);
 
   modelMode = 'evidence-exhaustion';
-  const exhaustedEvidenceTask = worker.create({ title: 'Bound evidence recovery', objective: 'Stop only after the bounded sealed evidence-recovery budget is exhausted.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
-  await assert.rejects(worker.run(exhaustedEvidenceTask.id, { confirm: true, taskHash: exhaustedEvidenceTask.taskHash }), /LOW_CONFIDENCE/);
+  const exhaustedEvidenceTask = createPreparedTask({ title: 'Bound evidence recovery', objective: 'Stop only after the bounded sealed evidence-recovery budget is exhausted.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(runPreparedTask(exhaustedEvidenceTask), /LOW_CONFIDENCE/);
   const exhaustedEvidence = worker.load(exhaustedEvidenceTask.id);
   assert.equal(exhaustedEvidence.status, 'needs-evidence');
   assert.equal(exhaustedEvidence.evidenceRecoveries, 3, 'the worker makes all three permitted unattended evidence-recovery passes before stopping');
@@ -156,8 +179,8 @@ try {
   await worker.reject(exhaustedEvidenceTask.id);
 
   modelMode = 'validation-repair';
-  const repairTask = worker.create({ title: 'Repair after checker feedback', objective: 'Use the independent checker result to correct the approved fixture.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
-  const repairReview = await worker.run(repairTask.id, { confirm: true, taskHash: repairTask.taskHash });
+  const repairTask = createPreparedTask({ title: 'Repair after checker feedback', objective: 'Use the independent checker result to correct the approved fixture.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const repairReview = await runPreparedTask(repairTask);
   assert.equal(repairReview.status, 'review');
   assert.equal(repairReview.validationRepairs, 1, 'one checker-guided repair remains bounded');
   assert.ok(repairReview.audit.some((event) => event.phase === 'validation_repair_assessment'), 'repair assessment is durable evidence');
@@ -165,54 +188,74 @@ try {
   assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'checker-guided repair never changes the live checkout');
   await worker.reject(repairTask.id);
 
+  modelMode = 'validation-permanent-failure';
+  const failedValidationTask = createPreparedTask({ title: 'Retain failed checker evidence', objective: 'Keep the terminal independent-checker result available for review.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(runPreparedTask(failedValidationTask), /Independent validation failed after 1 bounded repair attempt/);
+  const failedValidation = worker.load(failedValidationTask.id);
+  assert.equal(failedValidation.status, 'failed');
+  assert.equal(failedValidation.validationResult?.ok, false, 'terminal checker failure remains structured task evidence');
+  assert.match(failedValidation.validationResult?.output || '', /permanent fixture checker/);
+  await worker.reject(failedValidationTask.id);
+
+  modelMode = 'validation-repair-low-confidence';
+  const lowConfidenceRepairTask = createPreparedTask({ title: 'Explain low-confidence checker repair', objective: 'Persist the exact missing evidence when checker-guided repair cannot safely continue.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(runPreparedTask(lowConfidenceRepairTask), /LOW_CONFIDENCE/);
+  const lowConfidenceRepair = worker.load(lowConfidenceRepairTask.id);
+  assert.equal(lowConfidenceRepair.status, 'needs-evidence');
+  assert.equal(lowConfidenceRepair.assessment?.repairedAfterValidation, true);
+  assert.deepEqual(lowConfidenceRepair.recovery?.evidenceGaps, ['Read the production contract that defines the required corrected fixture value.']);
+  assert.match(lowConfidenceRepair.validationResult?.output || '', /fixture requires value = 3/, 'the failed first checker result remains visible beside repair evidence gaps');
+  await worker.reject(lowConfidenceRepairTask.id);
+
   modelMode = 'tool-escape';
-  const toolEscape = worker.create({ title: 'Escape tool', objective: 'Attempt an out-of-scope tool read.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
-  await assert.rejects(worker.run(toolEscape.id, { confirm: true, taskHash: toolEscape.taskHash }), /outside the approved scope/);
+  const toolEscape = createPreparedTask({ title: 'Escape tool', objective: 'Attempt an out-of-scope tool read.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(runPreparedTask(toolEscape), /outside the approved scope/);
   assert.equal(worker.load(toolEscape.id).status, 'failed');
 
   modelMode = 'tool-loop';
-  const toolLoop = worker.create({ title: 'Bound tool loop', objective: 'Prove endless tool requests stop.', allowedPaths: ['src'], maxFilesChanged: 1 });
-  await assert.rejects(worker.run(toolLoop.id, { confirm: true, taskHash: toolLoop.taskHash }), /8-tool-call limit/);
+  const toolLoop = createPreparedTask({ title: 'Bound tool loop', objective: 'Prove endless tool requests stop.', allowedPaths: ['src'], maxFilesChanged: 1 });
+  await assert.rejects(runPreparedTask(toolLoop), /8-tool-call limit/);
   assert.equal(worker.load(toolLoop.id).toolTrace.length, 8);
 
   modelMode = 'delete';
-  const deleteTask = worker.create({ title: 'Delete fixture', objective: 'Remove the approved obsolete file.', allowedPaths: ['src/obsolete.js'], maxFilesChanged: 1 });
-  const deleteReview = await worker.run(deleteTask.id, { confirm: true, taskHash: deleteTask.taskHash });
+  const deleteTask = createPreparedTask({ title: 'Delete fixture', objective: 'Remove the approved obsolete file.', allowedPaths: ['src/obsolete.js'], maxFilesChanged: 1 });
+  const deleteReview = await runPreparedTask(deleteTask);
   assert.match(deleteReview.diff, /deleted file mode/);
   assert.equal(fs.existsSync(path.join(temp, 'src', 'obsolete.js')), true, 'review deletion reached live checkout before Apply');
   await worker.reject(deleteTask.id);
 
   modelMode = 'new';
-  const newFile = worker.create({ title: 'Add fixture', objective: 'Add one JavaScript fixture.', allowedPaths: ['src'], maxFilesChanged: 1 });
-  const newReview = await worker.run(newFile.id, { confirm: true, taskHash: newFile.taskHash });
+  const newFile = createPreparedTask({ title: 'Add fixture', objective: 'Add one JavaScript fixture.', allowedPaths: ['src'], maxFilesChanged: 1 });
+  const newReview = await runPreparedTask(newFile);
   assert.match(newReview.diff, /new file mode/);
   await worker.apply(newFile.id, { confirm: true, patchHash: newReview.patchHash });
   assert.equal(fs.readFileSync(path.join(temp, 'src', 'new.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const added = true;\n');
   fs.unlinkSync(path.join(temp, 'src', 'new.js'));
 
   modelMode = 'escape';
-  const unsafe = worker.create({ title: 'Unsafe fixture', objective: 'Attempt an out-of-scope edit.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
-  await assert.rejects(worker.run(unsafe.id, { confirm: true, taskHash: unsafe.taskHash }), /outside the approved scope/);
+  const unsafe = createPreparedTask({ title: 'Unsafe fixture', objective: 'Attempt an out-of-scope edit.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(runPreparedTask(unsafe), /outside the approved scope/);
   assert.equal(fs.existsSync(path.join(temp, 'outside.js')), false);
   assert.equal(worker.load(unsafe.id).status, 'failed');
 
   modelMode = 'low-confidence';
-  const lowConfidence = worker.create({ title: 'Need more evidence', objective: 'Do not edit when the source does not establish the defect.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
-  await assert.rejects(worker.run(lowConfidence.id, { confirm: true, taskHash: lowConfidence.taskHash }), /LOW_CONFIDENCE/);
+  const lowConfidence = createPreparedTask({ title: 'Need more evidence', objective: 'Do not edit when the source does not establish the defect.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(runPreparedTask(lowConfidence), /LOW_CONFIDENCE/);
   const stopped = worker.load(lowConfidence.id);
   assert.equal(stopped.status, 'needs-evidence');
   assert.equal(stopped.assessment.confidence, 0.35);
   assert.match(stopped.recovery.nextPermittedAction, /prepare scoped evidence again/);
   assert.deepEqual(stopped.recovery.evidenceGaps, ['Read the production contract that specifies the intended exported value.']);
   assert.match(stopped.error, /Gather one of the named evidence gaps/);
+  await assert.rejects(runPreparedTask(lowConfidence), /Task cannot run from status needs-evidence/, 'exhausted evidence recovery cannot blindly rerun against unchanged evidence');
   await worker.reject(lowConfidence.id);
 
   modelMode = 'valid';
-  const concurrentA = worker.create({ title: 'Concurrent A', objective: 'First single-flight task.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
-  const concurrentB = worker.create({ title: 'Concurrent B', objective: 'Second single-flight task.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const concurrentA = createPreparedTask({ title: 'Concurrent A', objective: 'First single-flight task.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const concurrentB = createPreparedTask({ title: 'Concurrent B', objective: 'Second single-flight task.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
   const concurrent = await Promise.allSettled([
-    worker.run(concurrentA.id, { confirm: true, taskHash: concurrentA.taskHash }),
-    worker.run(concurrentB.id, { confirm: true, taskHash: concurrentB.taskHash })
+    runPreparedTask(concurrentA),
+    runPreparedTask(concurrentB)
   ]);
   assert.equal(concurrent.filter((item) => item.status === 'fulfilled').length, 1);
   assert.equal(concurrent.filter((item) => item.status === 'rejected' && /Another native coding task/.test(item.reason.message)).length, 1);
@@ -221,7 +264,7 @@ try {
     if (['review', 'pending', 'failed'].includes(current.status)) await worker.reject(task.id);
   }
 
-  const interrupted = worker.create({ title: 'Restart fixture', objective: 'Prove stale running state is not trusted.', allowedPaths: ['src/value.js'] });
+  const interrupted = createTask({ title: 'Restart fixture', objective: 'Prove stale running state is not trusted.', allowedPaths: ['src/value.js'] });
   const interruptedFile = worker.taskFile(interrupted.id);
   fs.writeFileSync(interruptedFile, JSON.stringify({ ...interrupted, status: 'running', phase: 'local_coder_inference' }, null, 2));
   const recovered = new NativeCodingWorker({ root: temp, runGit: (args) => run('git', args), runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath });

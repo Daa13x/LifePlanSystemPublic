@@ -109,6 +109,9 @@ export function parseNativeCodingTurn(text) {
   if (action !== 'propose_edits' || !Number.isFinite(assessmentConfidence) || assessmentConfidence < 0 || assessmentConfidence > 1 || evidenceBasis.length < 12) {
     throw new Error('Coding model final edits require action "propose_edits", confidence from 0 to 1, and an evidence_basis of at least 12 characters.');
   }
+  if (assessmentConfidence >= MIN_EDIT_CONFIDENCE && evidenceGaps.length) {
+    throw new Error('Coding model cannot claim edit confidence at or above the threshold while declaring unresolved evidence gaps. Resolve the gaps with an approved read or lower confidence honestly.');
+  }
   return { type: 'final', summary: String(parsed.summary || '').trim().slice(0, 2000), edits: parsed.edits, action, confidence: assessmentConfidence, evidenceBasis, evidenceGaps };
 }
 
@@ -240,7 +243,7 @@ export class NativeCodingWorker {
     const validation = Object.hasOwn(NATIVE_CODING_VALIDATIONS, input.validation) ? input.validation : 'syntax';
     const createdAt = new Date().toISOString();
     const baseCommit = String(input.baseCommit || '').trim();
-    if (baseCommit && !/^[a-f0-9]{40}$/i.test(baseCommit)) throw new Error('A valid current base commit is required.');
+    if (!/^[a-f0-9]{40}$/i.test(baseCommit)) throw new Error('A valid current base commit is required before sealing a coding task.');
     const task = {
       id: `code-${createdAt.replace(/[^0-9]/g, '')}-${crypto.randomBytes(3).toString('hex')}`,
       title, objective, allowedPaths, maxFilesChanged, validation,
@@ -373,7 +376,7 @@ export class NativeCodingWorker {
     const task = this.load(id);
     if (approval.confirm !== true) throw new Error('Explicit run approval is required.');
     if (taskSeal(task) !== task.taskHash || approval.taskHash !== task.taskHash) throw new Error('Run approval does not match the current sealed task scope. Refresh and approve again.');
-    if (!['pending', 'prepared', 'needs-evidence', 'failed', 'interrupted', 'cancelled'].includes(task.status)) throw new Error(`Task cannot run from status ${task.status}.`);
+    if (!['pending', 'prepared', 'failed', 'interrupted', 'cancelled'].includes(task.status)) throw new Error(`Task cannot run from status ${task.status}.`);
     if (task.baseCommit && !task.preparation?.evidenceHash) throw new Error('Prepare and review scoped workspace evidence before running this task.');
     if (task.baseCommit && approval.evidenceHash !== task.preparation?.evidenceHash) throw new Error('Run approval does not match the prepared workspace evidence. Refresh and approve again.');
     const adviceHash = task.browserAdvice?.status === 'validated' ? String(task.browserAdvice.answerHash || '') : '';
@@ -405,7 +408,7 @@ export class NativeCodingWorker {
         activeBranch: branch.stdout.trim(),
         worktreeClean: status.ok && !status.stdout.trim(),
         taskId: task.id,
-        taskCardValid: Boolean(task.title && task.objective && task.taskHash),
+        taskCardValid: Boolean(task.title && task.objective && task.baseCommit && task.taskHash),
         allowedPaths: task.allowedPaths,
         protectedPathHits: []
       });
@@ -421,7 +424,6 @@ export class NativeCodingWorker {
     const controller = new AbortController();
     this.active.set(task.id, controller);
     this.reserved = false;
-    if (!task.baseCommit) task.baseCommit = head.stdout.trim();
     task.status = 'running'; task.phase = 'creating_isolated_worktree'; task.error = '';
     task.runApprovedAt = new Date().toISOString(); task.runApprovedBy = String(approval.approvedBy || 'user').slice(0, 80);
     this.record(task, 'run_approval', 'allow', `One-shot approval matched task hash ${task.taskHash}.`);
@@ -478,6 +480,11 @@ export class NativeCodingWorker {
         if (turn.type === 'final') {
           const candidate = { summary: turn.summary, edits: turn.edits, action: turn.action, confidence: turn.confidence, evidenceBasis: turn.evidenceBasis, evidenceGaps: turn.evidenceGaps };
           if (candidate.confidence >= MIN_EDIT_CONFIDENCE || !candidate.evidenceGaps.length || evidenceRecoveries >= MAX_EVIDENCE_RECOVERY_ATTEMPTS) {
+            if (candidate.confidence >= MIN_EDIT_CONFIDENCE && evidenceRecoveries) {
+              task.recovery = null;
+              this.record(task, 'evidence_recovery_complete', 'allow', `Local coder resolved evidence gaps after ${evidenceRecoveries}/${MAX_EVIDENCE_RECOVERY_ATTEMPTS} bounded recovery pass(es).`, { action: candidate.action, confidence: candidate.confidence, evidenceBasis: candidate.evidenceBasis, sourceReferences: task.toolTrace.map((entry) => entry.path) });
+              this.save(task);
+            }
             proposal = candidate;
             break;
           }
@@ -570,7 +577,12 @@ export class NativeCodingWorker {
         return { validationResult, actualPaths };
       };
 
+      const persistValidationResult = (result) => {
+        task.validationResult = { ...result, evidenceHash: digest(result) };
+        this.save(task);
+      };
       let { validationResult, actualPaths } = await applyAndValidateProposal(proposal);
+      persistValidationResult(validationResult);
       if (!validationResult.ok) {
         task.validationRepairs = Number(task.validationRepairs || 0) + 1;
         this.record(task, 'independent_validation', 'deny', `Validation failed; sending the capped checker evidence to the same isolated local worker for repair ${task.validationRepairs}/${MAX_VALIDATION_REPAIR_ATTEMPTS}.`);
@@ -584,17 +596,29 @@ export class NativeCodingWorker {
         if (String(repairResponse.model?.name || '').trim() !== task.gitAuthority.modelId) throw new Error('Coding model identity changed during validation repair. Refresh and run again.');
         const repairTurn = parseNativeCodingTurn(repairResponse.content);
         if (repairTurn.type !== 'final') throw new Error('Validation repair must return corrected final edits, not another tool request.');
-        if (repairTurn.confidence < MIN_EDIT_CONFIDENCE) throw new Error(`LOW_CONFIDENCE: Validation repair confidence ${(repairTurn.confidence * 100).toFixed(0)}% is below the ${MIN_EDIT_CONFIDENCE * 100}% edit threshold.`);
+        if (repairTurn.confidence < MIN_EDIT_CONFIDENCE) {
+          task.assessment = { action: repairTurn.action, confidence: repairTurn.confidence, evidenceBasis: repairTurn.evidenceBasis, evidenceGaps: repairTurn.evidenceGaps, assessedAt: new Date().toISOString(), repairedAfterValidation: true };
+          task.recovery = {
+            blockedReason: `Validation repair confidence ${(repairTurn.confidence * 100).toFixed(0)}% is below the ${MIN_EDIT_CONFIDENCE * 100}% edit threshold.`,
+            evidenceGaps: repairTurn.evidenceGaps,
+            nextPermittedAction: repairTurn.evidenceGaps.length ? 'Gather one of the named evidence gaps, prepare scoped evidence again, then explicitly approve a new isolated run.' : 'Gather the exact missing source or verification evidence, prepare scoped evidence again, then explicitly approve a new isolated run.',
+            recordedAt: new Date().toISOString()
+          };
+          this.record(task, 'validation_repair_assessment', 'deny', task.recovery.blockedReason, { action: repairTurn.action, confidence: repairTurn.confidence, evidenceBasis: repairTurn.evidenceBasis, sourceReferences: task.toolTrace.map((entry) => entry.path) });
+          this.save(task);
+          throw new Error(`LOW_CONFIDENCE: ${task.recovery.blockedReason} ${task.recovery.nextPermittedAction}`);
+        }
         proposal = { summary: repairTurn.summary, edits: repairTurn.edits, action: repairTurn.action, confidence: repairTurn.confidence, evidenceBasis: repairTurn.evidenceBasis, evidenceGaps: repairTurn.evidenceGaps };
         task.assessment = { action: proposal.action, confidence: proposal.confidence, evidenceBasis: proposal.evidenceBasis, evidenceGaps: proposal.evidenceGaps, assessedAt: new Date().toISOString(), repairedAfterValidation: true };
         this.record(task, 'validation_repair_assessment', 'allow', `Model supplied a corrected proposal at ${(proposal.confidence * 100).toFixed(0)}% confidence after checker feedback.`, { action: proposal.action, confidence: proposal.confidence, evidenceBasis: proposal.evidenceBasis, sourceReferences: task.toolTrace.map((entry) => entry.path) });
         this.save(task);
         ({ validationResult, actualPaths } = await applyAndValidateProposal(proposal));
+        persistValidationResult(validationResult);
       }
       if (!validationResult.ok) throw new Error(`Independent validation failed after ${MAX_VALIDATION_REPAIR_ATTEMPTS} bounded repair attempt: ${validationResult.output}`);
       const diff = await this.runGit(['-C', worktree, 'diff', '--no-ext-diff', '--binary', 'HEAD']);
       if (!diff.ok || !diff.stdout.trim()) throw new Error('Coding task produced no reviewable diff.');
-      task.summary = proposal.summary; task.changedFiles = actualPaths; task.validationResult = { ...validationResult, evidenceHash: digest(validationResult) };
+      task.summary = proposal.summary; task.changedFiles = actualPaths;
       task.diff = diff.stdout; task.status = 'review'; task.phase = 'awaiting_apply_approval';
       task.patchHash = digest(task.diff);
       this.record(task, 'independent_validation', 'allow', `Validation evidence ${task.validationResult.evidenceHash}; patch ${task.patchHash}.`);
