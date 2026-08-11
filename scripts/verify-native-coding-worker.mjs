@@ -59,7 +59,7 @@ try {
         : modelMode === 'new'
           ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved source directory permits this bounded fixture addition.', summary: 'Add the fixture.', edits: [{ path: 'src/new.js', content: 'export const added = true;\n' }] })
           : modelMode === 'low-confidence'
-            ? JSON.stringify({ action: 'propose_edits', confidence: 0.35, evidence_basis: 'The supplied source does not establish the intended production behavior.', summary: 'Stop for evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
+            ? JSON.stringify({ action: 'propose_edits', confidence: 0.35, evidence_basis: 'The supplied source does not establish the intended production behavior.', evidence_gaps: ['Read the production contract that specifies the intended exported value.'], summary: 'Stop for evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
             : JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'This deliberately unsafe fixture is used to test path enforcement.', summary: 'Escape scope.', edits: [{ path: 'outside.js', content: 'bad\n' }] })
     }),
     forbiddenPath: (candidate) => candidate.startsWith('.git') || candidate.startsWith('.lps') || candidate.startsWith('data'),
@@ -156,7 +156,9 @@ try {
   const stopped = worker.load(lowConfidence.id);
   assert.equal(stopped.status, 'needs-evidence');
   assert.equal(stopped.assessment.confidence, 0.35);
-  assert.match(stopped.error, /Gather the exact missing source/);
+  assert.match(stopped.recovery.nextPermittedAction, /prepare scoped evidence again/);
+  assert.deepEqual(stopped.recovery.evidenceGaps, ['Read the production contract that specifies the intended exported value.']);
+  assert.match(stopped.error, /Gather one of the named evidence gaps/);
   await worker.reject(lowConfidence.id);
 
   modelMode = 'valid';

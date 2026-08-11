@@ -5116,6 +5116,8 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
                   <dt>Patch hash</dt><dd><code>{selectedCodingTask.patchHash?.slice(0, 20) || 'not generated'}</code></dd>
                   <dt>Last action confidence</dt><dd>{selectedCodingTask.assessment ? `${Math.round(Number(selectedCodingTask.assessment.confidence) * 100)}% — ${selectedCodingTask.assessment.action}` : 'not assessed'}</dd>
                   {selectedCodingTask.assessment?.evidenceBasis && <><dt>Confidence basis</dt><dd>{selectedCodingTask.assessment.evidenceBasis}</dd></>}
+                  {selectedCodingTask.recovery?.blockedReason && <><dt>Blocked by</dt><dd>{selectedCodingTask.recovery.blockedReason}</dd><dt>Next safe action</dt><dd>{selectedCodingTask.recovery.nextPermittedAction}</dd></>}
+                  {selectedCodingTask.recovery?.evidenceGaps?.length > 0 && <><dt>Evidence gaps</dt><dd>{selectedCodingTask.recovery.evidenceGaps.map((gap) => <div key={gap}>{gap}</div>)}</dd></>}
                   <dt>Browser advice</dt><dd>{selectedCodingTask.browserAdvice?.status || 'skipped'}</dd>
                 </dl>
 
