@@ -356,6 +356,10 @@ export function violatesMandatoryForbidden(candidatePath) {
   return isProtectedWorkspacePath(normalized)
     || OPENHANDS_MANDATORY_FORBIDDEN.some((blockedPath) => {
       const blocked = normalizeRequestPath(blockedPath).replace(/\/+$/, '');
+      // Credential-bearing names are a deliberately broad denylist. Unlike
+      // ordinary directory segments, credentials.json and similar files must
+      // be refused wherever they appear in the approved scope.
+      if (blocked === 'credentials' && normalized.includes('credentials')) return true;
       return normalized === blocked || normalized.startsWith(`${blocked}/`) || normalized.includes(`/${blocked}/`);
     });
 }

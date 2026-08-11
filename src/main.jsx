@@ -5114,6 +5114,7 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
                   <dt>File limit</dt><dd>{selectedCodingTask.maxFilesChanged}</dd>
                   <dt>Evidence hash</dt><dd><code>{selectedCodingTask.preparation?.evidenceHash?.slice(0, 20) || 'not prepared'}</code></dd>
                   <dt>Patch hash</dt><dd><code>{selectedCodingTask.patchHash?.slice(0, 20) || 'not generated'}</code></dd>
+                  <dt>Checker repairs</dt><dd>{Number(selectedCodingTask.validationRepairs || 0)} / 1 bounded repair pass</dd>
                   <dt>Last action confidence</dt><dd>{selectedCodingTask.assessment ? `${Math.round(Number(selectedCodingTask.assessment.confidence) * 100)}% — ${selectedCodingTask.assessment.action}` : 'not assessed'}</dd>
                   {selectedCodingTask.assessment?.evidenceBasis && <><dt>Confidence basis</dt><dd>{selectedCodingTask.assessment.evidenceBasis}</dd></>}
                   {selectedCodingTask.recovery?.blockedReason && <><dt>Blocked by</dt><dd>{selectedCodingTask.recovery.blockedReason}</dd><dt>Next safe action</dt><dd>{selectedCodingTask.recovery.nextPermittedAction}</dd></>}

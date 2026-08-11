@@ -4,6 +4,8 @@
 
 LifePlanSystem now connects its existing governed `NativeCodingWorker` to a usable local-first coding workflow. Workboard can seal and queue a narrow task. **System > Runs** is the operational review workspace. Source Control remains the only Git publication surface.
 
+The worker may continue unattended inside one sealed detached worktree: it selects bounded read-only evidence tools, proposes a scoped edit, runs the independent validator, and—if that validator fails—receives the capped validator evidence for exactly one in-scope correction attempt. The final diff still requires a passing validator result and explicit human patch apply. This is bounded task completion, not unattended live-checkout mutation, Git activity, browser activity, or arbitrary command execution.
+
 This implementation does not add another agent, command runner, browser controller, branch owner, or auto-apply path. The local model still returns bounded JSON file replacements. Browser consultation is optional untrusted advice and is never a coding fallback.
 
 ## User flow

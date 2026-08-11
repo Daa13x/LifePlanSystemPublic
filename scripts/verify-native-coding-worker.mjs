@@ -33,11 +33,14 @@ try {
   const worker = new NativeCodingWorker({
     root: temp,
     runGit: (args) => run('git', args),
-    runValidation: async ({ worktree, changedFiles }) => ({
-      ok: changedFiles.length === 1,
-      output: 'PASS fixture checker',
-      checks: [{ name: 'fixture checker', ok: true }]
-    }),
+    runValidation: async ({ worktree, changedFiles }) => {
+      if (modelMode === 'validation-repair') {
+        const value = fs.readFileSync(path.join(worktree, 'src', 'value.js'), 'utf8');
+        const ok = value.includes('value = 3');
+        return { ok, output: ok ? 'PASS repaired fixture checker' : 'FAIL fixture requires value = 3', checks: [{ name: 'repaired fixture checker', ok }] };
+      }
+      return { ok: changedFiles.length === 1, output: 'PASS fixture checker', checks: [{ name: 'fixture checker', ok: true }] };
+    },
     invokeModel: async ({ prompt }) => ({
       model: { name: 'fake-local-coder', endpoint: 'http://127.0.0.1:1', source: 'acceptance fixture' },
       content: modelMode === 'tools'
@@ -58,6 +61,10 @@ try {
           ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved obsolete fixture is present in the scoped source.', summary: 'Remove obsolete fixture.', edits: [{ path: 'src/obsolete.js', delete: true }] })
         : modelMode === 'new'
           ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved source directory permits this bounded fixture addition.', summary: 'Add the fixture.', edits: [{ path: 'src/new.js', content: 'export const added = true;\n' }] })
+          : modelMode === 'validation-repair'
+            ? (prompt.includes('Independent checker failure')
+              ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The checker explicitly requires the corrected fixture value of three.', summary: 'Repair the value from checker feedback.', edits: [{ path: 'src/value.js', content: 'export const value = 3;\n' }] })
+              : JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved fixture source establishes an initial bounded change.', summary: 'Initial value change.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }))
           : modelMode === 'low-confidence'
             ? JSON.stringify({ action: 'propose_edits', confidence: 0.35, evidence_basis: 'The supplied source does not establish the intended production behavior.', evidence_gaps: ['Read the production contract that specifies the intended exported value.'], summary: 'Stop for evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
             : JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'This deliberately unsafe fixture is used to test path enforcement.', summary: 'Escape scope.', edits: [{ path: 'outside.js', content: 'bad\n' }] })
@@ -118,6 +125,16 @@ try {
   assert.match(toolReview.toolTrace.at(-1).resultPreview, /export const value = 1/, 'the final scoped file read is retained as evidence, not paraphrased model reasoning');
   assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'tool-loop review changed live checkout');
   await worker.reject(toolTask.id);
+
+  modelMode = 'validation-repair';
+  const repairTask = worker.create({ title: 'Repair after checker feedback', objective: 'Use the independent checker result to correct the approved fixture.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const repairReview = await worker.run(repairTask.id, { confirm: true, taskHash: repairTask.taskHash });
+  assert.equal(repairReview.status, 'review');
+  assert.equal(repairReview.validationRepairs, 1, 'one checker-guided repair remains bounded');
+  assert.ok(repairReview.audit.some((event) => event.phase === 'validation_repair_assessment'), 'repair assessment is durable evidence');
+  assert.match(repairReview.diff, /value = 3/);
+  assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'checker-guided repair never changes the live checkout');
+  await worker.reject(repairTask.id);
 
   modelMode = 'tool-escape';
   const toolEscape = worker.create({ title: 'Escape tool', objective: 'Attempt an out-of-scope tool read.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
