@@ -6,6 +6,8 @@ LifePlanSystem now connects its existing governed `NativeCodingWorker` to a usab
 
 The worker may continue unattended inside one sealed detached worktree: it selects bounded read-only evidence tools, proposes a scoped edit, runs the independent validator, and—if that validator fails—receives the capped validator evidence for exactly one in-scope correction attempt. The final diff still requires a passing validator result and explicit human patch apply. This is bounded task completion, not unattended live-checkout mutation, Git activity, browser activity, or arbitrary command execution.
 
+Before `needs-evidence` is recorded, the sealed worker now gets up to three self-directed evidence-recovery passes. A concrete gap is not an unattended-completion failure by itself: the worker must use the available bounded read-only tools when an approved source can answer it. It stops only after that bounded recovery is exhausted, the model says no permitted read can answer the fact, or the missing evidence is genuinely outside the sealed scope.
+
 This implementation does not add another agent, command runner, browser controller, branch owner, or auto-apply path. The local model still returns bounded JSON file replacements. Browser consultation is optional untrusted advice and is never a coding fallback.
 
 ## User flow
@@ -15,7 +17,7 @@ This implementation does not add another agent, command runner, browser controll
 3. **Prepare evidence** runs solvability preflight and bounded workspace indexing over approved paths. It stores ranked files, selection reasons, excerpts, omissions, redaction count, source hash, and an evidence hash. It makes no model or browser request.
 4. If local evidence is sufficient, approve the local run directly. If one implementation fact is missing, preview one browser-advice prompt. The exact redacted prompt is bound to its provider and SHA-256 before one dispatch.
 5. The native worker rechecks the clean `main` checkout and sealed base commit, creates a detached isolated worktree, reads approved context, invokes the verified loopback coding model, applies only bounded text replacements in isolation, and runs independent validation.
-6. Run approval is bound to the task hash, prepared evidence hash, and validated advice answer hash (or an explicit empty advice hash). The final local proposal must declare `action: "propose_edits"`, a 0–1 confidence, and an evidence basis. Below 70% confidence, LPS records the assessment and stops in `needs-evidence` before an isolated edit. System > Runs displays the evidence, assessment, review patch, changed files, validator output/evidence hash, model route, task hash, patch hash, and chronological audit record. The live checkout remains unchanged.
+6. Run approval is bound to the task hash, prepared evidence hash, and validated advice answer hash (or an explicit empty advice hash). The final local proposal must declare `action: "propose_edits"`, a 0–1 confidence, and an evidence basis. Below 70% confidence, LPS gives the same sealed worker up to three self-directed evidence-recovery passes: it must use an approved read-only tool when that can answer a named gap. Only exhausted, non-actionable, or genuinely out-of-scope gaps stop in `needs-evidence`; no isolated or live edit is accepted there. System > Runs displays the evidence, recovery count, assessment, review patch, changed files, validator output/evidence hash, model route, task hash, patch hash, and chronological audit record. The live checkout remains unchanged.
 7. **Apply reviewed patch** requires a separate explicit approval for the exact patch hash. It rechecks clean live `main` and the unchanged base commit, applies the patch unstaged, and performs no commit or push.
 8. Source Control refreshes the resulting changed files. Commit and push remain separate user-controlled Git operations.
 
@@ -24,7 +26,7 @@ This implementation does not add another agent, command runner, browser controll
 - `pending`: sealed and waiting for evidence preparation.
 - `prepared`: scoped evidence is ready; local run or optional advisory preview is available.
 - `needs-scope`: preflight found an unresolved or out-of-manifest implementation target.
-- `needs-evidence`: the local model assessed its edit below the 70% evidence threshold; no isolated or live edit was accepted.
+- `needs-evidence`: bounded in-scope evidence recovery is exhausted or cannot answer the named fact, so no isolated or live edit was accepted.
 - `awaiting-advice`: exactly one persisted browser job is being polled; polling never redispatches.
 - `running`: isolated worktree/local inference/validation is active.
 - `review`: independently validated patch is waiting for patch-hash approval.

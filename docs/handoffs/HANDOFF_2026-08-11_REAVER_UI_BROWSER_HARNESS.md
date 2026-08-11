@@ -14,7 +14,7 @@ Work began on synchronized `main` through `npm.cmd run policy:agent-start`. No b
 
 ### Local coding-controller evidence gate
 
-`server/nativeCodingWorker.js` now treats a final model proposal as an assessment, not authority. Final responses must declare `action: "propose_edits"`, numeric `confidence` from 0 to 1, and meaningful `evidence_basis`. The worker stores action, confidence, evidence basis, source references, and evidence hash in its ledger. It ends in `needs-evidence` below 0.70 confidence before any isolated edit is applied. The console exposes the assessment and lets an operator run again with evidence or reject it. Legacy records show confidence was not captured instead of falsely rendering 0%.
+`server/nativeCodingWorker.js` treats a final model proposal as an assessment, not authority. Final responses must declare `action: "propose_edits"`, numeric `confidence` from 0 to 1, and meaningful `evidence_basis`. The worker stores action, confidence, evidence basis, source references, and evidence hash in its ledger. Below 0.70 confidence, it first makes up to three bounded in-scope evidence-recovery passes rather than prematurely ending unattended work; only gaps that remain unresolvable through approved reads reach `needs-evidence`, before any isolated edit is applied. The console exposes the assessment and recovery count and lets an operator rerun with newly prepared evidence or reject it. Legacy records show confidence was not captured instead of falsely rendering 0%.
 
 Coverage and documentation: `scripts/verify-native-coding-worker.mjs`, `scripts/verify-browser-assisted-coding.mjs`, and `docs/handoffs/HANDOFF_2026-08-02_LOCAL_CODING_OPERATIONAL_LOOP.md`.
 

@@ -13,6 +13,7 @@ const MAX_TOOL_TRANSCRIPT_BYTES = 64000;
 const MAX_TOOL_READ_LINES = 400;
 const MAX_TOOL_EVIDENCE_PREVIEW_BYTES = 2400;
 const MAX_VALIDATION_REPAIR_ATTEMPTS = 1;
+const MAX_EVIDENCE_RECOVERY_ATTEMPTS = 3;
 const MIN_EDIT_CONFIDENCE = 0.70;
 
 export const NATIVE_CODING_VALIDATIONS = Object.freeze({
@@ -131,6 +132,7 @@ export function buildNativeCodingSystemPrompt({ allowedPaths, maxFilesChanged, v
     '{"tool":{"name":"read_file","path":"approved/file","startLine":1,"endLine":200}}',
     'After enough evidence, output exactly one final JSON object with this schema:',
     '{"action":"propose_edits","confidence":0.85,"evidence_basis":"The cited source and controller tool results show the exact defect.","evidence_gaps":["Only name a concrete missing source or verification fact when confidence is below the edit threshold."],"summary":"short explanation","edits":[{"path":"relative/path","content":"complete file content"},{"path":"obsolete/file","delete":true}]}',
+    'Do not stop merely because you can name up to three concrete evidence gaps. If an approved controller read can resolve one, request that read and continue. A final proposal below 70% confidence is accepted only when no permitted read can close the remaining gap.',
     'A deletion must use delete:true with no content. A rename is one approved deletion plus one approved creation and counts as two changed files.',
     'If the controller later supplies independent checker failure evidence, diagnose that evidence and return one corrected in-scope final proposal. The checker, not confidence, decides whether the proposal reaches review.',
     'No markdown fences, prose outside JSON, binary content, commands, Git operations, network access, secrets, or paths outside the approved scope.'
@@ -447,8 +449,11 @@ export class NativeCodingWorker {
       const basePrompt = promptParts.join('\n');
       const toolExchanges = [];
       let proposal = null;
+      let evidenceRecoveries = 0;
       task.toolTrace = [];
-      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+      let toolCalls = 0;
+      const maxInferenceTurns = MAX_TOOL_ROUNDS + MAX_EVIDENCE_RECOVERY_ATTEMPTS + 1;
+      for (let round = 0; round < maxInferenceTurns; round += 1) {
         const detailedExchanges = [...toolExchanges];
         while (detailedExchanges.length > 1 && Buffer.byteLength(detailedExchanges.join('\n\n')) > MAX_TOOL_TRANSCRIPT_BYTES) detailedExchanges.shift();
         const traceSummary = task.toolTrace.length
@@ -471,13 +476,28 @@ export class NativeCodingWorker {
         }
         const turn = parseNativeCodingTurn(response.content);
         if (turn.type === 'final') {
-          proposal = { summary: turn.summary, edits: turn.edits, action: turn.action, confidence: turn.confidence, evidenceBasis: turn.evidenceBasis, evidenceGaps: turn.evidenceGaps };
-          break;
+          const candidate = { summary: turn.summary, edits: turn.edits, action: turn.action, confidence: turn.confidence, evidenceBasis: turn.evidenceBasis, evidenceGaps: turn.evidenceGaps };
+          if (candidate.confidence >= MIN_EDIT_CONFIDENCE || !candidate.evidenceGaps.length || evidenceRecoveries >= MAX_EVIDENCE_RECOVERY_ATTEMPTS) {
+            proposal = candidate;
+            break;
+          }
+          evidenceRecoveries += 1;
+          task.evidenceRecoveries = evidenceRecoveries;
+          task.recovery = {
+            blockedReason: `The local coder identified ${candidate.evidenceGaps.length} unresolved evidence gap(s) before it could safely edit.`,
+            evidenceGaps: candidate.evidenceGaps,
+            nextPermittedAction: 'The sealed local worker is resolving the named gaps with its approved read-only tools before it decides whether human evidence is still needed.',
+            recordedAt: new Date().toISOString()
+          };
+          this.record(task, 'evidence_recovery', 'allow', `Local coder self-recovery ${evidenceRecoveries}/${MAX_EVIDENCE_RECOVERY_ATTEMPTS} started for ${candidate.evidenceGaps.length} concrete evidence gap(s).`, { action: candidate.action, confidence: candidate.confidence, evidenceBasis: candidate.evidenceBasis, sourceReferences: task.toolTrace.map((entry) => entry.path) });
+          this.save(task);
+          toolExchanges.push(`Prior final proposal was below the edit threshold and is not accepted. Concrete evidence gaps to resolve using approved read-only tools:\n${candidate.evidenceGaps.map((gap, index) => `${index + 1}. ${gap}`).join('\n')}\n\nReturn a tool request that can resolve a gap, or a final proposal only if no permitted read can resolve it.`);
+          continue;
         }
-        if (round === MAX_TOOL_ROUNDS) throw new Error(`Coding model exceeded the ${MAX_TOOL_ROUNDS}-tool-call limit without returning edits.`);
+        if (toolCalls >= MAX_TOOL_ROUNDS) throw new Error(`Coding model exceeded the ${MAX_TOOL_ROUNDS}-tool-call limit without returning edits.`);
         const toolResult = this.executeReadOnlyTool(task, worktree, turn.tool);
         const trace = {
-          round: round + 1,
+          round: toolCalls + 1,
           name: turn.tool.name,
           path: normalize(turn.tool.path || task.allowedPaths[0]),
           query: turn.tool.name === 'search' ? String(turn.tool.query || '').slice(0, 160) : '',
@@ -488,6 +508,7 @@ export class NativeCodingWorker {
           // inspectable without turning task records into an unbounded source dump.
           resultPreview: limitUtf8(toolResult, MAX_TOOL_EVIDENCE_PREVIEW_BYTES)
         };
+        toolCalls += 1;
         task.toolTrace.push(trace);
         this.record(task, 'read_only_tool', 'allow', `${trace.name} ${trace.path}; result ${trace.resultHash}.`, { action: trace.name, evidenceBasis: 'The controller completed this bounded read-only tool inside the sealed allowed paths.', sourceReferences: [trace.path] });
         task.phase = `local_coder_tool_${trace.name}`;

@@ -61,6 +61,14 @@ try {
           ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved obsolete fixture is present in the scoped source.', summary: 'Remove obsolete fixture.', edits: [{ path: 'src/obsolete.js', delete: true }] })
         : modelMode === 'new'
           ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved source directory permits this bounded fixture addition.', summary: 'Add the fixture.', edits: [{ path: 'src/new.js', content: 'export const added = true;\n' }] })
+          : modelMode === 'evidence-recovery'
+            ? (!prompt.includes('Prior final proposal was below the edit threshold')
+              ? JSON.stringify({ action: 'propose_edits', confidence: 0.35, evidence_basis: 'The supplied fixture context does not establish which value the checker expects.', evidence_gaps: ['Read the approved fixture file to verify the expected exported value.'], summary: 'Need the exact approved fixture value.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
+              : !prompt.includes('Controller tool result')
+                ? JSON.stringify({ tool: { name: 'read_file', path: 'src/value.js', startLine: 1, endLine: 20 } })
+                : JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The recovered approved fixture read proves the exact bounded change.', summary: 'Apply the evidence-backed fixture change.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }))
+            : modelMode === 'evidence-exhaustion'
+              ? JSON.stringify({ action: 'propose_edits', confidence: 0.35, evidence_basis: 'The available fixture evidence remains insufficient to establish the required external contract.', evidence_gaps: ['Obtain the external contract that defines the required exported value.'], summary: 'The remaining evidence is outside the sealed scope.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
           : modelMode === 'validation-repair'
             ? (prompt.includes('Independent checker failure')
               ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The checker explicitly requires the corrected fixture value of three.', summary: 'Repair the value from checker feedback.', edits: [{ path: 'src/value.js', content: 'export const value = 3;\n' }] })
@@ -125,6 +133,27 @@ try {
   assert.match(toolReview.toolTrace.at(-1).resultPreview, /export const value = 1/, 'the final scoped file read is retained as evidence, not paraphrased model reasoning');
   assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'tool-loop review changed live checkout');
   await worker.reject(toolTask.id);
+
+  modelMode = 'evidence-recovery';
+  const evidenceRecoveryTask = worker.create({ title: 'Resolve own evidence gap', objective: 'Use an approved read to close a concrete gap before proposing the fixture edit.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const evidenceRecoveryReview = await worker.run(evidenceRecoveryTask.id, { confirm: true, taskHash: evidenceRecoveryTask.taskHash });
+  assert.equal(evidenceRecoveryReview.status, 'review');
+  assert.equal(evidenceRecoveryReview.evidenceRecoveries, 1, 'a concrete in-scope evidence gap triggers unattended local recovery');
+  assert.deepEqual(evidenceRecoveryReview.toolTrace.map((entry) => entry.name), ['read_file']);
+  assert.ok(evidenceRecoveryReview.audit.some((event) => event.phase === 'evidence_recovery' && event.verdict === 'allow'), 'the recovery decision is durable operator evidence');
+  assert.match(evidenceRecoveryReview.assessment.evidenceBasis, /recovered approved fixture read/);
+  assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'evidence recovery never changes the live checkout');
+  await worker.reject(evidenceRecoveryTask.id);
+
+  modelMode = 'evidence-exhaustion';
+  const exhaustedEvidenceTask = worker.create({ title: 'Bound evidence recovery', objective: 'Stop only after the bounded sealed evidence-recovery budget is exhausted.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(worker.run(exhaustedEvidenceTask.id, { confirm: true, taskHash: exhaustedEvidenceTask.taskHash }), /LOW_CONFIDENCE/);
+  const exhaustedEvidence = worker.load(exhaustedEvidenceTask.id);
+  assert.equal(exhaustedEvidence.status, 'needs-evidence');
+  assert.equal(exhaustedEvidence.evidenceRecoveries, 3, 'the worker makes all three permitted unattended evidence-recovery passes before stopping');
+  assert.equal(exhaustedEvidence.audit.filter((event) => event.phase === 'evidence_recovery').length, 3, 'each exhausted evidence-recovery pass remains durable audit evidence');
+  assert.match(exhaustedEvidence.recovery.nextPermittedAction, /Gather one of the named evidence gaps/);
+  await worker.reject(exhaustedEvidenceTask.id);
 
   modelMode = 'validation-repair';
   const repairTask = worker.create({ title: 'Repair after checker feedback', objective: 'Use the independent checker result to correct the approved fixture.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
