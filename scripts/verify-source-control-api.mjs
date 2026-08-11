@@ -77,6 +77,22 @@ try {
   });
   await waitForHealth();
 
+  fs.mkdirSync(path.join(client, '.lps'), { recursive: true });
+  fs.mkdirSync(path.join(client, 'source_of_truth'), { recursive: true });
+  fs.mkdirSync(path.join(client, 'rules'), { recursive: true });
+  fs.writeFileSync(path.join(client, 'safe-context.md'), 'safe context\n');
+  fs.writeFileSync(path.join(client, '.lps', 'runtime.json'), '{"private":true}\n');
+  fs.writeFileSync(path.join(client, 'source_of_truth', 'private.md'), 'private\n');
+  fs.writeFileSync(path.join(client, 'rules', 'private.md'), 'private\n');
+  const contextFiles = await api('/api/repo/files?q=');
+  assert.equal(contextFiles.response.status, 200, JSON.stringify(contextFiles.body));
+  assert.ok(contextFiles.body.data.some((file) => file.path === 'safe-context.md'));
+  assert.ok(!contextFiles.body.data.some((file) => /(^|\/)(?:\.lps|source_of_truth|rules)(?:\/|$)/.test(file.path)), 'protected paths never appear as selectable chat/browser context');
+  fs.rmSync(path.join(client, '.lps'), { recursive: true, force: true });
+  fs.rmSync(path.join(client, 'source_of_truth'), { recursive: true, force: true });
+  fs.rmSync(path.join(client, 'rules'), { recursive: true, force: true });
+  fs.unlinkSync(path.join(client, 'safe-context.md'));
+
   const initial = await api('/api/source/status');
   assert.equal(initial.response.status, 200);
   assert.equal(initial.body.data.branch, 'main');

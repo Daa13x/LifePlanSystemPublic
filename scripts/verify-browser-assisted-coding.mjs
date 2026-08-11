@@ -241,7 +241,7 @@ try {
     root: gitRepo,
     runGit: (args) => git(args),
     runValidation: async ({ worktree, changedFiles }) => ({ ok: changedFiles.length === 1 && changedFiles.every((f) => fs.existsSync(path.join(worktree, f))), output: 'PASS', checks: [{ name: 'fixture', ok: true }] }),
-    invokeModel: async ({ prompt }) => { capturedPrompt = prompt; return { model: { name: 'fake', endpoint: 'http://127.0.0.1:1', source: 'test' }, content: JSON.stringify({ summary: 'set to 2', edits: [{ path: 'src/valueHost.js', content: 'export const valueHost = 2;\n' }] }) }; },
+    invokeModel: async ({ prompt }) => { capturedPrompt = prompt; return { model: { name: 'fake', endpoint: 'http://127.0.0.1:1', source: 'test' }, content: JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved fixture source and validated untrusted advice agree on this exact change.', summary: 'set to 2', edits: [{ path: 'src/valueHost.js', content: 'export const valueHost = 2;\n' }] }) }; },
     forbiddenPath: forbidden,
     getExecutionContext: async () => ({
       executionType: 'local', modelProvider: 'fixture-local-model', modelId: 'fake',

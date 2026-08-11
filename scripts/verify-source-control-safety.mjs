@@ -19,12 +19,15 @@ const protectedFixtures = [
   'nested/.env.secret',
   'nested/data/private.json',
   'project/.claude/settings.json',
+  '.agent/run-state.md',
   'project/.git/config',
   '.safety-probe/ui-audit.sqlite-wal',
   'runtime/private.sqlite-shm',
   'runtime/private.db-wal',
   'connector/pairing-config.json',
   '.playwright-cli/page.yml',
+  'source_of_truth/memory/INBOX.md',
+  'rules/LIS_RULES_SANITISED.md',
   'models/brain.gguf',
   'logs/server.log'
 ];
@@ -65,6 +68,7 @@ assert.match(serverSource, /GIT_ASKPASS_REQUIRE/);
 assert.match(serverSource, /LPS_GIT_ASKPASS_TOKEN/);
 assert.doesNotMatch(serverSource, /authenticatedGitHubRemoteUrl/);
 assert.doesNotMatch(serverSource, /x-access-token:\$\{token\}@/);
+assert.match(serverSource, /entry\.isSymbolicLink\(\) \|\| isProtectedWorkspacePath\(relative\)/, 'repository file lists exclude symlinked and protected paths before displaying selectable context');
 
 assert.deepEqual(detectHighConfidenceSecrets('normal docs and ghp_short_example'), []);
 assert.deepEqual(detectHighConfidenceSecrets(`value=ghp_${'A'.repeat(36)}`), ['GitHub token']);

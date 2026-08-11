@@ -56,6 +56,15 @@ try {
   assert.match(serverSource, /folderOpened/);
   assert.match(serverSource, /manualChromeStepRequired/);
   assert.doesNotMatch(serverSource, /--load-extension/);
+  const extensionRoot = path.join(process.cwd(), 'browser-extension', 'lps-browser-agent');
+  const manifest = JSON.parse(fs.readFileSync(path.join(extensionRoot, 'manifest.json'), 'utf8'));
+  const worker = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'utf8');
+  assert.equal(manifest.action.default_popup, 'popup.html', 'the connector exposes a visible status/control surface');
+  assert.ok(manifest.permissions.includes('alarms'), 'the MV3 worker has an alarm revival path');
+  assert.match(worker, /POLL_ALARM/, 'the worker creates an explicit revival alarm');
+  assert.match(worker, /lps-browser-agent-status/, 'the popup reads a bounded local status message');
+  assert.ok(fs.existsSync(path.join(extensionRoot, 'popup.html')));
+  assert.ok(fs.existsSync(path.join(extensionRoot, 'popup.js')));
   console.log('Browser extension installation verification passed.');
 } finally {
   fs.rmSync(probeRoot, { recursive: true, force: true });

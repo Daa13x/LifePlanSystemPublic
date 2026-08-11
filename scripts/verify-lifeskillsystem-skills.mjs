@@ -78,7 +78,7 @@ for (const file of skillFiles) {
   const raw = fs.readFileSync(file, 'utf8');
   const fm = frontmatter(raw);
 
-  const missingMeta = REQUIRED_METADATA.filter((key) => !new RegExp(`^${key}\\s*:`, 'm').test(fm));
+  const missingMeta = REQUIRED_METADATA.filter((key) => !new RegExp(`^(?:${key}|\\s+${key})\\s*:`, 'm').test(fm));
   line(missingMeta.length === 0, `${rel} has required metadata -> ${JSON.stringify(missingMeta)}`);
 
   const missingSections = REQUIRED_SECTIONS.filter((section) => !raw.includes(section));

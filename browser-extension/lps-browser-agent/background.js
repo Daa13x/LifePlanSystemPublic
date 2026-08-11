@@ -244,6 +244,34 @@ async function poll() {
   }
 }
 
+const POLL_ALARM = 'lps-browser-agent-poll';
+
+async function wakeAndPoll() {
+  await heartbeat();
+  await poll();
+}
+
+async function ensurePollAlarm() {
+  await chrome.alarms.create(POLL_ALARM, { periodInMinutes: 0.5 });
+}
+
 setInterval(poll, 1500);
-chrome.runtime.onInstalled.addListener(poll);
-chrome.runtime.onStartup.addListener(poll);
+chrome.runtime.onInstalled.addListener(() => { void ensurePollAlarm(); void wakeAndPoll(); });
+chrome.runtime.onStartup.addListener(() => { void ensurePollAlarm(); void wakeAndPoll(); });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === POLL_ALARM) void wakeAndPoll();
+});
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== 'lps-browser-agent-status') return undefined;
+  void (async () => {
+    const config = await pairingConfig();
+    const tabs = await visibleTabs();
+    await heartbeat();
+    sendResponse({ ok: true, bridgeUrl: config.bridgeUrl || LPS, tabs });
+  })().catch((error) => sendResponse({ ok: false, error: error?.message || 'Unable to read connector status.' }));
+  return true;
+});
+
+void ensurePollAlarm();
+void poll();

@@ -11,6 +11,7 @@
   },
   "action": {
     "default_title": "Life Planner Browser Agent",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -18,7 +19,7 @@
       "128": "icons/icon128.png"
     }
   },
-  "permissions": ["tabs", "scripting"],
+  "permissions": ["tabs", "scripting", "alarms"],
   "host_permissions": [
     "http://127.0.0.1:4177/*",
     "https://chatgpt.com/*",

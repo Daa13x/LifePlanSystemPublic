@@ -47,18 +47,20 @@ try {
             ? JSON.stringify({ tool: { name: 'search', path: 'src', query: 'value' } })
             : !prompt.includes('"startLine":1')
               ? JSON.stringify({ tool: { name: 'read_file', path: 'src/value.js', startLine: 1, endLine: 20 } })
-              : JSON.stringify({ summary: 'Used scoped evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }))
+              : JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The scoped list, search, and file read prove the fixture change.', summary: 'Used scoped evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }))
         : modelMode === 'tool-escape'
           ? JSON.stringify({ tool: { name: 'read_file', path: 'outside.js', startLine: 1, endLine: 20 } })
           : modelMode === 'tool-loop'
             ? JSON.stringify({ tool: { name: 'list_files', path: 'src' } })
           : modelMode === 'valid'
-        ? JSON.stringify({ summary: 'Increment the fixture.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
+        ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved fixture source directly shows the exact value to change.', summary: 'Increment the fixture.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
         : modelMode === 'delete'
-          ? JSON.stringify({ summary: 'Remove obsolete fixture.', edits: [{ path: 'src/obsolete.js', delete: true }] })
+          ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved obsolete fixture is present in the scoped source.', summary: 'Remove obsolete fixture.', edits: [{ path: 'src/obsolete.js', delete: true }] })
         : modelMode === 'new'
-          ? JSON.stringify({ summary: 'Add the fixture.', edits: [{ path: 'src/new.js', content: 'export const added = true;\n' }] })
-          : JSON.stringify({ summary: 'Escape scope.', edits: [{ path: 'outside.js', content: 'bad\n' }] })
+          ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved source directory permits this bounded fixture addition.', summary: 'Add the fixture.', edits: [{ path: 'src/new.js', content: 'export const added = true;\n' }] })
+          : modelMode === 'low-confidence'
+            ? JSON.stringify({ action: 'propose_edits', confidence: 0.35, evidence_basis: 'The supplied source does not establish the intended production behavior.', summary: 'Stop for evidence.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
+            : JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'This deliberately unsafe fixture is used to test path enforcement.', summary: 'Escape scope.', edits: [{ path: 'outside.js', content: 'bad\n' }] })
     }),
     forbiddenPath: (candidate) => candidate.startsWith('.git') || candidate.startsWith('.lps') || candidate.startsWith('data'),
     getExecutionContext: async () => ({
@@ -91,6 +93,9 @@ try {
   await assert.rejects(worker.run(task.id, { confirm: true, taskHash: task.taskHash, evidenceHash: 'b'.repeat(64) }), /prepared workspace evidence/);
   const review = await worker.run(task.id, { confirm: true, taskHash: task.taskHash, evidenceHash: task.preparation.evidenceHash, adviceHash: '', approvedBy: 'acceptance' });
   assert.equal(review.status, 'review');
+  assert.equal(review.assessment.confidence, 0.9);
+  assert.match(review.assessment.evidenceBasis, /approved fixture source/);
+  assert.ok(review.audit.some((event) => event.phase === 'model_action_assessment' && event.confidence === 0.9));
   assert.equal(review.changedFiles[0], 'src/value.js');
   assert.match(review.validationResult.evidenceHash, /^[a-f0-9]{64}$/);
   assert.match(review.patchHash, /^[a-f0-9]{64}$/);
@@ -142,6 +147,15 @@ try {
   await assert.rejects(worker.run(unsafe.id, { confirm: true, taskHash: unsafe.taskHash }), /outside the approved scope/);
   assert.equal(fs.existsSync(path.join(temp, 'outside.js')), false);
   assert.equal(worker.load(unsafe.id).status, 'failed');
+
+  modelMode = 'low-confidence';
+  const lowConfidence = worker.create({ title: 'Need more evidence', objective: 'Do not edit when the source does not establish the defect.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  await assert.rejects(worker.run(lowConfidence.id, { confirm: true, taskHash: lowConfidence.taskHash }), /LOW_CONFIDENCE/);
+  const stopped = worker.load(lowConfidence.id);
+  assert.equal(stopped.status, 'needs-evidence');
+  assert.equal(stopped.assessment.confidence, 0.35);
+  assert.match(stopped.error, /Gather the exact missing source/);
+  await worker.reject(lowConfidence.id);
 
   modelMode = 'valid';
   const concurrentA = worker.create({ title: 'Concurrent A', objective: 'First single-flight task.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });

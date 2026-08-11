@@ -7281,6 +7281,7 @@ app.get('/api/repo/files', (req, res) => {
       if (blocked.has(entry.name)) continue;
       const absolute = path.join(current, entry.name);
       const relative = path.relative(root, absolute).replaceAll('\\', '/');
+      if (entry.isSymbolicLink() || isProtectedWorkspacePath(relative)) continue;
       if (entry.isDirectory()) {
         stack.push(absolute);
       } else if (includeExt.has(path.extname(entry.name).toLowerCase()) && (!query || relative.toLowerCase().includes(query))) {

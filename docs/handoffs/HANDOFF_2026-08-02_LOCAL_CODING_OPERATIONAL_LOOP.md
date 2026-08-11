@@ -13,7 +13,7 @@ This implementation does not add another agent, command runner, browser controll
 3. **Prepare evidence** runs solvability preflight and bounded workspace indexing over approved paths. It stores ranked files, selection reasons, excerpts, omissions, redaction count, source hash, and an evidence hash. It makes no model or browser request.
 4. If local evidence is sufficient, approve the local run directly. If one implementation fact is missing, preview one browser-advice prompt. The exact redacted prompt is bound to its provider and SHA-256 before one dispatch.
 5. The native worker rechecks the clean `main` checkout and sealed base commit, creates a detached isolated worktree, reads approved context, invokes the verified loopback coding model, applies only bounded text replacements in isolation, and runs independent validation.
-6. Run approval is bound to the task hash, prepared evidence hash, and validated advice answer hash (or an explicit empty advice hash). System > Runs then displays the evidence, review patch, changed files, validator output/evidence hash, model route, task hash, patch hash, and chronological audit record. The live checkout remains unchanged.
+6. Run approval is bound to the task hash, prepared evidence hash, and validated advice answer hash (or an explicit empty advice hash). The final local proposal must declare `action: "propose_edits"`, a 0–1 confidence, and an evidence basis. Below 70% confidence, LPS records the assessment and stops in `needs-evidence` before an isolated edit. System > Runs displays the evidence, assessment, review patch, changed files, validator output/evidence hash, model route, task hash, patch hash, and chronological audit record. The live checkout remains unchanged.
 7. **Apply reviewed patch** requires a separate explicit approval for the exact patch hash. It rechecks clean live `main` and the unchanged base commit, applies the patch unstaged, and performs no commit or push.
 8. Source Control refreshes the resulting changed files. Commit and push remain separate user-controlled Git operations.
 
@@ -22,6 +22,7 @@ This implementation does not add another agent, command runner, browser controll
 - `pending`: sealed and waiting for evidence preparation.
 - `prepared`: scoped evidence is ready; local run or optional advisory preview is available.
 - `needs-scope`: preflight found an unresolved or out-of-manifest implementation target.
+- `needs-evidence`: the local model assessed its edit below the 70% evidence threshold; no isolated or live edit was accepted.
 - `awaiting-advice`: exactly one persisted browser job is being polled; polling never redispatches.
 - `running`: isolated worktree/local inference/validation is active.
 - `review`: independently validated patch is waiting for patch-hash approval.
@@ -138,6 +139,19 @@ npm.cmd run build
 - The user must approve the sealed run and later approve the exact reviewed patch separately.
 - Applied files remain unstaged. The user reviews Source Control and separately decides whether to stage, commit, and push.
 - Hosted CI, installer, and release artifacts require their own connected evidence; local worker verification does not prove release publication.
+
+## Follow-up: action confidence ledger
+
+The durable task audit records every controller decision with its action name,
+confidence, evidence basis, source references where applicable, timestamp, and
+evidence hash. Host-enforced checks record full confidence only for the bounded
+fact they proved; a model edit assessment must instead earn its value from the
+supplied task context, sealed source, and controller tool results. This is a
+small vertical slice: browser advice remains untrusted context and is not used
+to inflate the model's score. The next bounded expansion is transactional
+SQLite-backed task state, leases, and approval nonces from the roadmap item;
+do not weaken the model, path, validation, or separate-approval boundaries to
+make that migration easier.
 
 ## Follow-up: branchless tools
 

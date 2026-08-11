@@ -40,6 +40,12 @@ for (const { name, text } of sources) {
 // The audit's honest-state vocabulary must remain present: truthful empty,
 // setup-gated, and not-tracked states rather than fake fills.
 const ui = sources.find((s) => s.name === 'main.jsx')?.text || '';
+const styles = fs.readFileSync(path.join(root, 'src', 'styles.css'), 'utf8');
+for (const phrase of ['Save chat log later', 'Sync everything later', 'Automatic ChatGPT response will appear here']) {
+  line(!ui.includes(phrase), `browser consultation omits unsupported promise: "${phrase}"`);
+}
+line(ui.includes('Legacy record — confidence was not captured.'), 'legacy coding audit records are not displayed as fabricated zero-confidence assessments');
+line(/button\.primary:disabled,[\s\S]*background: var\(--panel-2\)/.test(styles), 'disabled primary actions use a neutral unavailable state instead of success styling');
 for (const phrase of ['nothing recorded yet', 'Prepared — connection required', 'not tracked', 'local only']) {
   line(ui.includes(phrase), `honest-state language retained: "${phrase}"`);
 }

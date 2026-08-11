@@ -1,0 +1,4 @@
+interface:
+  display_name: "LPS Reaver Mode"
+  short_description: "Evidence-first completion discipline for LifePlanSystem."
+  default_prompt: "Use Reaver Mode to complete this LPS task with verified source, tests, installer evidence, and publication."

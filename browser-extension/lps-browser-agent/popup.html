@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Life Planner Browser Agent</title>
+  <style>
+    :root { color-scheme: dark; --bg:#101519; --panel:#182128; --line:#31424d; --text:#edf6f5; --muted:#a8bfbc; --good:#52d6a5; --warn:#f4c45f; }
+    body { width:340px; margin:0; background:var(--bg); color:var(--text); font:13px/1.4 system-ui,sans-serif; }
+    main { padding:14px; display:grid; gap:12px; }
+    section { padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+    h1,h2,p { margin:0; } h1 { font-size:16px; } h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:7px; }
+    .state { color:var(--warn); } .state.ok { color:var(--good); } .mono { font-family:ui-monospace,Consolas,monospace; overflow-wrap:anywhere; }
+    ul { margin:0; padding-left:18px; } button { border:1px solid var(--line); border-radius:6px; background:#263740; color:var(--text); padding:8px 10px; cursor:pointer; } button:focus-visible { outline:2px solid var(--good); outline-offset:2px; }
+    .actions { display:flex; gap:8px; } small { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <section><h1>Life Planner Browser Agent</h1><p id="state" class="state" aria-live="polite">Checking the local bridge…</p></section>
+    <section><h2>Local bridge</h2><div id="bridge" class="mono">—</div><small>This extension only talks to the paired local LPS bridge.</small></section>
+    <section><h2>Supported signed-in tabs</h2><ul id="tabs"><li>Checking…</li></ul></section>
+    <section class="actions"><button id="refresh" type="button">Refresh status</button><button id="extensions" type="button">Open extensions</button></section>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

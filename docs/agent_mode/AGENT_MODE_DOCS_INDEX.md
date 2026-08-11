@@ -38,6 +38,7 @@ Links to runtime-isolated manual helpers are labelled explicitly.
 
 ### Starter skills (instruction-only)
 
+- [`skills/reaver-mode/SKILL.md`](skills/reaver-mode/SKILL.md) — evidence-first completion discipline for broad LPS repairs
 - [`skills/starter/lifeskillsystem-next-move/SKILL.md`](skills/starter/lifeskillsystem-next-move/SKILL.md)
 - [`skills/starter/codex-bulk-prompt-builder/SKILL.md`](skills/starter/codex-bulk-prompt-builder/SKILL.md)
 - [`skills/starter/agent-output-reviewer/SKILL.md`](skills/starter/agent-output-reviewer/SKILL.md)
