@@ -6,6 +6,8 @@
 // WITHOUT importing the whole server (which boots Express/sqlite on import) and
 // WITHOUT enabling OpenHands invocation.
 //
+import { isProtectedWorkspacePath } from './sourceControlSafety.js';
+
 // These functions are pure and side-effect-free: no network, no filesystem, no
 // database, no app state. Behaviour is identical to the prior in-index
 // definitions (blocker #2 forbidden/protected matching, blocker #4 boundary-safe
@@ -17,15 +19,25 @@
 // request's own allowed/forbidden lists. Requests violating this are rejected
 // outright rather than stored.
 export const OPENHANDS_MANDATORY_FORBIDDEN = [
-  'source_of_truth/',
-  'memory/',
+  'source_of_truth',
+  'memory',
   '.env',
-  'secrets/',
-  'data/',
-  '.git/',
-  '.lps/',
+  'secrets',
+  'data',
+  '.git',
+  '.lps',
   'credentials',
-  'rules/'
+  'rules',
+  '.cache',
+  '.agent',
+  '.agents',
+  '.claude',
+  '.playwright-cli',
+  '.safety-probe',
+  'node_modules',
+  'dist',
+  'release',
+  'pairing-config.json'
 ];
 
 export const OPENHANDS_EXECUTOR_LIMITS = Object.freeze({
@@ -339,10 +351,13 @@ export function buildOpenHandsInvocationReadiness({
 }
 
 export function violatesMandatoryForbidden(candidatePath) {
-  const normalized = normalizeRequestPath(candidatePath);
+  const normalized = normalizeRequestPath(candidatePath).replace(/\/+$/, '');
   if (!normalized) return false;
-  return OPENHANDS_MANDATORY_FORBIDDEN.some((blocked) =>
-    normalized === blocked || normalized.startsWith(blocked) || normalized.includes(`/${blocked}`));
+  return isProtectedWorkspacePath(normalized)
+    || OPENHANDS_MANDATORY_FORBIDDEN.some((blockedPath) => {
+      const blocked = normalizeRequestPath(blockedPath).replace(/\/+$/, '');
+      return normalized === blocked || normalized.startsWith(`${blocked}/`) || normalized.includes(`/${blocked}/`);
+    });
 }
 
 export function parsePorcelainPaths(stdout) {

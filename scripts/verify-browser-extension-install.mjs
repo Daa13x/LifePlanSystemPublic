@@ -63,8 +63,11 @@ try {
   assert.ok(manifest.permissions.includes('alarms'), 'the MV3 worker has an alarm revival path');
   assert.match(worker, /POLL_ALARM/, 'the worker creates an explicit revival alarm');
   assert.match(worker, /lps-browser-agent-status/, 'the popup reads a bounded local status message');
+  assert.match(worker, /lastSuccessAt/, 'the popup can distinguish a live bridge from an active extension');
+  assert.match(worker, /lastError/, 'the popup receives a bounded recovery diagnostic');
   assert.ok(fs.existsSync(path.join(extensionRoot, 'popup.html')));
   assert.ok(fs.existsSync(path.join(extensionRoot, 'popup.js')));
+  assert.match(fs.readFileSync(path.join(extensionRoot, 'popup.js'), 'utf8'), /bridgeReachable/);
   console.log('Browser extension installation verification passed.');
 } finally {
   fs.rmSync(probeRoot, { recursive: true, force: true });

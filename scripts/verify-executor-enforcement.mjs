@@ -148,6 +148,10 @@ expectReject(['/etc/passwd'], { allowedPaths: ['docs'] }, '/etc/passwd', 'B allo
 expectReject(['source_of_truth/plan.md'], { allowedPaths: ['source_of_truth'] }, 'touches a protected path', 'B protected source_of_truth/plan.md');
 expectReject(['memory/notes.md'], { allowedPaths: ['memory'] }, 'touches a protected path', 'B protected memory/notes.md');
 expectReject(['.env'], { allowedPaths: ['.env'] }, 'touches a protected path', 'B protected .env');
+expectReject(['.agent/run-state.json'], { allowedPaths: ['.agent'] }, 'touches a protected path', 'B protected .agent/run-state.json');
+expectReject(['dist/app.js'], { allowedPaths: ['dist'] }, 'touches a protected path', 'B protected dist/app.js');
+expectReject(['runtime.sqlite'], { allowedPaths: ['runtime.sqlite'] }, 'touches a protected path', 'B protected sqlite database');
+expectReject(['pairing-config.json'], { allowedPaths: ['pairing-config.json'] }, 'touches a protected path', 'B protected pairing config');
 
 // Positive controls (allowed).
 expectAllow(['docs/file.md'], { allowedPaths: ['docs'] }, 'B allowed=[docs] changed=docs/file.md');
@@ -308,6 +312,15 @@ const validInvocationConfig = { model: 'openai/qwen-test', baseUrl: 'http://127.
   });
   line(r.ok === false && r.setupGated === true && r.missing.includes('allowed_paths_present'),
     `F missing allowedPaths setup-gated -> ${JSON.stringify(r)}`);
+}
+{
+  const r = buildOpenHandsInvocationConstraints({
+    request: { ...validInvocationRequest, allowedPaths: ['.agent'] },
+    plan: validInvocationPlan,
+    config: validInvocationConfig
+  });
+  line(r.ok === false && r.missing.includes('mandatory_forbidden_paths_enforced'),
+    `F exact protected operational root setup-gated -> ${JSON.stringify(r)}`);
 }
 {
   const r = buildOpenHandsInvocationConstraints({

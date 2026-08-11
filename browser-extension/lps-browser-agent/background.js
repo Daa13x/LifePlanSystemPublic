@@ -1,5 +1,6 @@
 const LPS = 'http://127.0.0.1:4177';
 let pairingConfigPromise;
+const bridgeState = { lastSuccessAt: '', lastError: '', lastPollAt: '' };
 
 const AGENT_URLS = {
   ChatGPT: 'https://chatgpt.com/',
@@ -56,13 +57,20 @@ async function visibleTabs() {
 }
 
 async function heartbeat() {
+  bridgeState.lastPollAt = new Date().toISOString();
   try {
-    await api('/api/browser/extension/heartbeat', {
+    const result = await api('/api/browser/extension/heartbeat', {
       method: 'POST',
       body: JSON.stringify({ tabs: await visibleTabs() })
     });
-  } catch {
+    if (!result?.ok) throw new Error(result?.error || 'The local bridge rejected the heartbeat.');
+    bridgeState.lastSuccessAt = new Date().toISOString();
+    bridgeState.lastError = '';
+    return true;
+  } catch (error) {
+    bridgeState.lastError = String(error?.message || 'The local bridge did not respond.').slice(0, 300);
     // LPS may be closed; try again on the next tick.
+    return false;
   }
 }
 
@@ -247,7 +255,6 @@ async function poll() {
 const POLL_ALARM = 'lps-browser-agent-poll';
 
 async function wakeAndPoll() {
-  await heartbeat();
   await poll();
 }
 
@@ -267,8 +274,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void (async () => {
     const config = await pairingConfig();
     const tabs = await visibleTabs();
-    await heartbeat();
-    sendResponse({ ok: true, bridgeUrl: config.bridgeUrl || LPS, tabs });
+    const bridgeReachable = await heartbeat();
+    sendResponse({
+      ok: true,
+      bridgeUrl: config.bridgeUrl || LPS,
+      bridgeReachable,
+      lastSuccessAt: bridgeState.lastSuccessAt,
+      lastPollAt: bridgeState.lastPollAt,
+      lastError: bridgeState.lastError,
+      tabs
+    });
   })().catch((error) => sendResponse({ ok: false, error: error?.message || 'Unable to read connector status.' }));
   return true;
 });
