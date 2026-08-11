@@ -4481,6 +4481,7 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
   const [codingDraft, setCodingDraft] = useState({ title: '', objective: '', allowedPaths: 'src', maxFilesChanged: 3, validation: 'frontend' });
   const [selectedCodingTaskId, setSelectedCodingTaskId] = useState('');
   const [codingAdviceDraft, setCodingAdviceDraft] = useState({ provider: 'ChatGPT', question: '', temporaryChatConfirmed: false });
+  const [codingConfirmation, setCodingConfirmation] = useState(null);
 
   useEffect(() => { setTab(initialTab); }, [initialTab]);
 
@@ -4640,6 +4641,41 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
   async function prepareCodingTask(task) {
     await action(`/api/source/coding/tasks/${task.id}/prepare`, {}, 'Scoped workspace evidence prepared without calling a model or browser.');
     setSelectedCodingTaskId(task.id);
+  }
+
+  async function proposeCodingConfirmation(kind, task) {
+    if (sourceBusy) return;
+    setSourceBusy(true);
+    try {
+      const body = kind === 'run'
+        ? { taskHash: task.taskHash, evidenceHash: task.preparation?.evidenceHash, adviceHash: task.browserAdvice?.status === 'validated' ? task.browserAdvice.answerHash : '' }
+        : { patchHash: task.patchHash };
+      const proposal = await api(`/api/source/coding/tasks/${task.id}/${kind}/propose`, { method: 'POST', body: JSON.stringify(body) });
+      setCodingConfirmation({ kind, taskId: task.id, title: task.title, ...proposal });
+      setNotice(`${kind === 'run' ? 'Run' : 'Apply'} confirmation is ready. Review the bound snapshot, then confirm once.`);
+      await refreshCoding();
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setSourceBusy(false);
+    }
+  }
+
+  async function confirmCodingAction() {
+    if (!codingConfirmation || sourceBusy) return;
+    const pending = codingConfirmation;
+    setSourceBusy(true);
+    try {
+      const result = await api(`/api/source/coding/tasks/${pending.taskId}/${pending.kind}/confirm`, { method: 'POST', body: JSON.stringify({ confirmationId: pending.confirmationId, token: pending.token }) });
+      setCodingConfirmation(null);
+      setNotice(result.note || `${pending.kind === 'run' ? 'Run' : 'Apply'} confirmation completed.`);
+      await refresh();
+    } catch (err) {
+      setNotice(err.message);
+      await refreshCoding().catch(() => {});
+    } finally {
+      setSourceBusy(false);
+    }
   }
 
   async function previewCodingAdvice(task) {
@@ -5125,11 +5161,13 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
 
                 <div className="coding-actions">
                   {['pending', 'needs-scope'].includes(selectedCodingTask.status) && <button className="primary" onClick={() => prepareCodingTask(selectedCodingTask)} disabled={sourceBusy}><SearchCheck size={15} /> Prepare evidence</button>}
-                  {['prepared', 'failed', 'interrupted', 'cancelled'].includes(selectedCodingTask.status) && <button className="primary" onClick={() => requestSourceConfirmation({ title: `Run ${selectedCodingTask.title}?`, detail: `Approve sealed scope ${selectedCodingTask.taskHash} with evidence ${selectedCodingTask.preparation?.evidenceHash}. The local model receives only this prepared context and any hash-bound validated advice. Inside a detached worktree it may make up to eight scoped list, literal-search, or ranged-read calls and up to three self-directed evidence-recovery passes before it stops for patch review or a real external evidence requirement.`, path: `/api/source/coding/tasks/${selectedCodingTask.id}/run`, body: { taskHash: selectedCodingTask.taskHash, evidenceHash: selectedCodingTask.preparation?.evidenceHash, adviceHash: selectedCodingTask.browserAdvice?.status === 'validated' ? selectedCodingTask.browserAdvice.answerHash : '', approvedBy: 'user' }, success: 'Local coding task reached review or stopped safely.' })} disabled={sourceBusy || !coding.model?.configured || hasChanges || !selectedCodingTask.preparation?.evidenceHash} title={!coding.model?.configured ? 'The configured local coding endpoint is unavailable.' : hasChanges ? 'The live checkout must be clean before a local run.' : !selectedCodingTask.preparation?.evidenceHash ? 'Prepare scoped evidence first.' : 'Run the local worker'}><Play size={15} /> Approve local run</button>}
+                  {['prepared', 'failed', 'interrupted', 'cancelled'].includes(selectedCodingTask.status) && <button className="primary" onClick={() => proposeCodingConfirmation('run', selectedCodingTask)} disabled={sourceBusy || !coding.model?.configured || hasChanges || !selectedCodingTask.preparation?.evidenceHash} title={!coding.model?.configured ? 'The configured local coding endpoint is unavailable.' : hasChanges ? 'The live checkout must be clean before a local run.' : !selectedCodingTask.preparation?.evidenceHash ? 'Prepare scoped evidence first.' : 'Create a durable run confirmation'}><Play size={15} /> Approve local run</button>}
                   {selectedCodingTask.status === 'running' && <button className="danger" onClick={() => action(`/api/source/coding/tasks/${selectedCodingTask.id}/cancel`, {}, 'Cancellation requested.')} disabled={sourceBusy}><X size={15} /> Cancel run</button>}
-                  {selectedCodingTask.status === 'review' && <button className="primary" onClick={() => requestSourceConfirmation({ title: `Apply reviewed patch for ${selectedCodingTask.title}?`, detail: `This one-shot approval is bound to patch ${selectedCodingTask.patchHash}. It applies unstaged and performs no commit or push.`, path: `/api/source/coding/tasks/${selectedCodingTask.id}/apply`, body: { patchHash: selectedCodingTask.patchHash, approvedBy: 'user' }, success: 'Reviewed coding patch applied unstaged.' })} disabled={sourceBusy || hasChanges} title={hasChanges ? 'The live checkout must be clean before Apply.' : 'Apply this exact reviewed patch'}><Check size={15} /> Apply reviewed patch</button>}
+                  {selectedCodingTask.status === 'review' && <button className="primary" onClick={() => proposeCodingConfirmation('apply', selectedCodingTask)} disabled={sourceBusy || hasChanges} title={hasChanges ? 'The live checkout must be clean before Apply.' : 'Create a durable patch-apply confirmation'}><Check size={15} /> Apply reviewed patch</button>}
                   {['pending', 'prepared', 'needs-scope', 'needs-evidence', 'awaiting-advice', 'failed', 'interrupted', 'cancelled', 'review'].includes(selectedCodingTask.status) && <button className="danger" onClick={() => requestSourceConfirmation({ title: `Reject ${selectedCodingTask.title}?`, detail: 'The proposal and isolated worktree will be discarded. The live checkout will not change.', path: `/api/source/coding/tasks/${selectedCodingTask.id}/reject`, body: {}, success: 'Coding proposal rejected.' })} disabled={sourceBusy}><Trash2 size={15} /> Reject</button>}
                 </div>
+
+                {codingConfirmation?.taskId === selectedCodingTask.id && <div className="coding-advice-box"><h4>Confirm {codingConfirmation.kind === 'run' ? 'local run' : 'patch apply'}</h4><p>This one-time confirmation is bound to the current sealed snapshot and expires at {new Date(codingConfirmation.expiresAt).toLocaleTimeString()}. {codingConfirmation.kind === 'run' ? 'It authorizes only isolated local inference and validation.' : 'It authorizes only this reviewed patch, applied unstaged.'}</p><div className="button-row"><button className="primary" onClick={confirmCodingAction} disabled={sourceBusy}>Confirm once</button><button className="secondary" onClick={() => setCodingConfirmation(null)} disabled={sourceBusy}>Cancel</button></div></div>}
 
                 {['prepared', 'needs-evidence'].includes(selectedCodingTask.status) && <div className="coding-advice-box">
                   <h4>Optional browser advice</h4>

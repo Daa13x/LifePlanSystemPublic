@@ -4448,6 +4448,74 @@ async function prepareNativeCodingTask(task) {
   return nativeCodingWorker.save(task);
 }
 
+function codingConfirmationSnapshot(task, kind) {
+  if (kind === 'run') {
+    return {
+      kind, taskId: task.id, status: task.status, taskHash: task.taskHash,
+      evidenceHash: task.preparation?.evidenceHash || '',
+      adviceHash: task.browserAdvice?.status === 'validated' ? String(task.browserAdvice.answerHash || '') : '',
+      baseCommit: task.baseCommit
+    };
+  }
+  return {
+    kind, taskId: task.id, status: task.status, patchHash: task.patchHash || '',
+    baseCommit: task.baseCommit
+  };
+}
+
+function proposeCodingConfirmation(req, res, kind) {
+  try {
+    const task = nativeCodingWorker.load(req.params.id);
+    const snapshot = codingConfirmationSnapshot(task, kind);
+    const allowed = kind === 'run'
+      ? ['prepared', 'failed', 'interrupted', 'cancelled'].includes(task.status) && Boolean(snapshot.evidenceHash) && req.body?.taskHash === snapshot.taskHash && req.body?.evidenceHash === snapshot.evidenceHash && String(req.body?.adviceHash || '') === snapshot.adviceHash
+      : task.status === 'review' && Boolean(snapshot.patchHash) && req.body?.patchHash === snapshot.patchHash;
+    if (!allowed) return fail(res, 409, kind === 'run' ? 'Run confirmation does not match the current sealed task, prepared evidence, and validated advice.' : 'Apply confirmation does not match the current reviewed patch.');
+    const confirmation = proposeConfirmation(db, {
+      operation: `native_coding.${kind}`,
+      target: task.id,
+      beforeState: snapshot,
+      afterState: { action: kind, taskId: task.id },
+      reason: kind === 'run' ? `Run local coding task ${task.id} in its detached worktree.` : `Apply reviewed local coding patch ${snapshot.patchHash}.`,
+      origin: 'native-coding-worker',
+      sessionId: CONFIRMATION_SESSION,
+      requiresRevalidation: true,
+      idempotencyKey: `native_coding.${kind}:${task.id}:${kind === 'run' ? snapshot.taskHash : snapshot.patchHash}`
+    });
+    nativeCodingWorker.record(task, `${kind}_confirmation_proposed`, 'allow', `Durable ${kind} confirmation ${confirmation.id} is bound to the current task snapshot.`);
+    nativeCodingWorker.save(task);
+    ok(res, { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt, snapshot });
+  } catch (error) {
+    fail(res, 409, error.message);
+  }
+}
+
+async function confirmCodingConfirmation(req, res, kind) {
+  try {
+    const confirmationId = String(req.body?.confirmationId || '');
+    const token = String(req.body?.token || '');
+    const confirmation = getConfirmation(db, confirmationId);
+    if (!confirmation) return fail(res, 404, 'Coding confirmation not found.');
+    if (confirmation.operation !== `native_coding.${kind}` || confirmation.target !== req.params.id) return fail(res, 409, 'Coding confirmation does not match this task action.');
+    const result = await confirmAndApply(
+      db,
+      { id: confirmationId, token, sessionId: CONFIRMATION_SESSION },
+      async () => {
+        const task = nativeCodingWorker.load(req.params.id);
+        const snapshot = codingConfirmationSnapshot(task, kind);
+        return kind === 'run'
+          ? nativeCodingWorker.run(task.id, { confirm: true, taskHash: snapshot.taskHash, evidenceHash: snapshot.evidenceHash, adviceHash: snapshot.adviceHash, approvedBy: 'user' })
+          : nativeCodingWorker.apply(task.id, { confirm: true, patchHash: snapshot.patchHash, approvedBy: 'user' });
+      },
+      { revalidate: () => codingConfirmationSnapshot(nativeCodingWorker.load(req.params.id), kind) }
+    );
+    if (!result.ok) return fail(res, result.code === 'not_found' ? 404 : 409, result.error);
+    ok(res, { task: result.value, confirmation: result.confirmation, note: kind === 'run' ? 'Local coding reached review or stopped safely.' : 'Reviewed patch applied unstaged; no commit or push occurred.' });
+  } catch (error) {
+    fail(res, 409, error.message);
+  }
+}
+
 function buildNativeCodingAdvicePrompt(task, provider, question) {
   const evidence = task.preparation?.evidence;
   if (!evidence || task.preparation?.status !== 'ready') throw new Error('Prepare scoped workspace evidence before requesting browser advice.');
@@ -6645,23 +6713,10 @@ app.post('/api/source/coding/tasks/:id/advice/poll', async (req, res) => {
   }
 });
 
-app.post('/api/source/coding/tasks/:id/run', async (req, res) => {
-  try {
-    const task = await nativeCodingWorker.run(req.params.id, req.body || {});
-    ok(res, { task, note: 'Local coding finished in an isolated worktree. Review the patch and validation evidence before applying it.' });
-  } catch (error) {
-    fail(res, 409, error.message);
-  }
-});
-
-app.post('/api/source/coding/tasks/:id/apply', async (req, res) => {
-  try {
-    const task = await nativeCodingWorker.apply(req.params.id, req.body || {});
-    ok(res, { task, note: 'Reviewed patch applied to the live checkout. It was not staged, committed, pushed, or merged.' });
-  } catch (error) {
-    fail(res, 409, error.message);
-  }
-});
+app.post('/api/source/coding/tasks/:id/run/propose', (req, res) => proposeCodingConfirmation(req, res, 'run'));
+app.post('/api/source/coding/tasks/:id/run/confirm', async (req, res) => confirmCodingConfirmation(req, res, 'run'));
+app.post('/api/source/coding/tasks/:id/apply/propose', (req, res) => proposeCodingConfirmation(req, res, 'apply'));
+app.post('/api/source/coding/tasks/:id/apply/confirm', async (req, res) => confirmCodingConfirmation(req, res, 'apply'));
 
 app.post('/api/source/coding/tasks/:id/reject', async (req, res) => {
   try {

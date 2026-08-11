@@ -47,6 +47,7 @@ for (const phrase of ['Save chat log later', 'Sync everything later', 'Automatic
 line(ui.includes('Legacy record — confidence was not captured.'), 'legacy coding audit records are not displayed as fabricated zero-confidence assessments');
 line(ui.includes('Controller evidence excerpt') && ui.includes('entry.resultPreview'), 'coding review exposes retained controller evidence excerpts rather than only model summaries or hashes');
 line(ui.includes("['prepared', 'needs-evidence'].includes(selectedCodingTask.status)") && ui.includes('The in-scope read budget is exhausted.'), 'needs-evidence offers the truthful advisory-or-rescope path instead of presenting a blind rerun as recovery');
+line(ui.includes('Create a durable run confirmation') && ui.includes('Create a durable patch-apply confirmation') && ui.includes('Confirm once'), 'coding run and apply use explicit token-backed confirmation controls rather than UI-only success state');
 line(/button\.primary:disabled,[\s\S]*background: var\(--panel-2\)/.test(styles), 'disabled primary actions use a neutral unavailable state instead of success styling');
 for (const phrase of ['nothing recorded yet', 'Prepared — connection required', 'not tracked', 'local only']) {
   line(ui.includes(phrase), `honest-state language retained: "${phrase}"`);

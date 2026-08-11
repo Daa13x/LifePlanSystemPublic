@@ -106,6 +106,10 @@ try {
   assert.match(productionServer, /const DEFAULT_LLAMA_CONTEXT_SIZE = 16384;/, 'managed llama.cpp must default to a coding-capable context');
   assert.match(productionServer, /managedContextSize.*MIN_CODING_CONTEXT_SIZE/s, 'coding route must detect and replace an undersized managed context');
   assert.match(productionServer, /context size must be an integer from/, 'llama context settings must be bounded');
+  assert.match(productionServer, /\/api\/source\/coding\/tasks\/:id\/run\/propose/, 'coding run must start with a durable confirmation proposal route');
+  assert.match(productionServer, /\/api\/source\/coding\/tasks\/:id\/run\/confirm/, 'coding run must require the token-backed confirmation route');
+  assert.match(productionServer, /\/api\/source\/coding\/tasks\/:id\/apply\/propose/, 'patch apply must start with a durable confirmation proposal route');
+  assert.match(productionServer, /confirmAndApply\([\s\S]*codingConfirmationSnapshot/, 'coding confirmations must revalidate the sealed task snapshot before side effects');
   assert.throws(() => worker.create({ title: 'Traversal', objective: 'Must fail.', allowedPaths: ['src/../../secret.txt'] }), /unsafe or protected/);
   const baseCommit = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
   assert.throws(() => worker.create({ title: 'Unpinned task', objective: 'Must never acquire a base commit after user approval.', allowedPaths: ['src/value.js'] }), /base commit is required/);

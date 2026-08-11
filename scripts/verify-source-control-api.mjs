@@ -98,6 +98,33 @@ try {
   assert.equal(initial.body.data.branch, 'main');
   assert.equal(initial.body.data.behind, 0);
 
+  // Native coding run authority is durable and token-bound: proposing it does
+  // not invoke a model or mutate the checkout, and a wrong one-time token
+  // cannot consume the proposal.
+  const codingTask = await api('/api/source/coding/tasks', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'Verify durable run confirmation', objective: 'Prepare a bounded source task without invoking a coding model.', allowedPaths: ['version.txt'], maxFilesChanged: 1, validation: 'syntax' })
+  });
+  assert.equal(codingTask.response.status, 200, JSON.stringify(codingTask.body));
+  const preparedCoding = await api(`/api/source/coding/tasks/${codingTask.body.data.task.id}/prepare`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(preparedCoding.response.status, 200, JSON.stringify(preparedCoding.body));
+  assert.equal(preparedCoding.body.data.task.status, 'prepared');
+  const sealed = preparedCoding.body.data.task;
+  const runProposal = await api(`/api/source/coding/tasks/${sealed.id}/run/propose`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskHash: sealed.taskHash, evidenceHash: sealed.preparation.evidenceHash, adviceHash: '' })
+  });
+  assert.equal(runProposal.response.status, 200, JSON.stringify(runProposal.body));
+  assert.ok(/^[a-f0-9]{64}$/i.test(runProposal.body.data.token), 'run proposal returns one raw token only to its proposer');
+  assert.equal(fs.readFileSync(path.join(client, 'version.txt'), 'utf8').trim(), 'one', 'proposing a coding run does not mutate the checkout');
+  const wrongRunConfirm = await api(`/api/source/coding/tasks/${sealed.id}/run/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmationId: runProposal.body.data.confirmationId, token: 'wrong' })
+  });
+  assert.equal(wrongRunConfirm.response.status, 409, JSON.stringify(wrongRunConfirm.body));
+  const codingAfterWrongToken = await api('/api/source/coding/status');
+  assert.equal(codingAfterWrongToken.body.data.tasks.find((task) => task.id === sealed.id)?.status, 'prepared', 'a wrong confirmation token does not start the local worker');
+
   fs.writeFileSync(path.join(upstream, 'version.txt'), 'two\n');
   git(['add', 'version.txt'], upstream);
   git(['commit', '-m', 'remote update'], upstream);
