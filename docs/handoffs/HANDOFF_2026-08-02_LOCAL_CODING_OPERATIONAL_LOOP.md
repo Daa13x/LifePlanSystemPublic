@@ -60,7 +60,7 @@ The Local coding queue shows active durable statuses and provides a compact task
 The selected-task workspace has:
 
 - a left task rail with durable status;
-- a central line-numbered, syntax-coloured evidence and patch viewer;
+- a central line-numbered, syntax-coloured evidence and patch viewer, including expandable controller-returned excerpts for each bounded tool result (not model paraphrases);
 - a right inspection rail for scope, base commit, validation, browser state, hashes, and explicit controls;
 - a bottom chronological run console with evidence hashes and expandable raw task state.
 
