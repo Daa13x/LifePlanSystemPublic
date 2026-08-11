@@ -11,6 +11,7 @@ const MAX_TOOL_ROUNDS = 8;
 const MAX_TOOL_RESULT_BYTES = 16000;
 const MAX_TOOL_TRANSCRIPT_BYTES = 64000;
 const MAX_TOOL_READ_LINES = 400;
+const MAX_TOOL_EVIDENCE_PREVIEW_BYTES = 2400;
 const MIN_EDIT_CONFIDENCE = 0.70;
 
 export const NATIVE_CODING_VALIDATIONS = Object.freeze({
@@ -475,7 +476,11 @@ export class NativeCodingWorker {
           path: normalize(turn.tool.path || task.allowedPaths[0]),
           query: turn.tool.name === 'search' ? String(turn.tool.query || '').slice(0, 160) : '',
           resultHash: digest(toolResult),
-          resultBytes: Buffer.byteLength(toolResult)
+          resultBytes: Buffer.byteLength(toolResult),
+          // Store the controller-returned evidence, not a model paraphrase.
+          // It is capped before persistence so a multi-step investigation stays
+          // inspectable without turning task records into an unbounded source dump.
+          resultPreview: limitUtf8(toolResult, MAX_TOOL_EVIDENCE_PREVIEW_BYTES)
         };
         task.toolTrace.push(trace);
         this.record(task, 'read_only_tool', 'allow', `${trace.name} ${trace.path}; result ${trace.resultHash}.`, { action: trace.name, evidenceBasis: 'The controller completed this bounded read-only tool inside the sealed allowed paths.', sourceReferences: [trace.path] });

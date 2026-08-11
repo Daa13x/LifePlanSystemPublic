@@ -114,6 +114,8 @@ try {
   assert.equal(toolReview.status, 'review');
   assert.deepEqual(toolReview.toolTrace.map((entry) => entry.name), ['list_files', 'search', 'read_file']);
   assert.ok(toolReview.toolTrace.every((entry) => /^[a-f0-9]{64}$/.test(entry.resultHash)));
+  assert.ok(toolReview.toolTrace.every((entry) => typeof entry.resultPreview === 'string' && entry.resultPreview.length > 0), 'controller evidence excerpts remain reviewable in the durable task record');
+  assert.match(toolReview.toolTrace.at(-1).resultPreview, /export const value = 1/, 'the final scoped file read is retained as evidence, not paraphrased model reasoning');
   assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'tool-loop review changed live checkout');
   await worker.reject(toolTask.id);
 
