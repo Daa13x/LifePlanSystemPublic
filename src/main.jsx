@@ -5144,6 +5144,17 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
                 </details>
 
                 {selectedCodingTask.validationResult && <details className="coding-evidence-section" open><summary>Independent validation <span>{selectedCodingTask.validationResult.ok ? 'Passed' : 'Failed'}</span></summary><pre className="code-block compact-code">{selectedCodingTask.validationResult.output}</pre></details>}
+                {selectedCodingTask.browserAdvice?.disposition && selectedCodingTask.browserAdvice.disposition.state !== 'validated' && (() => {
+                  const d = selectedCodingTask.browserAdvice.disposition;
+                  const tone = d.category === 'rejected' || d.category === 'blocked' ? 'bad' : d.category === 'in-progress' ? 'info' : 'warn';
+                  return (
+                    <div className={cx('source-warning', tone)}>
+                      <strong>Browser consultation: {d.label}</strong>
+                      {d.missing && <small>Missing: {d.missing}</small>}
+                      <small>Next: {d.nextAction}</small>
+                    </div>
+                  );
+                })()}
                 {selectedCodingTask.browserAdvice?.receipt && (() => {
                   const receipt = selectedCodingTask.browserAdvice.receipt;
                   const stale = receipt.evidenceHash !== (selectedCodingTask.preparation?.evidenceHash || '') || receipt.taskHash !== selectedCodingTask.taskHash;

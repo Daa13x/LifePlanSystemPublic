@@ -75,6 +75,7 @@ import { resolveWorkspacePath } from './workspacePathGuard.js';
 import { normalizeIdempotencyKey, hashRequest, runIdempotent, IdempotencyConflictError } from './idempotency.js';
 import { assessValidationScope } from './validationScopePreflight.js';
 import { buildConsultationReceipt, effectiveValidatedAdviceHash } from './consultationReceipt.js';
+import { normalizeAdviceDisposition } from './browserAdviceDisposition.js';
 
 migrate();
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
@@ -6615,6 +6616,7 @@ app.post('/api/source/coding/tasks/:id/advice/preview', (req, res) => {
       validation: null,
       context: ''
     };
+    task.browserAdvice.disposition = normalizeAdviceDisposition(task.browserAdvice);
     task.phase = classified.blocked ? 'browser_advice_blocked' : 'browser_advice_preview';
     nativeCodingWorker.record(task, 'browser_advice_preview', classified.blocked ? 'deny' : 'allow',
       classified.blocked ? 'Cloud egress classifier blocked this prompt.' : `Provider-bound prompt ${promptHash} is ready for review.`);
@@ -6641,6 +6643,7 @@ app.post('/api/source/coding/tasks/:id/advice/send', async (req, res) => {
     if (!providerConnected) {
       advice.status = 'unavailable';
       advice.error = `No connected ${advice.provider} provider tab. The task remains resumable and nothing was sent.`;
+      advice.disposition = normalizeAdviceDisposition(advice);
       task.status = 'prepared';
       task.phase = 'browser_advice_unavailable';
       nativeCodingWorker.record(task, 'browser_advice_dispatch', 'deny', advice.error);
@@ -6666,6 +6669,7 @@ app.post('/api/source/coding/tasks/:id/advice/send', async (req, res) => {
     advice.status = 'awaiting';
     advice.jobId = dispatch.record.browserJobId;
     advice.sentAt = new Date().toISOString();
+    advice.disposition = normalizeAdviceDisposition(advice);
     task.status = 'awaiting-advice';
     task.phase = 'awaiting_browser_advice';
     nativeCodingWorker.record(task, 'browser_advice_dispatch', dispatch.dispatched ? 'allow' : 'deny',
@@ -6692,6 +6696,7 @@ app.post('/api/source/coding/tasks/:id/advice/poll', async (req, res) => {
     if (result.record.state !== 'answered') {
       task.browserAdvice.status = 'incomplete';
       task.browserAdvice.error = result.record.error || `Consultation ended as ${result.record.state}.`;
+      task.browserAdvice.disposition = normalizeAdviceDisposition(task.browserAdvice);
       task.status = 'prepared';
       task.phase = 'browser_advice_incomplete';
       nativeCodingWorker.record(task, 'browser_advice_result', 'deny', task.browserAdvice.error);
@@ -6709,6 +6714,7 @@ app.post('/api/source/coding/tasks/:id/advice/poll', async (req, res) => {
     task.browserAdvice.answerHash = nativeCodingEvidenceHash(task.browserAdvice.answer);
     task.browserAdvice.validation = { ok: validated.ok, reason: validated.reason, findings: validated.findings };
     task.browserAdvice.status = validated.ok ? 'validated' : 'rejected';
+    task.browserAdvice.disposition = normalizeAdviceDisposition(task.browserAdvice);
     task.browserAdvice.context = validated.ok ? renderAdviceContext(validated.advice) : '';
     task.browserAdvice.validatedAdvice = validated.ok ? validated.advice : null;
     task.browserAdvice.completedAt = new Date().toISOString();
