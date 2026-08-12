@@ -468,6 +468,20 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_routing_obs_class ON routing_observations(task_class, route);
+
+    -- Request idempotency for retry-unsafe multi-row mutations. A stored first
+    -- result lets an identical client retry (dropped response, proxy timeout)
+    -- replay instead of re-writing. The record is written in the same
+    -- transaction as the mutation, so a rolled-back write leaves no key behind.
+    CREATE TABLE IF NOT EXISTS request_idempotency (
+      idempotency_key TEXT NOT NULL,
+      route TEXT NOT NULL,
+      request_hash TEXT NOT NULL,
+      status_code INTEGER NOT NULL,
+      response_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (route, idempotency_key)
+    );
   `);
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;

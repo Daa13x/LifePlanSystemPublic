@@ -72,6 +72,7 @@ import {
   validateRemoteUrl
 } from './sourceControlSafety.js';
 import { resolveWorkspacePath } from './workspacePathGuard.js';
+import { normalizeIdempotencyKey, hashRequest, runIdempotent, IdempotencyConflictError } from './idempotency.js';
 
 migrate();
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
@@ -113,7 +114,7 @@ function seedRoadmapIfEmpty() {
     { title: 'Encrypt stored credentials with Windows DPAPI', detail: 'Keep GitHub, Hugging Face, and browser connector tokens out of plaintext SQLite while preserving redacted APIs and normal Source/browser behavior.', resume_notes: 'COMPLETED 2026-07-17: current-user Windows DPAPI encryption is enforced in server/db.js. Startup migrates legacy plaintext rows, secure-delete plus WAL truncation and VACUUM remove recoverable plaintext, empty values delete rows, and decrypt failures fail closed. verify:governance-safety proves migration, ciphertext-at-rest, redaction, replacement, and clearing. The live database was migrated and inspected without exposing values.', status: 'done', category: 'fix' },
     { title: 'Classified exports and transactional recovery', detail: 'Require explicit shareability classification and preview for public exports, then redesign Local Backup as a documented, transactional recovery format.', resume_notes: 'ACTIVE 2026-07-27: persisted closed-set shareability, server-side public export preview/confirmation, and atomic JSON import are being implemented. Keep status separate from privacy classification. Remaining: complete recovery manifest/import support and UI classification workflow.', status: 'active', category: 'fix' },
     { title: 'Cloud egress classification and provider-aware completion', detail: 'Block sensitive prose and file content from browser-agent egress until reviewed, and replace generic DOM/stability capture with provider-specific completion evidence.', resume_notes: 'P1. Follow repair queue section 3. Add a server-side egress decision before job creation, user preview/confirmation, provider adapters for ChatGPT/Gemini/Grok/Claude, deterministic DOM fixtures, bounded fallback, cancellation, terminal-job pruning, and extension reload/port-change acceptance. Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 independently confirmed both egress risk (server/index.js:670,677,2482,2498) and stale generic capture risk (background.js:99,148,199). Current Serenity reference implementations are data/native/extensions/browser-agent/conversation-capture.js and conversation-capture.test.cjs; review the privacy and stale-turn gaps in docs/handoffs/HANDOFF_2026-07-22_SERENITY_BROWSER_CONTROL_PARITY.md before porting.', status: 'planned', category: 'fix' },
-    { title: 'Transactional chat consultation and import writes', detail: 'Make multi-row chat, consultation-candidate, model, and JSON import operations atomic with recoverable failure states and durable idempotency.', resume_notes: 'P1/P2. Follow repair queue section 4. Start with POST /api/import/json and chat send. Validate the complete payload before BEGIN IMMEDIATE, commit all rows together, roll back injected mid-operation failures, and add request/provenance keys for retry safety. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4699,4711,1779,1784.', status: 'planned', category: 'fix' },
+    { title: 'Transactional chat consultation and import writes', detail: 'Make multi-row chat, consultation-candidate, model, and JSON import operations atomic with recoverable failure states and durable idempotency.', resume_notes: 'IN PROGRESS 2026-08-12. Atomicity was already in place: transaction() (BEGIN IMMEDIATE/COMMIT/ROLLBACK) wraps persistChatUserTurn/persistChatAssistantTurn, and POST /api/import/json validates the full payload before writing and rolls back injected mid-import failures. The missing piece was retry safety: a dropped-response retry re-ran the whole write and duplicated rows. Added server/idempotency.js (normalizeIdempotencyKey, canonical hashRequest, runIdempotent) + request_idempotency table, and wired POST /api/import/json to an optional X-LPS-Idempotency-Key/requestKey — the dedup record commits in the SAME transaction as the rows, so a same-key identical retry replays the first result (no duplicate), a same-key different payload is a 409, and a rolled-back failure leaves no key so a genuine retry still succeeds. verify:request-idempotency (unit + HTTP acceptance) runs inside verify:runtime-safety. REMAINING: extend the same key to chat send so a retried send does not create a duplicate user turn / second model call.', status: 'active', category: 'fix' },
     { title: 'Repository Explorer realpath containment', detail: 'Apply canonical realpath and junction/symlink containment to every Repository Explorer read, list, preview, and proposal path.', resume_notes: 'COMPLETED 2026-08-12: centralized in server/workspacePathGuard.js. safeWorkspacePath and safeExistingWorkspaceFile now delegate to resolveWorkspacePath, so all read/preview/proposal paths (GET /api/repo/file, POST /api/repo/proposals, and the other workspace-relative routes) get lexical + canonical realpath containment: a symlink/junction leaf is rejected, an existing target must realpath inside the workspace, and a create must have its nearest existing parent realpath inside — closing the escape that lexical checks alone admitted. verify:workspace-path-guard plants a real junction pointing outside the workspace and proves the escape is rejected while lexical containment alone would have admitted it; it runs inside verify:runtime-safety.', status: 'done', category: 'fix' },
     { title: 'Verified atomic downloads and llama readiness', detail: 'Download models and runtimes through temporary files with published integrity checks, and report llama-server ready only after bounded health proof.', resume_notes: 'COMPLETED 2026-07-22: same-volume partial downloads, published size/SHA-256 checks, fsync, atomic rename, cleanup, captured logs, bounded health polling, failed-child termination, installer provisioning, and real completion acceptance all pass. verify:local-ai-docs protects the contract.', status: 'done', category: 'infra' },
     { title: 'Portable PDF and context documents', detail: 'Import local PDFs and export selected Life Planner context as PDF, interactive HTML, Markdown, text, or JSON.', resume_notes: 'COMPLETED 2026-07-22: PDF.js extraction is local and bounded with SHA-256 provenance/pending review. PDF export uses local Chromium. Interactive HTML is self-contained, searchable, and CSP-restricted. Export scopes cover all, projects, knowledge, roadmap, and chat. Public export remains separately classification-gated.', status: 'done', category: 'feature' },
@@ -7698,7 +7699,6 @@ app.post('/api/import/json', (req, res) => {
   const mode = req.query.mode === 'import_all' || data.mode === 'import_all' ? 'import_all' : 'skip_duplicates';
   let prepared;
   try { prepared = validateImportData(data, mode); } catch (error) { return fail(res, 400, error.message); }
-  const imported = { projects: 0, knowledge_items: 0, skipped_projects: prepared.skippedProjects, skipped_knowledge_items: prepared.skippedKnowledgeItems, mode };
   const insertProject = db.prepare(`
     INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action, shareability)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unknown')
@@ -7707,24 +7707,40 @@ app.post('/api/import/json', (req, res) => {
     INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action, shareability)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown')
   `);
+  // Retry safety: an optional client key lets a dropped-response retry replay the
+  // original result instead of importing the rows a second time. The dedup record
+  // and the row inserts commit together, so an injected mid-import failure rolls
+  // back both and a genuine retry can still run. The hash covers the validated,
+  // deduplicated rows so a same-key retry with a different payload is a 409.
+  const idempotencyKey = normalizeIdempotencyKey(req.get('X-LPS-Idempotency-Key') || data.requestKey);
+  const requestHash = hashRequest({ route: '/api/import/json', mode, projects: prepared.projects, knowledgeItems: prepared.knowledgeItems });
   try {
-    db.exec('BEGIN IMMEDIATE');
-    for (const project of prepared.projects) {
-      insertProject.run(project.name, project.status || 'active', project.owner || 'user', 'json import', project.confidence || 0.6, project.last_reviewed || null, project.evidence || '', project.next_action || '');
-      imported.projects += 1;
-      if (process.env.LIFE_PLANNER_TEST_IMPORT_FAIL_AFTER === 'project') throw new Error('Injected import failure.');
-    }
-    for (const item of prepared.knowledgeItems) {
-      insertItem.run(item.type || 'current state', item.title, item.body || '', 'json import', item.status || 'pending review', item.confidence || 0.5, item.last_reviewed || null, item.evidence || '', item.owner || 'user', item.next_action || '');
-      imported.knowledge_items += 1;
-      if (process.env.LIFE_PLANNER_TEST_IMPORT_FAIL_AFTER === 'knowledge_item') throw new Error('Injected import failure.');
-    }
-    db.exec('COMMIT');
+    const { replayed, body } = runIdempotent({
+      db,
+      transaction,
+      route: '/api/import/json',
+      key: idempotencyKey,
+      requestHash,
+      execute: () => {
+        const imported = { projects: 0, knowledge_items: 0, skipped_projects: prepared.skippedProjects, skipped_knowledge_items: prepared.skippedKnowledgeItems, mode };
+        for (const project of prepared.projects) {
+          insertProject.run(project.name, project.status || 'active', project.owner || 'user', 'json import', project.confidence || 0.6, project.last_reviewed || null, project.evidence || '', project.next_action || '');
+          imported.projects += 1;
+          if (process.env.LIFE_PLANNER_TEST_IMPORT_FAIL_AFTER === 'project') throw new Error('Injected import failure.');
+        }
+        for (const item of prepared.knowledgeItems) {
+          insertItem.run(item.type || 'current state', item.title, item.body || '', 'json import', item.status || 'pending review', item.confidence || 0.5, item.last_reviewed || null, item.evidence || '', item.owner || 'user', item.next_action || '');
+          imported.knowledge_items += 1;
+          if (process.env.LIFE_PLANNER_TEST_IMPORT_FAIL_AFTER === 'knowledge_item') throw new Error('Injected import failure.');
+        }
+        return { statusCode: 200, body: imported };
+      }
+    });
+    ok(res, { ...body, replayed });
   } catch (error) {
-    try { db.exec('ROLLBACK'); } catch { /* transaction already settled */ }
+    if (error instanceof IdempotencyConflictError) return fail(res, 409, error.message);
     return fail(res, 500, `JSON import rolled back: ${error.message}`);
   }
-  ok(res, imported);
 });
 
 app.post('/api/import/json/preview', (req, res) => {
