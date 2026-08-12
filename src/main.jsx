@@ -5187,6 +5187,10 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
                   <dt>File limit</dt><dd>{selectedCodingTask.maxFilesChanged}</dd>
                   <dt>Evidence hash</dt><dd><code>{selectedCodingTask.preparation?.evidenceHash?.slice(0, 20) || 'not prepared'}</code></dd>
                   <dt>Patch hash</dt><dd><code>{selectedCodingTask.patchHash?.slice(0, 20) || 'not generated'}</code></dd>
+                  {selectedCodingTask.leaseStatus?.acquiredAt && <>
+                    <dt>Run lease</dt><dd>{selectedCodingTask.leaseStatus.held ? `Held by ${selectedCodingTask.leaseStatus.owner}` : 'Expired — reclaimable'}{selectedCodingTask.leaseStatus.held && Number.isFinite(selectedCodingTask.leaseStatus.remainingMs) ? ` · ${Math.round(selectedCodingTask.leaseStatus.remainingMs / 60000)} min left` : ''}</dd>
+                    <dt>Lease phase</dt><dd>{selectedCodingTask.leaseStatus.phase || '—'}{selectedCodingTask.leaseStatus.lastEvent?.at ? ` · last event ${selectedCodingTask.leaseStatus.lastEvent.at}` : ''}</dd>
+                  </>}
                   <dt>Checker repairs</dt><dd>{Number(selectedCodingTask.validationRepairs || 0)} / 1 bounded repair pass</dd>
                   <dt>Evidence recovery</dt><dd>{Number(selectedCodingTask.evidenceRecoveries || 0)} / 3 bounded gap-resolution passes</dd>
                   <dt>Last action confidence</dt><dd>{selectedCodingTask.assessment ? `${Math.round(Number(selectedCodingTask.assessment.confidence) * 100)}% — ${selectedCodingTask.assessment.action}` : 'not assessed'}</dd>

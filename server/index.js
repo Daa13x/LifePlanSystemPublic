@@ -76,6 +76,7 @@ import { normalizeIdempotencyKey, hashRequest, runIdempotent, IdempotencyConflic
 import { assessValidationScope } from './validationScopePreflight.js';
 import { buildConsultationReceipt, effectiveValidatedAdviceHash } from './consultationReceipt.js';
 import { normalizeAdviceDisposition } from './browserAdviceDisposition.js';
+import { describeRunLease } from './leaseObservability.js';
 
 migrate();
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
@@ -6541,7 +6542,10 @@ app.get('/api/source/coding/status', async (_req, res) => {
   const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
   const providerTabs = agentTabsFromUrls(browserExtensionState.tabs);
   ok(res, {
-    tasks: nativeCodingWorker.list(),
+    // Each task carries a redacted lease-observability view (owner, expiry,
+    // remaining time, active phase, latest audit event) so the review UI can show
+    // who holds the durable run lease without exposing the raw lease token.
+    tasks: nativeCodingWorker.list().map((task) => ({ ...task, leaseStatus: describeRunLease(task) })),
     validations: NATIVE_CODING_VALIDATIONS,
     model: { ...model, configured: Boolean(model.endpoint) },
     activeTaskIds: [...nativeCodingWorker.active.keys()],
