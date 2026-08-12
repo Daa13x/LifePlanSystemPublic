@@ -73,6 +73,7 @@ import {
 } from './sourceControlSafety.js';
 import { resolveWorkspacePath } from './workspacePathGuard.js';
 import { normalizeIdempotencyKey, hashRequest, runIdempotent, IdempotencyConflictError } from './idempotency.js';
+import { assessValidationScope } from './validationScopePreflight.js';
 
 migrate();
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
@@ -4454,6 +4455,14 @@ function codingConfirmationSnapshot(task, kind) {
 function proposeCodingConfirmation(req, res, kind) {
   try {
     const task = nativeCodingWorker.load(req.params.id);
+    // Validation-scope preflight (audit delta #3): never offer a run confirmation
+    // for a task whose operator-selected validation cannot exercise the file
+    // types in its allowed paths. The worker still runs the human-selected
+    // command independently; this only blocks an under-covered task up front.
+    if (kind === 'run') {
+      const scope = assessValidationScope({ allowedPaths: task.allowedPaths, validation: task.validation });
+      if (!scope.ok) return fail(res, 400, `Validation scope insufficient: ${scope.reason} Seal a new task whose validation covers its files.`);
+    }
     const snapshot = codingConfirmationSnapshot(task, kind);
     const allowed = kind === 'run'
       ? ['prepared', 'failed', 'interrupted', 'cancelled'].includes(task.status) && Boolean(snapshot.evidenceHash) && req.body?.taskHash === snapshot.taskHash && req.body?.evidenceHash === snapshot.evidenceHash && String(req.body?.adviceHash || '') === snapshot.adviceHash
@@ -6548,7 +6557,17 @@ app.post('/api/source/coding/tasks', async (req, res) => {
     const head = await runCli('git', ['rev-parse', 'HEAD'], { timeout: 30000, maxBuffer: 1024 * 1024 });
     if (!head.ok) return fail(res, 409, head.stderr || 'Unable to seal the current base commit.');
     const task = nativeCodingWorker.create({ ...(req.body || {}), baseCommit: head.stdout.trim() });
-    ok(res, { task, note: 'Coding task staged. Nothing runs until the sealed task scope is explicitly approved.' });
+    // Surface validation coverage immediately so the operator can re-seal with a
+    // covering validation before doing evidence/consultation work — a run
+    // confirmation will be refused later if this is not ok.
+    const validationScope = assessValidationScope({ allowedPaths: task.allowedPaths, validation: task.validation });
+    ok(res, {
+      task,
+      validationScope,
+      note: validationScope.ok
+        ? 'Coding task staged. Nothing runs until the sealed task scope is explicitly approved.'
+        : `Coding task staged, but its validation will not cover its files: ${validationScope.reason} A run confirmation will be refused until you seal a task with a covering validation.`
+    });
   } catch (error) {
     fail(res, 400, error.message);
   }
