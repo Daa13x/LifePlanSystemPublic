@@ -74,6 +74,7 @@ import {
 import { resolveWorkspacePath } from './workspacePathGuard.js';
 import { normalizeIdempotencyKey, hashRequest, runIdempotent, IdempotencyConflictError } from './idempotency.js';
 import { assessValidationScope } from './validationScopePreflight.js';
+import { buildConsultationReceipt, effectiveValidatedAdviceHash } from './consultationReceipt.js';
 
 migrate();
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
@@ -4442,7 +4443,9 @@ function codingConfirmationSnapshot(task, kind) {
     return {
       kind, taskId: task.id, status: task.status, taskHash: task.taskHash,
       evidenceHash: task.preparation?.evidenceHash || '',
-      adviceHash: task.browserAdvice?.status === 'validated' ? String(task.browserAdvice.answerHash || '') : '',
+      // Only fresh, still-bound validated advice may be carried into a run; advice
+      // whose task seal or prepared evidence has since changed is treated as stale.
+      adviceHash: effectiveValidatedAdviceHash(task),
       baseCommit: task.baseCommit
     };
   }
@@ -6709,6 +6712,14 @@ app.post('/api/source/coding/tasks/:id/advice/poll', async (req, res) => {
     task.browserAdvice.context = validated.ok ? renderAdviceContext(validated.advice) : '';
     task.browserAdvice.validatedAdvice = validated.ok ? validated.advice : null;
     task.browserAdvice.completedAt = new Date().toISOString();
+    // Persist a normalized provenance receipt bound to the sealed task and the
+    // prepared evidence this advice was generated against, so the review UI can
+    // show where it came from and a later scope/evidence change makes it stale.
+    task.browserAdvice.receipt = buildConsultationReceipt({
+      advice: task.browserAdvice,
+      taskHash: task.taskHash,
+      evidenceHash: task.preparation?.evidenceHash || ''
+    });
     task.status = 'prepared';
     task.phase = validated.ok ? 'browser_advice_validated' : 'browser_advice_rejected';
     nativeCodingWorker.record(task, 'browser_advice_validation', validated.ok ? 'allow' : 'deny',

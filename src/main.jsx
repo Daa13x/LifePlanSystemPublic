@@ -4647,8 +4647,15 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
     if (sourceBusy) return;
     setSourceBusy(true);
     try {
+      // Mirror the server's receipt-freshness gate: validated advice only binds
+      // to a run while its receipt is still tied to the current task seal and
+      // prepared evidence. Stale advice (re-prepared evidence) is dropped, not
+      // silently carried, so the run proceeds without it rather than 409-ing.
+      const advice = task.browserAdvice;
+      const freshAdvice = advice?.status === 'validated'
+        && (!advice.receipt || (advice.receipt.taskHash === task.taskHash && advice.receipt.evidenceHash === (task.preparation?.evidenceHash || '')));
       const body = kind === 'run'
-        ? { taskHash: task.taskHash, evidenceHash: task.preparation?.evidenceHash, adviceHash: task.browserAdvice?.status === 'validated' ? task.browserAdvice.answerHash : '' }
+        ? { taskHash: task.taskHash, evidenceHash: task.preparation?.evidenceHash, adviceHash: freshAdvice ? advice.answerHash : '' }
         : { patchHash: task.patchHash };
       const proposal = await api(`/api/source/coding/tasks/${task.id}/${kind}/propose`, { method: 'POST', body: JSON.stringify(body) });
       setCodingConfirmation({ kind, taskId: task.id, title: task.title, ...proposal });
@@ -5137,6 +5144,25 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
                 </details>
 
                 {selectedCodingTask.validationResult && <details className="coding-evidence-section" open><summary>Independent validation <span>{selectedCodingTask.validationResult.ok ? 'Passed' : 'Failed'}</span></summary><pre className="code-block compact-code">{selectedCodingTask.validationResult.output}</pre></details>}
+                {selectedCodingTask.browserAdvice?.receipt && (() => {
+                  const receipt = selectedCodingTask.browserAdvice.receipt;
+                  const stale = receipt.evidenceHash !== (selectedCodingTask.preparation?.evidenceHash || '') || receipt.taskHash !== selectedCodingTask.taskHash;
+                  return (
+                    <details className="coding-evidence-section" open>
+                      <summary>Browser consultation receipt <span>{stale ? 'Stale — re-consult' : (receipt.terminalState || 'recorded')}</span></summary>
+                      <div className="coding-evidence-stats">
+                        <span>Provider <strong>{receipt.provider || 'unknown'}</strong></span>
+                        {receipt.conversationId && <span>Turn <code>{receipt.conversationId}</code></span>}
+                        {receipt.capturedAt && <span>Captured {receipt.capturedAt}</span>}
+                        <span>Answer <code>{(receipt.answerHash || '').slice(0, 16) || 'none'}</code></span>
+                        <span>Bound evidence <code>{(receipt.evidenceHash || '').slice(0, 16) || 'none'}</code></span>
+                      </div>
+                      <small>{stale
+                        ? 'The task scope or prepared evidence changed after this advice was captured, so it is no longer bound to a run. Re-consult to use fresh advice.'
+                        : 'Untrusted advisory provenance only. It cannot widen scope, apply code, or count as validation.'}</small>
+                    </details>
+                  );
+                })()}
                 {selectedCodingTask.summary && <div className="source-warning info"><strong>Local coder summary</strong><small>{selectedCodingTask.summary}</small></div>}
               </main>
 
