@@ -71,6 +71,7 @@ import {
   publicationBoundary,
   validateRemoteUrl
 } from './sourceControlSafety.js';
+import { resolveWorkspacePath } from './workspacePathGuard.js';
 
 migrate();
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
@@ -113,7 +114,7 @@ function seedRoadmapIfEmpty() {
     { title: 'Classified exports and transactional recovery', detail: 'Require explicit shareability classification and preview for public exports, then redesign Local Backup as a documented, transactional recovery format.', resume_notes: 'ACTIVE 2026-07-27: persisted closed-set shareability, server-side public export preview/confirmation, and atomic JSON import are being implemented. Keep status separate from privacy classification. Remaining: complete recovery manifest/import support and UI classification workflow.', status: 'active', category: 'fix' },
     { title: 'Cloud egress classification and provider-aware completion', detail: 'Block sensitive prose and file content from browser-agent egress until reviewed, and replace generic DOM/stability capture with provider-specific completion evidence.', resume_notes: 'P1. Follow repair queue section 3. Add a server-side egress decision before job creation, user preview/confirmation, provider adapters for ChatGPT/Gemini/Grok/Claude, deterministic DOM fixtures, bounded fallback, cancellation, terminal-job pruning, and extension reload/port-change acceptance. Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 independently confirmed both egress risk (server/index.js:670,677,2482,2498) and stale generic capture risk (background.js:99,148,199). Current Serenity reference implementations are data/native/extensions/browser-agent/conversation-capture.js and conversation-capture.test.cjs; review the privacy and stale-turn gaps in docs/handoffs/HANDOFF_2026-07-22_SERENITY_BROWSER_CONTROL_PARITY.md before porting.', status: 'planned', category: 'fix' },
     { title: 'Transactional chat consultation and import writes', detail: 'Make multi-row chat, consultation-candidate, model, and JSON import operations atomic with recoverable failure states and durable idempotency.', resume_notes: 'P1/P2. Follow repair queue section 4. Start with POST /api/import/json and chat send. Validate the complete payload before BEGIN IMMEDIATE, commit all rows together, roll back injected mid-operation failures, and add request/provenance keys for retry safety. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:4699,4711,1779,1784.', status: 'planned', category: 'fix' },
-    { title: 'Repository Explorer realpath containment', detail: 'Apply canonical realpath and junction/symlink containment to every Repository Explorer read, list, preview, and proposal path.', resume_notes: 'P2. Follow repair queue section 5. Centralize an operation-aware resolver, reject protected paths before and after canonicalization, constrain parent realpaths for creates, and test symlink/junction escapes plus TOCTOU-sensitive cases. Independently confirmed by Serenity audit thread 019f248e-8ff9-7c51-83b8-a446de4ed437 at server/index.js:991,999,4599,4612.', status: 'planned', category: 'fix' },
+    { title: 'Repository Explorer realpath containment', detail: 'Apply canonical realpath and junction/symlink containment to every Repository Explorer read, list, preview, and proposal path.', resume_notes: 'COMPLETED 2026-08-12: centralized in server/workspacePathGuard.js. safeWorkspacePath and safeExistingWorkspaceFile now delegate to resolveWorkspacePath, so all read/preview/proposal paths (GET /api/repo/file, POST /api/repo/proposals, and the other workspace-relative routes) get lexical + canonical realpath containment: a symlink/junction leaf is rejected, an existing target must realpath inside the workspace, and a create must have its nearest existing parent realpath inside — closing the escape that lexical checks alone admitted. verify:workspace-path-guard plants a real junction pointing outside the workspace and proves the escape is rejected while lexical containment alone would have admitted it; it runs inside verify:runtime-safety.', status: 'done', category: 'fix' },
     { title: 'Verified atomic downloads and llama readiness', detail: 'Download models and runtimes through temporary files with published integrity checks, and report llama-server ready only after bounded health proof.', resume_notes: 'COMPLETED 2026-07-22: same-volume partial downloads, published size/SHA-256 checks, fsync, atomic rename, cleanup, captured logs, bounded health polling, failed-child termination, installer provisioning, and real completion acceptance all pass. verify:local-ai-docs protects the contract.', status: 'done', category: 'infra' },
     { title: 'Portable PDF and context documents', detail: 'Import local PDFs and export selected Life Planner context as PDF, interactive HTML, Markdown, text, or JSON.', resume_notes: 'COMPLETED 2026-07-22: PDF.js extraction is local and bounded with SHA-256 provenance/pending review. PDF export uses local Chromium. Interactive HTML is self-contained, searchable, and CSP-restricted. Export scopes cover all, projects, knowledge, roadmap, and chat. Public export remains separately classification-gated.', status: 'done', category: 'feature' },
     { title: 'Installer launch health and process lifecycle', detail: 'Launch the installed app through a hidden, single-instance Windows tray host with health polling, useful failure output, pause/resume, and owned-process shutdown.', resume_notes: 'COMPLETED 2026-07-22: Windows tray support is part of main, not a separate product branch. Start Life Planner.vbs launches LifePlannerTray.ps1 without a visible Node or PowerShell terminal. The tray host uses a per-install/port mutex, rejects unrelated port owners, waits for /api/health, captures server logs, keeps the app alive after the browser closes, and exposes Open, Pause, Resume, and Exit. Exit terminates only the owned bundled Node process tree. Packaging and Inno shortcuts include the app icon and tray files; verify:tray-launcher is part of verify:runtime-safety. Compared against the native Serenity and KeepHerFlying tray lifecycles before acceptance.', status: 'done', category: 'fix' },
@@ -1177,30 +1178,16 @@ async function npxRun(args) {
   return runCli(npxCommand, args, { timeout: 20 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
 }
 
+// Every workspace-relative path flows through the centralized guard so lexical
+// containment AND canonical realpath containment (symlink/junction rejection,
+// nearest-existing-parent validation for creates) apply uniformly to reads,
+// previews, and write proposals. See server/workspacePathGuard.js.
 function safeWorkspacePath(relativePath = '') {
-  const raw = String(relativePath || '').trim();
-  if (!raw || raw.includes('\0')) throw new Error('Invalid path.');
-  if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('\\\\') || raw.startsWith('//')) {
-    throw new Error('Use a workspace-relative path, not an absolute path.');
-  }
-  const normalized = raw.replaceAll('\\', '/').replace(/^\/+/, '');
-  if (!normalized || normalized.split('/').some((part) => part === '..')) throw new Error('Path must stay inside the workspace.');
-  const absolute = path.resolve(root, normalized);
-  const rootWithSep = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
-  if (absolute !== root && !absolute.startsWith(rootWithSep)) throw new Error('Path must stay inside the workspace.');
-  return { normalized, absolute };
+  return resolveWorkspacePath(root, relativePath);
 }
 
 function safeExistingWorkspaceFile(relativePath = '') {
-  const target = safeWorkspacePath(relativePath);
-  if (!fs.existsSync(target.absolute)) throw new Error('File not found.');
-  const stat = fs.lstatSync(target.absolute);
-  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error('Context must be a regular file, not a link or directory.');
-  const resolvedRoot = fs.realpathSync(root);
-  const resolvedFile = fs.realpathSync(target.absolute);
-  const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : `${resolvedRoot}${path.sep}`;
-  if (!resolvedFile.startsWith(rootWithSep)) throw new Error('Resolved file must stay inside the workspace.');
-  return { ...target, absolute: resolvedFile };
+  return resolveWorkspacePath(root, relativePath, { mustExist: true, mustBeFile: true });
 }
 
 // Guards against git argument injection: runCli uses execFile (no shell), so
