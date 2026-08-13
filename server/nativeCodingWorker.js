@@ -306,13 +306,19 @@ export class NativeCodingWorker {
         }
         return;
       }
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES || total + stat.size > MAX_CONTEXT_BYTES) return;
+      if (!stat.isFile() || total >= MAX_CONTEXT_BYTES) return;
       const content = fs.readFileSync(absolute, 'utf8');
       if (content.includes('\0')) return;
       const relative = path.relative(worktree, absolute).replaceAll('\\', '/');
       if (this.forbiddenPath(relative)) return;
-      files.push({ path: relative, content });
-      total += Buffer.byteLength(content);
+      const remaining = MAX_CONTEXT_BYTES - total;
+      const oversized = stat.size > MAX_FILE_BYTES || Buffer.byteLength(content) > remaining;
+      const excerpt = oversized
+        ? `${limitUtf8(content, Math.min(MAX_TOOL_RESULT_BYTES, remaining))}\n\n[Prepared context is an opening excerpt of this oversized approved file. Use read_file with line bounds for the exact source region before proposing an edit.]`
+        : content;
+      if (!excerpt.trim()) return;
+      files.push({ path: relative, content: excerpt, truncated: oversized });
+      total += Buffer.byteLength(excerpt);
     };
     const realWorktree = fs.realpathSync.native(worktree);
     for (const allowed of allowedPaths) {
