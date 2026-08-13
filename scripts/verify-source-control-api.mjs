@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -13,9 +14,29 @@ const bare = path.join(probeRoot, 'remote.git');
 const seed = path.join(probeRoot, 'seed');
 const client = path.join(probeRoot, 'client');
 const upstream = path.join(probeRoot, 'upstream');
-const port = 43400 + Math.floor(Math.random() * 400);
+async function reserveLoopbackPort() {
+  return await new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      probe.close((error) => error ? reject(error) : resolve(port));
+    });
+  });
+}
+
+const port = await reserveLoopbackPort();
 const base = `http://127.0.0.1:${port}`;
 let server;
+const serverOutput = [];
+
+function captureServerOutput(stream, label) {
+  stream?.on('data', (chunk) => {
+    serverOutput.push(`[${label}] ${String(chunk)}`);
+    if (serverOutput.length > 80) serverOutput.shift();
+  });
+}
 
 function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
@@ -45,10 +66,13 @@ async function api(route, options = {}) {
 
 async function waitForHealth() {
   for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (server?.exitCode !== null && server?.exitCode !== undefined) {
+      throw new Error(`Source API acceptance server exited with code ${server.exitCode}.\n${serverOutput.join('')}`);
+    }
     try { if ((await fetch(`${base}/api/health`)).ok) return; } catch {}
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error('Source API acceptance server did not become healthy.');
+  throw new Error(`Source API acceptance server did not become healthy on ${base}.\n${serverOutput.join('')}`);
 }
 
 try {
@@ -75,6 +99,8 @@ try {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
   });
+  captureServerOutput(server.stdout, 'stdout');
+  captureServerOutput(server.stderr, 'stderr');
   await waitForHealth();
 
   fs.mkdirSync(path.join(client, '.lps'), { recursive: true });
