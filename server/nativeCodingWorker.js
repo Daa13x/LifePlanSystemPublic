@@ -140,6 +140,7 @@ export function buildNativeCodingSystemPrompt({ allowedPaths, maxFilesChanged, v
     'Choose the next bounded read based on the highest-value unresolved implementation fact; do not follow a canned checklist or invent unavailable access.',
     'After every controller result, treat that returned evidence as the current authority: correct any earlier assumption, do not request information already supplied, and choose the next read or final proposal from what the result actually says.',
     `You may edit only these paths: ${allowedPaths.join(', ')}.`,
+    `FINAL WRITE GATE: every edit.path must be exactly one of, or a child of, this sealed allowlist: ${allowedPaths.join(', ')}. Before returning final edits, compare every edit path against that list. If the objective would require any other path, do not propose it: request an approved read if one can resolve the mismatch, otherwise return a grounded report_no_change or low-confidence evidence gap.`,
     `Return at most ${maxFilesChanged} complete text-file replacements.`,
     `The independent Checker will run: ${NATIVE_CODING_VALIDATIONS[validation]}.`,
     'You may request one read-only tool per turn with exactly one of these JSON objects:',

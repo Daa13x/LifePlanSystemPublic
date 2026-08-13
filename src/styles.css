@@ -937,7 +937,7 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   gap: 16px;
   align-items: start;
 }
-.settings-grid { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) 330px; }
+.settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .panel { padding: 16px; }
 .panel > p { margin-top: 6px; margin-bottom: 14px; }
 .table-list { display: grid; gap: 0; }
