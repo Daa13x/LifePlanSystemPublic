@@ -14,6 +14,7 @@ const MAX_TOOL_READ_LINES = 400;
 const MAX_TOOL_EVIDENCE_PREVIEW_BYTES = 2400;
 const MAX_VALIDATION_REPAIR_ATTEMPTS = 1;
 const MAX_EVIDENCE_RECOVERY_ATTEMPTS = 5;
+const MAX_SCOPE_CORRECTION_ATTEMPTS = 5;
 const RUN_LEASE_MS = 30 * 60 * 1000;
 const MIN_EDIT_CONFIDENCE = 0.70;
 
@@ -529,7 +530,7 @@ export class NativeCodingWorker {
       let scopeCorrections = 0;
       task.toolTrace = [];
       let toolCalls = 0;
-      const maxInferenceTurns = MAX_TOOL_ROUNDS + MAX_EVIDENCE_RECOVERY_ATTEMPTS + 1;
+      const maxInferenceTurns = MAX_TOOL_ROUNDS + MAX_EVIDENCE_RECOVERY_ATTEMPTS + MAX_SCOPE_CORRECTION_ATTEMPTS + 1;
       for (let round = 0; round < maxInferenceTurns; round += 1) {
         const detailedExchanges = [...toolExchanges];
         while (detailedExchanges.length > 1 && Buffer.byteLength(detailedExchanges.join('\n\n')) > MAX_TOOL_TRANSCRIPT_BYTES) detailedExchanges.shift();
@@ -557,12 +558,12 @@ export class NativeCodingWorker {
           try {
             for (const edit of candidate.edits) this.resolveAllowed(task, worktree, edit.path);
           } catch (error) {
-            if (scopeCorrections >= 1) throw error;
+            if (scopeCorrections >= MAX_SCOPE_CORRECTION_ATTEMPTS) throw error;
             scopeCorrections += 1;
             this.record(task, 'scope_correction', 'deny', `Controller rejected an out-of-scope proposed path before any isolated file write: ${error.message}`, { action: candidate.action, confidence: candidate.confidence, evidenceBasis: candidate.evidenceBasis, sourceReferences: task.allowedPaths });
             task.phase = 'local_coder_scope_correction';
             this.save(task);
-            toolExchanges.push(`Controller rejected the previous final proposal before any file was written: ${error.message}\n\nThis is the one permitted scope correction. Return a replacement final edits JSON using only these paths: ${task.allowedPaths.join(', ')}. Do not explain, request an outside path, or alter production behaviour.`);
+            toolExchanges.push(`Controller rejected the previous final proposal before any file was written: ${error.message}\n\nScope correction ${scopeCorrections}/${MAX_SCOPE_CORRECTION_ATTEMPTS}. Return a replacement final edits JSON using only these paths: ${task.allowedPaths.join(', ')}. Do not explain, request an outside path, or alter production behaviour.`);
             continue;
           }
           if (candidate.confidence >= MIN_EDIT_CONFIDENCE || !candidate.evidenceGaps.length || evidenceRecoveries >= MAX_EVIDENCE_RECOVERY_ATTEMPTS) {
