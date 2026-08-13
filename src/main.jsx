@@ -2266,7 +2266,7 @@ function ContextPicker({ picker, onSearch, onAttach, onClose }) {
       <div className="picker" onClick={(e) => e.stopPropagation()}>
         <div className="picker-head">
           <strong>{picker.domain === 'knowledge' ? 'Attach Knowledge context' : 'Attach Workboard context'}</strong>
-          <button className="icon-button" onClick={onClose}><X size={16} /></button>
+          <button className="icon-button" onClick={onClose} aria-label="Close context picker"><X size={16} /></button>
         </div>
         <div className="picker-controls">
           {picker.domain === 'knowledge' ? (

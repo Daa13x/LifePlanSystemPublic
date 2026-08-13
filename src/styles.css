@@ -796,6 +796,14 @@ input, textarea, select {
   padding: 10px 11px;
   outline: none;
 }
+/* Keyboard focus must stay visible: the default outline is removed for a custom
+   border treatment, so restore an explicit accent focus ring for keyboard users
+   (WCAG 2.4.7). Pointer focus stays quiet via :focus-visible. */
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 72%, white);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
 textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
 .composer textarea { min-height: 50px; max-height: 140px; }
 .context-bar {
