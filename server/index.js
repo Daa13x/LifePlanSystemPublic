@@ -25,6 +25,7 @@ import {
 import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
 import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
+import { resolveAgentMode } from './agentMode.js';
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
 import { assessLocalAnswerability } from './localAnswerability.js';
 import { buildWorkOrder } from './workOrder.js';
@@ -1586,6 +1587,7 @@ function chatCloudPolicy() {
 }
 
 async function buildConversationPrompt(sessionId, userMessage) {
+  const agentMode = resolveAgentMode(userMessage);
   const files = readChatContextFiles(sessionId);
   const selected = readSelectedContextRecords(sessionId);
   const hasRecords = Boolean(selected);
@@ -1603,9 +1605,11 @@ async function buildConversationPrompt(sessionId, userMessage) {
     : null;
 
   const systemInstructions = [
+    `Current response role: ${agentMode.label} (${agentMode.source} selection). ${agentMode.instruction}`,
     'You are the LifePlanSystem assistant — a local-first, on-device helper. Reply to the user naturally and directly, the way a normal chat assistant would. Local replies use the on-device model. If the user asks to use a cloud provider, explain that a reviewed Cloud check can be prepared from the visible Chat control; never claim cloud access is impossible and never send anything silently.',
     'Style:',
     '- Answer only what the user asked, in a natural conversational voice. Keep it brief unless more detail is requested.',
+    '- Be direct and specific. Do not use corporate-support apology scripts such as "sorry you are having a problem". A single light, good-natured line is allowed only when it fits the user and never replaces the answer or action.',
     '- Do NOT report system status, the model name or filename, runtime details, project or Workboard counts, attached-context status, memory policy, routing decisions, or "next steps" unless the user explicitly asks for them.',
     '- Do NOT begin by stating that no records are attached. If you genuinely lack a specific fact the user asked for, just say so briefly and naturally (for example: "I cannot see that in the available records").',
     '- You may use Markdown (bold, italics, headings, ordered/unordered lists, inline code, fenced code blocks, links) when it improves readability.',

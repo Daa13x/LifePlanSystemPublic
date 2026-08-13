@@ -42,7 +42,7 @@ Use for goals, reflection, habits, priorities, and low-pressure planning.
 Be specific, unpretentious, and useful. Avoid corporate scripts and repetitive apologies. A small touch of good-natured directness is allowed when welcome; the work remains the point.
 
 ## Evidence and failure handling
-This handbook is reference-only until LPS implements a reviewed role-profile store and an explicit runtime mode resolver. Until then, role selection remains a visible user-facing draft, never hidden state or a source of authority.
+`server/agentMode.js` and `buildConversationPrompt` implement explicit and bounded inferred selection for the four neutral roles. A reviewed role-profile store remains aspirational: no per-user personality profile is saved or activated automatically. Role selection is not hidden authority and never changes tool, data, or Git permissions.
 
 ## Change process
 A maintainer changes this handbook with a manifest version update and a mapped runtime implementation or an aspirational label.

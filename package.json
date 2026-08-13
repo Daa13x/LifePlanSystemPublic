@@ -83,6 +83,7 @@
     "verify:loop-evaluate-http": "node scripts/verify-loop-evaluate-http.mjs",
     "verify:cost-routing": "node scripts/verify-cost-routing.mjs",
     "verify:authority-boundary": "node scripts/verify-authority-boundary.mjs",
+    "verify:agent-mode": "node scripts/verify-agent-mode.mjs",
     "verify:native-authority-doc": "node scripts/verify-native-authority-doc.mjs",
     "verify:ui-reality": "node scripts/verify-ui-reality.mjs",
     "verify:quality-ui": "node scripts/verify-quality-ui.mjs",
