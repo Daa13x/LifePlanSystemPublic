@@ -526,6 +526,7 @@ export class NativeCodingWorker {
       const toolExchanges = [];
       let proposal = null;
       let evidenceRecoveries = 0;
+      let scopeCorrections = 0;
       task.toolTrace = [];
       let toolCalls = 0;
       const maxInferenceTurns = MAX_TOOL_ROUNDS + MAX_EVIDENCE_RECOVERY_ATTEMPTS + 1;
@@ -553,6 +554,17 @@ export class NativeCodingWorker {
         const turn = parseNativeCodingTurn(response.content);
         if (turn.type === 'final') {
           const candidate = { summary: turn.summary, edits: turn.edits, action: turn.action, confidence: turn.confidence, evidenceBasis: turn.evidenceBasis, evidenceGaps: turn.evidenceGaps };
+          try {
+            for (const edit of candidate.edits) this.resolveAllowed(task, worktree, edit.path);
+          } catch (error) {
+            if (scopeCorrections >= 1) throw error;
+            scopeCorrections += 1;
+            this.record(task, 'scope_correction', 'deny', `Controller rejected an out-of-scope proposed path before any isolated file write: ${error.message}`, { action: candidate.action, confidence: candidate.confidence, evidenceBasis: candidate.evidenceBasis, sourceReferences: task.allowedPaths });
+            task.phase = 'local_coder_scope_correction';
+            this.save(task);
+            toolExchanges.push(`Controller rejected the previous final proposal before any file was written: ${error.message}\n\nThis is the one permitted scope correction. Return a replacement final edits JSON using only these paths: ${task.allowedPaths.join(', ')}. Do not explain, request an outside path, or alter production behaviour.`);
+            continue;
+          }
           if (candidate.confidence >= MIN_EDIT_CONFIDENCE || !candidate.evidenceGaps.length || evidenceRecoveries >= MAX_EVIDENCE_RECOVERY_ATTEMPTS) {
             if (candidate.confidence >= MIN_EDIT_CONFIDENCE && evidenceRecoveries) {
               task.recovery = null;
