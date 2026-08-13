@@ -100,6 +100,17 @@ export function parseNativeCodingTurn(text) {
     if (!['list_files', 'search', 'read_file'].includes(name)) throw new Error(`Coding model requested unsupported tool: ${name || '(missing)'}.`);
     return { type: 'tool', tool: { ...parsed.tool, name } };
   }
+  // An honest "no source mutation recommended" outcome, grounded in the sealed
+  // prepared evidence. It carries no edits and never becomes a patch; the run
+  // lands it in an operator-closed evidence_only review state.
+  if (String(parsed?.action || '').trim() === 'report_no_change') {
+    const evidenceBasis = String(parsed.evidence_basis || '').trim().slice(0, 600);
+    if (evidenceBasis.length < 12) throw new Error('A no-change report requires an evidence_basis of at least 12 characters grounded in the prepared evidence.');
+    const noChangeConfidence = Number(parsed.confidence);
+    if (!Number.isFinite(noChangeConfidence) || noChangeConfidence < 0 || noChangeConfidence > 1) throw new Error('A no-change report requires confidence from 0 to 1.');
+    if (Array.isArray(parsed.edits) && parsed.edits.length) throw new Error('A no-change report must not include edits.');
+    return { type: 'no_change', summary: String(parsed.summary || '').trim().slice(0, 2000), evidenceBasis, confidence: noChangeConfidence };
+  }
   if (!parsed || !Array.isArray(parsed.edits) || !parsed.edits.length) throw new Error('Coding model returned neither a supported tool request nor edits.');
   const action = String(parsed.action || '').trim();
   const evidenceBasis = String(parsed.evidence_basis || '').trim().slice(0, 600);
@@ -136,6 +147,7 @@ export function buildNativeCodingSystemPrompt({ allowedPaths, maxFilesChanged, v
     '{"tool":{"name":"read_file","path":"approved/file","startLine":1,"endLine":200}}',
     'After enough evidence, output exactly one final JSON object with this schema:',
     '{"action":"propose_edits","confidence":0.85,"evidence_basis":"The cited source and controller tool results show the exact defect.","evidence_gaps":["Only name a concrete missing source or verification fact when confidence is below the edit threshold."],"summary":"short explanation","edits":[{"path":"relative/path","content":"complete file content"},{"path":"obsolete/file","delete":true}]}',
+    'If the sealed evidence shows that NO source change is warranted, return exactly one JSON object {"action":"report_no_change","confidence":0.9,"evidence_basis":"why the prepared evidence shows no change is needed","summary":"short explanation"} with no edits. This is an honest evidence-only outcome for human review; never invent an edit to avoid it.',
     'Do not stop merely because you can name up to three concrete evidence gaps. If an approved controller read can resolve one, request that read and continue. A final proposal below 70% confidence is accepted only when no permitted read can close the remaining gap.',
     'A deletion must use delete:true with no content. A rename is one approved deletion plus one approved creation and counts as two changed files.',
     'If the controller later supplies independent checker failure evidence, diagnose that evidence and return one corrected in-scope final proposal. The checker, not confidence, decides whether the proposal reaches review.',
@@ -561,6 +573,20 @@ export class NativeCodingWorker {
           toolExchanges.push(`Prior final proposal was below the edit threshold and is not accepted. Concrete evidence gaps to resolve using approved read-only tools:\n${candidate.evidenceGaps.map((gap, index) => `${index + 1}. ${gap}`).join('\n')}\n\nReturn a tool request that can resolve a gap, or a final proposal only if no permitted read can resolve it.`);
           continue;
         }
+        if (turn.type === 'no_change') {
+          // Evidence-only outcome: no patch is created, no validation stands in
+          // as verification, and the task waits for an operator to close it.
+          if (!task.preparation?.evidenceHash) throw new Error('A no-change report requires sealed prepared evidence.');
+          task.assessment = { action: 'report_no_change', confidence: turn.confidence, evidenceBasis: turn.evidenceBasis, evidenceGaps: [], assessedAt: new Date().toISOString() };
+          task.summary = turn.summary;
+          task.changedFiles = [];
+          task.diff = '';
+          task.patchHash = '';
+          task.status = 'evidence_only';
+          task.phase = 'awaiting_operator_close';
+          this.record(task, 'no_change_report', 'allow', `Local coder reports no source mutation is recommended, grounded in sealed evidence ${task.preparation.evidenceHash}: ${turn.evidenceBasis}`, { action: 'report_no_change', confidence: turn.confidence, evidenceBasis: turn.evidenceBasis, sourceReferences: task.toolTrace.map((entry) => entry.path) });
+          return this.save(task);
+        }
         if (toolCalls >= MAX_TOOL_ROUNDS) throw new Error(`Coding model exceeded the ${MAX_TOOL_ROUNDS}-tool-call limit without returning edits.`);
         const toolResult = this.executeReadOnlyTool(task, worktree, turn.tool);
         const trace = {
@@ -746,7 +772,7 @@ export class NativeCodingWorker {
 
   async reject(id) {
     const task = this.load(id);
-    if (!['review', 'failed', 'pending', 'prepared', 'needs-scope', 'needs-evidence', 'awaiting-advice', 'interrupted', 'cancelled'].includes(task.status)) throw new Error(`Task cannot be rejected from status ${task.status}.`);
+    if (!['review', 'failed', 'pending', 'prepared', 'needs-scope', 'needs-evidence', 'awaiting-advice', 'interrupted', 'cancelled', 'evidence_only'].includes(task.status)) throw new Error(`Task cannot be rejected from status ${task.status}.`);
     task.status = 'rejected'; task.phase = 'complete'; task.rejectedAt = new Date().toISOString();
     this.record(task, 'reject', 'allow', 'User rejected the proposal; no live checkout change was accepted.');
     this.save(task);

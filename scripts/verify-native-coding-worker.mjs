@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { NATIVE_CODING_VALIDATIONS, NativeCodingWorker, parseNativeCodingResponse } from '../server/nativeCodingWorker.js';
+import { NATIVE_CODING_VALIDATIONS, NativeCodingWorker, parseNativeCodingResponse, parseNativeCodingTurn } from '../server/nativeCodingWorker.js';
 
 const execFileAsync = promisify(execFile);
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-native-code-'));
@@ -58,6 +58,8 @@ try {
           ? JSON.stringify({ tool: { name: 'read_file', path: 'outside.js', startLine: 1, endLine: 20 } })
           : modelMode === 'tool-loop'
             ? JSON.stringify({ tool: { name: 'list_files', path: 'src' } })
+          : modelMode === 'no-change'
+        ? JSON.stringify({ action: 'report_no_change', confidence: 0.9, evidence_basis: 'The scoped fixture already exports the intended value, so no source change is warranted.', summary: 'No source mutation is recommended.' })
           : modelMode === 'valid'
         ? JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved fixture source directly shows the exact value to change.', summary: 'Increment the fixture.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] })
         : modelMode === 'delete'
@@ -158,6 +160,31 @@ try {
   assert.match(toolReview.toolTrace.at(-1).resultPreview, /export const value = 1/, 'the final scoped file read is retained as evidence, not paraphrased model reasoning');
   assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'tool-loop review changed live checkout');
   await worker.reject(toolTask.id);
+
+  // No-change report parse contract (audit delta #2): grounded, edit-free, valid confidence.
+  assert.equal(parseNativeCodingTurn(JSON.stringify({ action: 'report_no_change', confidence: 0.9, evidence_basis: 'The scoped evidence already satisfies the objective.', summary: 'No change.' })).type, 'no_change', 'a grounded no-change report parses');
+  assert.throws(() => parseNativeCodingTurn(JSON.stringify({ action: 'report_no_change', confidence: 0.9, evidence_basis: 'short', summary: 'x' })), /evidence_basis of at least 12/, 'a no-change report without grounded evidence is rejected');
+  assert.throws(() => parseNativeCodingTurn(JSON.stringify({ action: 'report_no_change', confidence: 0.9, evidence_basis: 'The scoped evidence already satisfies the objective.', edits: [{ path: 'src/value.js', content: 'x' }] })), /must not include edits/, 'a no-change report may not smuggle edits');
+  assert.throws(() => parseNativeCodingTurn(JSON.stringify({ action: 'report_no_change', confidence: 2, evidence_basis: 'The scoped evidence already satisfies the objective.' })), /confidence from 0 to 1/, 'a no-change report needs a valid confidence');
+
+  // Evidence-only outcome (audit delta #2): an honest "no source change" report
+  // lands in an operator-closed evidence_only state, never a patch, and cannot be
+  // applied. The live checkout stays untouched and the operator closes it.
+  modelMode = 'no-change';
+  const noChangeTask = createPreparedTask({ title: 'No-change fixture', objective: 'Report honestly that the fixture already meets the objective.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const noChangeReview = await runPreparedTask(noChangeTask);
+  assert.equal(noChangeReview.status, 'evidence_only', 'a no-change report lands in the evidence_only review state');
+  assert.equal(noChangeReview.phase, 'awaiting_operator_close');
+  assert.equal(noChangeReview.changedFiles.length, 0, 'an evidence-only outcome changes no files');
+  assert.equal(noChangeReview.diff, '', 'an evidence-only outcome has no diff');
+  assert.ok(!noChangeReview.patchHash, 'an evidence-only outcome has no patch hash');
+  assert.equal(noChangeReview.assessment.action, 'report_no_change');
+  assert.ok(noChangeReview.audit.some((event) => event.phase === 'no_change_report'), 'the no-change report is durable evidence');
+  assert.equal(fs.readFileSync(path.join(temp, 'src', 'value.js'), 'utf8').replaceAll('\r\n', '\n'), 'export const value = 1;\n', 'evidence-only outcome left the live checkout untouched');
+  await assert.rejects(worker.apply(noChangeTask.id, { confirm: true, patchHash: 'anything' }), /review-ready task and explicit apply approval/, 'an evidence-only task cannot be applied');
+  await worker.reject(noChangeTask.id);
+  assert.equal(worker.load(noChangeTask.id).status, 'rejected', 'the operator can close an evidence-only task');
+  modelMode = 'valid';
 
   const leasedTask = createPreparedTask({ title: 'Durable lease fixture', objective: 'Prove another process cannot enter the same sealed task while its execution lease exists.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
   const heldLease = worker.acquireRunLease(leasedTask);

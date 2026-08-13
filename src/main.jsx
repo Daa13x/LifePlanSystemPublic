@@ -4416,12 +4416,13 @@ const CODING_STATUS_LABELS = {
   pending: 'Pending', prepared: 'Preparing complete', 'needs-scope': 'Needs Scope',
   'awaiting-advice': 'Awaiting Browser Advice', running: 'Local Run', review: 'Review Ready',
   applied: 'Applied', failed: 'Failed', interrupted: 'Interrupted',
-  'apply-interrupted': 'Apply Interrupted', cancelled: 'Cancelled', rejected: 'Rejected'
+  'apply-interrupted': 'Apply Interrupted', cancelled: 'Cancelled', rejected: 'Rejected',
+  evidence_only: 'Evidence Only — No Change'
 };
 
 function codingTone(status) {
   if (status === 'applied') return 'good';
-  if (['review', 'awaiting-advice', 'prepared'].includes(status)) return 'warn';
+  if (['review', 'awaiting-advice', 'prepared', 'evidence_only'].includes(status)) return 'warn';
   if (['failed', 'cancelled', 'interrupted', 'apply-interrupted', 'needs-scope'].includes(status)) return 'bad';
   return 'default';
 }
@@ -5144,6 +5145,7 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
                 </details>
 
                 {selectedCodingTask.validationResult && <details className="coding-evidence-section" open><summary>Independent validation <span>{selectedCodingTask.validationResult.ok ? 'Passed' : 'Failed'}</span></summary><pre className="code-block compact-code">{selectedCodingTask.validationResult.output}</pre></details>}
+                {selectedCodingTask.status === 'evidence_only' && <div className="source-warning info"><strong>Evidence-only outcome — no source change</strong><small>The local coder reported that the sealed evidence warrants no source mutation ({selectedCodingTask.assessment?.evidenceBasis || 'grounded in prepared evidence'}). No patch was created and nothing was validated as a change. Close this task with Reject, or seal a new task if you disagree.</small></div>}
                 {selectedCodingTask.browserAdvice?.disposition && selectedCodingTask.browserAdvice.disposition.state !== 'validated' && (() => {
                   const d = selectedCodingTask.browserAdvice.disposition;
                   const tone = d.category === 'rejected' || d.category === 'blocked' ? 'bad' : d.category === 'in-progress' ? 'info' : 'warn';
