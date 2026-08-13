@@ -217,8 +217,8 @@ try {
   await assert.rejects(runPreparedTask(exhaustedEvidenceTask), /LOW_CONFIDENCE/);
   const exhaustedEvidence = worker.load(exhaustedEvidenceTask.id);
   assert.equal(exhaustedEvidence.status, 'needs-evidence');
-  assert.equal(exhaustedEvidence.evidenceRecoveries, 3, 'the worker makes all three permitted unattended evidence-recovery passes before stopping');
-  assert.equal(exhaustedEvidence.audit.filter((event) => event.phase === 'evidence_recovery').length, 3, 'each exhausted evidence-recovery pass remains durable audit evidence');
+  assert.equal(exhaustedEvidence.evidenceRecoveries, 5, 'the worker makes all five permitted unattended evidence-recovery passes before stopping');
+  assert.equal(exhaustedEvidence.audit.filter((event) => event.phase === 'evidence_recovery').length, 5, 'each exhausted evidence-recovery pass remains durable audit evidence');
   assert.match(exhaustedEvidence.recovery.nextPermittedAction, /Gather one of the named evidence gaps/);
   await worker.reject(exhaustedEvidenceTask.id);
 
@@ -258,8 +258,8 @@ try {
 
   modelMode = 'tool-loop';
   const toolLoop = createPreparedTask({ title: 'Bound tool loop', objective: 'Prove endless tool requests stop.', allowedPaths: ['src'], maxFilesChanged: 1 });
-  await assert.rejects(runPreparedTask(toolLoop), /8-tool-call limit/);
-  assert.equal(worker.load(toolLoop.id).toolTrace.length, 8);
+  await assert.rejects(runPreparedTask(toolLoop), /16-tool-call limit/);
+  assert.equal(worker.load(toolLoop.id).toolTrace.length, 16);
 
   modelMode = 'delete';
   const deleteTask = createPreparedTask({ title: 'Delete fixture', objective: 'Remove the approved obsolete file.', allowedPaths: ['src/obsolete.js'], maxFilesChanged: 1 });
