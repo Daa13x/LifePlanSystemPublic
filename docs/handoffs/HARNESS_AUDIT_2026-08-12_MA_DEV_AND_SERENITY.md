@@ -18,8 +18,8 @@ authorization to copy either implementation.
 Focused suites executed in each MA repository:
 
 ```text
-dotnet test data/tests/MostlyArmless.Agent.Tests/MostlyArmless.Agent.Tests.csproj --no-restore \
-  --filter "FullyQualifiedName~ProjectLocalCodingLoopServiceRuntimeTests|FullyQualifiedName~ProjectVerificationCommandTests|FullyQualifiedName~ProjectTaskAnchorDiscoveryTests"
+dotnet test [external-project test suite] --no-restore \
+  --filter "[focused browser/local-coding, verification, and source-packet contracts]"
 ```
 
 The MA-Dev result was **69 passed, 0 failed**; Serenity's result was **64
@@ -37,9 +37,8 @@ removes 55 across the audited automation, execution, and contract-test areas.
 
 ## What MA-Dev/Serenity actually implement
 
-The central implementation is
-`data/source/Services/Automation/ProjectLocalCodingLoopService.cs`. A cited
-Project item can move through local-first investigation, optional Captain-owned
+The central external implementation is intentionally unnamed. A cited Project
+item can move through local-first investigation, optional Captain-owned
 browser consultation, local coding, local verification, and an optional browser
 follow-up. It uses one process-local `SemaphoreSlim`, a cancellable background
 owner, typed browser outcomes (`Completed`, `Deferred`, `Unavailable`, and

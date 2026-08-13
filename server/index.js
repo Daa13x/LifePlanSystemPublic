@@ -77,6 +77,7 @@ import { assessValidationScope } from './validationScopePreflight.js';
 import { buildConsultationReceipt, effectiveValidatedAdviceHash } from './consultationReceipt.js';
 import { normalizeAdviceDisposition } from './browserAdviceDisposition.js';
 import { describeRunLease } from './leaseObservability.js';
+import { assertNoMaReferenceMaterial } from './maReferenceGuard.js';
 
 migrate();
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
@@ -828,6 +829,7 @@ function selectedContextFiles(paths = []) {
       throw new Error(`Context file not found: ${target.normalized}`);
     }
     const raw = fs.readFileSync(target.absolute, 'utf8');
+    assertNoMaReferenceMaterial({ filePath: target.normalized, text: raw });
     const remaining = Math.max(0, 24000 - totalChars);
     if (!remaining) break;
     const content = raw.slice(0, Math.min(raw.length, remaining, 8000));
@@ -1503,6 +1505,7 @@ function readChatContextFiles(sessionId) {
       const target = safeExistingWorkspaceFile(item.path);
       if (isProtectedWorkspacePath(target.normalized)) continue;
       const text = fs.readFileSync(target.absolute, 'utf8').slice(0, remaining);
+      assertNoMaReferenceMaterial({ filePath: target.normalized, text });
       remaining -= text.length;
       files.push({ path: target.normalized, text });
     } catch {
@@ -2826,6 +2829,7 @@ app.post('/api/chat/sessions/:id/context', (req, res) => {
   try {
     const target = safeExistingWorkspaceFile(req.body.path);
     if (isProtectedWorkspacePath(target.normalized)) return fail(res, 403, `Protected/private file cannot be attached to chat: ${target.normalized}`);
+    assertNoMaReferenceMaterial({ filePath: target.normalized, text: fs.readFileSync(target.absolute, 'utf8') });
     db.prepare(`
       INSERT INTO chat_context_files (session_id, path)
       VALUES (?, ?)
@@ -7631,6 +7635,7 @@ app.get('/api/export/context.:format', async (req, res) => {
 
 app.post('/api/import/pdf', async (req, res) => {
   const name = path.basename(String(req.body.name || 'Imported document.pdf'));
+  try { assertNoMaReferenceMaterial({ name }); } catch (error) { return fail(res, 422, error.message); }
   const base64 = String(req.body.base64 || '');
   if (!base64) return fail(res, 400, 'PDF data is required.');
   let bytes;
@@ -7652,6 +7657,7 @@ app.post('/api/import/pdf', async (req, res) => {
     }
     await loading.destroy();
     const text = pages.map((pageText, index) => `## Page ${index + 1}\n\n${pageText || '[No extractable text]'}`).join('\n\n');
+    assertNoMaReferenceMaterial({ name, text });
     const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
     const id = db.prepare(`
       INSERT INTO knowledge_items (type, title, body, source, status, confidence, evidence, owner, next_action)

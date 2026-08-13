@@ -53,6 +53,7 @@ for (const hook of ['commit-msg', 'pre-commit', 'pre-push']) {
   assert.ok(hookInstaller.includes(`'${hook}'`), `Hook installer does not install ${hook}.`);
 }
 assert.match(read('.githooks/pre-commit'), /sync-main\.mjs --pre-commit/);
+assert.match(read('.githooks/pre-commit'), /verify-ma-lock\.mjs --staged/);
 assert.match(read('.githooks/pre-push'), /sync-main\.mjs --pre-push/);
 
 console.log('LifePlanSystem synchronization contract, model instructions, scripts, and hooks are present and fail-closed.');

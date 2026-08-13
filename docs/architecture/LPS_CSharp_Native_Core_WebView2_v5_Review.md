@@ -4,17 +4,20 @@
 
 Correct direction, materially incomplete as supplied. The requested v5 file was not present in the attachment or current checkout, so a line-by-line comparison would be invented. This review records that evidence gap and supplies a standalone v6 replacement.
 
-The supplied doctrine supports C# authority, JavaScript rendering-only, database truth, DPAPI credentials, honest disconnected UI, failure evidence and installed acceptance. The concrete controls below are engineering recommendations, with official platform support noted in v6.
+The concrete controls below are LPS engineering recommendations. They must be
+justified by LPS-owned requirements and executable evidence, with platform
+support documented in v6; they do not depend on an external project's doctrine,
+prompts, model adapters, or companion systems.
 
-## Doctrine alignment matrix
+## LPS architecture alignment matrix
 
-| Source | Principle | v5 evidence | Required correction |
+| LPS requirement | Principle | v5 evidence | Required correction |
 |---|---|---|---|
-| Sacred Laws Law 21 | JS renders; C# owns business and data logic | v5 absent | Ban new React/Node domain decisions and test the boundary. |
-| Project Bible | database truth, DPAPI, no hardcoded paths | v5 absent | One SQLite writer and verified AppData backup/recovery. |
-| Android Bible | views are not truth; offline state must be honest | v5 absent | Native-derived provider state and stale/offline UI. |
-| Failure Bible | failures are evidence | v5 absent | Run-state, reproduction, rollback and installed evidence. |
-| Hayley handbook | C# build/runtime pressure matters | v5 absent | Small executable phases with installed acceptance. |
+| Runtime authority | JS renders; C# owns business and data logic | v5 absent | Ban new React/Node domain decisions and test the boundary. |
+| Durable data | database truth, DPAPI, no hardcoded paths | v5 absent | One SQLite writer and verified AppData backup/recovery. |
+| Honest presentation | views are not truth; offline state must be honest | v5 absent | Native-derived provider state and stale/offline UI. |
+| Failure evidence | failures are evidence | v5 absent | Run-state, reproduction, rollback and installed evidence. |
+| Delivery proof | C# build/runtime pressure matters | v5 absent | Small executable phases with installed acceptance. |
 | Microsoft WebView2 docs | navigation can be cancelled; messages are explicit host events | v5 absent | Separate trusted/provider views and validated message capability. |
 
 ## Critical issues
@@ -57,4 +60,9 @@ Database edge cases require a copied real-profile rehearsal and restore drill. P
 
 ## Evidence classification
 
-Doctrine statements above are supported by the supplied MostlyArmless exports: Sacred Laws pages 2-8, Project Bible pages 84-95, Failure Bible page 27, Android Bible pages 3-9, Installer Rules pages 64-65 and Hayley handbook pages 6-7. Platform mechanisms are external official guidance: Microsoft Learn WebView2 navigation events and WebMessageReceived documentation, .NET Generic Host and hosted-services guidance, Microsoft.Data.Sqlite documentation, and WebView2 distribution guidance. The specific design defaults in this review are engineering recommendations, not claimed doctrine.
+This review is based on LPS-owned requirements and executable evidence. Platform
+mechanisms should be verified against official Microsoft documentation for
+WebView2 navigation/events, .NET Generic Host/hosted services,
+Microsoft.Data.Sqlite, and WebView2 distribution. Mostly Armless proprietary
+material is not a source of LPS requirements; see
+`REFERENCE_MATERIAL_BOUNDARY.md`.

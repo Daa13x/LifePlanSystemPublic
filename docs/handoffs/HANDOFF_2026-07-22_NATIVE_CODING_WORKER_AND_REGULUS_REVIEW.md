@@ -19,33 +19,16 @@ The durable lifecycle is:
 
 ## Mostly Armless delegation skeleton used as reference
 
-Read-only Serenity references:
-
-- `data/source/Services/Agents/AgentService.Delegation.cs`: role/model routing and delegation result recording.
-- `data/source/Services/Agents/MultiAgentTaskManager.cs`: explicit pending/in-progress/completed/failed phases and per-agent serialization.
-- `data/source/Services/Agents/WorkflowEngine.cs`: coordinator-owned steps and dependency ordering.
-- `data/source/Services/Agents/AgentGateway.cs`: compact role/system-prompt boundary.
-- `data/source/Services/Automation/WorkboardBrowserCodingLoopService.cs`: implementation, independent review, bounded attempts, terminal blocked state, and durable milestone handoff.
-- `data/source/Services/Core/SelfImprovementLoopService.cs`: pre-run Git snapshot, bounded writes, validation, rollback, and prohibition on commit/push/package/deploy.
-- `data/source/Services/Planning/PlanExecutionService.cs`: resumable persisted mission phases and cancellation.
+Historical external source references were intentionally redacted in the
+MA-lock hardening pass. This handoff preserves only LPS's independently proven
+contracts; it is not a map to proprietary implementation details.
 
 LPS adapted the lifecycle separation and evidence handoff, but improved isolation with a dedicated Git worktree and approval hashes. LPS does not recursively hand failed work to another model, accept a literal `VERIFIED` string as proof, or claim an agent identity that differs from the recorded endpoint/model.
 
 ## Regulus security patterns used
 
-Read-only Serenity references:
-
-- `data/source/Services/Core/SecurityGovernor.cs`
-- `data/source/Services/Core/SecurityGovernor.Rules.cs`
-- `data/source/Services/Core/SecurityGovernor.Audit.cs`
-- `data/source/Services/Core/GovernorService.cs`
-- `data/source/Services/Core/ExecApprovalService.cs`
-- `data/source/Services/Core/RegulusElevationBridge.cs`
-- `data/source/Services/Planning/PreflightIntentService.cs`
-- `data/source/Services/Agents/ToolRegistry.FileTools.Part1.cs`
-- `data/source/Services/Agents/ToolRegistry.FileTools.Part2.cs`
-- `data/source/Services/Core/EmbeddedWebServerService.cs`
-- `data/source/Services/Core/BrainSystemCatalog.cs`
+The prior external security source list was intentionally redacted. Only the
+following LPS-owned and independently enforced security properties remain.
 
 Useful Regulus ideas retained:
 
