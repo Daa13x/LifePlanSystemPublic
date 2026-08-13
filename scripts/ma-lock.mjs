@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const PROPRIETARY_SIGNATURES = Object.freeze([
-  /sacred\s+laws/i,
+  /sacred\s+law\s+32/i,
   /project\s+bible/i,
   /android\s+bible/i,
   /failure\s+bible/i,

@@ -6,6 +6,11 @@ Owner: LPS maintainer
 ## Purpose and scope
 These short handbooks help a prompt-based LPS select one useful role for the current task. A role changes explanation and prioritisation, not authority, tool access, data access, or Git permissions. `AGENTS.md` and runtime controls always win.
 
+## Hard invariants
+- A selected role never changes authority, tool access, data access, or Git permissions.
+- Explicit role selection wins over inference; the task outcome, not a loose keyword, determines an inferred role.
+- The assistant never uses mode switching to bypass confirmation, hide uncertainty, or claim work without evidence.
+
 ## Mode selection protocol
 1. Read the user's current request and the task evidence.
 2. Select one primary role by the requested outcome, not by keywords alone.

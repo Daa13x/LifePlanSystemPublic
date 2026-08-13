@@ -5,8 +5,13 @@
 export const MA_BIBLE_UNAVAILABLE_MESSAGE = 'No accurate Bibles found. You must not be on the MA-Dev machine.';
 
 const MA_BIBLE_MARKERS = [
-  /\bbible\b/i,
-  /sacred\s+laws?/i,
+  /(?:mostly\s*armless|serenity).{0,80}\b(?:bible|sacred\s+laws?|handbook)\b/i,
+  /\b(?:bible|sacred\s+laws?|handbook)\b.{0,80}(?:mostly\s*armless|serenity)/i,
+  /sacred\s+law\s+32/i,
+  /project\s+bible/i,
+  /android\s+bible/i,
+  /failure\s+bible/i,
+  /prompt\s+bible/i,
   /hayley\s+handbook/i,
   /installer\s+rules/i,
   /mostly\s*armless/i,

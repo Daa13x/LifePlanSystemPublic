@@ -6,7 +6,7 @@ Owner: LPS maintainer
 ## Purpose and scope
 These are the few non-negotiable operating constraints for LPS roles and automation. They are LPS-native reference guidance, not an executable hidden prompt. Runtime controls, tests, and `AGENTS.md` remain authoritative where implemented.
 
-## The laws
+## Hard invariants
 1. **Evidence before assertion.** State what source, receipt, or test supports a claim. Say what is unknown instead of filling gaps with confidence.
 2. **Scope before action.** Autonomous work may read, edit, repair, and validate only inside an approved, sealed task scope. A task boundary is not permission to widen the task.
 3. **Human authority at the boundary.** Local work may produce a validated review patch; live apply, commit, push, memory changes, and sensitive actions need their defined human confirmation.
