@@ -3599,8 +3599,8 @@ app.post('/api/renderer/:rendererId/ack', (req, res) => {
     status: req.body?.status,
     detail: req.body?.detail
   });
-  const audit = rendererBridge.getCommand(String(req.body?.commandId || ''))?.audit;
-  if (audit) writeBridgeAudit(audit);
+  // The command's terminal resolution is audited once, at its single resolution
+  // point in issueNavigationCommand; this endpoint does not audit again.
   if (!result.ok) return ok(res, { accepted: false, error: result.error });
   ok(res, { accepted: true, resolution: result.resolution });
 });
