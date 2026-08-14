@@ -57,9 +57,25 @@ const deps = {
     if (a.type === 'candidate') return { id: 1, entity_type: 'candidate', category: 'note', title: 'candidate', status: 'candidate', detail: 'candidate detail' };
     return null;
   },
-  systemStatus: async () => { calls.push(['systemStatus']); return { health: { db: 'ready' }, model: { assigned: true } }; },
-  listModels: async () => { calls.push(['listModels']); return rows(30); },
-  listRuns: (a) => { calls.push(['listRuns', a]); return rows(30); },
+  systemStatus: async () => {
+    calls.push(['systemStatus']);
+    return {
+      health: { db: 'ready', storageFile: oversizedWorkboardText }, sqlite: { ready: true },
+      model: { assigned: true, name: oversizedWorkboardText, available: true, file_error: oversizedWorkboardText },
+      runtime: { managedServerRunning: true, managedServerReady: true, endpoint: oversizedWorkboardText, endpointConfigured: true, llamaServerAvailable: true, llamaCliAvailable: false, lastResult: { output: oversizedWorkboardText } },
+      workboard: { focus: 2, blockers: 1, waiting: 3, automatic: 4, stale: 5, approvals: 6, candidates: 7, injected: oversizedWorkboardText },
+      browserConnector: { connected: true, secret: oversizedWorkboardText },
+      repository: { available: true, branch: oversizedWorkboardText, hasChanges: false, hasConflicts: false, ahead: 1, behind: 2, note: oversizedWorkboardText, remote: oversizedWorkboardText }
+    };
+  },
+  listModels: async () => {
+    calls.push(['listModels']);
+    return Array.from({ length: 30 }, (_, index) => ({ id: index + 1, name: oversizedWorkboardText, assigned_role: oversizedWorkboardText, available: index % 2 === 0, size_gb: 1.25, file_error: oversizedWorkboardText }));
+  },
+  listRuns: (a) => {
+    calls.push(['listRuns', a]);
+    return Array.from({ length: 30 }, (_, index) => ({ id: oversizedWorkboardText, title: oversizedWorkboardText, status: oversizedWorkboardText, created_at: oversizedWorkboardText, ignored: oversizedWorkboardText, index }));
+  },
   searchConversations: (a) => { calls.push(['searchConversations', a]); return Array.from({ length: 20 }, () => ({ session_id: 1, role: 'user', content: 'msg', created_at: 't' })); }
 };
 
@@ -156,6 +172,8 @@ await throwsAsync(
 await checkAsync('system.models bounded', async () => {
   const r = await reg.invoke('system.models', { limit: 5 });
   assert.ok(r.data.models.length <= 5);
+  assert.ok(r.data.models.every((model) => model.name.length <= reg.LIMITS.titleMaxLength && model.assigned_role.length <= reg.LIMITS.metadataMaxLength && model.file_error.length <= reg.LIMITS.provenanceEvidenceMaxLength));
+  assert.ok(JSON.stringify(r.data).length < 7000, 'complete models receipt stays bounded');
 });
 await checkAsync('conversation.search bounded', async () => {
   const r = await reg.invoke('conversation.search', { query: 'a', limit: 3 });
@@ -182,6 +200,30 @@ await checkAsync('workboard.propose_create returns a confirmation-required propo
   assert.equal(r.data.operation, 'workboard.create');
   assert.equal(r.data.preview.body, body, 'the immutable write payload is not silently truncated');
   assert.deepEqual(calls, [], 'propose_create must call no dependency (no read/write side effects)');
+});
+await checkAsync('system.runs returns bounded strict run summaries', async () => {
+  const r = await reg.invoke('system.runs', { limit: 5 });
+  assert.equal(r.data.runs.length, 5);
+  for (const run of r.data.runs) {
+    assert.deepEqual(Object.keys(run).sort(), ['created_at', 'id', 'status', 'title']);
+    assert.ok(run.id.length <= reg.LIMITS.metadataMaxLength);
+    assert.ok(run.title.length <= reg.LIMITS.titleMaxLength);
+    assert.ok(run.status.length <= reg.LIMITS.metadataMaxLength);
+    assert.ok(run.created_at.length <= reg.LIMITS.metadataMaxLength);
+  }
+  assert.ok(JSON.stringify(r.data).length < 6000, 'complete runs receipt stays bounded');
+});
+await checkAsync('system.status returns one strict bounded receipt from the authoritative dependency', async () => {
+  calls.length = 0;
+  const r = await reg.invoke('system.status', {});
+  assert.deepEqual(Object.keys(r.data).sort(), ['browserConnector', 'health', 'model', 'repository', 'runtime', 'sqlite', 'workboard']);
+  assert.deepEqual(Object.keys(r.data.runtime).sort(), ['endpoint', 'endpointConfigured', 'llamaCliAvailable', 'llamaServerAvailable', 'managedServerReady', 'managedServerRunning']);
+  assert.deepEqual(Object.keys(r.data.repository).sort(), ['ahead', 'available', 'behind', 'branch', 'hasChanges', 'hasConflicts', 'note']);
+  assert.equal(r.data.sqlite.ready, true);
+  assert.equal(r.data.browserConnector.connected, true);
+  for (const value of [r.data.health.storageFile, r.data.model.name, r.data.model.file_error, r.data.runtime.endpoint, r.data.repository.branch, r.data.repository.note]) assert.match(value, /\[truncated \d+ chars\]$/);
+  assert.ok(JSON.stringify(r.data).length < 3000, 'complete status receipt stays bounded');
+  assert.deepEqual(calls, [['systemStatus']]);
 });
 await checkAsync('workboard.propose_update returns before/after and performs no write', async () => {
   calls.length = 0;

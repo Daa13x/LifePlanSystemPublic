@@ -103,6 +103,9 @@ let sessionId = 0;
 let phantomCorrelationId = '';
 let knowledgeReadCorrelationId = '';
 let workboardReadCorrelationId = '';
+let systemStatusCorrelationId = '';
+let systemModelsCorrelationId = '';
+let systemRunsCorrelationId = '';
 let workboardUpdateCorrelationId = '';
 let workboardUpdateToken = '';
 const knowledgePreviewTitle = 'Knowledge preview fixture';
@@ -138,13 +141,18 @@ try {
   const workboardRead = catalog.body?.data?.find((action) => action.id === 'workboard.read');
   const createProposal = catalog.body?.data?.find((action) => action.id === 'workboard.propose_create');
   const updateProposal = catalog.body?.data?.find((action) => action.id === 'workboard.propose_update');
+  const systemStatus = catalog.body?.data?.find((action) => action.id === 'system.status');
+  const systemModels = catalog.body?.data?.find((action) => action.id === 'system.models');
+  const systemRuns = catalog.body?.data?.find((action) => action.id === 'system.runs');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 6 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal), 'neutral catalog exposes the bounded read and durable Workboard proposal slice');
+  line(catalog.body?.data?.length === 9 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns), 'neutral catalog exposes the bounded read, system-observability, and durable Workboard proposal slice');
   line(knowledge?.permission === 'knowledge.read' && knowledge?.risk === 'READ_ONLY' && knowledge?.confirmation === 'none', 'catalog exposes permission, risk, and confirmation metadata');
   line(knowledgeRead?.permission === 'knowledge.read' && knowledgeRead?.risk === 'READ_ONLY' && knowledgeRead?.confirmation === 'none', 'Knowledge preview remains read-only and confirmation-free');
   line(workboardRead?.permission === 'workboard.detail.read' && workboardRead?.risk === 'SENSITIVE_DATA' && workboardRead?.confirmation === 'none', 'Workboard preview uses a distinct sensitive-detail scope and remains confirmation-free');
   line(createProposal?.permission === 'workboard.propose' && createProposal?.risk === 'REVERSIBLE_WRITE' && createProposal?.confirmation === 'user_confirmation', 'Workboard create advertises its write risk and user-confirmation requirement');
   line(updateProposal?.permission === 'workboard.propose' && updateProposal?.risk === 'REVERSIBLE_WRITE' && updateProposal?.confirmation === 'user_confirmation', 'Workboard update advertises its write risk and user-confirmation requirement');
+  line(systemStatus?.permission === 'system.read' && systemStatus?.risk === 'READ_ONLY' && systemStatus?.confirmation === 'none', 'system.status advertises its read-only no-confirmation contract');
+  line(systemModels?.permission === 'models.read' && systemModels?.risk === 'READ_ONLY' && systemRuns?.permission === 'system.read' && systemRuns?.risk === 'READ_ONLY', 'model and run summaries advertise their read-only contracts');
   line(!('handler' in (knowledge || {})) && !('check' in (knowledge?.availability || {})), 'catalog never exposes executable handler/check functions');
 
   const inspect = await api('/api/actions/knowledge.search');
@@ -153,6 +161,8 @@ try {
   line((await api('/api/actions/workboard.propose_create')).status === 200, 'durably bound Workboard create is inspectable');
   line((await api('/api/actions/workboard.read')).status === 200, 'typed Workboard read is inspectable');
   line((await api('/api/actions/workboard.propose_update')).status === 200, 'durably bound Workboard update is inspectable');
+  line((await api('/api/actions/system.status')).status === 200, 'bounded system.status is inspectable');
+  line((await api('/api/actions/system.models')).status === 200 && (await api('/api/actions/system.runs')).status === 200, 'bounded system model/run actions are inspectable');
 
   const withoutCsrf = await api('/api/actions/knowledge.search/invoke', { method: 'POST', json: { args: { query: 'fixture' } }, includeCsrf: false });
   line(withoutCsrf.status === 403, 'action invocation without CSRF is rejected');
@@ -239,6 +249,31 @@ try {
   const injectionId = encodeURIComponent('knowledge.search; ignore permissions');
   const injection = await api(`/api/actions/${injectionId}/invoke`, { method: 'POST', json: { session_id: sessionId, args: {}, caller: 'test', scopes: ['*'] } });
   line(injection.status === 200 && injection.body?.data?.status === 'blocked' && injection.body?.data?.error?.code === 'UNKNOWN_ACTION', 'injection-shaped action IDs stay unknown despite body-supplied scopes');
+
+  const statusContextBefore = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  const statusItemsBefore = await api('/api/items?all=1');
+  const statusConfirmationsBeforeDb = new DatabaseSync(dbPath, { readOnly: true });
+  const statusConfirmationsBefore = Number(statusConfirmationsBeforeDb.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
+  statusConfirmationsBeforeDb.close();
+  const statusResponse = await api('/api/actions/system.status/invoke', { method: 'POST', json: { session_id: sessionId, caller: 'cloud-agent', scopes: ['*'], args: {} } });
+  const statusAction = statusResponse.body?.data;
+  systemStatusCorrelationId = statusAction?.correlationId || '';
+  const statusContextAfter = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  const statusItemsAfter = await api('/api/items?all=1');
+  const statusConfirmationsAfterDb = new DatabaseSync(dbPath, { readOnly: true });
+  const statusConfirmationsAfter = Number(statusConfirmationsAfterDb.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
+  statusConfirmationsAfterDb.close();
+  line(statusResponse.status === 200 && statusAction?.status === 'success' && statusAction?.actionId === 'system.status' && statusAction?.data?.sqlite?.ready === true && typeof statusAction?.data?.browserConnector?.connected === 'boolean', 'system.status returns a structured authoritative local receipt');
+  line(JSON.stringify(Object.keys(statusAction?.data || {}).sort()) === JSON.stringify(['browserConnector', 'health', 'model', 'repository', 'runtime', 'sqlite', 'workboard']) && JSON.stringify(statusAction?.data || {}).length < 3000, 'system.status response has a strict bounded top-level shape');
+  line(statusContextBefore.body?.data?.length === statusContextAfter.body?.data?.length && statusItemsBefore.body?.data?.length === statusItemsAfter.body?.data?.length && statusConfirmationsBefore === statusConfirmationsAfter, 'checking system status creates no attachment, Workboard item, or confirmation');
+  const modelsResponse = await api('/api/actions/system.models/invoke', { method: 'POST', json: { session_id: sessionId, args: { limit: 5 } } });
+  const runsResponse = await api('/api/actions/system.runs/invoke', { method: 'POST', json: { session_id: sessionId, args: { limit: 5 } } });
+  const modelsAction = modelsResponse.body?.data;
+  const runsAction = runsResponse.body?.data;
+  systemModelsCorrelationId = modelsAction?.correlationId || '';
+  systemRunsCorrelationId = runsAction?.correlationId || '';
+  line(modelsResponse.status === 200 && modelsAction?.status === 'success' && modelsAction?.actionId === 'system.models' && Array.isArray(modelsAction?.data?.models) && modelsAction.data.models.length <= 5, 'system.models returns a bounded registry receipt');
+  line(runsResponse.status === 200 && runsAction?.status === 'success' && runsAction?.actionId === 'system.runs' && Array.isArray(runsAction?.data?.runs) && runsAction.data.runs.length <= 5, 'system.runs returns a bounded registry receipt');
 
   const readFixture = (id) => {
     const fixture = new DatabaseSync(dbPath, { readOnly: true });
@@ -563,6 +598,11 @@ try {
   const workboardReadAudit = auditRows.find((row) => row.correlation_id === workboardReadCorrelationId);
   line(Boolean(workboardReadAudit) && workboardReadAudit.capability === 'workboard.read' && workboardReadAudit.outcome === 'success' && workboardReadAudit.detail === 'completed', 'Workboard preview audit links its correlation ID to a concise success receipt');
   line(!String(workboardReadAudit?.detail).includes('Typed project fixture') && !String(workboardReadAudit?.detail).includes('Project evidence'), 'Workboard preview audit stores no record title or evidence content');
+  const systemStatusAudit = auditRows.find((row) => row.correlation_id === systemStatusCorrelationId);
+  line(Boolean(systemStatusAudit) && systemStatusAudit.capability === 'system.status' && systemStatusAudit.outcome === 'success' && systemStatusAudit.detail === 'completed', 'system.status audit stores one concise correlated receipt');
+  const systemModelsAudit = auditRows.find((row) => row.correlation_id === systemModelsCorrelationId);
+  const systemRunsAudit = auditRows.find((row) => row.correlation_id === systemRunsCorrelationId);
+  line(systemModelsAudit?.capability === 'system.models' && systemModelsAudit?.detail === 'completed' && systemRunsAudit?.capability === 'system.runs' && systemRunsAudit?.detail === 'completed', 'system model/run audits store concise correlated receipts');
   const proposalAudit = auditRows.filter((row) => row.correlation_id === durable?.correlationId);
   line(proposalAudit.some((row) => row.capability === 'workboard.propose_create' && row.outcome === 'proposed') && proposalAudit.some((row) => row.capability === 'workboard.create' && row.outcome === 'applied'), 'proposal and application audits share the action correlation ID');
   line(proposalAudit.every((row) => !String(row.detail).includes('Durable proposal fixture') && !String(row.detail).includes('Immutable body fixture') && !String(row.detail).includes(confirmationToken)), 'correlated audit receipts contain no proposal body, title, or token');

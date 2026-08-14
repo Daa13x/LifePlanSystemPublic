@@ -1634,6 +1634,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
   const [connection, setConnection] = useState(null);
+  const [systemStatusPreview, setSystemStatusPreview] = useState(null);
+  const [systemModelsPreview, setSystemModelsPreview] = useState(null);
+  const [systemRunsPreview, setSystemRunsPreview] = useState(null);
+  const [systemCheckBusy, setSystemCheckBusy] = useState('');
   const [contextRecords, setContextRecords] = useState([]);
   const [picker, setPicker] = useState(null);
   const pickerSearchRequestRef = useRef(0);
@@ -1732,6 +1736,45 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       throw new Error(result.error?.message || `Action ${name} did not complete.`);
     }
     return result;
+  }
+
+  async function checkSystemStatus() {
+    if (systemCheckBusy) return;
+    setSystemCheckBusy('status');
+    try {
+      const result = await invokeAction('system.status', {});
+      setSystemStatusPreview(result.data);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSystemCheckBusy('');
+    }
+  }
+
+  async function checkSystemModels() {
+    if (systemCheckBusy) return;
+    setSystemCheckBusy('models');
+    try {
+      const result = await invokeAction('system.models', { limit: 5 });
+      setSystemModelsPreview(result.data);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSystemCheckBusy('');
+    }
+  }
+
+  async function checkSystemRuns() {
+    if (systemCheckBusy) return;
+    setSystemCheckBusy('runs');
+    try {
+      const result = await invokeAction('system.runs', { limit: 5 });
+      setSystemRunsPreview(result.data);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSystemCheckBusy('');
+    }
   }
 
   async function runPickerSearch(next = {}) {
@@ -2154,7 +2197,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} />
+          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2262,7 +2305,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, runtime, generating, navigate }) {
+function ChatConnectionBar({ connection, runtime, generating, navigate, statusPreview, modelsPreview, runsPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2281,7 +2324,17 @@ function ChatConnectionBar({ connection, runtime, generating, navigate }) {
       <div className="conn-item">
         <span>Runtime</span>
         <strong className={generating ? 'good' : ''}>{genStatus}</strong>
-        <button className="link" onClick={() => navigate('system', 'status')}>System status</button>
+        <button className="link" data-action-id="system.status" data-control-id="chat.connection.system-status-check" onClick={onCheckStatus} disabled={Boolean(checkBusy)}>{checkBusy === 'status' ? 'Checking…' : 'Check status'}</button>
+        <button className="link" data-action-id="system.models" data-control-id="chat.connection.system-models-check" onClick={onCheckModels} disabled={Boolean(checkBusy)}>{checkBusy === 'models' ? 'Checking…' : 'Check models'}</button>
+        <button className="link" data-action-id="system.runs" data-control-id="chat.connection.system-runs-check" onClick={onCheckRuns} disabled={Boolean(checkBusy)}>{checkBusy === 'runs' ? 'Checking…' : 'Recent runs'}</button>
+        <button className="link" onClick={() => navigate('system', 'status')}>Open full System</button>
+        {statusPreview ? (
+          <small role="status">
+            DB {statusPreview.sqlite?.ready ? 'ready' : 'unavailable'} · model {statusPreview.model?.assigned ? 'assigned' : 'not assigned'} · repository {statusPreview.repository?.available ? statusPreview.repository.hasChanges ? 'has changes' : 'clean' : 'unavailable'} · browser connector {statusPreview.browserConnector?.connected ? 'connected' : 'disconnected'}
+          </small>
+        ) : null}
+        {modelsPreview ? <small role="status">{modelsPreview.count} model(s): {modelsPreview.models.length ? modelsPreview.models.map((model) => model.name).join(', ') : 'none recorded'}</small> : null}
+        {runsPreview ? <small role="status">{runsPreview.count} recent run(s): {runsPreview.runs.length ? runsPreview.runs.map((run) => `${run.title} (${run.status})`).join(', ') : 'none recorded'}</small> : null}
       </div>
       <div className="conn-item">
         <span>Always-on local sources</span>

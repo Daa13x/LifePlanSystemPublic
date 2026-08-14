@@ -141,6 +141,72 @@ function boundedUpdatePreviewValue(key, value) {
   return truncate(value, LIMITS.metadataMaxLength);
 }
 
+function boundedSystemStatusResult(value) {
+  const status = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const count = (input) => Number.isSafeInteger(input) && input >= 0 ? input : 0;
+  const nullableCount = (input) => Number.isSafeInteger(input) && input >= 0 ? input : null;
+  const nullableText = (input, max = LIMITS.metadataMaxLength) => input == null || input === '' ? null : truncate(input, max);
+  const workboard = status.workboard && typeof status.workboard === 'object'
+    ? {
+        focus: count(status.workboard.focus), blockers: count(status.workboard.blockers), waiting: count(status.workboard.waiting),
+        automatic: count(status.workboard.automatic), stale: count(status.workboard.stale), approvals: count(status.workboard.approvals),
+        candidates: count(status.workboard.candidates)
+      }
+    : null;
+  return {
+    health: {
+      db: status.health?.db === 'ready' ? 'ready' : 'unavailable',
+      storageFile: nullableText(status.health?.storageFile)
+    },
+    sqlite: { ready: Boolean(status.sqlite?.ready) },
+    model: {
+      assigned: Boolean(status.model?.assigned),
+      name: nullableText(status.model?.name, LIMITS.titleMaxLength),
+      available: typeof status.model?.available === 'boolean' ? status.model.available : null,
+      file_error: nullableText(status.model?.file_error, LIMITS.provenanceEvidenceMaxLength)
+    },
+    runtime: {
+      managedServerRunning: Boolean(status.runtime?.managedServerRunning),
+      managedServerReady: Boolean(status.runtime?.managedServerReady),
+      endpoint: nullableText(status.runtime?.endpoint, LIMITS.provenanceSourceMaxLength),
+      endpointConfigured: Boolean(status.runtime?.endpointConfigured),
+      llamaServerAvailable: Boolean(status.runtime?.llamaServerAvailable),
+      llamaCliAvailable: Boolean(status.runtime?.llamaCliAvailable)
+    },
+    workboard,
+    browserConnector: { connected: Boolean(status.browserConnector?.connected) },
+    repository: {
+      available: Boolean(status.repository?.available),
+      branch: nullableText(status.repository?.branch),
+      hasChanges: Boolean(status.repository?.hasChanges),
+      hasConflicts: Boolean(status.repository?.hasConflicts),
+      ahead: nullableCount(status.repository?.ahead),
+      behind: nullableCount(status.repository?.behind),
+      note: nullableText(status.repository?.note, LIMITS.provenanceEvidenceMaxLength)
+    }
+  };
+}
+
+function boundedModelResult(model) {
+  return {
+    id: Number.isSafeInteger(model?.id) && model.id > 0 ? model.id : truncate(model?.id || 'unknown', LIMITS.metadataMaxLength),
+    name: truncate(model?.name || 'Unnamed model', LIMITS.titleMaxLength),
+    assigned_role: model?.assigned_role ? truncate(model.assigned_role, LIMITS.metadataMaxLength) : null,
+    available: Boolean(model?.available),
+    size_gb: Number.isFinite(model?.size_gb) && model.size_gb >= 0 ? Number(model.size_gb) : null,
+    file_error: model?.file_error ? truncate(model.file_error, LIMITS.provenanceEvidenceMaxLength) : null
+  };
+}
+
+function boundedRunResult(run) {
+  return {
+    id: truncate(run?.id || 'unknown', LIMITS.metadataMaxLength),
+    title: truncate(run?.title || 'run', LIMITS.titleMaxLength),
+    status: truncate(run?.status || 'unknown', LIMITS.metadataMaxLength),
+    created_at: run?.created_at ? truncate(run.created_at, LIMITS.metadataMaxLength) : null
+  };
+}
+
 function workboardIdentity(record) {
   const type = asString(record?.entity_type);
   const id = record?.id;
@@ -249,17 +315,20 @@ const ACTION_METADATA = Object.freeze({
   },
   'system.status': {
     label: 'Read system status', feature: 'System', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.system.status',
-    resultSchema: resultObject(['health'], { health: { type: 'object' } }, true)
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-status-check'], testId: 'action.system.status',
+    resultSchema: resultObject(
+      ['health', 'sqlite', 'model', 'runtime', 'workboard', 'browserConnector', 'repository'],
+      { health: { type: 'object' }, sqlite: { type: 'object' }, model: { type: 'object' }, runtime: { type: 'object' }, workboard: { type: ['object', 'null'] }, browserConnector: { type: 'object' }, repository: { type: 'object' } }
+    )
   },
   'system.models': {
     label: 'List local models', feature: 'System models', permission: 'models.read', risk: ACTION_RISKS.READ_ONLY,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.system.models',
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-models-check'], testId: 'action.system.models',
     resultSchema: resultObject(['models', 'count', 'truncated'], { models: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
   },
   'system.runs': {
     label: 'List local runs', feature: 'System runs', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.system.runs',
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-runs-check'], testId: 'action.system.runs',
     resultSchema: resultObject(['runs', 'count', 'truncated'], { runs: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
   },
   'conversation.search': {
@@ -273,7 +342,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -429,11 +498,11 @@ export function createCapabilityRegistry(deps) {
     },
 
     'system.status': {
-      description: 'Report authoritative application/runtime status (health, SQLite, model, runtime, repo, browser, tools). Read-only.',
+      description: 'Report bounded authoritative application/runtime status (health, SQLite, model, runtime, Workboard counts, repository, and browser connector). Read-only.',
       readOnly: true,
       schema: {},
       async handler() {
-        return await dep('systemStatus')();
+        return boundedSystemStatusResult(await dep('systemStatus')());
       }
     },
 
@@ -443,7 +512,7 @@ export function createCapabilityRegistry(deps) {
       schema: { limit: { type: 'integer', default: LIMITS.maxLimit, min: LIMITS.minLimit, max: LIMITS.maxLimit } },
       async handler(args) {
         const models = await dep('listModels')();
-        return { models: models.slice(0, args.limit), count: Math.min(models.length, args.limit), truncated: models.length > args.limit };
+        return { models: models.slice(0, args.limit).map(boundedModelResult), count: Math.min(models.length, args.limit), truncated: models.length > args.limit };
       }
     },
 
@@ -453,7 +522,7 @@ export function createCapabilityRegistry(deps) {
       schema: { limit: { type: 'integer', default: LIMITS.defaultLimit, min: LIMITS.minLimit, max: LIMITS.maxLimit } },
       async handler(args) {
         const runs = await dep('listRuns')({ limit: args.limit });
-        return { runs: runs.slice(0, args.limit), count: Math.min(runs.length, args.limit), truncated: runs.length > args.limit };
+        return { runs: runs.slice(0, args.limit).map(boundedRunResult), count: Math.min(runs.length, args.limit), truncated: runs.length > args.limit };
       }
     },
 

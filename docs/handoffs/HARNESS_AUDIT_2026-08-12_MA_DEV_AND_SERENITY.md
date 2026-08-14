@@ -279,4 +279,24 @@ submission, persisted it across reload, kept context attachments and an
 unrelated sentinel unchanged, and visibly rejected a later stale proposal after
 another legitimate item mutation.
 
+## 2026-08-14 bounded system-observability checkpoint
+
+The next low-risk slice exposes `system.status`, `system.models`, and
+`system.runs` through the neutral action gateway. Each action reuses the
+existing authoritative runtime/model/request owner. Returned objects are
+projected into strict fixed shapes with per-string, array-count, and complete
+receipt bounds; raw runtime output, arbitrary model fields, request payloads,
+paths beyond the already-safe basename, and undeclared nested data are omitted.
+
+Chat now offers explicit Check status, Check models, and Recent runs controls.
+They invoke the registered handlers, render bounded plain text, create only
+concise correlation-linked audit receipts, and leave Workboard records,
+confirmations, attachments, and the existing full System view unchanged.
+Focused unit/UI/HTTP checks include adversarial 250K-character source fields,
+strict-shape assertions, authorization metadata, no-write checks, and audit
+privacy. A disposable browser journey exercised all three controls twice,
+rendered truthful empty model/run states and live runtime/repository/connector
+state, preserved zero attachments and five fixture items, and still navigated
+to the full System status page.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

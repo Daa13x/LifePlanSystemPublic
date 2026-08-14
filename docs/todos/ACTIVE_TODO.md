@@ -24,6 +24,10 @@ identity, privacy, confirmation, recovery, or user authority.
   validated changed fields. Confirmation is bound to the real chat, typed item,
   correlation ID, expiry, and one-time token. A full-state stale check runs
   before claim and again inside the atomic update/settlement transaction.
+- Chat can now request bounded authoritative system status, local-model
+  summaries, and recent-run summaries through the same neutral registry used by
+  other actions. These checks are read-only, emit concise correlated audits,
+  render as plain text, and preserve the full System page as a separate view.
 
 ## Done
 
@@ -50,11 +54,13 @@ identity, privacy, confirmation, recovery, or user authority.
 
 ## Next authorised action-registry slice
 
-- Migrate one existing low-risk system/read control through the neutral action
-  gateway without changing the underlying owner or duplicating its data logic.
-- Prefer `system.status` if the visible UI can consume the same registered
-  handler and render a bounded truthful status receipt; otherwise take the next
-  bounded read/navigation control with an existing authoritative owner.
+- Evaluate `conversation.search`, the final already-registered capability that
+  remains outside the neutral catalog. Expose it only with a real active Chat
+  session, explicit human UI search, strict query/snippet/result bounds, and no
+  generic local/cloud agent scope.
+- Prove that searching history does not attach, promote, mutate, or leak raw
+  message bodies beyond the requested bounded snippets; preserve concise audit
+  receipts without query or message content.
 - Keep the catalog incremental. Do not expose additional mutations until their
   confirmation, stale-state, rollback, replay, and UI contracts are complete.
 
