@@ -17,6 +17,20 @@ assert.match(ui, /\['success', 'needs_confirmation', 'needs_approval'\]\.include
 assert.match(ui, /result\.error\?\.message \|\| `Action \$\{name\} did not complete/, 'UI surfaces the registry error instead of an undefined-data failure');
 const neutralCalls = [...ui.matchAll(/invokeAction\('([^']+)'/g)].map((match) => match[1]);
 assert.deepEqual([...new Set(neutralCalls)].sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'only the bounded Context Picker and Workboard-create actions use the neutral gateway');
+assert.match(ui, /invokeAction\('knowledge\.read',\s*\{\s*id: rec\.ref_id,\s*kind: rec\.kind === 'knowledge-candidate' \? 'candidate' : 'item'\s*\}\)/s, 'Knowledge preview sends the exact typed item/candidate identity');
+assert.match(ui, /pickerPreviewRequestRef\.current !== requestId/, 'late Knowledge preview responses cannot replace the current selection');
+assert.match(ui, /\/api\/chat\/sessions\/\$\{selectedSession\}\/context-records/, 'Attach remains a separate authoritative context-record write');
+const previewFunctionStart = ui.indexOf('async function previewKnowledgeRecord(');
+const attachFunctionStart = ui.indexOf('async function attachRecord(', previewFunctionStart);
+assert.ok(previewFunctionStart >= 0 && attachFunctionStart > previewFunctionStart, 'Knowledge preview function has a bounded source slice');
+const previewFunction = ui.slice(previewFunctionStart, attachFunctionStart);
+assert.match(previewFunction, /invokeAction\('knowledge\.read'/, 'Knowledge preview invokes only the read action');
+assert.doesNotMatch(previewFunction, /context-records|attachRecord|onAttach/, 'Knowledge preview cannot attach or write a context record');
+const searchFunction = ui.slice(ui.indexOf('async function runPickerSearch('), ui.indexOf('function openPicker('));
+assert.match(searchFunction, /pickerPreviewRequestRef\.current \+= 1/, 'every picker search invalidates an in-flight preview');
+const closeFunction = ui.slice(ui.indexOf('function closePicker('), previewFunctionStart);
+assert.match(closeFunction, /pickerPreviewRequestRef\.current \+= 1/, 'closing the picker invalidates an in-flight preview');
+assert.match(ui, /useEffect\(\(\) => \{\s*loadContext\(\);\s*loadContextRecords\(\);\s*loadConnection\(\);\s*loadCloudChecks\(\);\s*setProposal\(null\);\s*pickerSearchRequestRef\.current \+= 1;\s*pickerPreviewRequestRef\.current \+= 1;\s*setPicker\(null\);\s*\}, \[selectedSession\]\);/s, 'changing chat sessions invalidates and clears an in-flight preview');
 assert.match(ui, /invokeAction\('workboard\.propose_create'/, 'Workboard create preview uses the neutral action gateway');
 assert.doesNotMatch(ui, /invokeLegacyCapability\('workboard\.propose_create'/, 'Workboard create no longer uses the unbound legacy preview lane');
 assert.match(ui, /JSON\.stringify\(\{ confirmationId, token \}\)/, 'confirmation submits only the durable identifier and one-time token');
@@ -38,7 +52,7 @@ assert.ok(toolbarTriggers.some((line) => line.includes('openPicker(\'workboard\'
 const registry = createCapabilityRegistry({});
 const manifest = Object.fromEntries(registry.listActions().map((action) => [action.id, action]));
 assert.deepEqual(Object.keys(manifest).sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'neutral catalog contains exactly the declared bounded slice');
-for (const actionId of ['knowledge.search', 'workboard.list']) {
+for (const actionId of ['knowledge.search', 'knowledge.read', 'workboard.list']) {
   assert.ok(manifest[actionId], `${actionId} is registered`);
   assert.ok(manifest[actionId].sourceControls.length > 0, `${actionId} declares its source controls`);
   assert.equal(manifest[actionId].risk, 'READ_ONLY', `${actionId} remains read-only`);
@@ -50,8 +64,8 @@ for (const control of searchControls) {
   const actionId = control.match(/data-action-id="([^"]+)"/)[1];
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
-const mappedControls = ui.split(/\r?\n/).filter((line) => line.includes('data-action-id=') && line.includes('data-control-id='));
-assert.equal(mappedControls.length, 8, 'the bounded slice has exactly eight mapped trigger/search/proposal controls');
+const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
+assert.equal(mappedControls.length, 9, 'the bounded slice has exactly nine mapped trigger/search/preview/proposal controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -61,6 +75,23 @@ assert.deepEqual(
   ['chat.workboard-proposal.confirm', 'chat.workboard-proposal.open', 'chat.workboard-proposal.preview'],
   'the complete visible Workboard-create control family has stable identifiers'
 );
+assert.deepEqual(
+  controlMappings.filter((mapping) => mapping.actionId === 'knowledge.read').map((mapping) => mapping.controlId),
+  ['chat.context-picker.knowledge-preview'],
+  'the explicit Knowledge preview control maps to the read-only action'
+);
+const attachControlStart = picker.indexOf('<button className="picker-row"');
+const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
+const previewControlMarker = picker.indexOf('data-action-id="knowledge.read"');
+const previewControlStart = picker.lastIndexOf('<button', previewControlMarker);
+const previewControlEnd = picker.indexOf('</button>', previewControlMarker) + '</button>'.length;
+const attachControl = picker.slice(attachControlStart, attachControlEnd);
+const previewControl = picker.slice(previewControlStart, previewControlEnd);
+assert.match(attachControl, /onClick=\{\(\) => onAttach\(rec\)\}/, 'Attach is a distinct record-write control');
+assert.doesNotMatch(attachControl, /onPreview/, 'Attach does not invoke Preview');
+assert.match(previewControl, /onClick=\{\(\) => onPreview\(rec\)\}/, 'Preview invokes only its read handler');
+assert.doesNotMatch(previewControl, /onAttach/, 'Preview does not invoke Attach');
+assert.ok(attachControlEnd <= previewControlStart, 'Attach and Preview are separate sibling controls');
 for (const [actionId, action] of Object.entries(manifest)) {
   assert.deepEqual(
     action.sourceControls.slice().sort(),
@@ -75,5 +106,12 @@ assert.match(server, /app\.post\('\/api\/actions\/:id\/invoke'/, 'server invokes
 assert.match(server, /capabilityRegistry\.execute\(req\.params\.id, req\.body\?\.args, \{ caller: 'human-ui' \}\)/, 'HTTP route assigns its trusted caller instead of accepting body scopes');
 assert.match(server, /bindWorkboardCreateConfirmation\(sessionId, result\)/, 'the gateway binds Workboard create preview to the durable confirmation owner');
 assert.match(server, /keys\.length !== 2 \|\| keys\[0\] !== 'confirmationId' \|\| keys\[1\] !== 'token'/, 'the confirmation endpoint rejects replacement payload fields');
+const previewStart = picker.indexOf('function KnowledgeRecordPreview(');
+assert.ok(previewStart >= 0, 'Knowledge preview renderer exists in the bounded picker slice');
+const previewRenderer = picker.slice(previewStart);
+assert.match(previewRenderer, /record\.title/, 'Knowledge preview renders the title as React text');
+assert.match(previewRenderer, /record\.body/, 'Knowledge preview renders the bounded body as React text');
+assert.match(previewRenderer, /provenance\.source/, 'Knowledge preview renders provenance');
+assert.doesNotMatch(previewRenderer, /dangerouslySetInnerHTML/, 'Knowledge preview never renders record content as HTML');
 
 console.log('Action registry UI mapping and neutral-gateway wiring verification passed.');

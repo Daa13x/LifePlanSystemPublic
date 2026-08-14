@@ -1636,6 +1636,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [connection, setConnection] = useState(null);
   const [contextRecords, setContextRecords] = useState([]);
   const [picker, setPicker] = useState(null);
+  const pickerSearchRequestRef = useRef(0);
+  const pickerPreviewRequestRef = useRef(0);
   const [proposal, setProposal] = useState(null);
   const [proposalBusy, setProposalBusy] = useState(false);
   const [proposeOpen, setProposeOpen] = useState(false);
@@ -1733,7 +1735,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   async function runPickerSearch(next = {}) {
-    const p = { ...picker, ...next };
+    const requestId = ++pickerSearchRequestRef.current;
+    pickerPreviewRequestRef.current += 1;
+    const p = { ...picker, ...next, preview: null };
     setPicker({ ...p, loading: true });
     try {
       let results = [];
@@ -1744,14 +1748,52 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         const r = await invokeAction('workboard.list', { view: p.view || 'projects', limit: 15 });
         results = (r.data.records || []).map((rec) => ({ kind: (p.view || 'projects') === 'projects' ? 'workboard-project' : 'workboard-item', ref_id: rec.id, label: `${rec.type}: ${rec.title}`, sub: rec.detail || rec.status || '' }));
       }
-      setPicker({ ...p, loading: false, results });
-    } catch (err) { setNotice(err.message); setPicker({ ...p, loading: false, results: [] }); }
+      if (pickerSearchRequestRef.current !== requestId) return;
+      setPicker((current) => current?.domain === p.domain ? { ...p, loading: false, results } : current);
+    } catch (err) {
+      if (pickerSearchRequestRef.current !== requestId) return;
+      setNotice(err.message);
+      setPicker((current) => current?.domain === p.domain ? { ...p, loading: false, results: [] } : current);
+    }
   }
 
   function openPicker(domain) {
-    const base = { domain, query: '', results: [], loading: false, scope: 'all', view: 'projects' };
+    pickerSearchRequestRef.current += 1;
+    pickerPreviewRequestRef.current += 1;
+    const base = { domain, query: '', results: [], loading: false, scope: 'all', view: 'projects', preview: null };
     setPicker(base);
     runPickerSearch(base);
+  }
+
+  function closePicker() {
+    pickerSearchRequestRef.current += 1;
+    pickerPreviewRequestRef.current += 1;
+    setPicker(null);
+  }
+
+  async function previewKnowledgeRecord(rec) {
+    if (!rec || !['knowledge-item', 'knowledge-candidate'].includes(rec.kind)) return;
+    const requestId = ++pickerPreviewRequestRef.current;
+    const key = `${rec.kind}-${rec.ref_id}`;
+    setPicker((current) => current?.domain === 'knowledge'
+      ? { ...current, preview: { key, loading: true, data: null, error: '' } }
+      : current);
+    try {
+      const result = await invokeAction('knowledge.read', {
+        id: rec.ref_id,
+        kind: rec.kind === 'knowledge-candidate' ? 'candidate' : 'item'
+      });
+      if (pickerPreviewRequestRef.current !== requestId) return;
+      setPicker((current) => current?.domain === 'knowledge'
+        ? { ...current, preview: { key, loading: false, data: result.data, error: '' } }
+        : current);
+    } catch (err) {
+      if (pickerPreviewRequestRef.current !== requestId) return;
+      setNotice(err.message);
+      setPicker((current) => current?.domain === 'knowledge'
+        ? { ...current, preview: { key, loading: false, data: null, error: 'Preview unavailable.' } }
+        : current);
+    }
   }
 
   async function attachRecord(rec) {
@@ -2034,6 +2076,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     loadConnection();
     loadCloudChecks();
     setProposal(null);
+    pickerSearchRequestRef.current += 1;
+    pickerPreviewRequestRef.current += 1;
     setPicker(null);
   }, [selectedSession]);
   useEffect(() => {
@@ -2172,7 +2216,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
           <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
-        {picker && <ContextPicker picker={picker} onSearch={runPickerSearch} onAttach={attachRecord} onClose={() => setPicker(null)} />}
+        {picker && <ContextPicker picker={picker} onSearch={runPickerSearch} onPreview={previewKnowledgeRecord} onAttach={attachRecord} onClose={closePicker} />}
       </div>
     </section>
   );
@@ -2274,7 +2318,7 @@ function ProposalCard({ proposal, busy, onConfirm, onCancel }) {
   );
 }
 
-function ContextPicker({ picker, onSearch, onAttach, onClose }) {
+function ContextPicker({ picker, onSearch, onPreview, onAttach, onClose }) {
   return (
     <div className="picker-overlay" onClick={onClose}>
       <div className="picker" onClick={(e) => e.stopPropagation()}>
@@ -2302,14 +2346,53 @@ function ContextPicker({ picker, onSearch, onAttach, onClose }) {
             : (picker.results || []).length === 0
               ? <Empty title="No records" body="Nothing matched. Adjust the search or scope." />
               : picker.results.map((rec) => (
-                <button key={`${rec.kind}-${rec.ref_id}`} className="picker-row" onClick={() => onAttach(rec)}>
-                  <div><strong>{rec.label}</strong><span>{rec.sub}</span></div>
-                  <Plus size={16} />
-                </button>
+                <div key={`${rec.kind}-${rec.ref_id}`} className="picker-result">
+                  <div className="picker-result-actions">
+                    <button className="picker-row" onClick={() => onAttach(rec)} aria-label={`Attach ${rec.label}`}>
+                      <div><strong>{rec.label}</strong><span>{rec.sub}</span></div>
+                      <Plus size={16} />
+                    </button>
+                    {picker.domain === 'knowledge' ? (
+                      <button
+                        type="button"
+                        className="secondary picker-preview-button"
+                        data-action-id="knowledge.read"
+                        data-control-id="chat.context-picker.knowledge-preview"
+                        onClick={() => onPreview(rec)}
+                        disabled={picker.preview?.loading && picker.preview?.key === `${rec.kind}-${rec.ref_id}`}
+                      >
+                        {picker.preview?.loading && picker.preview?.key === `${rec.kind}-${rec.ref_id}` ? 'Loading…' : 'Preview'}
+                      </button>
+                    ) : null}
+                  </div>
+                  {picker.preview?.key === `${rec.kind}-${rec.ref_id}` ? <KnowledgeRecordPreview preview={picker.preview} /> : null}
+                </div>
               ))}
         </div>
-        <small>Only the record you pick is attached — never the whole database. IDs and provenance are retained.</small>
+        <small>Previewing never attaches a record. Only Attach adds the selected record — never the whole database. IDs and provenance are retained.</small>
       </div>
+    </div>
+  );
+}
+
+function KnowledgeRecordPreview({ preview }) {
+  if (preview.loading) return <div className="picker-preview" role="status">Loading preview…</div>;
+  if (preview.error) return <div className="picker-preview" role="status">{preview.error}</div>;
+  const record = preview.data;
+  if (!record) return null;
+  const provenance = record.provenance || {};
+  return (
+    <div className="picker-preview">
+      <div className="picker-preview-head"><strong>{record.title}</strong><span>{record.type || record.kind}</span></div>
+      <div className="picker-preview-body">{record.body || 'No body recorded.'}</div>
+      <div className="picker-preview-meta">
+        <span>source: {provenance.source || 'not recorded'}</span>
+        <span>evidence: {provenance.evidence || 'not recorded'}</span>
+        <span>status: {provenance.status || 'not recorded'}</span>
+        {provenance.confidence === null || provenance.confidence === undefined ? null : <span>confidence: {provenance.confidence}</span>}
+        {provenance.updated_at ? <span>updated: {provenance.updated_at}</span> : null}
+      </div>
+      <small>This is a bounded plain-text preview with provenance. Attach remains a separate action.</small>
     </div>
   );
 }

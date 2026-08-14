@@ -1445,15 +1445,28 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
 }
 .picker-head { display: flex; align-items: center; justify-content: space-between; }
 .picker-controls { display: flex; gap: 8px; }
-.picker-controls input { flex: 1; }
+.picker-controls input { flex: 1 1 auto; min-width: 0; }
+.picker-controls select { width: auto; flex: 0 0 130px; }
+.picker-controls select:only-child { width: 100%; flex: 1 1 auto; }
 .picker-results { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }
+.picker-result { display: flex; flex-direction: column; gap: 6px; }
+.picker-result-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: stretch; }
 .picker-row {
   display: flex; align-items: center; justify-content: space-between; gap: 10px; text-align: left;
-  padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); color: var(--text);
+  width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); color: var(--text);
 }
 .picker-row:hover { border-color: var(--accent); }
 .picker-row div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .picker-row div span { color: var(--muted); font-size: 0.76rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 420px; }
+.picker-preview-button { min-width: 78px; }
+.picker-preview {
+  display: flex; flex-direction: column; gap: 7px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); overflow-wrap: anywhere;
+}
+.picker-preview-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.picker-preview-head span { color: var(--muted); font-size: 0.76rem; text-transform: capitalize; }
+.picker-preview-body { max-height: 180px; overflow-y: auto; white-space: pre-wrap; font-size: 0.84rem; line-height: 1.45; }
+.picker-preview-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 0.72rem; }
 
 /* System > Runs: governed local coding workspace */
 .coding-workspace-shell { --code-bg: #071113; --code-line: #163035; --code-cyan: #73d7d0; --code-gold: #efc56d; }

@@ -21,6 +21,10 @@ import {
 const LIMITS = Object.freeze({
   queryMaxLength: 200,
   bodyMaxLength: 1200,
+  titleMaxLength: 240,
+  provenanceSourceMaxLength: 240,
+  provenanceEvidenceMaxLength: 480,
+  metadataMaxLength: 80,
   minLimit: 1,
   maxLimit: 25,
   defaultLimit: 8
@@ -32,18 +36,25 @@ function asString(value) {
 
 function truncate(text, max = LIMITS.bodyMaxLength) {
   const s = asString(text);
-  return s.length > max ? `${s.slice(0, max)}… [truncated ${s.length - max} chars]` : s;
+  if (s.length <= max) return s;
+  let keep = max;
+  let suffix = '';
+  for (let i = 0; i < 3; i += 1) {
+    suffix = `… [truncated ${s.length - keep} chars]`;
+    keep = Math.max(0, max - suffix.length);
+  }
+  return `${s.slice(0, keep)}${suffix}`;
 }
 
 function provenanceFor(record) {
   return {
     id: record.id,
-    kind: record.kind || record.record_kind || 'record',
-    source: record.source || 'not recorded',
-    evidence: record.evidence || 'not recorded',
+    kind: truncate(record.kind || record.record_kind || 'record', LIMITS.metadataMaxLength),
+    source: truncate(record.source || 'not recorded', LIMITS.provenanceSourceMaxLength),
+    evidence: truncate(record.evidence || 'not recorded', LIMITS.provenanceEvidenceMaxLength),
     confidence: record.confidence === undefined || record.confidence === null ? null : Number(record.confidence),
-    status: record.status || null,
-    updated_at: record.updated_at || record.created_at || null
+    status: record.status ? truncate(record.status, LIMITS.metadataMaxLength) : null,
+    updated_at: record.updated_at || record.created_at ? truncate(record.updated_at || record.created_at, LIMITS.metadataMaxLength) : null
   };
 }
 
@@ -65,8 +76,8 @@ const ACTION_METADATA = Object.freeze({
     testId: 'action.knowledge.search', resultSchema: resultObject(['items', 'count', 'truncated', 'scope'], { items: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' }, scope: { type: 'string' } })
   },
   'knowledge.read': {
-    label: 'Read Knowledge record', feature: 'Knowledge', permission: 'knowledge.read', risk: ACTION_RISKS.READ_ONLY,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.knowledge.read',
+    label: 'Preview Knowledge record', feature: 'Chat context picker', permission: 'knowledge.read', risk: ACTION_RISKS.READ_ONLY,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.context-picker.knowledge-preview'], testId: 'action.knowledge.read',
     resultSchema: resultObject(['id', 'kind', 'title', 'body', 'provenance'], { id: { type: 'integer' }, kind: { type: 'string' }, type: { type: ['string', 'null'] }, title: { type: 'string' }, body: { type: 'string' }, provenance: { type: 'object' } })
   },
   'workboard.list': {
@@ -117,7 +128,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'workboard.list', 'workboard.propose_create']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.propose_create']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -156,8 +167,8 @@ export function createCapabilityRegistry(deps) {
         const items = rows.slice(0, args.limit).map((r) => ({
           id: r.id,
           kind: r.kind,
-          type: r.type || null,
-          title: r.title,
+          type: r.type ? truncate(r.type, LIMITS.metadataMaxLength) : null,
+          title: truncate(r.title, LIMITS.titleMaxLength),
           snippet: truncate(r.body, 240),
           provenance: provenanceFor(r)
         }));
@@ -178,8 +189,8 @@ export function createCapabilityRegistry(deps) {
         return {
           id: record.id,
           kind: record.kind || args.kind,
-          type: record.type || null,
-          title: record.title,
+          type: record.type ? truncate(record.type, LIMITS.metadataMaxLength) : null,
+          title: truncate(record.title, LIMITS.titleMaxLength),
           body: truncate(record.body),
           provenance: provenanceFor(record)
         };

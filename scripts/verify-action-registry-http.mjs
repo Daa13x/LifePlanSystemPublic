@@ -101,18 +101,29 @@ let server = await retryStart();
 base = server.base;
 let sessionId = 0;
 let phantomCorrelationId = '';
+let knowledgeReadCorrelationId = '';
+const knowledgePreviewTitle = 'Knowledge preview fixture';
+const knowledgePreviewBody = `Preview body marker ${'z'.repeat(1400)}`;
 try {
   csrf = (await (await fetch(`${base}/api/csrf-token`)).json()).data.token;
   const createdSession = await api('/api/chat/sessions', { method: 'POST', json: { title: 'Action registry verification' } });
   sessionId = Number(createdSession.body?.data?.id);
   line(createdSession.status === 200 && Number.isInteger(sessionId) && sessionId > 0, 'audit verification uses a real persisted chat session');
+  const createdKnowledge = await api('/api/items', {
+    method: 'POST',
+    json: { type: 'note', title: knowledgePreviewTitle, body: knowledgePreviewBody, status: 'active', confidence: 0.77 }
+  });
+  const knowledgeRecordId = Number(createdKnowledge.body?.data?.id);
+  line(createdKnowledge.status === 200 && Number.isInteger(knowledgeRecordId) && knowledgeRecordId > 0, 'disposable Knowledge preview fixture is persisted');
 
   const catalog = await api('/api/actions');
   const knowledge = catalog.body?.data?.find((action) => action.id === 'knowledge.search');
+  const knowledgeRead = catalog.body?.data?.find((action) => action.id === 'knowledge.read');
   const createProposal = catalog.body?.data?.find((action) => action.id === 'workboard.propose_create');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 3 && Boolean(createProposal) && !catalog.body.data.some((action) => action.id === 'workboard.propose_update'), 'neutral catalog adds only the durable Workboard-create proposal');
+  line(catalog.body?.data?.length === 4 && Boolean(knowledgeRead) && Boolean(createProposal) && !catalog.body.data.some((action) => action.id === 'workboard.propose_update'), 'neutral catalog adds only Knowledge preview and the durable Workboard-create proposal');
   line(knowledge?.permission === 'knowledge.read' && knowledge?.risk === 'READ_ONLY' && knowledge?.confirmation === 'none', 'catalog exposes permission, risk, and confirmation metadata');
+  line(knowledgeRead?.permission === 'knowledge.read' && knowledgeRead?.risk === 'READ_ONLY' && knowledgeRead?.confirmation === 'none', 'Knowledge preview remains read-only and confirmation-free');
   line(createProposal?.permission === 'workboard.propose' && createProposal?.risk === 'REVERSIBLE_WRITE' && createProposal?.confirmation === 'user_confirmation', 'Workboard create advertises its write risk and user-confirmation requirement');
   line(!('handler' in (knowledge || {})) && !('check' in (knowledge?.availability || {})), 'catalog never exposes executable handler/check functions');
 
@@ -138,6 +149,29 @@ try {
     json: { session_id: sessionId, args: { query: 'another-empty-fixture', scope: 'all', limit: 1 } }
   });
   line(second.body?.data?.correlationId && second.body.data.correlationId !== firstResult?.correlationId, 'separate invocations receive unique correlation IDs');
+
+  const contextBeforePreview = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  const knowledgePreview = await api('/api/actions/knowledge.read/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { id: knowledgeRecordId, kind: 'item' } }
+  });
+  const previewResult = knowledgePreview.body?.data;
+  knowledgeReadCorrelationId = previewResult?.correlationId || '';
+  const contextAfterPreview = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  line(knowledgePreview.status === 200 && previewResult?.status === 'success' && previewResult?.data?.id === knowledgeRecordId && previewResult?.data?.title === knowledgePreviewTitle, 'Knowledge preview returns the requested typed record');
+  line(previewResult?.data?.body?.startsWith('Preview body marker ') && previewResult.data.body.includes('[truncated ') && previewResult.data.body.length <= 1200, 'Knowledge preview body is visibly and strictly bounded');
+  line(previewResult?.data?.provenance?.source === 'manual' && previewResult?.data?.provenance?.status === 'active' && previewResult?.data?.provenance?.confidence === 0.77, 'Knowledge preview includes authoritative provenance');
+  line(contextBeforePreview.body?.data?.length === 0 && contextAfterPreview.body?.data?.length === 0, 'previewing Knowledge creates no chat attachment');
+  const invalidReadKind = await api('/api/actions/knowledge.read/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { id: knowledgeRecordId, kind: 'project' } }
+  });
+  line(invalidReadKind.body?.data?.status === 'blocked' && invalidReadKind.body?.data?.error?.code === 'INVALID_ARGUMENTS', 'Knowledge preview rejects an invalid record kind before the handler');
+  const missingRead = await api('/api/actions/knowledge.read/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { id: 999999999, kind: 'item' } }
+  });
+  line(missingRead.body?.data?.status === 'failed' && missingRead.body?.data?.error?.code === 'HANDLER_FAILED' && /Reference /.test(missingRead.body?.data?.error?.message || '') && !String(missingRead.body?.data?.error?.message).includes('999999999'), 'missing Knowledge preview fails without exposing handler internals');
 
   const malformed = await api('/api/actions/knowledge.search/invoke', { method: 'POST', json: { session_id: sessionId, args: [] } });
   line(malformed.status === 200 && malformed.body?.data?.status === 'blocked' && malformed.body?.data?.error?.code === 'INVALID_ARGUMENTS', 'malformed arguments fail closed with a structured outcome');
@@ -306,6 +340,9 @@ try {
   const correlated = audit.body?.data?.find((row) => row.correlation_id === firstResult?.correlationId);
   line(Boolean(correlated) && correlated.capability === 'knowledge.search' && correlated.outcome === 'success', 'audit row links the action, outcome, and correlation ID');
   line(correlated?.detail === 'completed', 'audit detail is a concise receipt rather than the query body');
+  const knowledgeReadAudit = audit.body?.data?.find((row) => row.correlation_id === knowledgeReadCorrelationId);
+  line(Boolean(knowledgeReadAudit) && knowledgeReadAudit.capability === 'knowledge.read' && knowledgeReadAudit.outcome === 'success' && knowledgeReadAudit.detail === 'completed', 'Knowledge preview audit links its correlation ID to a concise success receipt');
+  line(!String(knowledgeReadAudit?.detail).includes(knowledgePreviewTitle) && !String(knowledgeReadAudit?.detail).includes('Preview body marker'), 'Knowledge preview audit stores no title or body content');
   const proposalAudit = audit.body?.data?.filter((row) => row.correlation_id === durable?.correlationId) || [];
   line(proposalAudit.some((row) => row.capability === 'workboard.propose_create' && row.outcome === 'proposed') && proposalAudit.some((row) => row.capability === 'workboard.create' && row.outcome === 'applied'), 'proposal and application audits share the action correlation ID');
   line(proposalAudit.every((row) => !String(row.detail).includes('Durable proposal fixture') && !String(row.detail).includes('Immutable body fixture') && !String(row.detail).includes(confirmationToken)), 'correlated audit receipts contain no proposal body, title, or token');

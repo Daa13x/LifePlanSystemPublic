@@ -266,6 +266,24 @@ await check('the visible-UI adapter and neutral gateway execute the same registe
   assert.deepEqual(calls, [ui.args, gateway.args]);
 });
 
+await check('Knowledge preview uses the same registered read handler through compatibility and neutral adapters', async () => {
+  const calls = [];
+  let seq = 0;
+  const registry = createCapabilityRegistry({
+    correlationIdFactory: () => `read-${String(++seq).padStart(8, '0')}`,
+    readKnowledge: (args) => {
+      calls.push(args);
+      return { id: args.id, kind: args.kind, type: 'note', title: 'Shared preview', body: 'Bounded body', source: 'fixture', evidence: 'same handler', status: 'active' };
+    }
+  });
+  const ui = await registry.invoke('knowledge.read', { id: 7, kind: 'item' });
+  const gateway = await registry.execute('knowledge.read', { id: 7, kind: 'item' }, { caller: 'test' });
+  assert.equal(ui.status, 'success');
+  assert.equal(gateway.status, 'success');
+  assert.deepEqual(ui.data, gateway.data);
+  assert.deepEqual(calls, [ui.args, gateway.args]);
+});
+
 await check('caller policies are separate and body-like scope injection is ignored', async () => {
   const registry = createCapabilityRegistry({ searchKnowledge: () => [] });
   assert.ok(CAPABILITY_CALLER_SCOPES['human-ui'].includes('knowledge.read'));

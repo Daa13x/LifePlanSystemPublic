@@ -26,9 +26,17 @@ async function throwsAsync(fn, re, label) {
 // Dependency spy — records every dep call so we can prove propose_* performs no writes.
 const calls = [];
 const rows = (n, extra = {}) => Array.from({ length: n }, (_, i) => ({ id: i + 1, kind: 'item', type: 'note', title: `t${i + 1}`, body: 'body text', source: 'src', evidence: 'ev', confidence: 0.5, status: 'active', ...extra }));
+const longKnowledgeBody = `preview marker ${'x'.repeat(1400)}`;
+const oversizedKnowledgeText = 'oversized'.repeat(31250);
 const deps = {
   searchKnowledge: (a) => { calls.push(['searchKnowledge', a]); return rows(40); },
-  readKnowledge: (a) => { calls.push(['readKnowledge', a]); return a.id === 1 ? { id: 1, kind: a.kind, type: 'note', title: 'x', body: 'y', source: 's', status: 'active', confidence: 0.4 } : null; },
+  readKnowledge: (a) => {
+    calls.push(['readKnowledge', a]);
+    if (a.id === 1) return { id: 1, kind: 'item', type: 'note', title: 'Preview item', body: longKnowledgeBody, source: 'manual', evidence: 'fixture evidence', status: 'active', confidence: 0.4 };
+    if (a.id === 2) return { id: 2, kind: 'candidate', type: 'preference', title: 'Preview candidate', body: 'candidate body', source: 'chat', evidence: 'candidate fixture', status: 'candidate', confidence: 0.5 };
+    if (a.id === 3) return { id: 3, kind: 'item', type: oversizedKnowledgeText, title: oversizedKnowledgeText, body: oversizedKnowledgeText, source: oversizedKnowledgeText, evidence: oversizedKnowledgeText, status: oversizedKnowledgeText, updated_at: oversizedKnowledgeText, confidence: 0.6 };
+    return null;
+  },
   listWorkboard: async (a) => { calls.push(['listWorkboard', a]); return { summary: { projects: 40 }, records: rows(40, { type: 'project' }) }; },
   readWorkboard: async (a) => { calls.push(['readWorkboard', a]); return a.id === 1 ? (a.kind === 'item' ? { kind: 'item', id: 1, title: 'it', status: 'active', next_action: 'n', body: 'b', confidence: 0.5 } : { kind: 'project', project: { id: 1, name: 'proj' }, items: [] }) : null; },
   systemStatus: async () => { calls.push(['systemStatus']); return { health: { db: 'ready' }, model: { assigned: true } }; },
@@ -58,6 +66,38 @@ await checkAsync('knowledge.search clamps oversized limit to the max', async () 
   const r = await reg.invoke('knowledge.search', { query: 'x', limit: 9999 });
   assert.ok(r.data.items.length <= 25, 'max limit is 25');
 });
+await checkAsync('knowledge.read returns a bounded item preview with provenance through the declared dependency', async () => {
+  calls.length = 0;
+  const r = await reg.invoke('knowledge.read', { id: 1, kind: 'item' });
+  assert.equal(r.data.title, 'Preview item');
+  assert.equal(r.data.kind, 'item');
+  assert.ok(r.data.body.startsWith('preview marker '));
+  assert.match(r.data.body, /\[truncated \d+ chars\]$/);
+  assert.ok(r.data.body.length <= reg.LIMITS.bodyMaxLength);
+  assert.deepEqual(r.data.provenance, { id: 1, kind: 'item', source: 'manual', evidence: 'fixture evidence', confidence: 0.4, status: 'active', updated_at: null });
+  assert.deepEqual(calls, [['readKnowledge', { id: 1, kind: 'item' }]]);
+});
+await checkAsync('knowledge.read preserves candidate identity and provenance', async () => {
+  calls.length = 0;
+  const r = await reg.invoke('knowledge.read', { id: 2, kind: 'candidate' });
+  assert.equal(r.data.title, 'Preview candidate');
+  assert.equal(r.data.kind, 'candidate');
+  assert.equal(r.data.body, 'candidate body');
+  assert.equal(r.data.provenance.status, 'candidate');
+  assert.deepEqual(calls, [['readKnowledge', { id: 2, kind: 'candidate' }]]);
+});
+await checkAsync('knowledge.read strictly bounds every caller-controlled text field', async () => {
+  const r = await reg.invoke('knowledge.read', { id: 3, kind: 'item' });
+  assert.ok(r.data.title.length <= reg.LIMITS.titleMaxLength);
+  assert.ok(r.data.type.length <= reg.LIMITS.metadataMaxLength);
+  assert.ok(r.data.body.length <= reg.LIMITS.bodyMaxLength);
+  assert.ok(r.data.provenance.source.length <= reg.LIMITS.provenanceSourceMaxLength);
+  assert.ok(r.data.provenance.evidence.length <= reg.LIMITS.provenanceEvidenceMaxLength);
+  assert.ok(r.data.provenance.status.length <= reg.LIMITS.metadataMaxLength);
+  assert.ok(r.data.provenance.updated_at.length <= reg.LIMITS.metadataMaxLength);
+  for (const value of [r.data.title, r.data.type, r.data.body, r.data.provenance.source, r.data.provenance.evidence, r.data.provenance.status, r.data.provenance.updated_at]) assert.match(value, /\[truncated \d+ chars\]$/);
+  assert.ok(JSON.stringify(r.data).length < 3000, 'the complete structured preview remains small');
+});
 await checkAsync('system.models bounded', async () => {
   const r = await reg.invoke('system.models', { limit: 5 });
   assert.ok(r.data.models.length <= 5);
@@ -69,6 +109,7 @@ await checkAsync('conversation.search bounded', async () => {
 
 await throwsAsync(() => reg.invoke('knowledge.search', {}), /required/, 'missing required argument is rejected');
 await throwsAsync(() => reg.invoke('knowledge.read', { id: 1, kind: 'item', extra: 'x' }), /unexpected/, 'unexpected argument is rejected');
+await throwsAsync(() => reg.invoke('knowledge.read', { id: 999, kind: 'item' }), /Action failed safely\. Reference/, 'missing Knowledge record fails without exposing handler internals');
 await throwsAsync(() => reg.invoke('workboard.read', { id: 0 }), /positive record id/, 'non-positive id is rejected');
 await throwsAsync(() => reg.invoke('knowledge.search', { query: 'x', scope: 'bogus' }), /must be one of/, 'invalid enum is rejected');
 await throwsAsync(() => reg.invoke('nope.capability', {}), /Unknown capability/, 'unknown capability is rejected');
