@@ -1,3 +1,10 @@
+import {
+  ACTION_CONFIRMATIONS,
+  ACTION_RISKS,
+  createActionRegistry,
+  validateActionArgs
+} from './actionRegistry.js';
+
 // Bounded, schema-validated capability layer for the central Chat control
 // surface. This module is intentionally PURE and dependency-injected: it never
 // touches SQLite, the filesystem, a shell, or the network directly. All data
@@ -23,64 +30,9 @@ function asString(value) {
   return value === undefined || value === null ? '' : String(value);
 }
 
-function clampInt(value, min, max, fallback) {
-  const n = Math.trunc(Number(value));
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
-}
-
 function truncate(text, max = LIMITS.bodyMaxLength) {
   const s = asString(text);
   return s.length > max ? `${s.slice(0, max)}… [truncated ${s.length - max} chars]` : s;
-}
-
-// Minimal, strict argument validator. Rejects unknown behaviour rather than
-// coercing silently for anything security relevant (ids, enums).
-function validateArgs(name, schema, rawArgs) {
-  const input = rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? rawArgs : {};
-  const out = {};
-  for (const [key, spec] of Object.entries(schema)) {
-    let value = input[key];
-    const missing = value === undefined || value === null || value === '';
-    if (missing) {
-      if (spec.required) throw new Error(`${name}: missing required argument "${key}".`);
-      if ('default' in spec) { out[key] = spec.default; }
-      continue;
-    }
-    switch (spec.type) {
-      case 'string': {
-        if (typeof value !== 'string') throw new Error(`${name}: "${key}" must be a string.`);
-        value = value.trim();
-        if (spec.maxLength) value = value.slice(0, spec.maxLength);
-        if (spec.enum && !spec.enum.includes(value)) {
-          throw new Error(`${name}: "${key}" must be one of: ${spec.enum.join(', ')}.`);
-        }
-        break;
-      }
-      case 'id': {
-        const n = Number(value);
-        if (!Number.isInteger(n) || n <= 0) throw new Error(`${name}: "${key}" must be a positive record id.`);
-        value = n;
-        break;
-      }
-      case 'integer': {
-        value = clampInt(value, spec.min ?? -Infinity, spec.max ?? Infinity, spec.default ?? 0);
-        break;
-      }
-      case 'object': {
-        if (typeof value !== 'object' || Array.isArray(value)) throw new Error(`${name}: "${key}" must be an object.`);
-        break;
-      }
-      default:
-        throw new Error(`${name}: unsupported schema type for "${key}".`);
-    }
-    out[key] = value;
-  }
-  // Reject unexpected keys so callers cannot smuggle extra fields into handlers.
-  for (const key of Object.keys(input)) {
-    if (!(key in schema)) throw new Error(`${name}: unexpected argument "${key}".`);
-  }
-  return out;
 }
 
 function provenanceFor(record) {
@@ -98,6 +50,91 @@ function provenanceFor(record) {
 // Fields that must never appear in tool arguments/results returned to the model.
 const KNOWLEDGE_SCOPES = ['all', 'approved', 'candidates', 'rules'];
 const WORKBOARD_VIEWS = ['overview', 'projects', 'roadmap', 'review', 'completed', 'blocked'];
+
+const ALWAYS_AVAILABLE = Object.freeze({
+  description: 'The local application runtime and its authoritative repositories are ready.',
+  check: () => ({ available: true, reason: null })
+});
+
+const resultObject = (required, properties = {}, additionalProperties = false) => ({ type: 'object', required, properties, additionalProperties });
+
+const ACTION_METADATA = Object.freeze({
+  'knowledge.search': {
+    label: 'Search Knowledge', feature: 'Chat context picker', permission: 'knowledge.read', risk: ACTION_RISKS.READ_ONLY,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.context-toolbar.open-knowledge', 'chat.context-picker.knowledge-query', 'chat.context-picker.knowledge-scope'],
+    testId: 'action.knowledge.search', resultSchema: resultObject(['items', 'count', 'truncated', 'scope'], { items: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' }, scope: { type: 'string' } })
+  },
+  'knowledge.read': {
+    label: 'Read Knowledge record', feature: 'Knowledge', permission: 'knowledge.read', risk: ACTION_RISKS.READ_ONLY,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.knowledge.read',
+    resultSchema: resultObject(['id', 'kind', 'title', 'body', 'provenance'], { id: { type: 'integer' }, kind: { type: 'string' }, type: { type: ['string', 'null'] }, title: { type: 'string' }, body: { type: 'string' }, provenance: { type: 'object' } })
+  },
+  'workboard.list': {
+    label: 'List Workboard records', feature: 'Chat context picker', permission: 'workboard.read', risk: ACTION_RISKS.READ_ONLY,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.context-toolbar.open-workboard', 'chat.context-picker.workboard-view'], testId: 'action.workboard.list',
+    resultSchema: resultObject(['view', 'records', 'count', 'truncated'], { view: { type: 'string' }, summary: { type: ['object', 'null'] }, records: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
+  },
+  'workboard.read': {
+    label: 'Read Workboard record', feature: 'Workboard', permission: 'workboard.read', risk: ACTION_RISKS.READ_ONLY,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.workboard.read',
+    resultSchema: resultObject(['kind'], { kind: { type: 'string' } }, true)
+  },
+  'workboard.propose_create': {
+    label: 'Preview new Workboard item', feature: 'Chat task proposal', permission: 'workboard.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
+    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Produces a review-only proposal; no Workboard data is changed.'],
+    sourceControls: ['chat.workboard-proposal.preview'], testId: 'action.workboard.propose_create',
+    resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
+  },
+  'workboard.propose_update': {
+    label: 'Preview Workboard update', feature: 'Chat task proposal', permission: 'workboard.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
+    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Reads the current item and produces a review-only proposal; no Workboard data is changed.'],
+    sourceControls: [], testId: 'action.workboard.propose_update',
+    resultSchema: resultObject(['proposal', 'operation', 'affects', 'target_id', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target_id: { type: 'integer' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
+  },
+  'system.status': {
+    label: 'Read system status', feature: 'System', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.system.status',
+    resultSchema: resultObject(['health'], { health: { type: 'object' } }, true)
+  },
+  'system.models': {
+    label: 'List local models', feature: 'System models', permission: 'models.read', risk: ACTION_RISKS.READ_ONLY,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.system.models',
+    resultSchema: resultObject(['models', 'count', 'truncated'], { models: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
+  },
+  'system.runs': {
+    label: 'List local runs', feature: 'System runs', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.system.runs',
+    resultSchema: resultObject(['runs', 'count', 'truncated'], { runs: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
+  },
+  'conversation.search': {
+    label: 'Search conversations', feature: 'Chat history', permission: 'chat.history.read', risk: ACTION_RISKS.SENSITIVE_DATA,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.conversation.search',
+    resultSchema: resultObject(['matches', 'count', 'truncated'], { matches: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
+  }
+});
+
+const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA).map((item) => item.permission))]);
+const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
+  .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
+  .map((item) => item.permission))]);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'workboard.list']);
+const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
+const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
+
+// Caller names are selected only by trusted application code. HTTP request
+// bodies are never allowed to supply or extend these scopes.
+export const CAPABILITY_CALLER_SCOPES = Object.freeze({
+  'human-ui': NEUTRAL_ACTION_SCOPES,
+  'legacy-human-ui': ALL_CAPABILITY_SCOPES,
+  'local-agent': READ_ONLY_CAPABILITY_SCOPES,
+  'cloud-agent': Object.freeze([]),
+  test: ALL_CAPABILITY_SCOPES
+});
+
+function trustedContext(caller, signal) {
+  const actor = Object.hasOwn(CAPABILITY_CALLER_SCOPES, caller) ? caller : 'unknown';
+  return { actor, scopes: [...(CAPABILITY_CALLER_SCOPES[actor] || [])], signal };
+}
 
 export function createCapabilityRegistry(deps) {
   const dep = (fn) => {
@@ -283,19 +320,76 @@ export function createCapabilityRegistry(deps) {
     }
   };
 
+  const actions = Object.entries(capabilities).map(([id, cap]) => {
+    const metadata = ACTION_METADATA[id];
+    if (!metadata) throw new Error(`Capability metadata is missing for ${id}.`);
+    return {
+      id,
+      label: metadata.label,
+      description: cap.description,
+      feature: metadata.feature,
+      inputSchema: cap.schema,
+      resultSchema: metadata.resultSchema,
+      availability: ALWAYS_AVAILABLE,
+      permission: metadata.permission,
+      risk: metadata.risk,
+      confirmation: metadata.confirmation,
+      sideEffects: metadata.sideEffects,
+      handler: cap.handler,
+      sourceControls: metadata.sourceControls,
+      testId: metadata.testId
+    };
+  });
+  const actionRegistry = createActionRegistry(actions, { correlationIdFactory: deps.correlationIdFactory });
+
   function list() {
-    return Object.entries(capabilities).map(([name, cap]) => ({ name, description: cap.description, readOnly: cap.readOnly }));
+    return actionRegistry.list().map((action) => ({
+      ...action,
+      name: action.id,
+      readOnly: Boolean(capabilities[action.id]?.readOnly)
+    }));
   }
 
+  function listActions() {
+    return list().filter((action) => NEUTRAL_ACTION_SET.has(action.id));
+  }
+
+  async function inspect(name, { caller = 'unknown', signal } = {}) {
+    if (!NEUTRAL_ACTION_SET.has(name)) return null;
+    return actionRegistry.inspect(name, trustedContext(caller, signal));
+  }
+
+  async function execute(name, rawArgs, { caller = 'unknown', signal } = {}) {
+    return actionRegistry.invoke(name, rawArgs, { ...trustedContext(caller, signal), allowedActionIds: NEUTRAL_ACTION_NAMES });
+  }
+
+  // Backward-compatible adapter for the existing Chat UI and verifier. It uses
+  // the same registry/handler as the neutral action gateway, while preserving
+  // the historical thrown-error and {name, readOnly, args, data} contract.
   async function invoke(name, rawArgs) {
-    const cap = capabilities[name];
-    if (!cap) throw new Error(`Unknown capability: ${asString(name).slice(0, 60)}`);
-    const args = validateArgs(name, cap.schema, rawArgs);
-    const data = await cap.handler(args);
-    return { name, readOnly: cap.readOnly, args, data };
+    const result = await actionRegistry.invoke(name, rawArgs, trustedContext('legacy-human-ui'));
+    if (!['success', 'needs_confirmation', 'needs_approval'].includes(result.status)) {
+      const message = result.error?.code === 'UNKNOWN_ACTION'
+        ? `Unknown capability: ${asString(name).slice(0, 60)}`
+        : result.error?.message || `Action ${asString(name).slice(0, 60)} failed.`;
+      const error = new Error(message);
+      error.code = result.error?.code || 'ACTION_FAILED';
+      error.actionStatus = result.status;
+      error.correlationId = result.correlationId;
+      throw error;
+    }
+    return {
+      name: result.actionId,
+      actionId: result.actionId,
+      readOnly: Boolean(capabilities[result.actionId]?.readOnly),
+      status: result.status,
+      correlationId: result.correlationId,
+      args: result.args,
+      data: result.data
+    };
   }
 
-  return { capabilities, list, invoke, LIMITS, validateArgs };
+  return { capabilities, actionRegistry, list, listActions, inspect, execute, invoke, LIMITS, validateArgs: validateActionArgs };
 }
 
 export const CAPABILITY_NAMES = [

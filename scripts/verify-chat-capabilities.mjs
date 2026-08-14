@@ -92,8 +92,8 @@ await checkAsync('workboard.propose_update returns before/after and performs no 
   // Only readWorkboard (a read) may be called to build the diff — never a write.
   assert.deepEqual(calls.map((c) => c[0]), ['readWorkboard'], 'propose_update may only read, never write');
 });
-await throwsAsync(() => reg.invoke('workboard.propose_update', { id: 1, changes: { owner: 'app' } }), /cannot be changed/, 'propose_update rejects disallowed fields');
-await throwsAsync(() => reg.invoke('workboard.propose_update', { id: 1, changes: {} }), /no permitted changes|required/, 'propose_update rejects empty changes');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { id: 1, changes: { owner: 'app' } }), /Action failed safely\. Reference/, 'propose_update rejects disallowed fields without exposing handler internals');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { id: 1, changes: {} }), /Action failed safely\. Reference/, 'propose_update rejects empty changes without exposing handler internals');
 
 // Structural safety: the capability module must not contain SQL, shell, or fs access.
 await checkAsync('capability module contains no SQL / shell / filesystem access', async () => {

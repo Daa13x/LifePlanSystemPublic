@@ -52,7 +52,7 @@ import {
 } from './executorEnforcement.js';
 import { resolveRunCliCwd } from './runCliCwd.js';
 import { chromeProfileArgument, probeChromeExtension } from './browserExtensionInstall.js';
-import { NativeCodingWorker, NATIVE_CODING_VALIDATIONS } from './nativeCodingWorker.js';
+import { NativeCodingWorker, NATIVE_CODING_LIMITS, NATIVE_CODING_VALIDATIONS } from './nativeCodingWorker.js';
 import {
   FileIndexCache,
   buildWorkspaceEvidence,
@@ -2967,10 +2967,21 @@ app.post('/api/chat/sessions/:id/cancel', (req, res) => {
 // return a proposal that must be confirmed via /workboard/confirm.
 // ---------------------------------------------------------------------------
 
-function writeChatAudit(sessionId, capability, outcome, detail) {
+function writeChatAudit(sessionId, capability, outcome, detail, correlationId = null) {
   try {
-    db.prepare('INSERT INTO chat_audit (session_id, capability, outcome, detail) VALUES (?, ?, ?, ?)')
-      .run(Number.isInteger(sessionId) ? sessionId : null, String(capability).slice(0, 80), String(outcome).slice(0, 40), String(detail || '').slice(0, 500));
+    const requestedSessionId = Number(sessionId);
+    const boundSessionId = Number.isInteger(requestedSessionId) && requestedSessionId > 0
+      && db.prepare('SELECT 1 FROM chat_sessions WHERE id = ? AND deleted = 0').get(requestedSessionId)
+      ? requestedSessionId
+      : null;
+    db.prepare('INSERT INTO chat_audit (session_id, capability, outcome, detail, correlation_id) VALUES (?, ?, ?, ?, ?)')
+      .run(
+        boundSessionId,
+        String(capability).slice(0, 80),
+        String(outcome).slice(0, 40),
+        String(detail || '').slice(0, 500),
+        correlationId ? String(correlationId).slice(0, 128) : null
+      );
   } catch { /* audit is best-effort and must never break a request */ }
 }
 
@@ -3123,15 +3134,44 @@ const capabilityRegistry = createCapabilityRegistry({
 
 app.get('/api/chat/capabilities', (_req, res) => ok(res, capabilityRegistry.list()));
 
+// Neutral/manual action gateway. The caller identity and scopes are assigned by
+// trusted server code; request bodies cannot claim to be a local/cloud agent or
+// add permissions. This first slice exposes only the two read-only Context
+// Picker actions. Existing proposal/confirmation routes remain outside it.
+app.get('/api/actions', (_req, res) => ok(res, capabilityRegistry.listActions()));
+
+app.get('/api/actions/:id', async (req, res) => {
+  const contract = await capabilityRegistry.inspect(req.params.id, { caller: 'human-ui' });
+  if (!contract) return fail(res, 404, 'Action not found.');
+  ok(res, contract);
+});
+
+app.post('/api/actions/:id/invoke', async (req, res) => {
+  const sessionId = Number(req.body?.session_id) || null;
+  try {
+    const result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui' });
+    writeChatAudit(
+      sessionId,
+      result.actionId || req.params.id || 'unknown',
+      result.status,
+      result.error?.code || (result.status === 'success' ? 'completed' : 'proposal'),
+      result.correlationId
+    );
+    ok(res, result);
+  } catch {
+    fail(res, 500, 'Action gateway failed safely.');
+  }
+});
+
 app.post('/api/chat/capability', async (req, res) => {
   const name = String(req.body?.name || '');
   const sessionId = Number(req.body?.session_id) || null;
   try {
     const result = await capabilityRegistry.invoke(name, req.body?.args || {});
-    writeChatAudit(sessionId, name, 'ok', result.readOnly ? 'read' : 'proposal');
+    writeChatAudit(sessionId, name, result.status, result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
-    writeChatAudit(sessionId, name || 'unknown', 'error', error.message);
+    writeChatAudit(sessionId, name || 'unknown', error.actionStatus || 'failed', error.code || 'ACTION_FAILED', error.correlationId);
     fail(res, 400, error.message);
   }
 });
@@ -6555,6 +6595,7 @@ app.get('/api/source/coding/status', async (_req, res) => {
     // who holds the durable run lease without exposing the raw lease token.
     tasks: nativeCodingWorker.list().map((task) => ({ ...task, leaseStatus: describeRunLease(task) })),
     validations: NATIVE_CODING_VALIDATIONS,
+    limits: NATIVE_CODING_LIMITS,
     model: { ...model, configured: Boolean(model.endpoint) },
     activeTaskIds: [...nativeCodingWorker.active.keys()],
     browser: {

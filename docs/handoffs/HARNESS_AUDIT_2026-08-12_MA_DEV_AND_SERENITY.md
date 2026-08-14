@@ -168,4 +168,38 @@ confirmations, stale-patch rejection, and branchless human Git control. The
 appropriate path is therefore to enrich LPS's evidence and operator visibility,
 not to import MA's autonomous workspace-writing loop.
 
+## 2026-08-14 continuity-note review
+
+The maintainer later supplied `serenity-chat-2026-08-14.pdf` for an LPS-native
+integration review. The six-page external reference was inspected visually and
+text-extracted; its SHA-256 is
+`FD364D687651FBC4B69B11FF7D5053D95ED3DC2B6EB9C8C03D7F27110DD2F88F`.
+The PDF is not checked into this repository, is not a source of runtime
+authority, and did not authorize importing external personas, Bibles, prompts,
+source code, schemas, or browser/model assumptions.
+
+The review produced these LPS-owned decisions:
+
+| Reference theme | LPS decision and evidence |
+| --- | --- |
+| Browser-assisted coding consultation needs typed outcomes, provenance, and a visible next step. | **Already implemented for that bounded lane.** `consultationReceipt.js`, `browserAdviceDisposition.js`, and their focused verifiers persist provider-bound evidence and truthful deferred/unavailable/review states. Browser output remains advisory. General research and source-acquisition provenance remain deferred below. |
+| Conversation, captured evidence, and an authorised mutation must remain separate records. | **Already implemented.** Chat context, consultation receipts, sealed coding tasks, durable confirmations, and apply receipts remain distinct stores and transitions. No external reply promotes itself to memory, source truth, or a write. |
+| Work must be resumable from explicit durable state rather than hidden conversational state. | **Already implemented for the bounded coding lane.** Task recovery, run leases, evidence hashes, consultation receipts, and confirmation bindings supply the resumable state. Broader planner-wide resumption remains future work and must not be simulated with prompts. |
+| Action selection should be data-driven, permission checked, and observable. | **Accepted in the 2026-08-14 action-registry slice.** `server/actionRegistry.js` defines typed action contracts and closed outcomes; the existing Chat capability handlers use that registry; the neutral gateway assigns trusted caller scopes; the visible Context Picker declares stable action IDs; correlation IDs link invocation results to concise audit receipts. `verify:action-registry` proves duplicate rejection, malformed/unknown denial, availability, caller isolation, result validation, confirmation states, UI/gateway handler equivalence, CSRF, and database migration. |
+| Direct captured evidence should not be delayed behind a second model or presentation pass. | **Accepted as a design constraint, not a new subsystem.** Current LPS receipts retain the captured result first; later summaries cannot replace the underlying evidence. Any future source-intake record must preserve this ordering. |
+| External-evidence operations should have a richer common taxonomy. | **Deferred.** Consultation, search, page extraction, and user-supplied intake currently have separate LPS routes. Consolidation belongs with the answerability/research workstream and requires an LPS-owned schema plus runtime tests; this audit does not pre-empt that lane. |
+| Hooks or provider text can direct hidden execution. | **Rejected.** Hooks remain bounded checks/receipts, provider text remains untrusted input, and neither can grant action scopes, mutation authority, memory promotion, or Git authority. |
+
+The PDF also cited [Rob Pike's *Notes on Programming in C*](https://zoo.cs.yale.edu/classes/cs223/doc-f2016/Pike.pdf).
+The referenced Rule 5 statement was checked against that Yale-hosted primary source. LPS uses
+it only as a non-normative design review heuristic: when control flow becomes
+complicated, first inspect whether the typed state/authority/evidence contract
+is ambiguous. The action registry applies that heuristic by making action
+metadata and outcomes explicit; the citation does not become runtime policy.
+
+No personal-memory or source-of-truth record was created from the continuity
+chat. Any remaining idea is either already covered by LPS code/tests, explicitly
+deferred with a missing dependency, or rejected by the reference-material and
+human-authority boundaries.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

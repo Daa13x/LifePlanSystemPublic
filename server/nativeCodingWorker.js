@@ -18,6 +18,12 @@ const MAX_SCOPE_CORRECTION_ATTEMPTS = 5;
 const RUN_LEASE_MS = 30 * 60 * 1000;
 const MIN_EDIT_CONFIDENCE = 0.70;
 
+export const NATIVE_CODING_LIMITS = Object.freeze({
+  maxToolRounds: MAX_TOOL_ROUNDS,
+  maxEvidenceRecoveryAttempts: MAX_EVIDENCE_RECOVERY_ATTEMPTS,
+  maxValidationRepairAttempts: MAX_VALIDATION_REPAIR_ATTEMPTS
+});
+
 export const NATIVE_CODING_VALIDATIONS = Object.freeze({
   syntax: 'Git diff + JavaScript/JSON syntax where supported',
   frontend: 'Frontend production build (changes restricted to src/)',

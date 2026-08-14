@@ -283,6 +283,7 @@ export function migrate() {
       capability TEXT NOT NULL,
       outcome TEXT NOT NULL DEFAULT 'ok',
       detail TEXT NOT NULL DEFAULT '',
+      correlation_id TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -295,6 +296,11 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Existing installations predate per-action correlation tracing. Keep this
+  // additive so the action gateway upgrades an old database in place.
+  try { db.exec('ALTER TABLE chat_audit ADD COLUMN correlation_id TEXT'); } catch { /* already present */ }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_chat_audit_correlation ON chat_audit(correlation_id)');
 
   for (const column of [
     ['prompt', 'TEXT'],

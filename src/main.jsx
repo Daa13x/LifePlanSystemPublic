@@ -1723,7 +1723,15 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     try { setContextRecords(await api(`/api/chat/sessions/${sessionId}/context-records`)); } catch { /* non-fatal */ }
   }
 
-  function capability(name, args) {
+  async function invokeAction(name, args) {
+    const result = await api(`/api/actions/${encodeURIComponent(name)}/invoke`, { method: 'POST', body: JSON.stringify({ args, session_id: selectedSession }) });
+    if (!['success', 'needs_confirmation', 'needs_approval'].includes(result.status)) {
+      throw new Error(result.error?.message || `Action ${name} did not complete.`);
+    }
+    return result;
+  }
+
+  async function invokeLegacyCapability(name, args) {
     return api('/api/chat/capability', { method: 'POST', body: JSON.stringify({ name, args, session_id: selectedSession }) });
   }
 
@@ -1733,10 +1741,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     try {
       let results = [];
       if (p.domain === 'knowledge') {
-        const r = await capability('knowledge.search', { query: p.query?.trim() || 'a', scope: p.scope || 'all', limit: 15 });
+        const r = await invokeAction('knowledge.search', { query: p.query?.trim() || 'a', scope: p.scope || 'all', limit: 15 });
         results = (r.data.items || []).map((it) => ({ kind: it.kind === 'candidate' ? 'knowledge-candidate' : 'knowledge-item', ref_id: it.id, label: `${it.type || it.kind}: ${it.title}`, sub: it.snippet }));
       } else {
-        const r = await capability('workboard.list', { view: p.view || 'projects', limit: 15 });
+        const r = await invokeAction('workboard.list', { view: p.view || 'projects', limit: 15 });
         results = (r.data.records || []).map((rec) => ({ kind: (p.view || 'projects') === 'projects' ? 'workboard-project' : 'workboard-item', ref_id: rec.id, label: `${rec.type}: ${rec.title}`, sub: rec.detail || rec.status || '' }));
       }
       setPicker({ ...p, loading: false, results });
@@ -1769,7 +1777,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   async function submitProposeCreate() {
     if (!proposeForm.title.trim()) return;
     try {
-      const r = await capability('workboard.propose_create', { type: proposeForm.type, title: proposeForm.title, next_action: proposeForm.next_action });
+      const r = await invokeLegacyCapability('workboard.propose_create', { type: proposeForm.type, title: proposeForm.title, next_action: proposeForm.next_action });
       setProposal(r.data);
       setProposeOpen(false);
       setProposeForm({ type: 'note', title: '', next_action: '' });
@@ -2079,8 +2087,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         <div className="context-bar">
           <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} />
           <div className="context-actions">
-            <button onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
-            <button onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
+            <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
+            <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
             <button onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
             <div className="inline-form compact">
               <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
@@ -2271,13 +2279,13 @@ function ContextPicker({ picker, onSearch, onAttach, onClose }) {
         <div className="picker-controls">
           {picker.domain === 'knowledge' ? (
             <>
-              <input value={picker.query} placeholder="Search approved memory, candidates, rules…" onChange={(e) => onSearch({ query: e.target.value })} autoFocus />
-              <select value={picker.scope} onChange={(e) => onSearch({ scope: e.target.value })}>
+              <input data-action-id="knowledge.search" data-control-id="chat.context-picker.knowledge-query" value={picker.query} placeholder="Search approved memory, candidates, rules…" onChange={(e) => onSearch({ query: e.target.value })} autoFocus />
+              <select data-action-id="knowledge.search" data-control-id="chat.context-picker.knowledge-scope" value={picker.scope} onChange={(e) => onSearch({ scope: e.target.value })}>
                 {['all', 'approved', 'candidates', 'rules'].map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </>
           ) : (
-            <select value={picker.view} onChange={(e) => onSearch({ view: e.target.value })}>
+            <select data-action-id="workboard.list" data-control-id="chat.context-picker.workboard-view" value={picker.view} onChange={(e) => onSearch({ view: e.target.value })}>
               {['projects', 'overview', 'roadmap', 'review', 'blocked', 'completed'].map((v) => <option key={v} value={v}>{v}</option>)}
             </select>
           )}
@@ -5136,7 +5144,7 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
 
                 <details className="coding-evidence-section" open={Boolean(selectedCodingTask.toolTrace?.length)}>
                   <summary>Local tool trace <span>{selectedCodingTask.toolTrace?.length || 0} read-only calls</span></summary>
-                  {(selectedCodingTask.toolTrace || []).length ? selectedCodingTask.toolTrace.map((entry) => <div className="coding-tool-evidence" key={`${entry.round}-${entry.resultHash}`}><div className="coding-evidence-stats"><strong>{entry.round}. {entry.name}</strong><code>{entry.path}</code>{entry.query && <span>query: {entry.query}</span>}<span>{entry.resultBytes} bytes</span><code>{entry.resultHash?.slice(0, 16)}</code></div>{entry.resultPreview && <details className="coding-file-preview"><summary><code>Controller evidence excerpt</code><span>Stored bounded result, not model paraphrase</span></summary><pre className="code-block compact-code">{entry.resultPreview}</pre></details>}</div>) : <Empty title="No tools used" body="The local model can make up to eight scoped list, literal search, or ranged file-read calls. It cannot run commands, use the network, or perform Git operations." />}
+                  {(selectedCodingTask.toolTrace || []).length ? selectedCodingTask.toolTrace.map((entry) => <div className="coding-tool-evidence" key={`${entry.round}-${entry.resultHash}`}><div className="coding-evidence-stats"><strong>{entry.round}. {entry.name}</strong><code>{entry.path}</code>{entry.query && <span>query: {entry.query}</span>}<span>{entry.resultBytes} bytes</span><code>{entry.resultHash?.slice(0, 16)}</code></div>{entry.resultPreview && <details className="coding-file-preview"><summary><code>Controller evidence excerpt</code><span>Stored bounded result, not model paraphrase</span></summary><pre className="code-block compact-code">{entry.resultPreview}</pre></details>}</div>) : <Empty title="No tools used" body={`The local model can make up to ${coding.limits?.maxToolRounds ?? 16} scoped list, literal search, or ranged file-read calls. It cannot run commands, use the network, or perform Git operations.`} />}
                 </details>
 
                 <details className="coding-evidence-section" open={Boolean(selectedCodingTask.diff)}>
@@ -5193,8 +5201,8 @@ function SourceControl({ setNotice, refreshSignal = 0, initialTab = 'changes', a
                     <dt>Run lease</dt><dd>{selectedCodingTask.leaseStatus.held ? `Held by ${selectedCodingTask.leaseStatus.owner}` : 'Expired — reclaimable'}{selectedCodingTask.leaseStatus.held && Number.isFinite(selectedCodingTask.leaseStatus.remainingMs) ? ` · ${Math.round(selectedCodingTask.leaseStatus.remainingMs / 60000)} min left` : ''}</dd>
                     <dt>Lease phase</dt><dd>{selectedCodingTask.leaseStatus.phase || '—'}{selectedCodingTask.leaseStatus.lastEvent?.at ? ` · last event ${selectedCodingTask.leaseStatus.lastEvent.at}` : ''}</dd>
                   </>}
-                  <dt>Checker repairs</dt><dd>{Number(selectedCodingTask.validationRepairs || 0)} / 1 bounded repair pass</dd>
-                  <dt>Evidence recovery</dt><dd>{Number(selectedCodingTask.evidenceRecoveries || 0)} / 3 bounded gap-resolution passes</dd>
+                  <dt>Checker repairs</dt><dd>{Number(selectedCodingTask.validationRepairs || 0)} / {coding.limits?.maxValidationRepairAttempts ?? 1} bounded repair pass</dd>
+                  <dt>Evidence recovery</dt><dd>{Number(selectedCodingTask.evidenceRecoveries || 0)} / {coding.limits?.maxEvidenceRecoveryAttempts ?? 5} bounded gap-resolution passes</dd>
                   <dt>Last action confidence</dt><dd>{selectedCodingTask.assessment ? `${Math.round(Number(selectedCodingTask.assessment.confidence) * 100)}% — ${selectedCodingTask.assessment.action}` : 'not assessed'}</dd>
                   {selectedCodingTask.assessment?.evidenceBasis && <><dt>Confidence basis</dt><dd>{selectedCodingTask.assessment.evidenceBasis}</dd></>}
                   {selectedCodingTask.recovery?.blockedReason && <><dt>Blocked by</dt><dd>{selectedCodingTask.recovery.blockedReason}</dd><dt>Next safe action</dt><dd>{selectedCodingTask.recovery.nextPermittedAction}</dd></>}
