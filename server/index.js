@@ -2738,11 +2738,13 @@ function readPlannerTaskFields(body) {
   return fields;
 }
 
-app.get('/api/planner/day', (_req, res) => {
+function plannerDayData() {
   const mode = currentCapacityMode();
   const tasks = allRows("SELECT * FROM planner_tasks WHERE status = 'active' ORDER BY updated_at DESC").map(plannerTaskToEngine);
-  ok(res, { mode, modes: CAPACITY_MODES, ...planDay(tasks, mode) });
-});
+  return { mode, modes: CAPACITY_MODES, ...planDay(tasks, mode) };
+}
+
+app.get('/api/planner/day', (_req, res) => ok(res, plannerDayData()));
 
 app.get('/api/planner/capacity', (_req, res) => ok(res, { mode: currentCapacityMode(), modes: CAPACITY_MODES }));
 
@@ -3018,14 +3020,15 @@ function realChatSessionId(value) {
 }
 
 function requireSessionScopedAction(actionId, sessionValue) {
-  if (!['workboard.read', 'conversation.search'].includes(actionId) || realChatSessionId(sessionValue)) return null;
+  if (!['workboard.read', 'conversation.search', 'planner.today'].includes(actionId) || realChatSessionId(sessionValue)) return null;
   const correlationId = crypto.randomUUID();
   const historySearch = actionId === 'conversation.search';
+  const plannerToday = actionId === 'planner.today';
   return {
     status: 'blocked',
     actionId,
     correlationId,
-    error: { code: 'INVALID_CHAT_SESSION', message: historySearch ? 'A valid active chat session is required to search local conversation history.' : 'A valid active chat session is required to read Workboard records.' }
+    error: { code: 'INVALID_CHAT_SESSION', message: historySearch ? 'A valid active chat session is required to search local conversation history.' : plannerToday ? 'A valid active chat session is required to read the Daily Planner.' : 'A valid active chat session is required to read Workboard records.' }
   };
 }
 
@@ -3342,6 +3345,9 @@ const capabilityRegistry = createCapabilityRegistry({
   searchConversations({ query, limit }) {
     const like = likeParam(query);
     return allRows("SELECT m.session_id, s.title AS session_title, m.role, m.content, m.created_at FROM chat_messages m JOIN chat_sessions s ON s.id = m.session_id AND s.deleted = 0 WHERE m.content LIKE ? ESCAPE '\\' ORDER BY m.id DESC LIMIT ?", [like, Math.min(limit * 2, 40)]);
+  },
+  plannerToday() {
+    return plannerDayData();
   }
 });
 

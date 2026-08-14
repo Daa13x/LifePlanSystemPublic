@@ -1637,6 +1637,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [systemStatusPreview, setSystemStatusPreview] = useState(null);
   const [systemModelsPreview, setSystemModelsPreview] = useState(null);
   const [systemRunsPreview, setSystemRunsPreview] = useState(null);
+  const [plannerTodayPreview, setPlannerTodayPreview] = useState(null);
   const [systemCheckBusy, setSystemCheckBusy] = useState('');
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyResults, setHistoryResults] = useState([]);
@@ -1774,6 +1775,19 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     try {
       const result = await invokeAction('system.runs', { limit: 5 });
       setSystemRunsPreview(result.data);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSystemCheckBusy('');
+    }
+  }
+
+  async function checkPlannerToday() {
+    if (systemCheckBusy) return;
+    setSystemCheckBusy('planner');
+    try {
+      const result = await invokeAction('planner.today', {});
+      setPlannerTodayPreview(result.data);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -2244,7 +2258,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} />
+          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2352,7 +2366,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, runtime, generating, navigate, statusPreview, modelsPreview, runsPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns }) {
+function ChatConnectionBar({ connection, runtime, generating, navigate, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2374,6 +2388,7 @@ function ChatConnectionBar({ connection, runtime, generating, navigate, statusPr
         <button className="link" data-action-id="system.status" data-control-id="chat.connection.system-status-check" onClick={onCheckStatus} disabled={Boolean(checkBusy)}>{checkBusy === 'status' ? 'Checking…' : 'Check status'}</button>
         <button className="link" data-action-id="system.models" data-control-id="chat.connection.system-models-check" onClick={onCheckModels} disabled={Boolean(checkBusy)}>{checkBusy === 'models' ? 'Checking…' : 'Check models'}</button>
         <button className="link" data-action-id="system.runs" data-control-id="chat.connection.system-runs-check" onClick={onCheckRuns} disabled={Boolean(checkBusy)}>{checkBusy === 'runs' ? 'Checking…' : 'Recent runs'}</button>
+        <button className="link" data-action-id="planner.today" data-control-id="chat.connection.planner-today-check" onClick={onCheckPlanner} disabled={Boolean(checkBusy)}>{checkBusy === 'planner' ? 'Checking…' : 'Check today'}</button>
         <button className="link" onClick={() => navigate('system', 'status')}>Open full System</button>
         {statusPreview ? (
           <small role="status">
@@ -2382,6 +2397,7 @@ function ChatConnectionBar({ connection, runtime, generating, navigate, statusPr
         ) : null}
         {modelsPreview ? <small role="status">{modelsPreview.count} model(s): {modelsPreview.models.length ? modelsPreview.models.map((model) => model.name).join(', ') : 'none recorded'}</small> : null}
         {runsPreview ? <small role="status">{runsPreview.count} recent run(s): {runsPreview.runs.length ? runsPreview.runs.map((run) => `${run.title} (${run.status})`).join(', ') : 'none recorded'}</small> : null}
+        {plannerPreview ? <small role="status">Today · {plannerPreview.mode} · {plannerPreview.visible.length} task(s): {plannerPreview.visible.length ? plannerPreview.visible.map((task) => task.title).join(', ') : 'nothing scheduled'}</small> : null}
       </div>
       <div className="conn-item">
         <span>Always-on local sources</span>
@@ -2393,7 +2409,7 @@ function ChatConnectionBar({ connection, runtime, generating, navigate, statusPr
       </div>
       <div className="conn-item">
         <span>Capabilities</span>
-        <strong>{connection?.capabilities?.length ?? 10} tools</strong>
+        <strong>{connection?.capabilities?.length ?? 11} tools</strong>
       </div>
       <div className="conn-item">
         <span>Conversation</span>

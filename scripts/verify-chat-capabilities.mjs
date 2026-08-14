@@ -79,6 +79,11 @@ const deps = {
   searchConversations: (a) => {
     calls.push(['searchConversations', a]);
     return Array.from({ length: 20 }, () => ({ session_id: 1, session_title: oversizedWorkboardText, role: 'user', content: oversizedWorkboardText, created_at: oversizedWorkboardText, ignored: oversizedWorkboardText }));
+  },
+  plannerToday: () => {
+    calls.push(['plannerToday']);
+    const tasks = Array.from({ length: 20 }, (_, index) => ({ id: index + 1, title: oversizedWorkboardText, status: 'active', activeStep: oversizedWorkboardText, deadline: oversizedWorkboardText, blocker: index === 0 ? oversizedWorkboardText : '', pinned: index === 0, reasons: Array(20).fill(oversizedWorkboardText) }));
+    return { mode: 'normal', visibleLimit: 7, pinnedCount: 1, visible: tasks, deferred: tasks };
   }
 };
 
@@ -89,7 +94,7 @@ check('registry exposes exactly the documented capabilities', () => {
 });
 check('read capabilities are read-only; propose_* are writes', () => {
   const byName = Object.fromEntries(reg.list().map((c) => [c.name, c.readOnly]));
-  for (const n of ['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'system.status', 'system.models', 'system.runs', 'conversation.search']) assert.equal(byName[n], true, `${n} must be read-only`);
+  for (const n of ['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today']) assert.equal(byName[n], true, `${n} must be read-only`);
   assert.equal(byName['workboard.propose_create'], false);
   assert.equal(byName['workboard.propose_update'], false);
 });
@@ -189,6 +194,17 @@ await checkAsync('conversation.search bounded', async () => {
     assert.match(match.snippet, /\[truncated \d+ chars\]$/);
   }
   assert.ok(JSON.stringify(r.data).length < 3000, 'complete conversation-search receipt stays bounded');
+});
+await checkAsync('planner.today reuses a strictly bounded canonical day result', async () => {
+  const r = await reg.invoke('planner.today', {});
+  assert.equal(r.data.visible.length, 7);
+  assert.equal(r.data.deferred.length, 5);
+  assert.equal(r.data.truncated, true);
+  assert.deepEqual(Object.keys(r.data.visible[0]).sort(), ['active_step', 'blocked', 'deadline', 'id', 'pinned', 'reasons', 'status', 'title']);
+  assert.ok(r.data.visible[0].title.length <= reg.LIMITS.titleMaxLength);
+  assert.ok(r.data.visible[0].active_step.length <= 400);
+  assert.ok(r.data.visible[0].reasons.length <= 5 && r.data.visible[0].reasons.every((reason) => reason.length <= 160));
+  assert.ok(JSON.stringify(r.data).length < 20000);
 });
 
 await throwsAsync(() => reg.invoke('knowledge.search', {}), /required/, 'missing required argument is rejected');

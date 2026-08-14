@@ -150,8 +150,9 @@ try {
   const systemModels = catalog.body?.data?.find((action) => action.id === 'system.models');
   const systemRuns = catalog.body?.data?.find((action) => action.id === 'system.runs');
   const conversationSearch = catalog.body?.data?.find((action) => action.id === 'conversation.search');
+  const plannerToday = catalog.body?.data?.find((action) => action.id === 'planner.today');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 10 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch), 'neutral catalog exposes every bounded registered capability');
+  line(catalog.body?.data?.length === 11 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday), 'neutral catalog exposes every bounded registered capability');
   line(knowledge?.permission === 'knowledge.read' && knowledge?.risk === 'READ_ONLY' && knowledge?.confirmation === 'none', 'catalog exposes permission, risk, and confirmation metadata');
   line(knowledgeRead?.permission === 'knowledge.read' && knowledgeRead?.risk === 'READ_ONLY' && knowledgeRead?.confirmation === 'none', 'Knowledge preview remains read-only and confirmation-free');
   line(workboardRead?.permission === 'workboard.detail.read' && workboardRead?.risk === 'SENSITIVE_DATA' && workboardRead?.confirmation === 'none', 'Workboard preview uses a distinct sensitive-detail scope and remains confirmation-free');
@@ -160,6 +161,7 @@ try {
   line(systemStatus?.permission === 'system.read' && systemStatus?.risk === 'READ_ONLY' && systemStatus?.confirmation === 'none', 'system.status advertises its read-only no-confirmation contract');
   line(systemModels?.permission === 'models.read' && systemModels?.risk === 'READ_ONLY' && systemRuns?.permission === 'system.read' && systemRuns?.risk === 'READ_ONLY', 'model and run summaries advertise their read-only contracts');
   line(conversationSearch?.permission === 'chat.history.read' && conversationSearch?.risk === 'SENSITIVE_DATA' && conversationSearch?.confirmation === 'none', 'conversation search advertises its sensitive read-only contract');
+  line(plannerToday?.permission === 'planner.today.read' && plannerToday?.risk === 'SENSITIVE_DATA' && plannerToday?.confirmation === 'none', 'Daily Planner advertises its sensitive read-only contract');
   line(!('handler' in (knowledge || {})) && !('check' in (knowledge?.availability || {})), 'catalog never exposes executable handler/check functions');
 
   const inspect = await api('/api/actions/knowledge.search');
@@ -171,6 +173,7 @@ try {
   line((await api('/api/actions/system.status')).status === 200, 'bounded system.status is inspectable');
   line((await api('/api/actions/system.models')).status === 200 && (await api('/api/actions/system.runs')).status === 200, 'bounded system model/run actions are inspectable');
   line((await api('/api/actions/conversation.search')).status === 200, 'session-bound conversation search is inspectable');
+  line((await api('/api/actions/planner.today')).status === 200, 'session-bound Daily Planner is inspectable');
 
   const withoutCsrf = await api('/api/actions/knowledge.search/invoke', { method: 'POST', json: { args: { query: 'fixture' } }, includeCsrf: false });
   line(withoutCsrf.status === 403, 'action invocation without CSRF is rejected');
@@ -308,6 +311,21 @@ try {
   const historyConfirmationsAfter = Number(historyDbAfter.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
   historyDbAfter.close();
   line(historyContextBefore.body?.data?.length === historyContextAfter.body?.data?.length && historyItemsBefore.body?.data?.length === historyItemsAfter.body?.data?.length && historyConfirmationsBefore === historyConfirmationsAfter, 'history search creates no attachment, Workboard item, or confirmation');
+
+  const plannerResponse = await api('/api/actions/planner.today/invoke', { method: 'POST', json: { session_id: sessionId, caller: 'cloud-agent', scopes: ['*'], args: {} } });
+  const plannerAction = plannerResponse.body?.data;
+  const plannerData = plannerAction?.data;
+  line(plannerResponse.status === 200 && plannerAction?.status === 'success' && plannerAction?.actionId === 'planner.today' && Array.isArray(plannerData?.visible) && Array.isArray(plannerData?.deferred), 'Daily Planner returns the canonical capacity-aware day through the registry');
+  line(plannerData?.visible?.length <= 7 && plannerData?.deferred?.length <= 5 && (plannerData?.visible || []).every((task) => task.title.length <= 240 && task.reasons.length <= 5) && JSON.stringify(plannerData || {}).length < 20000, 'Daily Planner result is strictly bounded');
+  const phantomPlanner = await api('/api/actions/planner.today/invoke', { method: 'POST', json: { session_id: 987654321, args: {} } });
+  const legacyPhantomPlanner = await api('/api/chat/capability', { method: 'POST', json: { session_id: 987654321, name: 'planner.today', args: {} } });
+  line(phantomPlanner.body?.data?.status === 'blocked' && phantomPlanner.body?.data?.error?.code === 'INVALID_CHAT_SESSION' && legacyPhantomPlanner.body?.data?.status === 'blocked' && legacyPhantomPlanner.body?.data?.error?.code === 'INVALID_CHAT_SESSION', 'neutral and compatibility Daily Planner reads both require a real active Chat session');
+  const plannerContextAfter = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  const plannerItemsAfter = await api('/api/items?all=1');
+  const plannerDbAfter = new DatabaseSync(dbPath, { readOnly: true });
+  const plannerConfirmationsAfter = Number(plannerDbAfter.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
+  plannerDbAfter.close();
+  line(historyContextAfter.body?.data?.length === plannerContextAfter.body?.data?.length && historyItemsAfter.body?.data?.length === plannerItemsAfter.body?.data?.length && historyConfirmationsAfter === plannerConfirmationsAfter, 'reading the Daily Planner creates no attachment, Workboard item, or confirmation');
 
   const readFixture = (id) => {
     const fixture = new DatabaseSync(dbPath, { readOnly: true });

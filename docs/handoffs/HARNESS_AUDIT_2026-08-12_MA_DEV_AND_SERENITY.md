@@ -318,4 +318,30 @@ isolation, and correlation-linked audits containing neither query nor message
 content. The neutral catalog now exposes all ten capabilities that existed when
 this continuation began; future actions remain separate safety slices.
 
+## 2026-08-14 bounded Daily Planner checkpoint
+
+`planner.today` extends the neutral catalog without creating another planner.
+Its dependency calls the same `plannerDayData()` owner as `/api/planner/day`, so
+the capacity mode, ordering, easier-step selection, blockers, pins, deferral,
+and transparent reasons remain canonical. The action is classified as sensitive
+local data, requires a real active Chat session on both HTTP paths, and is not
+granted to generic local/cloud callers.
+
+The result uses strict task identities and fixed limits: at most seven visible
+and five deferred tasks, five bounded reasons per task, bounded title/step/date
+fields, and a fixed top-level shape. Chat's explicit Check today control uses
+the same registered handler and renders plain text. Focused unit/UI/HTTP checks
+cover adversarial oversized fields, malformed task identities, caller denial,
+phantom sessions, result bounds, canonical-owner reuse, and mutation isolation.
+A disposable real-browser check rendered the same normal/empty day as the
+canonical endpoint, created one concise successful audit, and left attachments
+and confirmations at zero.
+
+Navigation was inspected but not falsely registered. Current routing lives in
+the renderer (`pushState` plus React state), while the existing native WebView
+message channel accepts only renderer-to-host provider-window requests. A
+truthful navigation action first needs an authenticated server-to-specific-
+renderer command stream and correlation-bound applied/failed acknowledgement.
+That prerequisite remains a separate engineering slice.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

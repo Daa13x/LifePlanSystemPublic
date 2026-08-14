@@ -218,6 +218,34 @@ function boundedConversationMatch(record) {
   };
 }
 
+function boundedPlannerTask(task) {
+  if (!Number.isSafeInteger(task?.id) || task.id <= 0) throw new Error('Planner dependency returned an invalid task identity.');
+  return {
+    id: task.id,
+    title: truncate(task.title || 'Untitled task', LIMITS.titleMaxLength),
+    status: truncate(task.status || 'active', LIMITS.metadataMaxLength),
+    active_step: task.activeStep ? truncate(task.activeStep, 400) : null,
+    deadline: task.deadline ? truncate(task.deadline, LIMITS.metadataMaxLength) : null,
+    blocked: Boolean(task.blocker),
+    pinned: Boolean(task.pinned),
+    reasons: (Array.isArray(task.reasons) ? task.reasons : []).slice(0, 5).map((reason) => truncate(reason, 160))
+  };
+}
+
+function boundedPlannerToday(value) {
+  const day = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const visible = (Array.isArray(day.visible) ? day.visible : []).slice(0, 7).map(boundedPlannerTask);
+  const deferred = (Array.isArray(day.deferred) ? day.deferred : []).slice(0, 5).map(boundedPlannerTask);
+  return {
+    mode: truncate(day.mode || 'normal', LIMITS.metadataMaxLength),
+    visible_limit: Number.isSafeInteger(day.visibleLimit) && day.visibleLimit >= 0 ? Math.min(day.visibleLimit, 7) : visible.length,
+    pinned_count: Number.isSafeInteger(day.pinnedCount) && day.pinnedCount >= 0 ? Math.min(day.pinnedCount, 999) : 0,
+    visible,
+    deferred,
+    truncated: (Array.isArray(day.visible) && day.visible.length > visible.length) || (Array.isArray(day.deferred) && day.deferred.length > deferred.length)
+  };
+}
+
 function workboardIdentity(record) {
   const type = asString(record?.entity_type);
   const id = record?.id;
@@ -346,6 +374,11 @@ const ACTION_METADATA = Object.freeze({
     label: 'Search conversations', feature: 'Chat history', permission: 'chat.history.read', risk: ACTION_RISKS.SENSITIVE_DATA,
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.history-search.submit'], testId: 'action.conversation.search',
     resultSchema: resultObject(['matches', 'count', 'truncated'], { matches: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
+  },
+  'planner.today': {
+    label: 'Read today plan', feature: 'Daily Planner', permission: 'planner.today.read', risk: ACTION_RISKS.SENSITIVE_DATA,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.planner-today-check'], testId: 'action.planner.today',
+    resultSchema: resultObject(['mode', 'visible_limit', 'pinned_count', 'visible', 'deferred', 'truncated'], { mode: { type: 'string' }, visible_limit: { type: 'integer' }, pinned_count: { type: 'integer' }, visible: { type: 'array' }, deferred: { type: 'array' }, truncated: { type: 'boolean' } })
   }
 });
 
@@ -353,7 +386,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -554,6 +587,15 @@ export function createCapabilityRegistry(deps) {
           truncated: rows.length > args.limit
         };
       }
+    },
+
+    'planner.today': {
+      description: 'Read the current capacity-aware Daily Planner ordering and explanations. Read-only.',
+      readOnly: true,
+      schema: {},
+      async handler() {
+        return boundedPlannerToday(await dep('plannerToday')());
+      }
     }
   };
 
@@ -633,5 +675,5 @@ export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
   'system.status', 'system.models', 'system.runs',
-  'conversation.search'
+  'conversation.search', 'planner.today'
 ];

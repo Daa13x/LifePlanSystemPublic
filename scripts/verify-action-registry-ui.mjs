@@ -48,6 +48,7 @@ assert.match(ui, /invokeAction\('system\.status', \{\}\)/, 'Chat system-status c
 assert.match(ui, /invokeAction\('system\.models', \{ limit: 5 \}\)/, 'Chat model check uses the neutral action gateway');
 assert.match(ui, /invokeAction\('system\.runs', \{ limit: 5 \}\)/, 'Chat recent-runs check uses the neutral action gateway');
 assert.match(ui, /invokeAction\('conversation\.search', \{ query, limit: 8 \}\)/, 'explicit Chat history search uses the neutral action gateway');
+assert.match(ui, /invokeAction\('planner\.today', \{\}\)/, 'Daily Planner check uses the neutral action gateway');
 
 const searchControls = [...picker.matchAll(/<(?:input|select)\b[^>]*\bonChange=\{\(e\) => onSearch\([^>]+>/g)].map((match) => match[0]);
 assert.equal(searchControls.length, 3, 'the bounded Context Picker slice has three search controls');
@@ -79,6 +80,8 @@ for (const actionId of ['system.models', 'system.runs']) {
 }
 assert.equal(manifest['conversation.search'].risk, 'SENSITIVE_DATA', 'conversation.search is explicitly classified as sensitive local data');
 assert.equal(manifest['conversation.search'].confirmation, 'none', 'explicit read-only conversation search requires no mutation confirmation');
+assert.equal(manifest['planner.today'].risk, 'SENSITIVE_DATA', 'Daily Planner detail is explicitly sensitive local data');
+assert.equal(manifest['planner.today'].confirmation, 'none', 'Daily Planner read requires no mutation confirmation');
 assert.equal(manifest['workboard.read'].risk, 'SENSITIVE_DATA', 'Workboard detail is explicitly classified as sensitive read data');
 assert.equal(manifest['workboard.read'].confirmation, 'none', 'the session-scoped Workboard read remains confirmation-free');
 assert.equal(manifest['workboard.propose_create'].risk, 'REVERSIBLE_WRITE', 'Workboard create remains a proposal write risk');
@@ -90,7 +93,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 16, 'the bounded slice has exactly sixteen mapped trigger/search/preview/proposal/system/history controls');
+assert.equal(mappedControls.length, 17, 'the bounded slice has exactly seventeen mapped trigger/search/preview/proposal/system/history/planner controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -123,6 +126,7 @@ assert.deepEqual(
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.models').map((mapping) => mapping.controlId), ['chat.connection.system-models-check'], 'the visible model control maps to system.models');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.runs').map((mapping) => mapping.controlId), ['chat.connection.system-runs-check'], 'the visible recent-runs control maps to system.runs');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'conversation.search').map((mapping) => mapping.controlId), ['chat.history-search.submit'], 'the explicit history-search submit control maps to conversation.search');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'planner.today').map((mapping) => mapping.controlId), ['chat.connection.planner-today-check'], 'the visible today control maps to planner.today');
 const attachControlStart = picker.indexOf('<button className="picker-row"');
 const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
 const previewControlMarker = picker.indexOf('data-action-id="knowledge.read"');
@@ -171,9 +175,11 @@ const statusRenderer = ui.slice(statusRendererStart, statusRendererEnd);
 assert.match(statusRenderer, /data-action-id="system\.status" data-control-id="chat\.connection\.system-status-check"/, 'system status trigger carries stable registry and control IDs');
 assert.match(statusRenderer, /data-action-id="system\.models" data-control-id="chat\.connection\.system-models-check"/, 'system models trigger carries stable registry and control IDs');
 assert.match(statusRenderer, /data-action-id="system\.runs" data-control-id="chat\.connection\.system-runs-check"/, 'system runs trigger carries stable registry and control IDs');
+assert.match(statusRenderer, /data-action-id="planner\.today" data-control-id="chat\.connection\.planner-today-check"/, 'Daily Planner trigger carries stable registry and control IDs');
 assert.match(statusRenderer, /statusPreview\.sqlite\?\.ready/, 'status receipt is rendered from the neutral action result');
 assert.match(statusRenderer, /modelsPreview\.models\.map/, 'bounded model summaries are rendered from the neutral action result');
 assert.match(statusRenderer, /runsPreview\.runs\.map/, 'bounded run summaries are rendered from the neutral action result');
+assert.match(statusRenderer, /plannerPreview\.visible\.map/, 'bounded Daily Planner task titles are rendered from the neutral action result');
 assert.doesNotMatch(statusRenderer, /dangerouslySetInnerHTML/, 'system status receipt renders only as React text');
 const historyFunctionStart = ui.indexOf('async function searchChatHistory(');
 const historyOpenStart = ui.indexOf('function openHistoryResult(', historyFunctionStart);

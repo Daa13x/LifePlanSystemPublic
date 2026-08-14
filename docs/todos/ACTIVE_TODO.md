@@ -28,11 +28,15 @@ identity, privacy, confirmation, recovery, or user authority.
   summaries, and recent-run summaries through the same neutral registry used by
   other actions. These checks are read-only, emit concise correlated audits,
   render as plain text, and preserve the full System page as a separate view.
-- All ten currently registered capabilities are now exposed through the neutral
+- All eleven currently registered capabilities are now exposed through the neutral
   action catalog. `conversation.search` is a real-session-bound, explicit human
   UI search: generic local/cloud callers do not receive its sensitive-history
   scope, deleted chats and SQL-wildcard expansion are excluded, and only bounded
   titles/snippets plus content-free correlated audit receipts leave the owner.
+- `planner.today` reuses the canonical capacity-planner owner to provide an
+  explicit human-only, session-bound view of today's mode, bounded task titles,
+  next steps, deadlines, blockers, pins, and transparent ordering reasons. It
+  does not change capacity, tasks, context, confirmations, or Workboard state.
 
 ## Done
 
@@ -59,12 +63,13 @@ identity, privacy, confirmation, recovery, or user authority.
 
 ## Next authorised action-registry slice
 
-- Inspect the existing renderer/navigation ownership and determine whether a
-  trustworthy correlation-bound command/acknowledgement bridge can be added
-  without falsely reporting navigation before the renderer applies it.
-- If that prerequisite is sound, migrate one bounded navigation family with
-  exact UI/action equivalence and truthful applied/failed receipts. If it is not
-  sound, document the concrete blocker instead of labelling navigation complete.
+- Navigation remains prerequisite-blocked: routing is renderer-local and the
+  only native message channel is renderer-to-host. A trustworthy action needs an
+  authenticated server-to-specific-renderer command stream, correlation binding,
+  and applied/failed acknowledgement before it can report success.
+- Design and verify that bridge as its own safety slice before registering any
+  `navigation.*` action. Do not substitute a server-returned route suggestion for
+  evidence that the renderer actually navigated.
 - Keep the catalog incremental. Do not expose destructive, repository, external
   send, approval-decision, or other mutations until their confirmation,
   stale-state, rollback, replay, and UI contracts are complete.
