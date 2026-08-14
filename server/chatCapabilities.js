@@ -81,8 +81,8 @@ const ACTION_METADATA = Object.freeze({
   },
   'workboard.propose_create': {
     label: 'Preview new Workboard item', feature: 'Chat task proposal', permission: 'workboard.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
-    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Produces a review-only proposal; no Workboard data is changed.'],
-    sourceControls: ['chat.workboard-proposal.preview'], testId: 'action.workboard.propose_create',
+    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Persists a time-limited review proposal; no Workboard item is changed until the user confirms it.'],
+    sourceControls: ['chat.workboard-proposal.open', 'chat.workboard-proposal.preview', 'chat.workboard-proposal.confirm'], testId: 'action.workboard.propose_create',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
   'workboard.propose_update': {
@@ -117,7 +117,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'workboard.list']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'workboard.list', 'workboard.propose_create']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -236,7 +236,7 @@ export function createCapabilityRegistry(deps) {
           proposal: true,
           operation: 'workboard.create',
           affects: 'new Workboard item',
-          preview: { type: args.type, title: args.title, body: truncate(args.body, 400), next_action: args.next_action },
+          preview: { type: args.type, title: args.title, body: args.body, next_action: args.next_action },
           confirmation_required: true
         };
       }

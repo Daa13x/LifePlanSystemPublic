@@ -6,7 +6,9 @@
 // is bound to the mutation session that created it, and rejects a stale proposal
 // whose target drifted. The proposal step NEVER mutates anything; only
 // confirmAndApply() does, and only after re-reading state and winning an atomic
-// status transition.
+// status transition. Same-database consumers may request a transactional apply,
+// which commits their synchronous mutation and the final applied receipt in one
+// SQLite transaction so neither can exist without the other.
 //
 // Hardening:
 //   * The raw token is returned exactly once at creation; only its SHA-256 hash
@@ -322,7 +324,7 @@ function reject(code, error) {
 // presented with the wrong token, or (for revalidating consumers) stale. The
 // awaiting->applying transition is atomic, so concurrent/duplicated confirms
 // apply at most once. On apply failure the confirmation becomes `failed`.
-export async function confirmAndApply(db, { id, token, sessionId }, applyFn, { now = Date.now(), revalidate = null } = {}) {
+export async function confirmAndApply(db, { id, token, sessionId }, applyFn, { now = Date.now(), revalidate = null, transactionalApply = false } = {}) {
   const current = readRow(db, id);
   if (!current) return reject('not_found', 'Confirmation not found.');
 
@@ -375,6 +377,35 @@ export async function confirmAndApply(db, { id, token, sessionId }, applyFn, { n
     ]
   });
   if (!claimed) return reject('already_claimed', 'This confirmation is already being applied.');
+
+  if (transactionalApply) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const applying = readRow(db, id);
+      if (!applying || applying.status !== CONFIRMATION_STATUS.APPLYING) throw new Error('The confirmation apply claim was lost.');
+      const result = typeof applyFn === 'function' ? applyFn(toPublic(applying)) : null;
+      if (result && typeof result.then === 'function') throw new Error('A transactional confirmation apply callback must be synchronous.');
+      const appliedAt = iso(now);
+      const changed = db.prepare('UPDATE confirmations SET status = ?, applied_at = ? WHERE id = ? AND status = ?')
+        .run(CONFIRMATION_STATUS.APPLIED, appliedAt, id, CONFIRMATION_STATUS.APPLYING);
+      if (changed.changes !== 1) throw new Error('The confirmation could not be settled as applied.');
+      db.prepare('INSERT INTO confirmation_events (confirmation_id, event, at, detail) VALUES (?, ?, ?, ?)')
+        .run(id, 'applied', appliedAt, null);
+      if (applying.idempotency_key) {
+        db.prepare('INSERT OR IGNORE INTO idempotency_receipts (key, confirmation_id, at, detail) VALUES (?, ?, ?, ?)')
+          .run(applying.idempotency_key, id, appliedAt, 'applied');
+      }
+      const confirmation = toPublic(readRow(db, id));
+      db.exec('COMMIT');
+      return { ok: true, confirmation, result };
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch { /* no active transaction */ }
+      transition(db, id, CONFIRMATION_STATUS.APPLYING, CONFIRMATION_STATUS.FAILED, {
+        events: [{ event: 'failed', at: iso(now), detail: String(error?.message || error) }]
+      });
+      return reject('apply_failed', String(error?.message || error));
+    }
+  }
 
   try {
     const result = typeof applyFn === 'function' ? await applyFn(toPublic(current)) : null;

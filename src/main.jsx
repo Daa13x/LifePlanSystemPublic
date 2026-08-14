@@ -1637,6 +1637,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [contextRecords, setContextRecords] = useState([]);
   const [picker, setPicker] = useState(null);
   const [proposal, setProposal] = useState(null);
+  const [proposalBusy, setProposalBusy] = useState(false);
   const [proposeOpen, setProposeOpen] = useState(false);
   const [proposeForm, setProposeForm] = useState({ type: 'note', title: '', next_action: '' });
   const [cloudChecks, setCloudChecks] = useState([]);
@@ -1731,10 +1732,6 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     return result;
   }
 
-  async function invokeLegacyCapability(name, args) {
-    return api('/api/chat/capability', { method: 'POST', body: JSON.stringify({ name, args, session_id: selectedSession }) });
-  }
-
   async function runPickerSearch(next = {}) {
     const p = { ...picker, ...next };
     setPicker({ ...p, loading: true });
@@ -1775,23 +1772,31 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   async function submitProposeCreate() {
-    if (!proposeForm.title.trim()) return;
+    if (!proposeForm.title.trim() || proposalBusy) return;
+    setProposalBusy(true);
     try {
-      const r = await invokeLegacyCapability('workboard.propose_create', { type: proposeForm.type, title: proposeForm.title, next_action: proposeForm.next_action });
-      setProposal(r.data);
+      const r = await invokeAction('workboard.propose_create', { type: proposeForm.type, title: proposeForm.title, next_action: proposeForm.next_action });
+      if (!r.confirmation?.confirmationId || !r.confirmation?.token) throw new Error('The Workboard proposal was not bound to a confirmation.');
+      setProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
       setProposeOpen(false);
       setProposeForm({ type: 'note', title: '', next_action: '' });
     } catch (err) { setNotice(err.message); }
+    finally { setProposalBusy(false); }
   }
 
   async function confirmProposal() {
-    if (!proposal) return;
+    if (!proposal || proposalBusy) return;
+    const confirmationId = proposal.confirmation?.confirmationId;
+    const token = proposal.confirmation?.token;
+    if (!confirmationId || !token) return setNotice('This proposal has no valid confirmation receipt. Preview it again.');
+    setProposalBusy(true);
     try {
-      const result = await api(`/api/chat/sessions/${selectedSession}/workboard/confirm`, { method: 'POST', body: JSON.stringify({ proposal }) });
+      const result = await api(`/api/chat/sessions/${selectedSession}/workboard/confirm`, { method: 'POST', body: JSON.stringify({ confirmationId, token }) });
       setNotice(`Workboard ${result.operation === 'workboard.create' ? 'item created' : 'item updated'}: ${result.record?.title || ''}.`);
       setProposal(null);
       refreshAll();
     } catch (err) { setNotice(err.message); }
+    finally { setProposalBusy(false); }
   }
 
   async function sendViaJson(outgoing, optimisticId) {
@@ -2089,7 +2094,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
-            <button onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
+            <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.open" onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
             <div className="inline-form compact">
               <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
                 <option value="">Attach repo file…</option>
@@ -2134,12 +2139,12 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               </div>
               <input value={proposeForm.next_action} onChange={(e) => setProposeForm((f) => ({ ...f, next_action: e.target.value }))} placeholder="Next action (optional)" />
               <div className="quick-add-row">
-                <button className="primary" onClick={submitProposeCreate} disabled={!proposeForm.title.trim()}>Preview proposal</button>
-                <button onClick={() => setProposeOpen(false)}>Cancel</button>
+                <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.preview" className="primary" onClick={submitProposeCreate} disabled={proposalBusy || !proposeForm.title.trim()}>{proposalBusy ? 'Preparing…' : 'Preview proposal'}</button>
+                <button onClick={() => setProposeOpen(false)} disabled={proposalBusy}>Cancel</button>
               </div>
             </div>
           )}
-          {proposal && <ProposalCard proposal={proposal} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
+          {proposal && <ProposalCard proposal={proposal} busy={proposalBusy} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
@@ -2240,7 +2245,7 @@ function ChatConnectionBar({ connection, runtime, generating, navigate }) {
   );
 }
 
-function ProposalCard({ proposal, onConfirm, onCancel }) {
+function ProposalCard({ proposal, busy, onConfirm, onCancel }) {
   const isUpdate = proposal.operation === 'workboard.update';
   return (
     <div className="proposal-card">
@@ -2255,15 +2260,16 @@ function ProposalCard({ proposal, onConfirm, onCancel }) {
             <>
               <div><span>type</span><strong>{proposal.preview?.type}</strong></div>
               <div><span>title</span><strong>{proposal.preview?.title}</strong></div>
+              {proposal.preview?.body ? <div><span>details</span><strong>{proposal.preview.body}</strong></div> : null}
               {proposal.preview?.next_action ? <div><span>next action</span><strong>{proposal.preview.next_action}</strong></div> : null}
             </>
           )}
       </div>
       <div className="decision-row">
-        <button className="primary" onClick={onConfirm}><Check size={15} /> Confirm and apply</button>
-        <button onClick={onCancel}><X size={15} /> Cancel</button>
+        <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Confirm and apply'}</button>
+        <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
       </div>
-      <small>This is the only way Chat changes the Workboard. Nothing is written to the database until you confirm.</small>
+      <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. Nothing is written to the Workboard until you confirm.</small>
     </div>
   );
 }

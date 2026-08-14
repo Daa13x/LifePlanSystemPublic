@@ -202,4 +202,30 @@ chat. Any remaining idea is either already covered by LPS code/tests, explicitly
 deferred with a missing dependency, or rejected by the reference-material and
 human-authority boundaries.
 
+## 2026-08-14 expanded continuity-blueprint review
+
+The maintainer then supplied `serenity-chat-2026-08-14 (1).pdf`. The expanded
+18-page external reference was inspected visually and text-extracted; its
+SHA-256 is
+`620527B712C0820AED608D63ADB4390C13BF24D8A4A328A65C24CD0312D4254B`.
+Its first six pages materially repeat the earlier continuity note. Pages 7–18
+add source-contained housekeeping instructions, a false auto-task receipt, and
+a broad research, ingestion, task-state, and orchestration blueprint. The file
+remains external audit provenance only: it is not copied into the repository,
+ingested as personal memory, or treated as runtime authority.
+
+The delta produced three bounded LPS-owned decisions:
+
+| Expanded-reference theme | LPS decision and evidence |
+| --- | --- |
+| Canonical tool/action payloads, closed truthful outcomes, immutable confirmation state, and evidence-backed receipts. | **Accepted only where an existing LPS lane owns the behavior.** The action registry rejects ambiguous fields and invalid results. The Chat Workboard-create slice now persists validated action arguments in the existing durable confirmation store, binds them to the real chat/action/correlation, accepts only the one-time identifier and token at apply, commits the same-database item mutation and final receipt atomically, and rejects substitution, expiry, tampering, replay, and concurrent duplicate application. The model and browser never receive direct SQLite authority. |
+| Imported instructions must remain source data. | **Already enforced as a boundary and retained here.** The housekeeping command and the reply claiming that an auto-task was queued are evidence about the external transcript, not LPS commands or proof of execution. They create no task, hook, file, memory, or authority in LPS. |
+| A planner-wide durable task envelope; Candidate → Captured → Accepted → Synthesized → Promoted research states; requested-count, source-diversity, topicality, and per-source-completeness gates; unified URL/document/paste ingestion; and multi-dimensional confidence. | **Deferred to the answerability/research lane.** LPS has useful lane-specific pieces, but it does not implement this blueprint end to end. This action-registry work neither claims nor simulates those missing systems. |
+| External personas, prompt text, exact schemas/phases/test matrices, C# housekeeping instructions, Bibles/doctrine, or automatic task/memory/source promotion. | **Rejected.** None is imported, and reference text cannot grant action scopes, mutation authority, source-of-truth status, or Git authority. |
+
+This review preserves the reference lock: transferable engineering ideas become
+LPS policy only through an LPS-owned implementation and focused tests. Fluent
+external prose, embedded commands, and claimed activity remain untrusted until
+the local system records matching direct evidence.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

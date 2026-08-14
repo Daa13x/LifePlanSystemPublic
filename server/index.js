@@ -2985,6 +2985,75 @@ function writeChatAudit(sessionId, capability, outcome, detail, correlationId = 
   } catch { /* audit is best-effort and must never break a request */ }
 }
 
+const CHAT_WORKBOARD_CREATE_ACTION = 'workboard.propose_create';
+const CHAT_WORKBOARD_CREATE_OPERATION = 'workboard.create';
+
+function realChatSessionId(value) {
+  const sessionId = Number(value);
+  if (!Number.isInteger(sessionId) || sessionId <= 0) return null;
+  return db.prepare('SELECT 1 FROM chat_sessions WHERE id = ? AND deleted = 0').get(sessionId) ? sessionId : null;
+}
+
+function chatConfirmationSessionId(sessionId) {
+  return `chat:${sessionId}`;
+}
+
+function canonicalWorkboardCreateState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The stored Workboard proposal is invalid.');
+  const allowed = new Set(['type', 'title', 'body', 'next_action']);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error('The stored Workboard proposal contains unsupported fields.');
+  const type = String(value.type || '');
+  const title = String(value.title || '').trim();
+  const body = String(value.body || '').trim();
+  const nextAction = String(value.next_action || '').trim();
+  if (!ITEM_TYPES.includes(type)) throw new Error('The stored Workboard proposal has an invalid type.');
+  if (!title || title.length > 160) throw new Error('The stored Workboard proposal has an invalid title.');
+  if (body.length > 2000 || nextAction.length > 400) throw new Error('The stored Workboard proposal exceeds its allowed bounds.');
+  return { type, title, body, next_action: nextAction };
+}
+
+function workboardCreateOrigin(correlationId) {
+  return JSON.stringify({ source: 'chat-action-gateway', actionId: CHAT_WORKBOARD_CREATE_ACTION, correlationId });
+}
+
+function readWorkboardCreateOrigin(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    if (parsed?.source !== 'chat-action-gateway' || parsed?.actionId !== CHAT_WORKBOARD_CREATE_ACTION || typeof parsed?.correlationId !== 'string' || !parsed.correlationId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bindWorkboardCreateConfirmation(sessionValue, result) {
+  if (result?.actionId !== CHAT_WORKBOARD_CREATE_ACTION || result.status !== 'needs_confirmation') return result;
+  const sessionId = realChatSessionId(sessionValue);
+  if (!sessionId) {
+    const error = new Error('A valid active chat session is required to stage a Workboard proposal.');
+    error.code = 'INVALID_CHAT_SESSION';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const afterState = canonicalWorkboardCreateState(result.args);
+  const target = `${chatConfirmationSessionId(sessionId)}:workboard:new`;
+  const confirmation = proposeConfirmation(db, {
+    operation: CHAT_WORKBOARD_CREATE_OPERATION,
+    target,
+    afterState,
+    reason: 'User-reviewed Chat Workboard create proposal.',
+    origin: workboardCreateOrigin(result.correlationId),
+    sessionId: chatConfirmationSessionId(sessionId),
+    requiresRevalidation: false,
+    idempotencyKey: `chat-workboard-create:${result.correlationId}`
+  });
+  return {
+    ...result,
+    confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt }
+  };
+}
+
 function likeParam(query) {
   return `%${String(query).replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
 }
@@ -3136,8 +3205,8 @@ app.get('/api/chat/capabilities', (_req, res) => ok(res, capabilityRegistry.list
 
 // Neutral/manual action gateway. The caller identity and scopes are assigned by
 // trusted server code; request bodies cannot claim to be a local/cloud agent or
-// add permissions. This first slice exposes only the two read-only Context
-// Picker actions. Existing proposal/confirmation routes remain outside it.
+// add permissions. The bounded catalog exposes the Context Picker reads and the
+// Workboard-create preview; the latter is bound here to a durable confirmation.
 app.get('/api/actions', (_req, res) => ok(res, capabilityRegistry.listActions()));
 
 app.get('/api/actions/:id', async (req, res) => {
@@ -3148,17 +3217,30 @@ app.get('/api/actions/:id', async (req, res) => {
 
 app.post('/api/actions/:id/invoke', async (req, res) => {
   const sessionId = Number(req.body?.session_id) || null;
+  let result = null;
   try {
-    const result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui' });
+    result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui' });
+    result = bindWorkboardCreateConfirmation(sessionId, result);
+    const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
       sessionId,
       result.actionId || req.params.id || 'unknown',
-      result.status,
-      result.error?.code || (result.status === 'success' ? 'completed' : 'proposal'),
+      confirmationCreated ? 'proposed' : result.status,
+      confirmationCreated ? 'confirmation_created' : result.error?.code || (result.status === 'success' ? 'completed' : 'proposal'),
       result.correlationId
     );
     ok(res, result);
-  } catch {
+  } catch (error) {
+    if (error?.code === 'INVALID_CHAT_SESSION' && result) {
+      const blocked = {
+        status: 'blocked',
+        actionId: result.actionId || req.params.id,
+        correlationId: result.correlationId,
+        error: { code: error.code, message: error.message }
+      };
+      writeChatAudit(sessionId, blocked.actionId, blocked.status, blocked.error.code, blocked.correlationId);
+      return ok(res, blocked);
+    }
     fail(res, 500, 'Action gateway failed safely.');
   }
 });
@@ -3167,8 +3249,9 @@ app.post('/api/chat/capability', async (req, res) => {
   const name = String(req.body?.name || '');
   const sessionId = Number(req.body?.session_id) || null;
   try {
-    const result = await capabilityRegistry.invoke(name, req.body?.args || {});
-    writeChatAudit(sessionId, name, result.status, result.readOnly ? 'read' : 'proposal', result.correlationId);
+    let result = await capabilityRegistry.invoke(name, req.body?.args || {});
+    result = bindWorkboardCreateConfirmation(sessionId, result);
+    writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
     writeChatAudit(sessionId, name || 'unknown', error.actionStatus || 'failed', error.code || 'ACTION_FAILED', error.correlationId);
@@ -3199,50 +3282,55 @@ app.delete('/api/chat/sessions/:id/context-records/:recordId', (req, res) => {
   ok(res, allRows('SELECT * FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
 });
 
-// Execute a Workboard write that the user has explicitly confirmed in the UI.
-// The proposal is re-validated here (enums, allowed fields, required title) and
-// written only through the authoritative knowledge_items store — the model
-// never writes to SQLite or constructs SQL.
-app.post('/api/chat/sessions/:id/workboard/confirm', (req, res) => {
+// Apply only the immutable Workboard-create payload stored by the action
+// gateway. The client supplies the one-time confirmation identifier and token,
+// never a replacement proposal. workboard.propose_update remains unexposed
+// until it has its own stale-state binding.
+app.post('/api/chat/sessions/:id/workboard/confirm', async (req, res) => {
   const sessionId = Number(req.params.id);
-  const proposal = req.body?.proposal || {};
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const keys = Object.keys(body).sort();
   try {
-    if (proposal.operation === 'workboard.create') {
-      const p = proposal.preview || {};
-      const title = String(p.title || '').trim();
-      if (!title) throw new Error('A title is required to create a Workboard item.');
-      const type = ITEM_TYPES.includes(p.type) ? p.type : 'note';
-      const status = type === 'blocker' ? 'blocked' : 'active';
-      const id = db.prepare(`INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, owner, next_action)
-        VALUES (?, ?, ?, 'chat', ?, ?, date('now'), 'user', ?)`)
-        .run(type, title, String(p.body || title), status, 0.9, p.next_action ? String(p.next_action) : null).lastInsertRowid;
-      writeChatAudit(sessionId, 'workboard.create', 'confirmed', `item ${id}: ${title}`);
-      return ok(res, { operation: 'workboard.create', success: true, record: row('SELECT * FROM knowledge_items WHERE id = ?', [id]) });
+    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
+      writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
+      return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
     }
-    if (proposal.operation === 'workboard.update') {
-      const id = Number(proposal.target_id);
-      const existing = row('SELECT * FROM knowledge_items WHERE id = ?', [id]);
-      if (!existing) throw new Error('The item to update no longer exists.');
-      const allowed = ['status', 'title', 'body', 'next_action', 'confidence', 'due_at', 'reviewed'];
-      const fields = {};
-      for (const [k, v] of Object.entries(proposal.after || {})) {
-        if (!allowed.includes(k)) throw new Error(`Field "${k}" cannot be changed from Chat.`);
-        if (k === 'reviewed') { if (v) fields.last_reviewed = new Date().toISOString().slice(0, 10); continue; }
-        if (k === 'status' && !ITEM_STATUSES.includes(String(v))) throw new Error(`Invalid status "${v}".`);
-        if (k === 'confidence') { fields.confidence = Number(v); continue; }
-        fields[k] = k === 'title' || k === 'body' || k === 'next_action' ? (v === null ? null : String(v)) : v;
-      }
-      if (!Object.keys(fields).length) throw new Error('No permitted changes to apply.');
-      fields.updated_at = new Date().toISOString();
-      const sets = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
-      db.prepare(`UPDATE knowledge_items SET ${sets} WHERE id = ?`).run(...Object.values(fields), id);
-      writeChatAudit(sessionId, 'workboard.update', 'confirmed', `item ${id}`);
-      return ok(res, { operation: 'workboard.update', success: true, record: row('SELECT * FROM knowledge_items WHERE id = ?', [id]) });
+    const confirmationId = String(body.confirmationId || '');
+    const token = String(body.token || '');
+    if (!/^[a-f0-9]{32}$/.test(confirmationId) || !/^[a-f0-9]{64}$/.test(token)) return fail(res, 400, 'A valid confirmation identifier and token are required.');
+    const staged = getConfirmation(db, confirmationId);
+    if (!staged || staged.operation !== CHAT_WORKBOARD_CREATE_OPERATION || staged.target !== `${chatConfirmationSessionId(sessionId)}:workboard:new`) {
+      writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'blocked', 'INVALID_CONFIRMATION');
+      return fail(res, 400, 'That Workboard confirmation is not available.');
     }
-    throw new Error('Unsupported or missing proposal operation.');
-  } catch (error) {
-    writeChatAudit(sessionId, proposal.operation || 'workboard.confirm', 'error', error.message);
-    fail(res, 400, error.message);
+    const origin = readWorkboardCreateOrigin(staged.origin);
+    if (!origin) {
+      writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'blocked', 'INVALID_CONFIRMATION_ORIGIN');
+      return fail(res, 400, 'That Workboard confirmation is not available.');
+    }
+    const applied = await confirmAndApply(
+      db,
+      { id: confirmationId, token, sessionId: chatConfirmationSessionId(sessionId) },
+      (claimed) => {
+        const p = canonicalWorkboardCreateState(claimed.afterState);
+        const status = p.type === 'blocker' ? 'blocked' : 'active';
+        const id = db.prepare(`INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, owner, next_action)
+          VALUES (?, ?, ?, 'chat', ?, ?, date('now'), 'user', ?)`)
+          .run(p.type, p.title, p.body || p.title, status, 0.9, p.next_action || null).lastInsertRowid;
+        return { operation: CHAT_WORKBOARD_CREATE_OPERATION, success: true, record: row('SELECT * FROM knowledge_items WHERE id = ?', [id]) };
+      },
+      { transactionalApply: true }
+    );
+    if (!applied.ok) {
+      writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'blocked', `CONFIRMATION_${String(applied.code || 'REJECTED').toUpperCase()}`);
+      return fail(res, 400, applied.error || 'The Workboard confirmation was rejected.');
+    }
+    writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'applied', `item ${applied.result?.record?.id || 'created'}`, origin.correlationId);
+    return ok(res, applied.result);
+  } catch {
+    writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'error', 'CONFIRMATION_FAILED');
+    fail(res, 400, 'Workboard confirmation failed safely.');
   }
 });
 

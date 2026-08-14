@@ -6,10 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-// HTTP acceptance for the first neutral action-gateway slice. It uses a
+// HTTP acceptance for the bounded neutral action-gateway slices. It uses a
 // disposable database with the OLD chat_audit schema so correlation-column
-// migration, CSRF, manifest inspection, structured outcomes, neutral-slice
-// boundaries, compatibility, and audit linkage are all exercised without user data.
+// migration, CSRF, manifest inspection, structured outcomes, durable Workboard
+// confirmation, compatibility, and audit linkage are exercised without user data.
 
 const appRoot = path.resolve(import.meta.dirname, '..');
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-action-registry-'));
@@ -97,7 +97,7 @@ async function api(route, { method = 'GET', json, includeCsrf = true } = {}) {
 }
 
 console.log('--- action registry HTTP verification ---');
-const server = await retryStart();
+let server = await retryStart();
 base = server.base;
 let sessionId = 0;
 let phantomCorrelationId = '';
@@ -109,15 +109,18 @@ try {
 
   const catalog = await api('/api/actions');
   const knowledge = catalog.body?.data?.find((action) => action.id === 'knowledge.search');
+  const createProposal = catalog.body?.data?.find((action) => action.id === 'workboard.propose_create');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 2 && !catalog.body.data.some((action) => action.id.startsWith('workboard.propose_')), 'neutral catalog is limited to the two read-only Context Picker actions');
+  line(catalog.body?.data?.length === 3 && Boolean(createProposal) && !catalog.body.data.some((action) => action.id === 'workboard.propose_update'), 'neutral catalog adds only the durable Workboard-create proposal');
   line(knowledge?.permission === 'knowledge.read' && knowledge?.risk === 'READ_ONLY' && knowledge?.confirmation === 'none', 'catalog exposes permission, risk, and confirmation metadata');
+  line(createProposal?.permission === 'workboard.propose' && createProposal?.risk === 'REVERSIBLE_WRITE' && createProposal?.confirmation === 'user_confirmation', 'Workboard create advertises its write risk and user-confirmation requirement');
   line(!('handler' in (knowledge || {})) && !('check' in (knowledge?.availability || {})), 'catalog never exposes executable handler/check functions');
 
   const inspect = await api('/api/actions/knowledge.search');
   line(inspect.status === 200 && inspect.body?.data?.availability?.available === true && inspect.body?.data?.permitted === true, 'action inspection reports live availability and permission');
   line((await api('/api/actions/missing.action')).status === 404, 'unknown action inspection returns 404');
-  line((await api('/api/actions/workboard.propose_create')).status === 404, 'legacy proposal capabilities are not advertised as neutral actions');
+  line((await api('/api/actions/workboard.propose_create')).status === 200, 'durably bound Workboard create is inspectable');
+  line((await api('/api/actions/workboard.propose_update')).status === 404, 'unbound Workboard update remains masked');
 
   const withoutCsrf = await api('/api/actions/knowledge.search/invoke', { method: 'POST', json: { args: { query: 'fixture' } }, includeCsrf: false });
   line(withoutCsrf.status === 403, 'action invocation without CSRF is rejected');
@@ -144,18 +147,154 @@ try {
   line(injection.status === 200 && injection.body?.data?.status === 'blocked' && injection.body?.data?.error?.code === 'UNKNOWN_ACTION', 'injection-shaped action IDs stay unknown despite body-supplied scopes');
 
   const beforeItems = await api('/api/items?all=1');
+  const phantomProposal = await api('/api/actions/workboard.propose_create/invoke', {
+    method: 'POST',
+    json: { session_id: 987654321, args: { title: 'No session proposal', type: 'note' } }
+  });
   const neutralProposal = await api('/api/actions/workboard.propose_create/invoke', {
     method: 'POST',
-    json: { session_id: sessionId, caller: 'cloud-agent', scopes: ['*'], args: { title: 'Proposal only', type: 'note' } }
+    json: { session_id: sessionId, caller: 'cloud-agent', scopes: ['*'], args: { title: 'Durable proposal fixture', type: 'note', body: 'Immutable body fixture', next_action: 'Review the receipt' } }
   });
   const legacyProposal = await api('/api/chat/capability', {
     method: 'POST',
-    json: { session_id: sessionId, name: 'workboard.propose_create', args: { title: 'Proposal only', type: 'note' } }
+    json: { session_id: sessionId, name: 'workboard.propose_create', args: { title: 'Legacy bound proposal', type: 'note' } }
   });
   const afterItems = await api('/api/items?all=1');
-  line(neutralProposal.body?.data?.status === 'blocked' && neutralProposal.body?.data?.error?.code === 'UNKNOWN_ACTION', 'neutral gateway masks proposal capabilities and never executes them');
-  line(legacyProposal.body?.data?.status === 'needs_confirmation' && legacyProposal.body?.data?.data?.confirmation_required === true, 'legacy proposal compatibility returns a review-only proposal');
-  line(beforeItems.body?.data?.length === afterItems.body?.data?.length, 'legacy proposal compatibility performs no Workboard write');
+  const durable = neutralProposal.body?.data;
+  line(phantomProposal.body?.data?.status === 'blocked' && phantomProposal.body?.data?.error?.code === 'INVALID_CHAT_SESSION' && !phantomProposal.body?.data?.confirmation, 'a proposal without a real chat session cannot create a confirmation');
+  line(durable?.status === 'needs_confirmation' && durable?.data?.confirmation_required === true && durable?.confirmation?.confirmationId && durable?.confirmation?.token && durable?.confirmation?.expiresAt, 'trusted UI proposal returns a time-limited durable confirmation envelope');
+  line(durable?.data?.preview?.body === 'Immutable body fixture', 'proposal preview preserves the validated immutable body');
+  line(legacyProposal.body?.data?.status === 'needs_confirmation' && legacyProposal.body?.data?.confirmation?.confirmationId, 'legacy proposal compatibility is also durably bound');
+  line(beforeItems.body?.data?.length === afterItems.body?.data?.length, 'proposal creation performs no Workboard write');
+
+  const confirmationId = durable?.confirmation?.confirmationId;
+  const confirmationToken = durable?.confirmation?.token;
+  const storedDb = new DatabaseSync(dbPath, { readOnly: true });
+  const stored = storedDb.prepare('SELECT token_hash, session_id, operation, target, after_state, origin FROM confirmations WHERE id = ?').get(confirmationId);
+  storedDb.close();
+  line(Boolean(stored) && stored.token_hash !== confirmationToken && !JSON.stringify(stored).includes(confirmationToken), 'the raw confirmation token is never stored in SQLite');
+  line(stored?.session_id === `chat:${sessionId}` && stored?.operation === 'workboard.create' && stored?.target === `chat:${sessionId}:workboard:new`, 'the confirmation is bound to the real chat, action, and target');
+  line(JSON.parse(stored?.after_state || '{}').body === 'Immutable body fixture', 'the stored payload is the validated action arguments');
+  line(!String(stored?.origin || '').includes('Durable proposal fixture') && JSON.parse(stored?.origin || '{}').correlationId === durable?.correlationId, 'origin stores correlation provenance without proposal content');
+
+  const rawConfirm = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { proposal: durable?.data }
+  });
+  line(rawConfirm.status === 400, 'a fabricated raw proposal is rejected before mutation');
+
+  const wrongToken = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId, token: '0'.repeat(64) }
+  });
+  line(wrongToken.status === 400, 'the wrong confirmation token is rejected');
+
+  const otherSession = await api('/api/chat/sessions', { method: 'POST', json: { title: 'Other action session' } });
+  const otherSessionId = Number(otherSession.body?.data?.id);
+  const wrongSession = await api(`/api/chat/sessions/${otherSessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId, token: confirmationToken }
+  });
+  line(wrongSession.status === 400, 'a different chat session cannot apply the confirmation');
+
+  const applyBefore = (await api('/api/items?all=1')).body?.data?.length;
+  const confirmed = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId, token: confirmationToken }
+  });
+  const applyAfter = (await api('/api/items?all=1')).body?.data?.length;
+  line(confirmed.status === 200 && confirmed.body?.data?.record?.title === 'Durable proposal fixture' && confirmed.body?.data?.record?.body === 'Immutable body fixture', 'confirmation applies only the immutable stored proposal');
+  line(applyAfter === applyBefore + 1, 'one successful confirmation creates exactly one Workboard item');
+  const replay = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId, token: confirmationToken }
+  });
+  line(replay.status === 400 && (await api('/api/items?all=1')).body?.data?.length === applyAfter, 'a replay is rejected without a second write');
+
+  const tamperProposal = await api('/api/actions/workboard.propose_create/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { title: 'Tamper target', type: 'note' } }
+  });
+  const tamperConfirmation = tamperProposal.body?.data?.confirmation;
+  const tamperDb = new DatabaseSync(dbPath);
+  tamperDb.prepare('UPDATE confirmations SET after_state = ? WHERE id = ?').run(JSON.stringify({ type: 'note', title: 'Changed after staging', body: '', next_action: '' }), tamperConfirmation.confirmationId);
+  tamperDb.close();
+  const tampered = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId: tamperConfirmation.confirmationId, token: tamperConfirmation.token }
+  });
+  line(tampered.status === 400, 'stored-payload tampering is rejected');
+
+  const expiryProposal = await api('/api/actions/workboard.propose_create/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { title: 'Expiry target', type: 'note' } }
+  });
+  const expiryConfirmation = expiryProposal.body?.data?.confirmation;
+  const expiryDb = new DatabaseSync(dbPath);
+  expiryDb.prepare('UPDATE confirmations SET expires_at = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', expiryConfirmation.confirmationId);
+  expiryDb.close();
+  const expired = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId: expiryConfirmation.confirmationId, token: expiryConfirmation.token }
+  });
+  line(expired.status === 400, 'an expired Workboard confirmation is rejected');
+
+  const settlementProposal = await api('/api/actions/workboard.propose_create/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { title: 'Atomic settlement target', type: 'note' } }
+  });
+  const settlementConfirmation = settlementProposal.body?.data?.confirmation;
+  const settlementBefore = (await api('/api/items?all=1')).body?.data?.length;
+  const settlementDb = new DatabaseSync(dbPath);
+  settlementDb.exec(`
+    CREATE TRIGGER reject_workboard_applied_settlement
+    BEFORE UPDATE OF status ON confirmations
+    WHEN NEW.status = 'applied'
+    BEGIN
+      SELECT RAISE(ABORT, 'settlement rejected');
+    END;
+  `);
+  settlementDb.close();
+  const settlementFailure = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId: settlementConfirmation.confirmationId, token: settlementConfirmation.token }
+  });
+  const settlementCleanup = new DatabaseSync(dbPath);
+  const settlementStatus = settlementCleanup.prepare('SELECT status FROM confirmations WHERE id = ?').get(settlementConfirmation.confirmationId)?.status;
+  settlementCleanup.exec('DROP TRIGGER reject_workboard_applied_settlement');
+  settlementCleanup.close();
+  const settlementAfter = (await api('/api/items?all=1')).body?.data?.length;
+  line(settlementFailure.status === 400 && settlementStatus === 'failed', 'a failed final receipt returns a truthful failed confirmation');
+  line(settlementAfter === settlementBefore, 'a failed final receipt rolls back the Workboard item insert');
+
+  const concurrentProposal = await api('/api/actions/workboard.propose_create/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { title: 'Concurrent target', type: 'note' } }
+  });
+  const concurrentConfirmation = concurrentProposal.body?.data?.confirmation;
+  const concurrentBefore = (await api('/api/items?all=1')).body?.data?.length;
+  const concurrentResults = await Promise.all([1, 2].map(() => api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId: concurrentConfirmation.confirmationId, token: concurrentConfirmation.token }
+  })));
+  const concurrentAfter = (await api('/api/items?all=1')).body?.data?.length;
+  line(concurrentResults.filter((result) => result.status === 200).length === 1 && concurrentResults.filter((result) => result.status === 400).length === 1, 'concurrent confirmation has exactly one winner');
+  line(concurrentAfter === concurrentBefore + 1, 'concurrent confirmation creates exactly one item');
+
+  const restartProposal = await api('/api/actions/workboard.propose_create/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { title: 'Restart persistence target', type: 'note' } }
+  });
+  const restartConfirmation = restartProposal.body?.data?.confirmation;
+  await stopServer(server.child);
+  server = await retryStart();
+  base = server.base;
+  csrf = (await (await fetch(`${base}/api/csrf-token`)).json()).data.token;
+  const afterRestart = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId: restartConfirmation.confirmationId, token: restartConfirmation.token }
+  });
+  line(afterRestart.status === 200 && afterRestart.body?.data?.record?.title === 'Restart persistence target', 'a durable confirmation survives a server restart');
 
   const legacyRoute = await api('/api/chat/capability', {
     method: 'POST',
@@ -167,6 +306,9 @@ try {
   const correlated = audit.body?.data?.find((row) => row.correlation_id === firstResult?.correlationId);
   line(Boolean(correlated) && correlated.capability === 'knowledge.search' && correlated.outcome === 'success', 'audit row links the action, outcome, and correlation ID');
   line(correlated?.detail === 'completed', 'audit detail is a concise receipt rather than the query body');
+  const proposalAudit = audit.body?.data?.filter((row) => row.correlation_id === durable?.correlationId) || [];
+  line(proposalAudit.some((row) => row.capability === 'workboard.propose_create' && row.outcome === 'proposed') && proposalAudit.some((row) => row.capability === 'workboard.create' && row.outcome === 'applied'), 'proposal and application audits share the action correlation ID');
+  line(proposalAudit.every((row) => !String(row.detail).includes('Durable proposal fixture') && !String(row.detail).includes('Immutable body fixture') && !String(row.detail).includes(confirmationToken)), 'correlated audit receipts contain no proposal body, title, or token');
 
   const phantom = await api('/api/actions/knowledge.search/invoke', {
     method: 'POST',

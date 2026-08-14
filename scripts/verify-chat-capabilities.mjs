@@ -75,11 +75,13 @@ await throwsAsync(() => reg.invoke('nope.capability', {}), /Unknown capability/,
 
 await checkAsync('workboard.propose_create returns a confirmation-required proposal and performs no write', async () => {
   calls.length = 0;
-  const r = await reg.invoke('workboard.propose_create', { title: 'Task', type: 'note' });
+  const body = 'x'.repeat(1000);
+  const r = await reg.invoke('workboard.propose_create', { title: 'Task', type: 'note', body });
   assert.equal(r.readOnly, false);
   assert.equal(r.data.proposal, true);
   assert.equal(r.data.confirmation_required, true);
   assert.equal(r.data.operation, 'workboard.create');
+  assert.equal(r.data.preview.body, body, 'the immutable write payload is not silently truncated');
   assert.deepEqual(calls, [], 'propose_create must call no dependency (no read/write side effects)');
 });
 await checkAsync('workboard.propose_update returns before/after and performs no write', async () => {

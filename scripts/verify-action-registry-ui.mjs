@@ -16,8 +16,11 @@ assert.match(ui, /\/api\/actions\/\$\{encodeURIComponent\(name\)\}\/invoke/, 'UI
 assert.match(ui, /\['success', 'needs_confirmation', 'needs_approval'\]\.includes\(result\.status\)/, 'UI handles structured non-success outcomes before reading action data');
 assert.match(ui, /result\.error\?\.message \|\| `Action \$\{name\} did not complete/, 'UI surfaces the registry error instead of an undefined-data failure');
 const neutralCalls = [...ui.matchAll(/invokeAction\('([^']+)'/g)].map((match) => match[1]);
-assert.deepEqual([...new Set(neutralCalls)].sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'only the bounded Context Picker read actions use the neutral gateway');
-assert.match(ui, /invokeLegacyCapability\('workboard\.propose_create'/, 'existing Workboard proposals remain on the legacy proposal/confirmation lane');
+assert.deepEqual([...new Set(neutralCalls)].sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'only the bounded Context Picker and Workboard-create actions use the neutral gateway');
+assert.match(ui, /invokeAction\('workboard\.propose_create'/, 'Workboard create preview uses the neutral action gateway');
+assert.doesNotMatch(ui, /invokeLegacyCapability\('workboard\.propose_create'/, 'Workboard create no longer uses the unbound legacy preview lane');
+assert.match(ui, /JSON\.stringify\(\{ confirmationId, token \}\)/, 'confirmation submits only the durable identifier and one-time token');
+assert.doesNotMatch(ui, /JSON\.stringify\(\{ proposal \}\)/, 'the UI never resubmits a mutable proposal');
 
 const searchControls = [...picker.matchAll(/<(?:input|select)\b[^>]*\bonChange=\{\(e\) => onSearch\([^>]+>/g)].map((match) => match[0]);
 assert.equal(searchControls.length, 3, 'the bounded Context Picker slice has three search controls');
@@ -34,23 +37,30 @@ assert.ok(toolbarTriggers.some((line) => line.includes('openPicker(\'workboard\'
 
 const registry = createCapabilityRegistry({});
 const manifest = Object.fromEntries(registry.listActions().map((action) => [action.id, action]));
-assert.deepEqual(Object.keys(manifest).sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'neutral catalog contains exactly the declared initial slice');
+assert.deepEqual(Object.keys(manifest).sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'neutral catalog contains exactly the declared bounded slice');
 for (const actionId of ['knowledge.search', 'workboard.list']) {
   assert.ok(manifest[actionId], `${actionId} is registered`);
   assert.ok(manifest[actionId].sourceControls.length > 0, `${actionId} declares its source controls`);
   assert.equal(manifest[actionId].risk, 'READ_ONLY', `${actionId} remains read-only`);
   assert.equal(manifest[actionId].confirmation, 'none', `${actionId} requires no write confirmation`);
 }
+assert.equal(manifest['workboard.propose_create'].risk, 'REVERSIBLE_WRITE', 'Workboard create remains a proposal write risk');
+assert.equal(manifest['workboard.propose_create'].confirmation, 'user_confirmation', 'Workboard create requires explicit user confirmation');
 for (const control of searchControls) {
   const actionId = control.match(/data-action-id="([^"]+)"/)[1];
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = ui.split(/\r?\n/).filter((line) => line.includes('data-action-id=') && line.includes('data-control-id='));
-assert.equal(mappedControls.length, 5, 'the bounded slice has exactly five mapped trigger/search controls');
+assert.equal(mappedControls.length, 8, 'the bounded slice has exactly eight mapped trigger/search/proposal controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
 }));
+assert.deepEqual(
+  controlMappings.filter((mapping) => mapping.actionId === 'workboard.propose_create').map((mapping) => mapping.controlId).sort(),
+  ['chat.workboard-proposal.confirm', 'chat.workboard-proposal.open', 'chat.workboard-proposal.preview'],
+  'the complete visible Workboard-create control family has stable identifiers'
+);
 for (const [actionId, action] of Object.entries(manifest)) {
   assert.deepEqual(
     action.sourceControls.slice().sort(),
@@ -63,5 +73,7 @@ assert.match(server, /app\.get\('\/api\/actions',[^\n]+capabilityRegistry\.listA
 assert.match(server, /app\.get\('\/api\/actions\/:id'/, 'server inspects one neutral action');
 assert.match(server, /app\.post\('\/api\/actions\/:id\/invoke'/, 'server invokes one neutral action');
 assert.match(server, /capabilityRegistry\.execute\(req\.params\.id, req\.body\?\.args, \{ caller: 'human-ui' \}\)/, 'HTTP route assigns its trusted caller instead of accepting body scopes');
+assert.match(server, /bindWorkboardCreateConfirmation\(sessionId, result\)/, 'the gateway binds Workboard create preview to the durable confirmation owner');
+assert.match(server, /keys\.length !== 2 \|\| keys\[0\] !== 'confirmationId' \|\| keys\[1\] !== 'token'/, 'the confirmation endpoint rejects replacement payload fields');
 
 console.log('Action registry UI mapping and neutral-gateway wiring verification passed.');

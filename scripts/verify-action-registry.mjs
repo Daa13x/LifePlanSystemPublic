@@ -269,17 +269,25 @@ await check('the visible-UI adapter and neutral gateway execute the same registe
 await check('caller policies are separate and body-like scope injection is ignored', async () => {
   const registry = createCapabilityRegistry({ searchKnowledge: () => [] });
   assert.ok(CAPABILITY_CALLER_SCOPES['human-ui'].includes('knowledge.read'));
-  assert.equal(CAPABILITY_CALLER_SCOPES['human-ui'].includes('workboard.propose'), false);
+  assert.ok(CAPABILITY_CALLER_SCOPES['human-ui'].includes('workboard.propose'));
   assert.ok(CAPABILITY_CALLER_SCOPES['legacy-human-ui'].includes('workboard.propose'));
   assert.ok(CAPABILITY_CALLER_SCOPES['local-agent'].includes('knowledge.read'));
   assert.equal(CAPABILITY_CALLER_SCOPES['local-agent'].includes('workboard.propose'), false);
   assert.deepEqual(CAPABILITY_CALLER_SCOPES['cloud-agent'], []);
   const omitted = await registry.execute('knowledge.search', { query: 'x' });
   const denied = await registry.execute('knowledge.search', { query: 'x' }, { caller: 'cloud-agent', scopes: ['knowledge.read', '*'] });
+  const humanProposal = await registry.execute('workboard.propose_create', { title: 'review me' }, { caller: 'human-ui' });
+  const localProposal = await registry.execute('workboard.propose_create', { title: 'do not run' }, { caller: 'local-agent' });
+  const cloudProposal = await registry.execute('workboard.propose_create', { title: 'do not run' }, { caller: 'cloud-agent', scopes: ['workboard.propose', '*'] });
   assert.equal(omitted.status, 'blocked');
   assert.equal(omitted.error.code, 'UNAUTHORIZED');
   assert.equal(denied.status, 'blocked');
   assert.equal(denied.error.code, 'UNAUTHORIZED');
+  assert.equal(humanProposal.status, 'needs_confirmation');
+  assert.equal(localProposal.status, 'blocked');
+  assert.equal(localProposal.error.code, 'UNAUTHORIZED');
+  assert.equal(cloudProposal.status, 'blocked');
+  assert.equal(cloudProposal.error.code, 'UNAUTHORIZED');
 });
 
 console.log(failures ? `\n${failures} action-registry check(s) FAILED` : '\nAll universal action-registry checks passed.');

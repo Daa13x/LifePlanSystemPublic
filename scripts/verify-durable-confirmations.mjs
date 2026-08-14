@@ -6,8 +6,8 @@
 // mutate; wrong token; wrong mutation session; altered stored payload (digest
 // mismatch); two simultaneous confirms applying exactly once; cancelled and
 // expired rejection; stale before-state rejection (and mandatory revalidation);
-// append-only event order; failure after application begins; restart while
-// `applying` (interrupted vs idempotency-receipt recovery); migration
+// append-only event order; failure after application begins; atomic same-DB
+// mutation+settlement; restart while `applying` (interrupted vs idempotency-receipt recovery); migration
 // idempotency; reversion; and survival across a simulated restart.
 //
 // Local-only: no network, no server. Exit 0 = pass.
@@ -138,6 +138,40 @@ try {
     line(JSON.stringify(events(db, f.id)) === JSON.stringify(['created', 'confirmed', 'applying', 'failed']), 'failure event follows applying in order');
     const retry = await confirmAndApply(db, { id: f.id, token: f.token, sessionId: SESSION }, () => 'ok', { now: T0 + 2 * MIN });
     line(!retry.ok && retry.code === 'bad_status', 'a failed confirmation is not silently retried');
+  }
+
+  // ---- same-database mutation + final receipt are one transaction ----
+  {
+    db.exec(`
+      CREATE TABLE transactional_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL);
+      CREATE TRIGGER reject_applied_settlement
+      BEFORE UPDATE OF status ON confirmations
+      WHEN NEW.status = 'applied'
+      BEGIN
+        SELECT RAISE(ABORT, 'settlement rejected');
+      END;
+    `);
+    const atomic = proposeConfirmation(db, { operation: 'same-db.write', sessionId: SESSION, requiresRevalidation: false, ttlMs: 10 * MIN, now: T0 });
+    const failed = await confirmAndApply(
+      db,
+      { id: atomic.id, token: atomic.token, sessionId: SESSION },
+      () => db.prepare('INSERT INTO transactional_targets (value) VALUES (?)').run('must roll back'),
+      { now: T0 + MIN, transactionalApply: true }
+    );
+    line(!failed.ok && failed.code === 'apply_failed', 'transactional settlement failure is reported');
+    line(db.prepare('SELECT COUNT(*) AS count FROM transactional_targets').get().count === 0, 'transactional settlement failure rolls back the target mutation');
+    line(getConfirmation(db, atomic.id).status === CONFIRMATION_STATUS.FAILED, 'rolled-back transactional apply settles as failed');
+    db.exec('DROP TRIGGER reject_applied_settlement');
+
+    const success = proposeConfirmation(db, { operation: 'same-db.write', sessionId: SESSION, requiresRevalidation: false, ttlMs: 10 * MIN, now: T0 });
+    const settledResult = await confirmAndApply(
+      db,
+      { id: success.id, token: success.token, sessionId: SESSION },
+      () => db.prepare('INSERT INTO transactional_targets (value) VALUES (?)').run('committed').lastInsertRowid,
+      { now: T0 + MIN, transactionalApply: true }
+    );
+    line(settledResult.ok && db.prepare('SELECT COUNT(*) AS count FROM transactional_targets').get().count === 1, 'transactional apply commits the target mutation and applied receipt together');
+    line(getConfirmation(db, success.id).status === CONFIRMATION_STATUS.APPLIED, 'successful transactional apply has an applied receipt');
   }
 
   // ---- two simultaneous confirms => exactly one application ----
