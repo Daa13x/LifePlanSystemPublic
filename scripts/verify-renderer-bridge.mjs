@@ -314,5 +314,16 @@ await check('a superseded renderer cannot attach a command stream', () => {
   assert.equal(bridge.attachStream(r1.rendererId, r1.token).error.code, 'UNKNOWN_RENDERER');
 });
 
+await check('authenticate() gates command targeting: only the registering window with its token passes', () => {
+  const { bridge } = harness();
+  const a = bridge.registerRenderer({ windowId: 'win-A' });
+  const b = bridge.registerRenderer({ windowId: 'win-B' });
+  assert.equal(bridge.authenticate(a.rendererId, a.token).ok, true);
+  assert.equal(bridge.authenticate(a.rendererId, b.token).error.code, 'UNKNOWN_RENDERER'); // wrong token
+  assert.equal(bridge.authenticate('rend-99999999', a.token).error.code, 'UNKNOWN_RENDERER'); // unknown id
+  bridge.unregisterRenderer(a.rendererId, a.token);
+  assert.equal(bridge.authenticate(a.rendererId, a.token).error.code, 'UNKNOWN_RENDERER'); // gone
+});
+
 console.log(failures ? `\n${failures} renderer-bridge check(s) FAILED` : '\nAll renderer-bridge checks passed.');
 process.exit(failures ? 1 : 0);

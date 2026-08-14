@@ -18,6 +18,7 @@ export const ACTION_STATUSES = Object.freeze([
 
 export const ACTION_RISKS = Object.freeze({
   READ_ONLY: 'READ_ONLY',
+  VIEW_NAVIGATION: 'VIEW_NAVIGATION',
   REVERSIBLE_WRITE: 'REVERSIBLE_WRITE',
   EXTERNAL_COMMUNICATION: 'EXTERNAL_COMMUNICATION',
   REPOSITORY_CHANGE: 'REPOSITORY_CHANGE',
@@ -150,6 +151,14 @@ function validateDefinition(action) {
   if ([ACTION_RISKS.REPOSITORY_CHANGE, ACTION_RISKS.DESTRUCTIVE_OR_IRREVERSIBLE].includes(action.risk)
       && action.confirmation !== ACTION_CONFIRMATIONS.APPROVAL) {
     contractError(action.id, `${action.risk} actions must require explicit approval.`);
+  }
+  // A bounded, reversible, allowlisted UI navigation is a direct view effect, not a
+  // data mutation: its safety comes from the renderer bridge's closed destination
+  // allowlist and single-use acknowledged commands, never from a confirmation
+  // dialog. It must therefore declare its view side effect (enforced below) and
+  // must never be gated as though it changed stored data.
+  if (action.risk === ACTION_RISKS.VIEW_NAVIGATION && action.confirmation !== ACTION_CONFIRMATIONS.NONE) {
+    contractError(action.id, 'view-navigation actions must not require confirmation.');
   }
   if (![ACTION_RISKS.READ_ONLY, ACTION_RISKS.SENSITIVE_DATA].includes(action.risk) && !action.sideEffects.length) {
     contractError(action.id, `${action.risk} actions must describe their proposal or side effects.`);

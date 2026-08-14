@@ -29,6 +29,7 @@ import {
   normalizeWorkboardItemChanges,
   workboardItemStateToken
 } from './chatCapabilities.js';
+import { createRendererBridge } from './rendererBridge.js';
 import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { resolveAgentMode } from './agentMode.js';
@@ -3348,6 +3349,24 @@ const capabilityRegistry = createCapabilityRegistry({
   },
   plannerToday() {
     return plannerDayData();
+  },
+  // View-navigation transport for navigation.* actions. Authenticates the target
+  // renderer, issues one correlated single-use command over the bridge, and waits
+  // for the renderer's acknowledgement (or timeout/cancellation). The bridge (its
+  // closed destination allowlist and non-programmable command) is what makes this
+  // safe; this dependency never navigates directly. rendererBridge/
+  // issueNavigationCommand are module-scoped and initialised before any request.
+  async navigate({ renderer, destination, correlationId }) {
+    const target = renderer && typeof renderer === 'object' && !Array.isArray(renderer) ? renderer : null;
+    const rendererId = target?.rendererId ? String(target.rendererId) : '';
+    const token = target?.token ? String(target.token) : '';
+    if (!rendererId || !token) return { requested: false, status: 'REJECTED', failureCategory: 'no_renderer', route: null };
+    const auth = rendererBridge.authenticate(rendererId, token);
+    if (!auth.ok) return { requested: false, status: 'REJECTED', failureCategory: auth.error.category, route: null };
+    const route = rendererBridge.listDestinations().find((d) => d.id === destination)?.route || null;
+    const outcome = await issueNavigationCommand(rendererId, destination, correlationId);
+    if (!outcome.ok) return { requested: false, status: 'REJECTED', failureCategory: outcome.error.category, route };
+    return { requested: true, status: outcome.resolution.status, failureCategory: outcome.resolution.failureCategory, route };
   }
 });
 
@@ -3374,7 +3393,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
       writeChatAudit(sessionId, sessionBlock.actionId, sessionBlock.status, sessionBlock.error.code, sessionBlock.correlationId);
       return ok(res, sessionBlock);
     }
-    result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui' });
+    result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui', renderer: extractRendererBinding(req.body) });
     result = bindWorkboardConfirmation(sessionId, result);
     const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
@@ -3409,7 +3428,7 @@ app.post('/api/chat/capability', async (req, res) => {
       writeChatAudit(sessionId, sessionBlock.actionId, sessionBlock.status, sessionBlock.error.code, sessionBlock.correlationId);
       return ok(res, sessionBlock);
     }
-    let result = await capabilityRegistry.invoke(name, req.body?.args || {});
+    let result = await capabilityRegistry.invoke(name, req.body?.args || {}, { renderer: extractRendererBinding(req.body) });
     result = bindWorkboardConfirmation(sessionId, result);
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
@@ -3417,6 +3436,189 @@ app.post('/api/chat/capability', async (req, res) => {
     writeChatAudit(sessionId, name || 'unknown', error.actionStatus || 'failed', error.code || 'ACTION_FAILED', error.correlationId);
     fail(res, 400, error.message);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Authenticated server -> renderer navigation command/acknowledgement bridge.
+// A renderer (a browser window/tab or the WebView2 host running the SPA)
+// registers and receives a server-issued id + secret token. It subscribes to a
+// per-renderer SSE command channel authenticated by that token, and it
+// acknowledges each delivered command with a single-use, correlation-bound POST.
+// The pure security core lives in rendererBridge.js; this layer only supplies the
+// transport (SSE delivery, expiry timers) and a content-minimised audit.
+// ---------------------------------------------------------------------------
+
+// Timing is env-overridable so acceptance tests can exercise timeout/idle paths
+// quickly; production uses the generous defaults.
+const RENDERER_COMMAND_TTL_MS = Math.max(500, Number(process.env.LIFE_PLANNER_RENDERER_TTL_MS) || 10_000);
+const RENDERER_IDLE_MS = Math.max(RENDERER_COMMAND_TTL_MS, Number(process.env.LIFE_PLANNER_RENDERER_IDLE_MS) || 60_000);
+const RENDERER_HEARTBEAT_MS = 20_000;
+const RENDERER_SSE_KEEPALIVE_MS = 25_000;
+
+const rendererBridge = createRendererBridge({
+  commandTtlMs: RENDERER_COMMAND_TTL_MS,
+  rendererIdleMs: RENDERER_IDLE_MS
+});
+// rendererId -> the open SSE response used to push commands to exactly that window.
+const rendererStreams = new Map();
+
+// Bounded navigation audit: identifiers + status only, never routes, tokens, or
+// chat content. Reuses the existing chat_audit surface; the correlationId links
+// the originating action, the command, and this resolution.
+function writeBridgeAudit(audit) {
+  if (!audit) return;
+  // Navigation commands are identified by correlationId + rendererSession, not a
+  // chat session, so the session column stays null; the detail carries only the
+  // status/failure category, never a route body, token, or chat content.
+  writeChatAudit(
+    null,
+    `navigation.${audit.destination}`,
+    audit.status || 'unknown',
+    audit.failureCategory || (audit.status === 'APPLIED' ? 'applied' : ''),
+    audit.correlationId
+  );
+}
+
+// Extract the per-request renderer binding a navigation action targets. Trusted
+// server code reads it from the request body; it is never an action argument the
+// model can set. Returns undefined for non-navigation requests.
+function extractRendererBinding(body) {
+  const renderer = body && typeof body === 'object' ? body.renderer : null;
+  if (!renderer || typeof renderer !== 'object' || Array.isArray(renderer)) return undefined;
+  const rendererId = renderer.rendererId ? String(renderer.rendererId) : '';
+  const token = renderer.token ? String(renderer.token) : '';
+  if (!rendererId || !token) return undefined;
+  return { rendererId, token };
+}
+
+function deliverCommand(rendererId, envelope) {
+  const stream = rendererStreams.get(rendererId);
+  if (!stream || stream.writableEnded) return false;
+  try {
+    stream.write(`event: command\ndata: ${JSON.stringify(envelope)}\n\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Resolve any commands past their acknowledgement window. Each resolution fires
+// the onResolved listener registered in issueNavigationCommand, which performs the
+// (single) bounded audit, so this sweeper never audits directly.
+function sweepExpiredCommands() {
+  rendererBridge.expireDueCommands();
+}
+
+// Periodic maintenance: time out stale commands and prune renderers whose windows
+// closed or went silent, closing their streams. Pruning stales pending commands,
+// which again resolves through onResolved (audited there).
+function sweepRendererBridge() {
+  sweepExpiredCommands();
+  for (const rendererId of rendererBridge.pruneStaleRenderers()) {
+    const stream = rendererStreams.get(rendererId);
+    if (stream && !stream.writableEnded) { try { stream.end(); } catch { /* already closing */ } }
+    rendererStreams.delete(rendererId);
+  }
+}
+
+// Issue one navigation command to a specific renderer, deliver it over that
+// renderer's channel, and resolve when the renderer acknowledges, the command
+// times out, or it is cancelled. This is the single seam the navigation action
+// calls; it never navigates directly.
+function issueNavigationCommand(rendererId, destination, correlationId) {
+  const issued = rendererBridge.issueCommand({ rendererId, destination, correlationId });
+  if (!issued.ok) return Promise.resolve({ ok: false, error: issued.error });
+  const delivered = deliverCommand(rendererId, issued.envelope);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (resolution) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      writeBridgeAudit(rendererBridge.getCommand(issued.commandId)?.audit);
+      resolve({ ok: true, delivered, resolution });
+    };
+    // Prompt timeout at the TTL boundary rather than waiting for the slow sweeper.
+    const timer = setTimeout(() => { sweepExpiredCommands(); }, RENDERER_COMMAND_TTL_MS + 250);
+    timer.unref?.();
+    rendererBridge.onResolved(issued.commandId, finish);
+  });
+}
+
+app.post('/api/renderer/register', (req, res) => {
+  const windowId = String(req.body?.windowId || '');
+  const chatSessionId = req.body?.chatSessionId == null ? null : String(req.body.chatSessionId);
+  const reg = rendererBridge.registerRenderer({ windowId, chatSessionId });
+  if (!reg.ok) return fail(res, 400, reg.error.message);
+  ok(res, {
+    rendererId: reg.rendererId,
+    token: reg.token,
+    generation: reg.generation,
+    destinations: rendererBridge.listDestinations().map((d) => d.id),
+    heartbeatMs: RENDERER_HEARTBEAT_MS,
+    commandTtlMs: RENDERER_COMMAND_TTL_MS
+  });
+});
+
+// Per-renderer command channel. A GET (CSRF-exempt) authenticated by the
+// server-issued token; only the matching, non-superseded renderer may subscribe.
+app.get('/api/renderer/:rendererId/commands', (req, res) => {
+  const rendererId = String(req.params.rendererId || '');
+  const attach = rendererBridge.attachStream(rendererId, String(req.query?.token || ''));
+  if (!attach.ok) return fail(res, 401, 'Renderer command stream authentication failed.');
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no'
+  });
+  res.write(`event: ready\ndata: ${JSON.stringify({ rendererId })}\n\n`);
+  // Replace any prior stream for this renderer (a reconnect) and register this one.
+  const prior = rendererStreams.get(rendererId);
+  if (prior && prior !== res && !prior.writableEnded) { try { prior.end(); } catch { /* already closing */ } }
+  rendererStreams.set(rendererId, res);
+  const keepAlive = setInterval(() => { if (!res.writableEnded) res.write(': keep-alive\n\n'); }, RENDERER_SSE_KEEPALIVE_MS);
+  keepAlive.unref?.();
+  res.on('close', () => {
+    clearInterval(keepAlive);
+    if (rendererStreams.get(rendererId) === res) rendererStreams.delete(rendererId);
+    rendererBridge.detachStream(rendererId, String(req.query?.token || ''));
+  });
+});
+
+// Single-use, correlation-bound acknowledgement. The renderer proves identity with
+// its token and possession of the command with the single-use command token.
+app.post('/api/renderer/:rendererId/ack', (req, res) => {
+  const rendererId = String(req.params.rendererId || '');
+  const result = rendererBridge.acknowledge({
+    commandId: String(req.body?.commandId || ''),
+    correlationId: String(req.body?.correlationId || ''),
+    rendererId,
+    token: String(req.body?.token || ''),
+    commandToken: String(req.body?.commandToken || ''),
+    status: req.body?.status,
+    detail: req.body?.detail
+  });
+  const audit = rendererBridge.getCommand(String(req.body?.commandId || ''))?.audit;
+  if (audit) writeBridgeAudit(audit);
+  if (!result.ok) return ok(res, { accepted: false, error: result.error });
+  ok(res, { accepted: true, resolution: result.resolution });
+});
+
+app.post('/api/renderer/:rendererId/heartbeat', (req, res) => {
+  const result = rendererBridge.touch(String(req.params.rendererId || ''), String(req.body?.token || ''));
+  if (!result.ok) return ok(res, { alive: false, error: result.error });
+  ok(res, { alive: true });
+});
+
+app.post('/api/renderer/:rendererId/unregister', (req, res) => {
+  const rendererId = String(req.params.rendererId || '');
+  const result = rendererBridge.unregisterRenderer(rendererId, String(req.body?.token || ''));
+  const stream = rendererStreams.get(rendererId);
+  if (stream && !stream.writableEnded) { try { stream.end(); } catch { /* already closing */ } }
+  rendererStreams.delete(rendererId);
+  if (!result.ok) return ok(res, { unregistered: false, error: result.error });
+  ok(res, { unregistered: true });
 });
 
 app.get('/api/chat/sessions/:id/context-records', (req, res) => {
@@ -8181,4 +8383,6 @@ app.listen(port, '127.0.0.1', () => {
   // user message while keeping startup responsive.
   setTimeout(() => warmManagedLlamaServerAtStartup(), 2500);
   setInterval(() => runDevTaskScan('interval'), DEV_TASK_SCAN_INTERVAL_MS).unref();
+  // Time out unacknowledged navigation commands and prune closed/silent renderers.
+  setInterval(() => sweepRendererBridge(), RENDERER_COMMAND_TTL_MS).unref();
 });

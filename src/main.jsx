@@ -108,6 +108,151 @@ async function api(path, options = {}) {
   return payload.data;
 }
 
+// ---------------------------------------------------------------------------
+// Renderer navigation bridge (client half).
+// This window registers with the server, subscribes to its own authenticated
+// command channel, and acknowledges each navigation command after applying it.
+// Applying a command means setting the in-app hash to the server-resolved
+// canonical route and letting the existing hashchange listener drive the real
+// navigation — the SPA's single source of routing truth, never re-implemented
+// here. The command is non-programmable: only a "navigate" verb carrying an
+// in-app hash route is ever honoured; anything else is acknowledged FAILED.
+// Navigation is a per-window view concern, so the window registers once on load.
+// ---------------------------------------------------------------------------
+
+const RENDERER_WINDOW_ID = (typeof crypto !== 'undefined' && crypto.randomUUID)
+  ? crypto.randomUUID()
+  : `win-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let rendererBinding = null;      // { rendererId, token } once registered
+let rendererSource = null;       // the open EventSource command channel
+let rendererHeartbeat = null;    // heartbeat interval id
+let rendererStarted = false;
+
+function getRendererBinding() {
+  return rendererBinding;
+}
+
+function closeRendererStream() {
+  if (rendererSource) { try { rendererSource.close(); } catch { /* already closed */ } rendererSource = null; }
+  if (rendererHeartbeat) { clearInterval(rendererHeartbeat); rendererHeartbeat = null; }
+}
+
+async function registerRenderer(chatSessionId = null) {
+  try {
+    const data = await api('/api/renderer/register', {
+      method: 'POST',
+      body: JSON.stringify({ windowId: RENDERER_WINDOW_ID, chatSessionId: chatSessionId == null ? null : String(chatSessionId) })
+    });
+    rendererBinding = { rendererId: data.rendererId, token: data.token };
+    openRendererStream(data.heartbeatMs);
+    return true;
+  } catch {
+    rendererBinding = null;
+    return false;
+  }
+}
+
+function openRendererStream(heartbeatMs) {
+  if (!rendererBinding || typeof EventSource === 'undefined') return;
+  closeRendererStream();
+  const { rendererId, token } = rendererBinding;
+  const source = new EventSource(`${API}/api/renderer/${encodeURIComponent(rendererId)}/commands?token=${encodeURIComponent(token)}`);
+  rendererSource = source;
+  source.addEventListener('command', (event) => { applyRendererCommand(event.data); });
+  source.onerror = () => {
+    // The browser auto-reconnects transient drops. Persistent failure (e.g. the
+    // server pruned this window) is recovered by the heartbeat re-registering.
+    if (source.readyState === EventSource.CLOSED) scheduleRendererRecovery();
+  };
+  rendererHeartbeat = setInterval(() => { sendRendererHeartbeat(); }, Math.max(5000, Number(heartbeatMs) || 20000));
+}
+
+let rendererRecoveryTimer = null;
+function scheduleRendererRecovery() {
+  if (rendererRecoveryTimer) return;
+  rendererRecoveryTimer = setTimeout(async () => {
+    rendererRecoveryTimer = null;
+    closeRendererStream();
+    rendererBinding = null;
+    await registerRenderer();
+  }, 3000);
+}
+
+async function sendRendererHeartbeat() {
+  const binding = rendererBinding;
+  if (!binding) return;
+  try {
+    const result = await api(`/api/renderer/${encodeURIComponent(binding.rendererId)}/heartbeat`, {
+      method: 'POST',
+      body: JSON.stringify({ token: binding.token })
+    });
+    if (result && result.alive === false) scheduleRendererRecovery();
+  } catch {
+    // Heartbeat failures are recovered on the next tick; never surface to the user.
+  }
+}
+
+async function applyRendererCommand(raw) {
+  const binding = rendererBinding;
+  let envelope;
+  try { envelope = JSON.parse(raw); } catch { return; }
+  // Targeting guard: only apply a command addressed to this exact renderer.
+  if (!binding || !envelope || envelope.rendererId !== binding.rendererId) return;
+  let status = 'FAILED';
+  let detail = '';
+  const intended = envelope.command === 'navigate' && typeof envelope.route === 'string' && envelope.route.startsWith('#')
+    ? routeFromLocation('/', '', envelope.route)
+    : null;
+  if (intended && !intended.legacy) {
+    try {
+      if (window.location.hash !== envelope.route) window.location.hash = envelope.route;
+      const applied = routeFromLocation(window.location.pathname, window.location.search, window.location.hash);
+      if (applied.section === intended.section && (applied.tab ?? null) === (intended.tab ?? null)) status = 'APPLIED';
+      else detail = 'route did not settle on the intended section';
+    } catch {
+      detail = 'navigation apply failed';
+    }
+  } else {
+    detail = 'unsupported or non-canonical navigation command';
+  }
+  try {
+    await api(`/api/renderer/${encodeURIComponent(binding.rendererId)}/ack`, {
+      method: 'POST',
+      body: JSON.stringify({
+        commandId: envelope.commandId,
+        correlationId: envelope.correlationId,
+        token: binding.token,
+        commandToken: envelope.commandToken,
+        status,
+        detail
+      })
+    });
+  } catch {
+    // If the ack cannot be delivered the server times the command out; never invent success.
+  }
+}
+
+function startRendererBridge(chatSessionId) {
+  if (rendererStarted) return;
+  rendererStarted = true;
+  registerRenderer(chatSessionId);
+  window.addEventListener('beforeunload', () => {
+    const binding = rendererBinding;
+    if (!binding) return;
+    // Best-effort clean shutdown so a closed window frees its renderer promptly.
+    // A keepalive fetch (not sendBeacon) can carry the cached CSRF header the
+    // mutation guard requires; if it does not land, the idle sweeper prunes it.
+    try {
+      fetch(`${API}/api/renderer/${encodeURIComponent(binding.rendererId)}/unregister`, {
+        method: 'POST',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json', 'X-LPS-CSRF': csrfToken },
+        body: JSON.stringify({ token: binding.token })
+      }).catch(() => {});
+    } catch { /* the idle sweeper prunes it regardless */ }
+  });
+}
+
 function cx(...parts) {
   return parts.filter(Boolean).join(' ');
 }
@@ -290,6 +435,10 @@ function App() {
       window.removeEventListener('hashchange', onPopState);
     };
   }, []);
+
+  // Register this window with the server-side navigation bridge exactly once so
+  // authenticated navigation commands can be delivered to it and acknowledged.
+  useEffect(() => { startRendererBridge(selectedSession); }, []);
 
   function navigate(section, tab = null, sessionId = null) {
     const next = { section, tab: tab || nav.find((entry) => entry.id === section)?.defaultTab || null, sessionId, legacy: false };
@@ -1736,11 +1885,33 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   async function invokeAction(name, args) {
-    const result = await api(`/api/actions/${encodeURIComponent(name)}/invoke`, { method: 'POST', body: JSON.stringify({ args, session_id: selectedSession }) });
+    // Navigation actions carry this window's authenticated renderer binding so the
+    // server can target the command back to exactly this window. The binding is
+    // trusted request context, never a model-supplied argument.
+    const body = { args, session_id: selectedSession };
+    if (name.startsWith('navigation.')) {
+      const binding = getRendererBinding();
+      if (binding) body.renderer = binding;
+    }
+    const result = await api(`/api/actions/${encodeURIComponent(name)}/invoke`, { method: 'POST', body: JSON.stringify(body) });
     if (!['success', 'needs_confirmation', 'needs_approval'].includes(result.status)) {
       throw new Error(result.error?.message || `Action ${name} did not complete.`);
     }
     return result;
+  }
+
+  async function openWorkboardViaAction() {
+    if (systemCheckBusy) return;
+    setSystemCheckBusy('navigation');
+    try {
+      const result = await invokeAction('navigation.workboard', {});
+      if (result.data?.applied) setNotice('Opened the Workboard.');
+      else setNotice(`Workboard navigation did not apply (${result.data?.status || 'unknown'}).`);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSystemCheckBusy('');
+    }
   }
 
   async function checkSystemStatus() {
@@ -2258,7 +2429,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} />
+          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2366,7 +2537,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, runtime, generating, navigate, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner }) {
+function ChatConnectionBar({ connection, runtime, generating, navigate, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2389,6 +2560,7 @@ function ChatConnectionBar({ connection, runtime, generating, navigate, statusPr
         <button className="link" data-action-id="system.models" data-control-id="chat.connection.system-models-check" onClick={onCheckModels} disabled={Boolean(checkBusy)}>{checkBusy === 'models' ? 'Checking…' : 'Check models'}</button>
         <button className="link" data-action-id="system.runs" data-control-id="chat.connection.system-runs-check" onClick={onCheckRuns} disabled={Boolean(checkBusy)}>{checkBusy === 'runs' ? 'Checking…' : 'Recent runs'}</button>
         <button className="link" data-action-id="planner.today" data-control-id="chat.connection.planner-today-check" onClick={onCheckPlanner} disabled={Boolean(checkBusy)}>{checkBusy === 'planner' ? 'Checking…' : 'Check today'}</button>
+        <button className="link" data-action-id="navigation.workboard" data-control-id="chat.navigation.open-workboard" onClick={onOpenWorkboard} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation' ? 'Opening…' : 'Open Workboard'}</button>
         <button className="link" onClick={() => navigate('system', 'status')}>Open full System</button>
         {statusPreview ? (
           <small role="status">

@@ -379,6 +379,16 @@ const ACTION_METADATA = Object.freeze({
     label: 'Read today plan', feature: 'Daily Planner', permission: 'planner.today.read', risk: ACTION_RISKS.SENSITIVE_DATA,
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.planner-today-check'], testId: 'action.planner.today',
     resultSchema: resultObject(['mode', 'visible_limit', 'pinned_count', 'visible', 'deferred', 'truncated'], { mode: { type: 'string' }, visible_limit: { type: 'integer' }, pinned_count: { type: 'integer' }, visible: { type: 'array' }, deferred: { type: 'array' }, truncated: { type: 'boolean' } })
+  },
+  'navigation.workboard': {
+    label: 'Open the Workboard', feature: 'Chat navigation', permission: 'navigation.control', risk: ACTION_RISKS.VIEW_NAVIGATION,
+    confirmation: ACTION_CONFIRMATIONS.NONE,
+    sideEffects: ['Changes the active view of the requesting window to the Workboard section; no stored data is modified and it is immediately reversible.'],
+    sourceControls: ['chat.navigation.open-workboard'], testId: 'action.navigation.workboard',
+    resultSchema: resultObject(
+      ['destination', 'requested', 'applied', 'status'],
+      { destination: { type: 'string' }, requested: { type: 'boolean' }, applied: { type: 'boolean' }, status: { type: 'string' }, route: { type: ['string', 'null'] }, failure_category: { type: ['string', 'null'] } }
+    )
   }
 });
 
@@ -386,7 +396,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -596,6 +606,27 @@ export function createCapabilityRegistry(deps) {
       async handler() {
         return boundedPlannerToday(await dep('plannerToday')());
       }
+    },
+
+    'navigation.workboard': {
+      description: 'Open the Workboard section in the requesting window. A bounded, reversible view navigation to a fixed semantic destination; it changes no stored data.',
+      readOnly: false,
+      navigation: true,
+      schema: {},
+      async handler(_args, context) {
+        // The renderer binding and the navigation transport are supplied by trusted
+        // server code, never by the model/client arguments. This handler only names
+        // a fixed semantic destination and reports the correlated resolution.
+        const outcome = await dep('navigate')({ renderer: context.renderer, destination: 'workboard', correlationId: context.correlationId });
+        return {
+          destination: 'workboard',
+          requested: Boolean(outcome?.requested),
+          applied: outcome?.status === 'APPLIED',
+          status: asString(outcome?.status || 'REJECTED') || 'REJECTED',
+          route: outcome?.route ? truncate(outcome.route, LIMITS.metadataMaxLength) : null,
+          failure_category: outcome?.failureCategory ? truncate(outcome.failureCategory, LIMITS.metadataMaxLength) : null
+        };
+      }
     }
   };
 
@@ -638,15 +669,18 @@ export function createCapabilityRegistry(deps) {
     return actionRegistry.inspect(name, trustedContext(caller, signal));
   }
 
-  async function execute(name, rawArgs, { caller = 'unknown', signal } = {}) {
-    return actionRegistry.invoke(name, rawArgs, { ...trustedContext(caller, signal), allowedActionIds: NEUTRAL_ACTION_NAMES });
+  async function execute(name, rawArgs, { caller = 'unknown', signal, renderer } = {}) {
+    // `renderer` is a trusted per-request binding ({ rendererId, token }) supplied
+    // only by server code, never by the model/client arguments. It reaches the
+    // handler via context for view-navigation actions and is ignored by all others.
+    return actionRegistry.invoke(name, rawArgs, { ...trustedContext(caller, signal), allowedActionIds: NEUTRAL_ACTION_NAMES, renderer });
   }
 
   // Backward-compatible adapter for the existing Chat UI and verifier. It uses
   // the same registry/handler as the neutral action gateway, while preserving
   // the historical thrown-error and {name, readOnly, args, data} contract.
-  async function invoke(name, rawArgs) {
-    const result = await actionRegistry.invoke(name, rawArgs, trustedContext('legacy-human-ui'));
+  async function invoke(name, rawArgs, { renderer } = {}) {
+    const result = await actionRegistry.invoke(name, rawArgs, { ...trustedContext('legacy-human-ui'), renderer });
     if (!['success', 'needs_confirmation', 'needs_approval'].includes(result.status)) {
       const message = result.error?.code === 'UNKNOWN_ACTION'
         ? `Unknown capability: ${asString(name).slice(0, 60)}`
@@ -675,5 +709,5 @@ export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
   'system.status', 'system.models', 'system.runs',
-  'conversation.search', 'planner.today'
+  'conversation.search', 'planner.today', 'navigation.workboard'
 ];

@@ -81,6 +81,16 @@ await check('write, external, repository, settings, and destructive risks fail c
   assert.throws(() => createActionRegistry([fixture({ risk: ACTION_RISKS.SETTINGS_CHANGE, confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: [] })]), /must describe/);
 });
 
+await check('view-navigation is a confirmation-free effect that must still declare its view side effect', () => {
+  const nav = { risk: ACTION_RISKS.VIEW_NAVIGATION, confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: ['Changes the active view of the requesting window.'] };
+  assert.doesNotThrow(() => createActionRegistry([fixture(nav)], { correlationIdFactory }));
+  // A navigation must never be gated as though it changed stored data.
+  assert.throws(() => createActionRegistry([fixture({ ...nav, confirmation: ACTION_CONFIRMATIONS.USER })]), /view-navigation actions must not require confirmation/);
+  assert.throws(() => createActionRegistry([fixture({ ...nav, confirmation: ACTION_CONFIRMATIONS.APPROVAL })]), /view-navigation actions must not require confirmation/);
+  // It is not a read: it must describe its effect rather than pretend to have none.
+  assert.throws(() => createActionRegistry([fixture({ risk: ACTION_RISKS.VIEW_NAVIGATION, confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [] })]), /must describe their proposal or side effects/);
+});
+
 await check('the queryable manifest exposes contracts but not executable functions', () => {
   const registry = createActionRegistry([fixture()], { correlationIdFactory });
   const [entry] = registry.list();

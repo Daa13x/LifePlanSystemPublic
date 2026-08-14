@@ -205,6 +205,15 @@ export function createRendererBridge({
     return { ok: true };
   }
 
+  // Non-mutating authentication check used before a caller is allowed to target a
+  // renderer with a command (defence in depth: only the window that registered and
+  // holds the token may have commands issued to it).
+  function authenticate(rendererId, token) {
+    const renderer = authRenderer(rendererId, token);
+    if (!renderer || renderer.unregistered || renderer.superseded) return reject('UNKNOWN_RENDERER', 'renderer_unknown', 'Unknown, superseded, or unauthorised renderer.');
+    return { ok: true };
+  }
+
   function attachStream(rendererId, token) {
     const renderer = authRenderer(rendererId, token);
     if (!renderer || renderer.unregistered || renderer.superseded) return reject('UNKNOWN_RENDERER', 'renderer_unknown', 'Unknown, superseded, or unauthorised renderer.');
@@ -422,7 +431,7 @@ export function createRendererBridge({
 
   return Object.freeze({
     COMMAND_VERB,
-    registerRenderer, unregisterRenderer, attachStream, detachStream, touch,
+    registerRenderer, unregisterRenderer, attachStream, detachStream, touch, authenticate,
     issueCommand, acknowledge, cancelCommand, expireDueCommands, pruneStaleRenderers,
     onResolved, toAuditRecord, getCommand, getRenderer, listDestinations, snapshot
   });

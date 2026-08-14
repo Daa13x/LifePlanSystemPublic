@@ -17,7 +17,7 @@
     "verify:navigation-consolidation": "node scripts/verify-navigation-consolidation.mjs",
     "verify:chat-capabilities": "node scripts/verify-chat-capabilities.mjs",
     "verify:action-registry": "node scripts/verify-action-registry.mjs && node scripts/verify-action-registry-ui.mjs && node scripts/verify-action-registry-http.mjs",
-    "verify:renderer-bridge": "node scripts/verify-renderer-bridge.mjs",
+    "verify:renderer-bridge": "node scripts/verify-renderer-bridge.mjs && node scripts/verify-renderer-bridge-http.mjs",
     "policy:cloud-main": "node scripts/check-cloud-main.mjs",
     "sync:prepare": "node scripts/sync-main.mjs --prepare",
     "sync:publish": "node scripts/sync-main.mjs --publish",
