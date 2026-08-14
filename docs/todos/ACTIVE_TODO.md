@@ -11,14 +11,19 @@ identity, privacy, confirmation, recovery, or user authority.
 ## Current checkpoint — 2026-08-14
 
 - The neutral action catalog has bounded Knowledge search/read, typed Workboard
-  list/read, and durable Workboard-create proposal/confirmation.
+  list/read, and durable Workboard create/update proposal/confirmation.
 - Workboard identity is explicit across project, item, roadmap, approval, and
   candidate records. Numeric IDs are never guessed across entity classes.
 - Workboard detail is a session-bound sensitive read. Project previews reuse
   the canonical layered-card projection; every returned string, child list, and
   complete response is bounded.
 - The real Chat Context Picker previews Workboard records without attaching
-  them. Attach remains a separate explicit context write.
+  them. Item previews can stage exact typed updates; Attach remains a separate
+  explicit context write.
+- Workboard updates persist the complete canonical before-state and only the
+  validated changed fields. Confirmation is bound to the real chat, typed item,
+  correlation ID, expiry, and one-time token. A full-state stale check runs
+  before claim and again inside the atomic update/settlement transaction.
 
 ## Done
 
@@ -45,14 +50,13 @@ identity, privacy, confirmation, recovery, or user authority.
 
 ## Next authorised action-registry slice
 
-- Expose `workboard.propose_update` only after it persists the exact reviewed
-  item identity, validated changes, and current-state fingerprint in the
-  existing durable confirmation owner.
-- Reject no-op, malformed, replayed, expired, cross-session, deleted-target,
-  and stale-state updates, and settle the item mutation plus confirmation
-  receipt atomically.
-- Prove the complete preview/confirm/persist/replay/stale/isolation journey in
-  deterministic tests and the real browser before publication.
+- Migrate one existing low-risk system/read control through the neutral action
+  gateway without changing the underlying owner or duplicating its data logic.
+- Prefer `system.status` if the visible UI can consume the same registered
+  handler and render a bounded truthful status receipt; otherwise take the next
+  bounded read/navigation control with an existing authoritative owner.
+- Keep the catalog incremental. Do not expose additional mutations until their
+  confirmation, stale-state, rollback, replay, and UI contracts are complete.
 
 ## Historical public-scaffold follow-ups
 

@@ -285,7 +285,12 @@ await check('Knowledge preview uses the same registered read handler through com
 });
 
 await check('caller policies are separate and body-like scope injection is ignored', async () => {
-  const registry = createCapabilityRegistry({ searchKnowledge: () => [] });
+  const registry = createCapabilityRegistry({
+    searchKnowledge: () => [],
+    readWorkboard: ({ id, type }) => type === 'item' && id === 1
+      ? { id, entity_type: 'item', type: 'goal', title: 'Policy fixture', body: 'body', source: 'fixture', status: 'active', confidence: 0.8, owner: 'user' }
+      : null
+  });
   assert.ok(CAPABILITY_CALLER_SCOPES['human-ui'].includes('knowledge.read'));
   assert.ok(CAPABILITY_CALLER_SCOPES['human-ui'].includes('workboard.propose'));
   assert.ok(CAPABILITY_CALLER_SCOPES['legacy-human-ui'].includes('workboard.propose'));
@@ -296,7 +301,9 @@ await check('caller policies are separate and body-like scope injection is ignor
   const omitted = await registry.execute('knowledge.search', { query: 'x' });
   const denied = await registry.execute('knowledge.search', { query: 'x' }, { caller: 'cloud-agent', scopes: ['knowledge.read', '*'] });
   const humanProposal = await registry.execute('workboard.propose_create', { title: 'review me' }, { caller: 'human-ui' });
+  const humanUpdate = await registry.execute('workboard.propose_update', { type: 'item', id: 1, changes: { status: 'stable' } }, { caller: 'human-ui' });
   const localProposal = await registry.execute('workboard.propose_create', { title: 'do not run' }, { caller: 'local-agent' });
+  const localUpdate = await registry.execute('workboard.propose_update', { type: 'item', id: 1, changes: { status: 'stable' } }, { caller: 'local-agent' });
   const localWorkboardRead = await registry.execute('workboard.read', { type: 'project', id: 1 }, { caller: 'local-agent' });
   const cloudProposal = await registry.execute('workboard.propose_create', { title: 'do not run' }, { caller: 'cloud-agent', scopes: ['workboard.propose', '*'] });
   assert.equal(omitted.status, 'blocked');
@@ -304,8 +311,11 @@ await check('caller policies are separate and body-like scope injection is ignor
   assert.equal(denied.status, 'blocked');
   assert.equal(denied.error.code, 'UNAUTHORIZED');
   assert.equal(humanProposal.status, 'needs_confirmation');
+  assert.equal(humanUpdate.status, 'needs_confirmation');
   assert.equal(localProposal.status, 'blocked');
   assert.equal(localProposal.error.code, 'UNAUTHORIZED');
+  assert.equal(localUpdate.status, 'blocked');
+  assert.equal(localUpdate.error.code, 'UNAUTHORIZED');
   assert.equal(localWorkboardRead.status, 'blocked');
   assert.equal(localWorkboardRead.error.code, 'UNAUTHORIZED');
   assert.equal(cloudProposal.status, 'blocked');

@@ -1834,6 +1834,18 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     finally { setProposalBusy(false); }
   }
 
+  async function submitProposeUpdate(record, changes) {
+    if (!record?.identity || proposalBusy) return;
+    setProposalBusy(true);
+    try {
+      const r = await invokeAction('workboard.propose_update', { type: record.identity.type, id: record.identity.id, changes });
+      if (!r.confirmation?.confirmationId || !r.confirmation?.token) throw new Error('The Workboard update was not bound to a confirmation.');
+      setProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
+      closePicker();
+    } catch (err) { setNotice(err.message); }
+    finally { setProposalBusy(false); }
+  }
+
   async function confirmProposal() {
     if (!proposal || proposalBusy) return;
     const confirmationId = proposal.confirmation?.confirmationId;
@@ -2224,7 +2236,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
           <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
-        {picker && <ContextPicker picker={picker} onSearch={runPickerSearch} onPreview={previewContextRecord} onAttach={attachRecord} onClose={closePicker} />}
+        {picker && <ContextPicker picker={picker} onSearch={runPickerSearch} onPreview={previewContextRecord} onProposeUpdate={submitProposeUpdate} proposalBusy={proposalBusy} onAttach={attachRecord} onClose={closePicker} />}
       </div>
     </section>
   );
@@ -2318,7 +2330,9 @@ function ProposalCard({ proposal, busy, onConfirm, onCancel }) {
           )}
       </div>
       <div className="decision-row">
-        <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Confirm and apply'}</button>
+        {isUpdate
+          ? <button data-action-id="workboard.propose_update" data-control-id="chat.workboard-update.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Confirm and apply'}</button>
+          : <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Confirm and apply'}</button>}
         <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
       </div>
       <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. Nothing is written to the Workboard until you confirm.</small>
@@ -2326,7 +2340,7 @@ function ProposalCard({ proposal, busy, onConfirm, onCancel }) {
   );
 }
 
-function ContextPicker({ picker, onSearch, onPreview, onAttach, onClose }) {
+function ContextPicker({ picker, onSearch, onPreview, onProposeUpdate, proposalBusy, onAttach, onClose }) {
   return (
     <div className="picker-overlay" onClick={onClose}>
       <div className="picker" onClick={(e) => e.stopPropagation()}>
@@ -2387,7 +2401,7 @@ function ContextPicker({ picker, onSearch, onPreview, onAttach, onClose }) {
                   {picker.preview?.key === `${rec.kind}-${rec.ref_id}`
                     ? picker.domain === 'knowledge'
                       ? <KnowledgeRecordPreview preview={picker.preview} />
-                      : <WorkboardRecordPreview preview={picker.preview} />
+                      : <WorkboardRecordPreview preview={picker.preview} onProposeUpdate={onProposeUpdate} busy={proposalBusy} />
                     : null}
                 </div>
               ))}
@@ -2420,7 +2434,7 @@ function KnowledgeRecordPreview({ preview }) {
   );
 }
 
-function WorkboardRecordPreview({ preview }) {
+function WorkboardRecordPreview({ preview, onProposeUpdate, busy }) {
   if (preview.loading) return <div className="picker-preview" role="status">Loading preview…</div>;
   if (preview.error) return <div className="picker-preview" role="status">{preview.error}</div>;
   const record = preview.data;
@@ -2447,6 +2461,40 @@ function WorkboardRecordPreview({ preview }) {
         <span>evidence: {record.provenance?.evidence || 'not recorded'}</span>
       </div>
       <small>This is a bounded plain-text preview. Attach remains a separate action.</small>
+      {record.identity?.type === 'item' ? <WorkboardUpdateControls record={record} onProposeUpdate={onProposeUpdate} busy={busy} /> : null}
+    </div>
+  );
+}
+
+function WorkboardUpdateControls({ record, onProposeUpdate, busy }) {
+  const [form, setForm] = useState({ title: record.title || '', status: record.status || 'active', next_action: record.next_action || '' });
+  useEffect(() => {
+    setForm({ title: record.title || '', status: record.status || 'active', next_action: record.next_action || '' });
+  }, [record.identity?.id, record.title, record.status, record.next_action]);
+  const changes = {};
+  if (form.title.trim() !== record.title) changes.title = form.title.trim();
+  if (form.status !== record.status) changes.status = form.status;
+  if ((form.next_action.trim() || null) !== (record.next_action || null)) changes.next_action = form.next_action.trim() || null;
+  const hasChanges = Object.keys(changes).length > 0;
+  return (
+    <div className="propose-form picker-update-form">
+      <strong>Propose an update</strong>
+      <input value={form.title} maxLength={160} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} aria-label="Updated Workboard title" />
+      <select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))} aria-label="Updated Workboard status">
+        {['active', 'stable', 'blocked', 'stale', 'pending review', 'done', 'archived', 'deprecated', 'superseded'].map((status) => <option key={status} value={status}>{status}</option>)}
+      </select>
+      <input value={form.next_action} maxLength={400} onChange={(event) => setForm((current) => ({ ...current, next_action: event.target.value }))} aria-label="Updated Workboard next action" placeholder="Next action" />
+      <button
+        type="button"
+        className="primary"
+        data-action-id="workboard.propose_update"
+        data-control-id="chat.context-picker.workboard-update"
+        onClick={() => onProposeUpdate(record, changes)}
+        disabled={busy || !form.title.trim() || !hasChanges}
+      >
+        {busy ? 'Preparing…' : 'Preview update'}
+      </button>
+      <small>No Workboard field changes until you review and confirm the exact diff.</small>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import {
   ACTION_CONFIRMATIONS,
   ACTION_RISKS,
@@ -63,6 +64,82 @@ function provenanceFor(record) {
 const KNOWLEDGE_SCOPES = ['all', 'approved', 'candidates', 'rules'];
 const WORKBOARD_VIEWS = ['overview', 'projects', 'roadmap', 'review', 'completed', 'blocked'];
 export const WORKBOARD_ENTITY_TYPES = Object.freeze(['project', 'item', 'roadmap', 'approval', 'candidate']);
+export const WORKBOARD_ITEM_STATUSES = Object.freeze(['active', 'stable', 'blocked', 'stale', 'pending review', 'done', 'archived', 'deprecated', 'superseded']);
+
+export function canonicalWorkboardItemState(record) {
+  if (!record || record.entity_type !== 'item' || !Number.isInteger(record.id) || record.id <= 0) {
+    throw new Error('A canonical Workboard item is required.');
+  }
+  return {
+    identity: { type: 'item', id: record.id },
+    type: asString(record.type),
+    title: asString(record.title),
+    body: asString(record.body),
+    source: asString(record.source),
+    status: asString(record.status),
+    confidence: Number.isFinite(record.confidence) ? Number(record.confidence) : null,
+    last_reviewed: record.last_reviewed == null ? null : asString(record.last_reviewed),
+    evidence: record.evidence == null ? null : asString(record.evidence),
+    owner: asString(record.owner),
+    next_action: record.next_action == null ? null : asString(record.next_action),
+    project_id: Number.isInteger(record.project_id) && record.project_id > 0 ? record.project_id : null,
+    due_at: record.due_at == null ? null : asString(record.due_at),
+    shareability: asString(record.shareability),
+    updated_at: asString(record.updated_at)
+  };
+}
+
+export function workboardItemStateToken(record) {
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalWorkboardItemState(record))).digest('hex');
+}
+
+export function normalizeWorkboardItemChanges(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Workboard item changes must be a plain object.');
+  const allowed = new Set(['status', 'title', 'body', 'next_action', 'confidence', 'due_at']);
+  const changes = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!allowed.has(key)) throw new Error(`workboard.propose_update: field "${key}" cannot be changed from Chat.`);
+    if (key === 'status') {
+      if (typeof raw !== 'string' || !WORKBOARD_ITEM_STATUSES.includes(raw)) throw new Error('Workboard item status is invalid.');
+      changes.status = raw;
+    } else if (key === 'title') {
+      if (typeof raw !== 'string') throw new Error('Workboard item title must be a string.');
+      const title = raw.trim();
+      if (!title || title.length > 160) throw new Error('Workboard item title must be 1-160 characters.');
+      changes.title = title;
+    } else if (key === 'body') {
+      if (typeof raw !== 'string' || raw.length > 2000) throw new Error('Workboard item detail must be a string of at most 2000 characters.');
+      changes.body = raw;
+    } else if (key === 'next_action') {
+      if (raw !== null && typeof raw !== 'string') throw new Error('Workboard item next action must be a string or null.');
+      const nextAction = raw === null ? null : raw.trim() || null;
+      if (nextAction && nextAction.length > 400) throw new Error('Workboard item next action must be at most 400 characters.');
+      changes.next_action = nextAction;
+    } else if (key === 'confidence') {
+      if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0 || raw > 1) throw new Error('Workboard item confidence must be a number from 0 to 1.');
+      changes.confidence = raw;
+    } else if (key === 'due_at') {
+      if (raw !== null && typeof raw !== 'string') throw new Error('Workboard item due date must be YYYY-MM-DD or null.');
+      const dueAt = raw === null || raw.trim() === '' ? null : raw.trim();
+      if (dueAt && (
+        !/^\d{4}-\d{2}-\d{2}$/.test(dueAt)
+        || Number.isNaN(Date.parse(`${dueAt}T00:00:00.000Z`))
+        || new Date(`${dueAt}T00:00:00.000Z`).toISOString().slice(0, 10) !== dueAt
+      )) throw new Error('Workboard item due date must be a real YYYY-MM-DD date or null.');
+      changes.due_at = dueAt;
+    }
+  }
+  if (!Object.keys(changes).length) throw new Error('workboard.propose_update: no permitted changes were supplied.');
+  return changes;
+}
+
+function boundedUpdatePreviewValue(key, value) {
+  if (typeof value !== 'string') return value;
+  if (key === 'body') return truncate(value, LIMITS.bodyMaxLength);
+  if (key === 'title') return truncate(value, LIMITS.titleMaxLength);
+  if (key === 'next_action') return truncate(value, 400);
+  return truncate(value, LIMITS.metadataMaxLength);
+}
 
 function workboardIdentity(record) {
   const type = asString(record?.entity_type);
@@ -117,6 +194,8 @@ function boundedWorkboardReadResult(record) {
     status: record.status ? truncate(record.status, LIMITS.metadataMaxLength) : null,
     detail: truncate(record.detail || record.body || '', LIMITS.bodyMaxLength),
     next_action: record.next_action ? truncate(record.next_action, 400) : null,
+    confidence: Number.isFinite(record.confidence) ? Number(record.confidence) : null,
+    due_at: record.due_at ? truncate(record.due_at, LIMITS.metadataMaxLength) : null,
     owner: record.owner ? truncate(record.owner, LIMITS.metadataMaxLength) : null,
     project,
     children,
@@ -153,7 +232,7 @@ const ACTION_METADATA = Object.freeze({
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.context-picker.workboard-preview'], testId: 'action.workboard.read',
     resultSchema: resultObject(
       ['identity', 'category', 'title', 'status', 'detail', 'next_action', 'owner', 'project', 'children', 'provenance', 'truncated'],
-      { identity: { type: 'object' }, category: { type: 'string' }, title: { type: 'string' }, status: { type: ['string', 'null'] }, detail: { type: 'string' }, next_action: { type: ['string', 'null'] }, owner: { type: ['string', 'null'] }, project: { type: ['object', 'null'] }, children: { type: 'array' }, provenance: { type: 'object' }, truncated: { type: 'boolean' } }
+      { identity: { type: 'object' }, category: { type: 'string' }, title: { type: 'string' }, status: { type: ['string', 'null'] }, detail: { type: 'string' }, next_action: { type: ['string', 'null'] }, confidence: { type: ['number', 'null'] }, due_at: { type: ['string', 'null'] }, owner: { type: ['string', 'null'] }, project: { type: ['object', 'null'] }, children: { type: 'array' }, provenance: { type: 'object' }, truncated: { type: 'boolean' } }
     )
   },
   'workboard.propose_create': {
@@ -165,8 +244,8 @@ const ACTION_METADATA = Object.freeze({
   'workboard.propose_update': {
     label: 'Preview Workboard update', feature: 'Chat task proposal', permission: 'workboard.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
     confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Reads the current item and produces a review-only proposal; no Workboard data is changed.'],
-    sourceControls: [], testId: 'action.workboard.propose_update',
-    resultSchema: resultObject(['proposal', 'operation', 'affects', 'target_id', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target_id: { type: 'integer' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
+    sourceControls: ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm'], testId: 'action.workboard.propose_update',
+    resultSchema: resultObject(['proposal', 'operation', 'affects', 'target', 'state_token', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target: { type: 'object' }, state_token: { type: 'string' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
   'system.status': {
     label: 'Read system status', feature: 'System', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
@@ -194,7 +273,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -325,22 +404,25 @@ export function createCapabilityRegistry(deps) {
       async handler(args) {
         const current = await dep('readWorkboard')({ id: args.id, type: args.type });
         if (!current) throw new Error(`Workboard item ${args.id} was not found.`);
-        const allowed = ['status', 'title', 'body', 'next_action', 'confidence', 'due_at', 'reviewed'];
-        const changes = {};
-        for (const [key, value] of Object.entries(args.changes || {})) {
-          if (!allowed.includes(key)) throw new Error(`workboard.propose_update: field "${key}" cannot be changed from Chat.`);
-          changes[key] = value;
-        }
-        if (!Object.keys(changes).length) throw new Error('workboard.propose_update: no permitted changes were supplied.');
+        const state = canonicalWorkboardItemState(current);
+        const changes = normalizeWorkboardItemChanges(args.changes);
         const before = {};
-        for (const key of Object.keys(changes)) before[key] = current[key] ?? null;
+        const after = {};
+        for (const [key, value] of Object.entries(changes)) {
+          const currentValue = state[key] ?? null;
+          if (Object.is(currentValue, value)) continue;
+          before[key] = boundedUpdatePreviewValue(key, currentValue);
+          after[key] = value;
+        }
+        if (!Object.keys(after).length) throw new Error('workboard.propose_update: the requested changes are already present.');
         return {
           proposal: true,
           operation: 'workboard.update',
-          affects: `Workboard item ${args.id} (${current.title})`,
-          target_id: args.id,
+          affects: `Workboard item ${args.id} (${truncate(current.title, LIMITS.titleMaxLength)})`,
+          target: { type: 'item', id: args.id },
+          state_token: workboardItemStateToken(current),
           before,
-          after: changes,
+          after,
           confirmation_required: true
         };
       }

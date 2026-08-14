@@ -251,4 +251,32 @@ disposable real-browser journey confirmed that Preview left attached context at
 zero, the explicit Attach control changed it to one, and the console remained
 clean.
 
+## 2026-08-14 durable typed Workboard-update checkpoint
+
+`workboard.propose_update` is now part of the bounded neutral catalog for typed
+`item` identities only. The capability normalizes an allowlist of status,
+title, detail, next-action, confidence, and real calendar-date changes; rejects
+identity/ownership mutation, malformed values, empty requests, and no-ops; and
+performs only the authoritative item read needed to produce a bounded exact
+diff. It emits a SHA-256 fingerprint of the complete canonical item state and
+does not mutate the Workboard while previewing.
+
+The HTTP gateway re-reads and fingerprints the target before persisting a
+durable confirmation. The stored record contains the complete canonical
+before-state and only the exact validated changes, bound to the real chat,
+typed target, action, correlation ID, expiry, and one-time token. Confirmation
+accepts only the identifier/token envelope. It revalidates before claiming and
+again inside the same SQLite transaction that applies the item update, writes
+any content revision, settles the confirmation, and records the idempotency
+receipt. Stale, deleted, substituted, tampered, expired, cross-session,
+replayed, concurrent, storage-failure, and receipt-failure paths fail closed.
+
+Focused registry, UI, HTTP, and durable-confirmation suites cover the complete
+contract, including process-restart persistence and privacy-safe correlated
+audits. A disposable real-browser journey showed the exact before/after diff,
+proved no mutation before confirmation, applied one update under a rapid double
+submission, persisted it across reload, kept context attachments and an
+unrelated sentinel unchanged, and visibly rejected a later stale proposal after
+another legitimate item mutation.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

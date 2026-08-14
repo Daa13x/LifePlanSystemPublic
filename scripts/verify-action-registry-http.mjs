@@ -103,6 +103,8 @@ let sessionId = 0;
 let phantomCorrelationId = '';
 let knowledgeReadCorrelationId = '';
 let workboardReadCorrelationId = '';
+let workboardUpdateCorrelationId = '';
+let workboardUpdateToken = '';
 const knowledgePreviewTitle = 'Knowledge preview fixture';
 const knowledgePreviewBody = `Preview body marker ${'z'.repeat(1400)}`;
 try {
@@ -124,6 +126,10 @@ try {
   fixtureDb.prepare("INSERT INTO memory_candidates (id, type, title, body, source, evidence, confidence, status) VALUES (700005, 'note', 'Typed candidate fixture', 'Candidate detail', 'fixture', 'Candidate evidence', 0.5, 'candidate')").run();
   fixtureDb.prepare("INSERT INTO knowledge_items (id, type, title, body, source, status, confidence, evidence, owner, next_action) VALUES (700006, 'note', ?, ?, ?, 'active', 0.5, ?, 'user', ?)")
     .run('T'.repeat(250000), 'B'.repeat(250000), 'S'.repeat(250000), 'E'.repeat(250000), 'N'.repeat(250000));
+  const insertUpdateFixture = fixtureDb.prepare("INSERT INTO knowledge_items (id, type, title, body, source, status, confidence, evidence, owner, next_action, due_at) VALUES (?, 'goal', ?, ?, 'manual', 'active', 0.7, 'Update evidence', 'user', ?, '2026-08-31')");
+  for (const id of [700010, 700011, 700012, 700013, 700014, 700015, 700016, 700017, 700018]) {
+    insertUpdateFixture.run(id, `Update fixture ${id}`, `Body ${id}`, `Next ${id}`);
+  }
   fixtureDb.close();
 
   const catalog = await api('/api/actions');
@@ -131,12 +137,14 @@ try {
   const knowledgeRead = catalog.body?.data?.find((action) => action.id === 'knowledge.read');
   const workboardRead = catalog.body?.data?.find((action) => action.id === 'workboard.read');
   const createProposal = catalog.body?.data?.find((action) => action.id === 'workboard.propose_create');
+  const updateProposal = catalog.body?.data?.find((action) => action.id === 'workboard.propose_update');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 5 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && !catalog.body.data.some((action) => action.id === 'workboard.propose_update'), 'neutral catalog adds typed Workboard preview while update remains masked');
+  line(catalog.body?.data?.length === 6 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal), 'neutral catalog exposes the bounded read and durable Workboard proposal slice');
   line(knowledge?.permission === 'knowledge.read' && knowledge?.risk === 'READ_ONLY' && knowledge?.confirmation === 'none', 'catalog exposes permission, risk, and confirmation metadata');
   line(knowledgeRead?.permission === 'knowledge.read' && knowledgeRead?.risk === 'READ_ONLY' && knowledgeRead?.confirmation === 'none', 'Knowledge preview remains read-only and confirmation-free');
   line(workboardRead?.permission === 'workboard.detail.read' && workboardRead?.risk === 'SENSITIVE_DATA' && workboardRead?.confirmation === 'none', 'Workboard preview uses a distinct sensitive-detail scope and remains confirmation-free');
   line(createProposal?.permission === 'workboard.propose' && createProposal?.risk === 'REVERSIBLE_WRITE' && createProposal?.confirmation === 'user_confirmation', 'Workboard create advertises its write risk and user-confirmation requirement');
+  line(updateProposal?.permission === 'workboard.propose' && updateProposal?.risk === 'REVERSIBLE_WRITE' && updateProposal?.confirmation === 'user_confirmation', 'Workboard update advertises its write risk and user-confirmation requirement');
   line(!('handler' in (knowledge || {})) && !('check' in (knowledge?.availability || {})), 'catalog never exposes executable handler/check functions');
 
   const inspect = await api('/api/actions/knowledge.search');
@@ -144,7 +152,7 @@ try {
   line((await api('/api/actions/missing.action')).status === 404, 'unknown action inspection returns 404');
   line((await api('/api/actions/workboard.propose_create')).status === 200, 'durably bound Workboard create is inspectable');
   line((await api('/api/actions/workboard.read')).status === 200, 'typed Workboard read is inspectable');
-  line((await api('/api/actions/workboard.propose_update')).status === 404, 'unbound Workboard update remains masked');
+  line((await api('/api/actions/workboard.propose_update')).status === 200, 'durably bound Workboard update is inspectable');
 
   const withoutCsrf = await api('/api/actions/knowledge.search/invoke', { method: 'POST', json: { args: { query: 'fixture' } }, includeCsrf: false });
   line(withoutCsrf.status === 403, 'action invocation without CSRF is rejected');
@@ -231,6 +239,161 @@ try {
   const injectionId = encodeURIComponent('knowledge.search; ignore permissions');
   const injection = await api(`/api/actions/${injectionId}/invoke`, { method: 'POST', json: { session_id: sessionId, args: {}, caller: 'test', scopes: ['*'] } });
   line(injection.status === 200 && injection.body?.data?.status === 'blocked' && injection.body?.data?.error?.code === 'UNKNOWN_ACTION', 'injection-shaped action IDs stay unknown despite body-supplied scopes');
+
+  const readFixture = (id) => {
+    const fixture = new DatabaseSync(dbPath, { readOnly: true });
+    const value = fixture.prepare('SELECT * FROM knowledge_items WHERE id = ?').get(id);
+    fixture.close();
+    return value;
+  };
+  const countRevisions = (id) => {
+    const fixture = new DatabaseSync(dbPath, { readOnly: true });
+    const value = Number(fixture.prepare('SELECT COUNT(*) AS count FROM memory_revisions WHERE memory_id = ?').get(id)?.count || 0);
+    fixture.close();
+    return value;
+  };
+  const proposeUpdate = (id, changes, requestedSessionId = sessionId) => api('/api/actions/workboard.propose_update/invoke', {
+    method: 'POST',
+    json: { session_id: requestedSessionId, caller: 'cloud-agent', scopes: ['*'], args: { type: 'item', id, changes } }
+  });
+  const confirmWorkboard = (routeSessionId, confirmation) => api(`/api/chat/sessions/${routeSessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId: confirmation?.confirmationId, token: confirmation?.token }
+  });
+
+  const updateBefore = readFixture(700010);
+  const updatePreview = await proposeUpdate(700010, { title: 'Updated exact title', status: 'stable', next_action: 'Updated exact next action', confidence: 0.91, due_at: '2026-09-15' });
+  const updateAction = updatePreview.body?.data;
+  const updateConfirmation = updateAction?.confirmation;
+  workboardUpdateCorrelationId = updateAction?.correlationId || '';
+  workboardUpdateToken = updateConfirmation?.token || '';
+  const updateAfterPreview = readFixture(700010);
+  line(updatePreview.status === 200 && updateAction?.status === 'needs_confirmation' && updateAction?.data?.target?.type === 'item' && updateAction?.data?.target?.id === 700010 && /^[a-f0-9]{64}$/.test(updateAction?.data?.state_token || '') && updateConfirmation?.confirmationId && updateConfirmation?.token, 'typed Workboard update returns a state-bound durable confirmation');
+  line(updateAfterPreview?.title === updateBefore?.title && updateAfterPreview?.status === updateBefore?.status && updateAfterPreview?.next_action === updateBefore?.next_action, 'previewing a Workboard update performs no target mutation');
+  const updateStoredDb = new DatabaseSync(dbPath, { readOnly: true });
+  const updateStored = updateStoredDb.prepare('SELECT token_hash, session_id, operation, target, before_state, after_state, origin FROM confirmations WHERE id = ?').get(updateConfirmation?.confirmationId);
+  updateStoredDb.close();
+  const updateStoredBefore = JSON.parse(updateStored?.before_state || '{}');
+  const updateStoredAfter = JSON.parse(updateStored?.after_state || '{}');
+  line(updateStored?.session_id === `chat:${sessionId}` && updateStored?.operation === 'workboard.update' && updateStored?.target === 'workboard:item:700010' && updateStoredBefore?.identity?.id === 700010 && updateStoredAfter?.identity?.type === 'item', 'update confirmation binds the real chat, typed target, and full canonical before-state');
+  line(JSON.stringify(updateStoredAfter?.changes) === JSON.stringify({ title: 'Updated exact title', status: 'stable', next_action: 'Updated exact next action', confidence: 0.91, due_at: '2026-09-15' }), 'the durable update stores only the validated exact changed fields');
+  line(updateStored?.token_hash !== updateConfirmation?.token && !JSON.stringify(updateStored).includes(updateConfirmation?.token), 'the Workboard update token is never stored in SQLite');
+  line(!String(updateStored?.origin || '').includes('Updated exact title') && JSON.parse(updateStored?.origin || '{}').correlationId === updateAction?.correlationId, 'update origin stores correlation provenance without user content');
+
+  const invalidUpdateEnvelope = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, {
+    method: 'POST',
+    json: { confirmationId: updateConfirmation?.confirmationId, token: updateConfirmation?.token, changes: { title: 'Injected replacement' } }
+  });
+  line(invalidUpdateEnvelope.status === 400 && readFixture(700010)?.title === updateBefore?.title, 'confirmation rejects replacement update fields before mutation');
+  const wrongUpdateToken = await api(`/api/chat/sessions/${sessionId}/workboard/confirm`, { method: 'POST', json: { confirmationId: updateConfirmation?.confirmationId, token: '0'.repeat(64) } });
+  line(wrongUpdateToken.status === 400 && readFixture(700010)?.title === updateBefore?.title, 'the wrong update token cannot mutate the target');
+  const updateOtherSession = await api('/api/chat/sessions', { method: 'POST', json: { title: 'Other update session' } });
+  const updateOtherSessionId = Number(updateOtherSession.body?.data?.id);
+  const wrongUpdateSession = await confirmWorkboard(updateOtherSessionId, updateConfirmation);
+  line(wrongUpdateSession.status === 400 && readFixture(700010)?.title === updateBefore?.title, 'a different chat cannot apply the Workboard update');
+  const updateRevisionBefore = countRevisions(700010);
+  const appliedUpdate = await confirmWorkboard(sessionId, updateConfirmation);
+  const updateAppliedRecord = readFixture(700010);
+  line(appliedUpdate.status === 200 && appliedUpdate.body?.data?.operation === 'workboard.update' && updateAppliedRecord?.title === 'Updated exact title' && updateAppliedRecord?.status === 'stable' && updateAppliedRecord?.next_action === 'Updated exact next action' && updateAppliedRecord?.confidence === 0.91 && updateAppliedRecord?.due_at === '2026-09-15' && updateAppliedRecord?.body === updateBefore?.body && updateAppliedRecord?.owner === updateBefore?.owner, 'confirmation applies exactly the staged fields and preserves unrelated state');
+  line(countRevisions(700010) === updateRevisionBefore + 1, 'title update records exactly one auditable memory revision');
+  const updateReplay = await confirmWorkboard(sessionId, updateConfirmation);
+  line(updateReplay.status === 400 && countRevisions(700010) === updateRevisionBefore + 1, 'an update confirmation replay is rejected without a second mutation');
+  const immediateUpdateAudit = (await api(`/api/chat/sessions/${sessionId}/audit`)).body?.data?.filter((row) => row.correlation_id === workboardUpdateCorrelationId) || [];
+  line(immediateUpdateAudit.some((row) => row.capability === 'workboard.propose_update' && row.outcome === 'proposed') && immediateUpdateAudit.some((row) => row.capability === 'workboard.update' && row.outcome === 'applied'), 'Workboard update proposal and apply receipts share one correlation ID');
+  line(immediateUpdateAudit.every((row) => !String(row.detail).includes('Updated exact title') && !String(row.detail).includes('Updated exact next action') && !String(row.detail).includes(workboardUpdateToken)), 'Workboard update audit stores no changed content or confirmation token');
+
+  const noSessionUpdate = await proposeUpdate(700011, { status: 'stable' }, 987654321);
+  line(noSessionUpdate.body?.data?.status === 'blocked' && noSessionUpdate.body?.data?.error?.code === 'INVALID_CHAT_SESSION' && !noSessionUpdate.body?.data?.confirmation && readFixture(700011)?.status === 'active', 'an update without a real Chat session cannot stage or mutate');
+  for (const [changes, label] of [
+    [{}, 'empty'],
+    [{ owner: 'app' }, 'identity/ownership'],
+    [{ status: 'active' }, 'no-op'],
+    [{ due_at: '2026-02-31' }, 'impossible-date'],
+    [{ confidence: 2 }, 'out-of-range']
+  ]) {
+    const invalid = await proposeUpdate(700011, changes);
+    line(['blocked', 'failed'].includes(invalid.body?.data?.status) && !invalid.body?.data?.confirmation && readFixture(700011)?.status === 'active', `${label} Workboard update fails closed without mutation`);
+  }
+
+  const stalePreview = await proposeUpdate(700011, { next_action: 'Stale proposal value' });
+  await api('/api/items/700011', { method: 'PATCH', json: { status: 'blocked' } });
+  const staleApply = await confirmWorkboard(sessionId, stalePreview.body?.data?.confirmation);
+  line(staleApply.status === 400 && readFixture(700011)?.status === 'blocked' && readFixture(700011)?.next_action === 'Next 700011', 'full-state stale detection rejects an update after another legitimate mutation');
+
+  const deletedPreview = await proposeUpdate(700012, { status: 'stable' });
+  const deleteDb = new DatabaseSync(dbPath);
+  deleteDb.prepare('DELETE FROM knowledge_items WHERE id = ?').run(700012);
+  deleteDb.close();
+  const deletedApply = await confirmWorkboard(sessionId, deletedPreview.body?.data?.confirmation);
+  line(deletedApply.status === 400 && !readFixture(700012), 'deleted Workboard targets fail closed at confirmation');
+
+  const tamperUpdate = await proposeUpdate(700013, { status: 'stable' });
+  const tamperUpdateConfirmation = tamperUpdate.body?.data?.confirmation;
+  const tamperUpdateDb = new DatabaseSync(dbPath);
+  tamperUpdateDb.prepare('UPDATE confirmations SET after_state = ? WHERE id = ?').run(JSON.stringify({ identity: { type: 'item', id: 700013 }, changes: { status: 'done' } }), tamperUpdateConfirmation.confirmationId);
+  tamperUpdateDb.close();
+  const tamperedUpdateApply = await confirmWorkboard(sessionId, tamperUpdateConfirmation);
+  line(tamperedUpdateApply.status === 400 && readFixture(700013)?.status === 'active', 'tampered stored update payload fails integrity validation before mutation');
+
+  const expiredUpdate = await proposeUpdate(700014, { status: 'stable' });
+  const expiredUpdateConfirmation = expiredUpdate.body?.data?.confirmation;
+  const expiredUpdateDb = new DatabaseSync(dbPath);
+  expiredUpdateDb.prepare('UPDATE confirmations SET expires_at = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', expiredUpdateConfirmation.confirmationId);
+  expiredUpdateDb.close();
+  const expiredUpdateApply = await confirmWorkboard(sessionId, expiredUpdateConfirmation);
+  line(expiredUpdateApply.status === 400 && readFixture(700014)?.status === 'active', 'expired Workboard update confirmation fails closed');
+
+  const updateSettlement = await proposeUpdate(700015, { title: 'Must roll back with settlement' });
+  const updateSettlementConfirmation = updateSettlement.body?.data?.confirmation;
+  const updateSettlementDb = new DatabaseSync(dbPath);
+  updateSettlementDb.exec(`
+    CREATE TRIGGER reject_update_applied_settlement
+    BEFORE UPDATE OF status ON confirmations
+    WHEN NEW.status = 'applied'
+    BEGIN
+      SELECT RAISE(ABORT, 'update settlement rejected');
+    END;
+  `);
+  updateSettlementDb.close();
+  const updateSettlementFailure = await confirmWorkboard(sessionId, updateSettlementConfirmation);
+  const updateSettlementCleanup = new DatabaseSync(dbPath);
+  const updateSettlementStatus = updateSettlementCleanup.prepare('SELECT status FROM confirmations WHERE id = ?').get(updateSettlementConfirmation.confirmationId)?.status;
+  updateSettlementCleanup.exec('DROP TRIGGER reject_update_applied_settlement');
+  updateSettlementCleanup.close();
+  line(updateSettlementFailure.status === 400 && updateSettlementStatus === 'failed' && readFixture(700015)?.title === 'Update fixture 700015', 'failed update settlement rolls back the mutation and records a truthful failed receipt');
+
+  const updateStorage = await proposeUpdate(700016, { title: 'Must roll back on storage error' });
+  const updateStorageConfirmation = updateStorage.body?.data?.confirmation;
+  const updateStorageDb = new DatabaseSync(dbPath);
+  updateStorageDb.exec(`
+    CREATE TRIGGER reject_workboard_update_storage
+    BEFORE UPDATE ON knowledge_items
+    WHEN OLD.id = 700016
+    BEGIN
+      SELECT RAISE(ABORT, 'update storage rejected');
+    END;
+  `);
+  updateStorageDb.close();
+  const updateStorageFailure = await confirmWorkboard(sessionId, updateStorageConfirmation);
+  const updateStorageCleanup = new DatabaseSync(dbPath);
+  const updateStorageStatus = updateStorageCleanup.prepare('SELECT status FROM confirmations WHERE id = ?').get(updateStorageConfirmation.confirmationId)?.status;
+  updateStorageCleanup.exec('DROP TRIGGER reject_workboard_update_storage');
+  updateStorageCleanup.close();
+  line(updateStorageFailure.status === 400 && updateStorageStatus === 'failed' && readFixture(700016)?.title === 'Update fixture 700016', 'datastore failure leaves the target unchanged with a truthful failed receipt');
+
+  const concurrentUpdate = await proposeUpdate(700017, { status: 'stable' });
+  const concurrentUpdateConfirmation = concurrentUpdate.body?.data?.confirmation;
+  const concurrentUpdateResults = await Promise.all([1, 2].map(() => confirmWorkboard(sessionId, concurrentUpdateConfirmation)));
+  line(concurrentUpdateResults.filter((result) => result.status === 200).length === 1 && concurrentUpdateResults.filter((result) => result.status === 400).length === 1 && readFixture(700017)?.status === 'stable', 'concurrent update confirmation has exactly one winner and one mutation');
+
+  const restartUpdate = await proposeUpdate(700018, { status: 'stable', next_action: 'Survived restart' });
+  const restartUpdateConfirmation = restartUpdate.body?.data?.confirmation;
+  await stopServer(server.child);
+  server = await retryStart();
+  base = server.base;
+  csrf = (await (await fetch(`${base}/api/csrf-token`)).json()).data.token;
+  const updateAfterRestart = await confirmWorkboard(sessionId, restartUpdateConfirmation);
+  line(updateAfterRestart.status === 200 && readFixture(700018)?.status === 'stable' && readFixture(700018)?.next_action === 'Survived restart', 'a durable Workboard update confirmation survives a server restart');
 
   const beforeItems = await api('/api/items?all=1');
   const phantomProposal = await api('/api/actions/workboard.propose_create/invoke', {
@@ -388,17 +551,19 @@ try {
   });
   line(legacyRoute.status === 200 && legacyRoute.body?.data?.name === 'knowledge.search' && legacyRoute.body?.data?.status === 'success' && legacyRoute.body?.data?.correlationId, 'Chat compatibility endpoint uses the structured registry result');
 
-  const audit = await api(`/api/chat/sessions/${sessionId}/audit`);
-  const correlated = audit.body?.data?.find((row) => row.correlation_id === firstResult?.correlationId);
+  const auditDb = new DatabaseSync(dbPath, { readOnly: true });
+  const auditRows = auditDb.prepare('SELECT * FROM chat_audit WHERE session_id = ? ORDER BY id DESC').all(sessionId);
+  auditDb.close();
+  const correlated = auditRows.find((row) => row.correlation_id === firstResult?.correlationId);
   line(Boolean(correlated) && correlated.capability === 'knowledge.search' && correlated.outcome === 'success', 'audit row links the action, outcome, and correlation ID');
   line(correlated?.detail === 'completed', 'audit detail is a concise receipt rather than the query body');
-  const knowledgeReadAudit = audit.body?.data?.find((row) => row.correlation_id === knowledgeReadCorrelationId);
+  const knowledgeReadAudit = auditRows.find((row) => row.correlation_id === knowledgeReadCorrelationId);
   line(Boolean(knowledgeReadAudit) && knowledgeReadAudit.capability === 'knowledge.read' && knowledgeReadAudit.outcome === 'success' && knowledgeReadAudit.detail === 'completed', 'Knowledge preview audit links its correlation ID to a concise success receipt');
   line(!String(knowledgeReadAudit?.detail).includes(knowledgePreviewTitle) && !String(knowledgeReadAudit?.detail).includes('Preview body marker'), 'Knowledge preview audit stores no title or body content');
-  const workboardReadAudit = audit.body?.data?.find((row) => row.correlation_id === workboardReadCorrelationId);
+  const workboardReadAudit = auditRows.find((row) => row.correlation_id === workboardReadCorrelationId);
   line(Boolean(workboardReadAudit) && workboardReadAudit.capability === 'workboard.read' && workboardReadAudit.outcome === 'success' && workboardReadAudit.detail === 'completed', 'Workboard preview audit links its correlation ID to a concise success receipt');
   line(!String(workboardReadAudit?.detail).includes('Typed project fixture') && !String(workboardReadAudit?.detail).includes('Project evidence'), 'Workboard preview audit stores no record title or evidence content');
-  const proposalAudit = audit.body?.data?.filter((row) => row.correlation_id === durable?.correlationId) || [];
+  const proposalAudit = auditRows.filter((row) => row.correlation_id === durable?.correlationId);
   line(proposalAudit.some((row) => row.capability === 'workboard.propose_create' && row.outcome === 'proposed') && proposalAudit.some((row) => row.capability === 'workboard.create' && row.outcome === 'applied'), 'proposal and application audits share the action correlation ID');
   line(proposalAudit.every((row) => !String(row.detail).includes('Durable proposal fixture') && !String(row.detail).includes('Immutable body fixture') && !String(row.detail).includes(confirmationToken)), 'correlated audit receipts contain no proposal body, title, or token');
 

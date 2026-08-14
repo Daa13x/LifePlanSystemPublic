@@ -22,7 +22,13 @@ import {
   detectLegacyData,
   importLegacyAsBackup
 } from './setupRecovery.js';
-import { createCapabilityRegistry, CAPABILITY_NAMES } from './chatCapabilities.js';
+import {
+  canonicalWorkboardItemState,
+  createCapabilityRegistry,
+  CAPABILITY_NAMES,
+  normalizeWorkboardItemChanges,
+  workboardItemStateToken
+} from './chatCapabilities.js';
 import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { resolveAgentMode } from './agentMode.js';
@@ -3002,6 +3008,8 @@ function writeChatAudit(sessionId, capability, outcome, detail, correlationId = 
 
 const CHAT_WORKBOARD_CREATE_ACTION = 'workboard.propose_create';
 const CHAT_WORKBOARD_CREATE_OPERATION = 'workboard.create';
+const CHAT_WORKBOARD_UPDATE_ACTION = 'workboard.propose_update';
+const CHAT_WORKBOARD_UPDATE_OPERATION = 'workboard.update';
 
 function realChatSessionId(value) {
   const sessionId = Number(value);
@@ -3078,6 +3086,80 @@ function bindWorkboardCreateConfirmation(sessionValue, result) {
     ...result,
     confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt }
   };
+}
+
+function readCanonicalWorkboardItem(id) {
+  const item = row('SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.id = ?', [id]);
+  return item ? { ...item, entity_type: 'item', category: item.type, detail: item.body } : null;
+}
+
+function canonicalWorkboardUpdateConfirmationState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The stored Workboard update is invalid.');
+  if (Object.keys(value).sort().join(',') !== 'changes,identity') throw new Error('The stored Workboard update contains unsupported fields.');
+  if (!value.identity || value.identity.type !== 'item' || !Number.isInteger(value.identity.id) || value.identity.id <= 0) throw new Error('The stored Workboard update has an invalid identity.');
+  return { identity: { type: 'item', id: value.identity.id }, changes: normalizeWorkboardItemChanges(value.changes) };
+}
+
+function workboardUpdateOrigin(correlationId) {
+  return JSON.stringify({ source: 'chat-action-gateway', actionId: CHAT_WORKBOARD_UPDATE_ACTION, correlationId });
+}
+
+function readWorkboardUpdateOrigin(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    if (parsed?.source !== 'chat-action-gateway' || parsed?.actionId !== CHAT_WORKBOARD_UPDATE_ACTION || typeof parsed?.correlationId !== 'string' || !parsed.correlationId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bindWorkboardUpdateConfirmation(sessionValue, result) {
+  if (result?.actionId !== CHAT_WORKBOARD_UPDATE_ACTION || result.status !== 'needs_confirmation') return result;
+  const sessionId = realChatSessionId(sessionValue);
+  if (!sessionId) {
+    const error = new Error('A valid active chat session is required to stage a Workboard update.');
+    error.code = 'INVALID_CHAT_SESSION';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const identity = result.data?.target;
+  if (!identity || identity.type !== 'item' || !Number.isInteger(identity.id) || identity.id <= 0) throw new Error('The Workboard update returned an invalid target.');
+  const current = readCanonicalWorkboardItem(identity.id);
+  if (!current) {
+    const error = new Error('The Workboard item is no longer available.');
+    error.code = 'WORKBOARD_TARGET_UNAVAILABLE';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  if (workboardItemStateToken(current) !== result.data?.state_token) {
+    const error = new Error('The Workboard item changed while the proposal was being prepared. Review it again.');
+    error.code = 'STALE_WORKBOARD_STATE';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const beforeState = canonicalWorkboardItemState(current);
+  const afterState = canonicalWorkboardUpdateConfirmationState({ identity, changes: result.data.after });
+  const target = `workboard:item:${identity.id}`;
+  const confirmation = proposeConfirmation(db, {
+    operation: CHAT_WORKBOARD_UPDATE_OPERATION,
+    target,
+    beforeState,
+    afterState,
+    reason: 'User-reviewed Chat Workboard update proposal.',
+    origin: workboardUpdateOrigin(result.correlationId),
+    sessionId: chatConfirmationSessionId(sessionId),
+    requiresRevalidation: true,
+    idempotencyKey: `chat-workboard-update:${result.correlationId}`
+  });
+  return { ...result, confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt } };
+}
+
+function bindWorkboardConfirmation(sessionValue, result) {
+  return bindWorkboardUpdateConfirmation(sessionValue, bindWorkboardCreateConfirmation(sessionValue, result));
 }
 
 function likeParam(query) {
@@ -3193,13 +3275,10 @@ const capabilityRegistry = createCapabilityRegistry({
       };
     }
     if (type === 'item') {
-      const item = row('SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.id = ?', [id]);
+      const item = readCanonicalWorkboardItem(id);
       if (!item) return null;
       return {
         ...item,
-        entity_type: 'item',
-        category: item.type,
-        detail: item.body,
         project: item.project_id ? { entity_type: 'project', id: item.project_id, title: item.project_name } : null
       };
     }
@@ -3289,7 +3368,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
       return ok(res, sessionBlock);
     }
     result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui' });
-    result = bindWorkboardCreateConfirmation(sessionId, result);
+    result = bindWorkboardConfirmation(sessionId, result);
     const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
       sessionId,
@@ -3300,7 +3379,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
     );
     ok(res, result);
   } catch (error) {
-    if (error?.code === 'INVALID_CHAT_SESSION' && result) {
+    if (error?.actionStatus === 'blocked' && result) {
       const blocked = {
         status: 'blocked',
         actionId: result.actionId || req.params.id,
@@ -3324,7 +3403,7 @@ app.post('/api/chat/capability', async (req, res) => {
       return ok(res, sessionBlock);
     }
     let result = await capabilityRegistry.invoke(name, req.body?.args || {});
-    result = bindWorkboardCreateConfirmation(sessionId, result);
+    result = bindWorkboardConfirmation(sessionId, result);
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
@@ -3356,54 +3435,85 @@ app.delete('/api/chat/sessions/:id/context-records/:recordId', (req, res) => {
   ok(res, allRows('SELECT * FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
 });
 
-// Apply only the immutable Workboard-create payload stored by the action
+// Apply only an immutable Workboard create/update payload stored by the action
 // gateway. The client supplies the one-time confirmation identifier and token,
-// never a replacement proposal. workboard.propose_update remains unexposed
-// until it has its own stale-state binding.
+// never a replacement mutation payload.
 app.post('/api/chat/sessions/:id/workboard/confirm', async (req, res) => {
   const sessionId = Number(req.params.id);
   const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
   const keys = Object.keys(body).sort();
+  let auditOperation = 'workboard.confirm';
   try {
     if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
     if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
-      writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
       return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
     }
     const confirmationId = String(body.confirmationId || '');
     const token = String(body.token || '');
     if (!/^[a-f0-9]{32}$/.test(confirmationId) || !/^[a-f0-9]{64}$/.test(token)) return fail(res, 400, 'A valid confirmation identifier and token are required.');
     const staged = getConfirmation(db, confirmationId);
-    if (!staged || staged.operation !== CHAT_WORKBOARD_CREATE_OPERATION || staged.target !== `${chatConfirmationSessionId(sessionId)}:workboard:new`) {
-      writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'blocked', 'INVALID_CONFIRMATION');
+    const createConfirmation = staged?.operation === CHAT_WORKBOARD_CREATE_OPERATION
+      && staged.target === `${chatConfirmationSessionId(sessionId)}:workboard:new`;
+    const updateTarget = staged?.operation === CHAT_WORKBOARD_UPDATE_OPERATION
+      ? /^workboard:item:([1-9]\d*)$/.exec(staged.target)
+      : null;
+    if (!staged || (!createConfirmation && !updateTarget)) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION');
       return fail(res, 400, 'That Workboard confirmation is not available.');
     }
-    const origin = readWorkboardCreateOrigin(staged.origin);
+    auditOperation = staged.operation;
+    const origin = createConfirmation ? readWorkboardCreateOrigin(staged.origin) : readWorkboardUpdateOrigin(staged.origin);
     if (!origin) {
-      writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'blocked', 'INVALID_CONFIRMATION_ORIGIN');
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ORIGIN');
       return fail(res, 400, 'That Workboard confirmation is not available.');
     }
+    const applyCreate = (claimed) => {
+      const p = canonicalWorkboardCreateState(claimed.afterState);
+      const status = p.type === 'blocker' ? 'blocked' : 'active';
+      const id = db.prepare(`INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, owner, next_action)
+        VALUES (?, ?, ?, 'chat', ?, ?, date('now'), 'user', ?)`)
+        .run(p.type, p.title, p.body || p.title, status, 0.9, p.next_action || null).lastInsertRowid;
+      return { operation: CHAT_WORKBOARD_CREATE_OPERATION, success: true, record: row('SELECT * FROM knowledge_items WHERE id = ?', [id]) };
+    };
+    const applyUpdate = (claimed) => {
+      const proposal = canonicalWorkboardUpdateConfirmationState(claimed.afterState);
+      const live = readCanonicalWorkboardItem(proposal.identity.id);
+      const liveState = live ? canonicalWorkboardItemState(live) : null;
+      if (!liveState || JSON.stringify(liveState) !== JSON.stringify(claimed.beforeState)) {
+        const error = new Error('The target changed after this confirmation was created. Review it again.');
+        error.confirmationCode = 'stale';
+        throw error;
+      }
+      const fields = { ...proposal.changes, updated_at: new Date().toISOString() };
+      const sets = Object.keys(fields).map((key) => `${key} = ?`).join(', ');
+      const changed = db.prepare(`UPDATE knowledge_items SET ${sets} WHERE id = ?`).run(...Object.values(fields), proposal.identity.id);
+      if (changed.changes !== 1) throw new Error('The Workboard item update did not apply exactly once.');
+      if (Object.hasOwn(fields, 'title') || Object.hasOwn(fields, 'body')) {
+        db.prepare('INSERT INTO memory_revisions (memory_id, action, previous_value) VALUES (?, ?, ?)')
+          .run(proposal.identity.id, 'edited', JSON.stringify({ title: live.title, body: live.body }));
+      }
+      return { operation: CHAT_WORKBOARD_UPDATE_OPERATION, success: true, record: row('SELECT * FROM knowledge_items WHERE id = ?', [proposal.identity.id]) };
+    };
+    const revalidateUpdate = (confirmation) => {
+      const proposal = canonicalWorkboardUpdateConfirmationState(confirmation.afterState);
+      const current = readCanonicalWorkboardItem(proposal.identity.id);
+      return current ? canonicalWorkboardItemState(current) : null;
+    };
     const applied = await confirmAndApply(
       db,
       { id: confirmationId, token, sessionId: chatConfirmationSessionId(sessionId) },
-      (claimed) => {
-        const p = canonicalWorkboardCreateState(claimed.afterState);
-        const status = p.type === 'blocker' ? 'blocked' : 'active';
-        const id = db.prepare(`INSERT INTO knowledge_items (type, title, body, source, status, confidence, last_reviewed, owner, next_action)
-          VALUES (?, ?, ?, 'chat', ?, ?, date('now'), 'user', ?)`)
-          .run(p.type, p.title, p.body || p.title, status, 0.9, p.next_action || null).lastInsertRowid;
-        return { operation: CHAT_WORKBOARD_CREATE_OPERATION, success: true, record: row('SELECT * FROM knowledge_items WHERE id = ?', [id]) };
-      },
-      { transactionalApply: true }
+      createConfirmation ? applyCreate : applyUpdate,
+      { transactionalApply: true, revalidate: createConfirmation ? null : revalidateUpdate }
     );
     if (!applied.ok) {
-      writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'blocked', `CONFIRMATION_${String(applied.code || 'REJECTED').toUpperCase()}`);
+      writeChatAudit(sessionId, auditOperation, 'blocked', `CONFIRMATION_${String(applied.code || 'REJECTED').toUpperCase()}`, origin.correlationId);
       return fail(res, 400, applied.error || 'The Workboard confirmation was rejected.');
     }
-    writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'applied', `item ${applied.result?.record?.id || 'created'}`, origin.correlationId);
+    writeChatAudit(sessionId, auditOperation, 'applied', `item ${applied.result?.record?.id || 'changed'}`, origin.correlationId);
     return ok(res, applied.result);
   } catch {
-    writeChatAudit(sessionId, CHAT_WORKBOARD_CREATE_OPERATION, 'error', 'CONFIRMATION_FAILED');
+    writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
     fail(res, 400, 'Workboard confirmation failed safely.');
   }
 });

@@ -16,7 +16,7 @@ assert.match(ui, /\/api\/actions\/\$\{encodeURIComponent\(name\)\}\/invoke/, 'UI
 assert.match(ui, /\['success', 'needs_confirmation', 'needs_approval'\]\.includes\(result\.status\)/, 'UI handles structured non-success outcomes before reading action data');
 assert.match(ui, /result\.error\?\.message \|\| `Action \$\{name\} did not complete/, 'UI surfaces the registry error instead of an undefined-data failure');
 const neutralCalls = [...ui.matchAll(/invokeAction\('([^']+)'/g)].map((match) => match[1]);
-assert.deepEqual([...new Set(neutralCalls)].sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'only the bounded Context Picker and Workboard-create actions use the neutral gateway');
+assert.deepEqual([...new Set(neutralCalls)].sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'only the bounded Context Picker and durable Workboard proposal actions use the neutral gateway');
 assert.match(ui, /invokeAction\('knowledge\.read',\s*\{\s*id: rec\.ref_id,\s*kind: rec\.kind === 'knowledge-candidate' \? 'candidate' : 'item'\s*\}\)/s, 'Knowledge preview sends the exact typed item/candidate identity');
 assert.match(ui, /invokeAction\('workboard\.read',\s*\{\s*id: rec\.ref_id,\s*type: rec\.entity_type\s*\}\)/s, 'Workboard preview sends the exact typed entity identity');
 assert.match(ui, /kind: `workboard-\$\{rec\.identity\.type\}`[\s\S]*entity_type: rec\.identity\.type[\s\S]*ref_id: rec\.identity\.id/, 'Workboard list results preserve the server-provided typed identity');
@@ -36,6 +36,12 @@ assert.match(closeFunction, /pickerPreviewRequestRef\.current \+= 1/, 'closing t
 assert.match(ui, /useEffect\(\(\) => \{\s*loadContext\(\);\s*loadContextRecords\(\);\s*loadConnection\(\);\s*loadCloudChecks\(\);\s*setProposal\(null\);\s*pickerSearchRequestRef\.current \+= 1;\s*pickerPreviewRequestRef\.current \+= 1;\s*setPicker\(null\);\s*\}, \[selectedSession\]\);/s, 'changing chat sessions invalidates and clears an in-flight preview');
 assert.match(ui, /invokeAction\('workboard\.propose_create'/, 'Workboard create preview uses the neutral action gateway');
 assert.doesNotMatch(ui, /invokeLegacyCapability\('workboard\.propose_create'/, 'Workboard create no longer uses the unbound legacy preview lane');
+const updateFunctionStart = ui.indexOf('async function submitProposeUpdate(');
+const confirmFunctionStart = ui.indexOf('async function confirmProposal(', updateFunctionStart);
+assert.ok(updateFunctionStart >= 0 && confirmFunctionStart > updateFunctionStart, 'Workboard update proposal has a bounded UI adapter');
+const updateFunction = ui.slice(updateFunctionStart, confirmFunctionStart);
+assert.match(updateFunction, /invokeAction\('workboard\.propose_update', \{ type: record\.identity\.type, id: record\.identity\.id, changes \}\)/, 'Workboard update preview sends the typed identity and exact changed fields');
+assert.doesNotMatch(updateFunction, /\/api\/items|method:\s*['"]PATCH['"]|context-records|onAttach/, 'previewing a Workboard update cannot write or attach a record');
 assert.match(ui, /JSON\.stringify\(\{ confirmationId, token \}\)/, 'confirmation submits only the durable identifier and one-time token');
 assert.doesNotMatch(ui, /JSON\.stringify\(\{ proposal \}\)/, 'the UI never resubmits a mutable proposal');
 
@@ -65,12 +71,14 @@ assert.equal(manifest['workboard.read'].risk, 'SENSITIVE_DATA', 'Workboard detai
 assert.equal(manifest['workboard.read'].confirmation, 'none', 'the session-scoped Workboard read remains confirmation-free');
 assert.equal(manifest['workboard.propose_create'].risk, 'REVERSIBLE_WRITE', 'Workboard create remains a proposal write risk');
 assert.equal(manifest['workboard.propose_create'].confirmation, 'user_confirmation', 'Workboard create requires explicit user confirmation');
+assert.equal(manifest['workboard.propose_update'].risk, 'REVERSIBLE_WRITE', 'Workboard update remains a proposal write risk');
+assert.equal(manifest['workboard.propose_update'].confirmation, 'user_confirmation', 'Workboard update requires explicit user confirmation');
 for (const control of searchControls) {
   const actionId = control.match(/data-action-id="([^"]+)"/)[1];
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 10, 'the bounded slice has exactly ten mapped trigger/search/preview/proposal controls');
+assert.equal(mappedControls.length, 12, 'the bounded slice has exactly twelve mapped trigger/search/preview/proposal controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -89,6 +97,11 @@ assert.deepEqual(
   controlMappings.filter((mapping) => mapping.actionId === 'workboard.read').map((mapping) => mapping.controlId),
   ['chat.context-picker.workboard-preview'],
   'the explicit Workboard preview control maps to the typed read-only action'
+);
+assert.deepEqual(
+  controlMappings.filter((mapping) => mapping.actionId === 'workboard.propose_update').map((mapping) => mapping.controlId).sort(),
+  ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm'],
+  'the complete visible Workboard-update preview/confirm family has stable identifiers'
 );
 const attachControlStart = picker.indexOf('<button className="picker-row"');
 const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
@@ -114,10 +127,12 @@ assert.match(server, /app\.get\('\/api\/actions',[^\n]+capabilityRegistry\.listA
 assert.match(server, /app\.get\('\/api\/actions\/:id'/, 'server inspects one neutral action');
 assert.match(server, /app\.post\('\/api\/actions\/:id\/invoke'/, 'server invokes one neutral action');
 assert.match(server, /capabilityRegistry\.execute\(req\.params\.id, req\.body\?\.args, \{ caller: 'human-ui' \}\)/, 'HTTP route assigns its trusted caller instead of accepting body scopes');
-assert.match(server, /bindWorkboardCreateConfirmation\(sessionId, result\)/, 'the gateway binds Workboard create preview to the durable confirmation owner');
+assert.match(server, /bindWorkboardConfirmation\(sessionId, result\)/, 'the gateway binds Workboard create and update previews to the durable confirmation owner');
 assert.match(server, /requireWorkboardReadSession\(req\.params\.id, sessionId\)/, 'neutral Workboard read requires a real active Chat session before the handler runs');
 assert.match(server, /requireWorkboardReadSession\(name, sessionId\)/, 'legacy Workboard read requires the same real-session boundary');
 assert.match(server, /keys\.length !== 2 \|\| keys\[0\] !== 'confirmationId' \|\| keys\[1\] !== 'token'/, 'the confirmation endpoint rejects replacement payload fields');
+assert.match(server, /JSON\.stringify\(liveState\) !== JSON\.stringify\(claimed\.beforeState\)/, 'Workboard update confirmation performs a full-state stale check inside the apply transaction');
+assert.match(server, /error\.confirmationCode = 'stale'/, 'a transactional stale race produces a truthful stale receipt');
 const previewStart = picker.indexOf('function KnowledgeRecordPreview(');
 assert.ok(previewStart >= 0, 'Knowledge preview renderer exists in the bounded picker slice');
 const previewRenderer = picker.slice(previewStart);

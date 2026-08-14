@@ -185,16 +185,28 @@ await checkAsync('workboard.propose_create returns a confirmation-required propo
 });
 await checkAsync('workboard.propose_update returns before/after and performs no write', async () => {
   calls.length = 0;
-  const r = await reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { status: 'done' } });
+  const r = await reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { status: 'done', title: ' Updated title ', next_action: null, confidence: 0.9, due_at: '2026-08-31' } });
   assert.equal(r.data.proposal, true);
   assert.equal(r.data.confirmation_required, true);
-  assert.deepEqual(r.data.after, { status: 'done' });
-  assert.ok('before' in r.data);
+  assert.equal(r.data.operation, 'workboard.update');
+  assert.deepEqual(r.data.target, { type: 'item', id: 1 });
+  assert.match(r.data.state_token, /^[a-f0-9]{64}$/);
+  assert.deepEqual(r.data.after, { status: 'done', title: 'Updated title', next_action: null, confidence: 0.9, due_at: '2026-08-31' });
+  assert.deepEqual(r.data.before, { status: 'active', title: 'it', next_action: 'n', confidence: 0.5, due_at: null });
   // Only readWorkboard (a read) may be called to build the diff — never a write.
   assert.deepEqual(calls.map((c) => c[0]), ['readWorkboard'], 'propose_update may only read, never write');
 });
 await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { owner: 'app' } }), /Action failed safely\. Reference/, 'propose_update rejects disallowed fields without exposing handler internals');
 await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: {} }), /Action failed safely\. Reference/, 'propose_update rejects empty changes without exposing handler internals');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'project', id: 1, changes: { status: 'done' } }), /must be one of/, 'propose_update rejects non-item target identities');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { status: 'active' } }), /Action failed safely\. Reference/, 'propose_update rejects no-op changes');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { status: 'invented' } }), /Action failed safely\. Reference/, 'propose_update rejects unknown statuses');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { title: 'x'.repeat(161) } }), /Action failed safely\. Reference/, 'propose_update rejects overlong titles');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { body: 'x'.repeat(2001) } }), /Action failed safely\. Reference/, 'propose_update rejects overlong detail');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { next_action: 'x'.repeat(401) } }), /Action failed safely\. Reference/, 'propose_update rejects overlong next actions');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { confidence: '0.5' } }), /Action failed safely\. Reference/, 'propose_update rejects confidence coercion');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { confidence: -0.1 } }), /Action failed safely\. Reference/, 'propose_update rejects confidence outside the canonical range');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { due_at: '2026-02-31' } }), /Action failed safely\. Reference/, 'propose_update rejects impossible calendar dates');
 
 // Structural safety: the capability module must not contain SQL, shell, or fs access.
 await checkAsync('capability module contains no SQL / shell / filesystem access', async () => {

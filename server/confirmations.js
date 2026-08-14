@@ -403,7 +403,8 @@ export async function confirmAndApply(db, { id, token, sessionId }, applyFn, { n
       transition(db, id, CONFIRMATION_STATUS.APPLYING, CONFIRMATION_STATUS.FAILED, {
         events: [{ event: 'failed', at: iso(now), detail: String(error?.message || error) }]
       });
-      return reject('apply_failed', String(error?.message || error));
+      const code = typeof error?.confirmationCode === 'string' && error.confirmationCode ? error.confirmationCode : 'apply_failed';
+      return reject(code, String(error?.message || error));
     }
   }
 

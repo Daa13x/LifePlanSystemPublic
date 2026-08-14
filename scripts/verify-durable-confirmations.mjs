@@ -172,6 +172,21 @@ try {
     );
     line(settledResult.ok && db.prepare('SELECT COUNT(*) AS count FROM transactional_targets').get().count === 1, 'transactional apply commits the target mutation and applied receipt together');
     line(getConfirmation(db, success.id).status === CONFIRMATION_STATUS.APPLIED, 'successful transactional apply has an applied receipt');
+
+    const staleRace = proposeConfirmation(db, { operation: 'same-db.stale', sessionId: SESSION, requiresRevalidation: false, ttlMs: 10 * MIN, now: T0 });
+    const staleResult = await confirmAndApply(
+      db,
+      { id: staleRace.id, token: staleRace.token, sessionId: SESSION },
+      () => {
+        db.prepare('INSERT INTO transactional_targets (value) VALUES (?)').run('stale mutation must roll back');
+        const error = new Error('target changed inside apply transaction');
+        error.confirmationCode = 'stale';
+        throw error;
+      },
+      { now: T0 + MIN, transactionalApply: true }
+    );
+    line(!staleResult.ok && staleResult.code === 'stale', 'transactional consumers can preserve a truthful stale outcome code');
+    line(db.prepare("SELECT COUNT(*) AS count FROM transactional_targets WHERE value = 'stale mutation must roll back'").get().count === 0 && getConfirmation(db, staleRace.id).status === CONFIRMATION_STATUS.FAILED, 'transactional stale race rolls back its target mutation and settles failed');
   }
 
   // ---- two simultaneous confirms => exactly one application ----
