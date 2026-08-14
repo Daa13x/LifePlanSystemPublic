@@ -299,4 +299,23 @@ rendered truthful empty model/run states and live runtime/repository/connector
 state, preserved zero attachments and five fixture items, and still navigated
 to the full System status page.
 
+## 2026-08-14 bounded conversation-search checkpoint
+
+`conversation.search`, the last pre-existing registered capability that was
+outside the neutral catalog, is now exposed as an explicit human-UI sensitive
+read. Both the neutral and compatibility paths require a real active Chat
+session. Generic local/cloud callers do not receive the history-read scope.
+Search uses literal wildcard escaping, excludes deleted chats, and returns only
+strictly bounded session titles, roles, snippets, timestamps, and result counts.
+
+The Chat sidebar uses the same registered handler, invalidates late responses
+when a different search or session wins, and opens the exact matched session.
+Search never attaches context, promotes memory, stages confirmation, or mutates
+Workboard data. Unit, UI, and disposable HTTP checks cover oversized stored
+fields, malformed dependency identities, blank input, deleted chats, wildcard
+queries, phantom-session bypass attempts, caller-scope denial, mutation
+isolation, and correlation-linked audits containing neither query nor message
+content. The neutral catalog now exposes all ten capabilities that existed when
+this continuation began; future actions remain separate safety slices.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

@@ -1638,6 +1638,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [systemModelsPreview, setSystemModelsPreview] = useState(null);
   const [systemRunsPreview, setSystemRunsPreview] = useState(null);
   const [systemCheckBusy, setSystemCheckBusy] = useState('');
+  const [historyQuery, setHistoryQuery] = useState('');
+  const [historyResults, setHistoryResults] = useState([]);
+  const [historySearchBusy, setHistorySearchBusy] = useState(false);
+  const historySearchRequestRef = useRef(0);
   const [contextRecords, setContextRecords] = useState([]);
   const [picker, setPicker] = useState(null);
   const pickerSearchRequestRef = useRef(0);
@@ -1775,6 +1779,31 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     } finally {
       setSystemCheckBusy('');
     }
+  }
+
+  async function searchChatHistory(event) {
+    event.preventDefault();
+    const query = historyQuery.trim();
+    if (!query || historySearchBusy) return;
+    const requestId = ++historySearchRequestRef.current;
+    setHistorySearchBusy(true);
+    try {
+      const result = await invokeAction('conversation.search', { query, limit: 8 });
+      if (historySearchRequestRef.current === requestId) setHistoryResults(result.data.matches || []);
+    } catch (error) {
+      if (historySearchRequestRef.current === requestId) setNotice(error.message);
+    } finally {
+      if (historySearchRequestRef.current === requestId) setHistorySearchBusy(false);
+    }
+  }
+
+  function openHistoryResult(match) {
+    historySearchRequestRef.current += 1;
+    setHistorySearchBusy(false);
+    setHistoryQuery('');
+    setHistoryResults([]);
+    setSelectedSession(match.session_id);
+    navigate('chat', null, match.session_id);
   }
 
   async function runPickerSearch(next = {}) {
@@ -2139,6 +2168,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     loadConnection();
     loadCloudChecks();
     setProposal(null);
+    historySearchRequestRef.current += 1;
+    setHistorySearchBusy(false);
+    setHistoryResults([]);
     pickerSearchRequestRef.current += 1;
     pickerPreviewRequestRef.current += 1;
     setPicker(null);
@@ -2165,6 +2197,21 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       <div className="chat-sidebar">
         <div className="session-list">
           <button className="primary" onClick={newSession}><Plus size={16} /> New chat</button>
+          <form className="inline-form compact" onSubmit={searchChatHistory}>
+            <input value={historyQuery} maxLength={240} onChange={(event) => setHistoryQuery(event.target.value)} aria-label="Search local chat history" placeholder="Search chats…" />
+            <button type="submit" data-action-id="conversation.search" data-control-id="chat.history-search.submit" disabled={historySearchBusy || !historyQuery.trim()}>{historySearchBusy ? 'Searching…' : 'Search'}</button>
+          </form>
+          {historyResults.length ? (
+            <div className="history-search-results" aria-label="Chat history search results">
+              {historyResults.map((match, index) => (
+                <button className="session-row" key={`${match.session_id}-${match.created_at || index}`} onClick={() => openHistoryResult(match)}>
+                  <span>{match.role} · Chat #{match.session_id}</span>
+                  <strong>{match.session_title}</strong>
+                  <small>{match.snippet}</small>
+                </button>
+              ))}
+            </div>
+          ) : null}
           {sessions.map((session) => (
             <div key={session.id} className={cx('session-entry', session.id === selectedSession && 'selected')}>
               <button className="session-row" onClick={() => { setSelectedSession(session.id); navigate('chat', null, session.id); }}>

@@ -28,6 +28,11 @@ identity, privacy, confirmation, recovery, or user authority.
   summaries, and recent-run summaries through the same neutral registry used by
   other actions. These checks are read-only, emit concise correlated audits,
   render as plain text, and preserve the full System page as a separate view.
+- All ten currently registered capabilities are now exposed through the neutral
+  action catalog. `conversation.search` is a real-session-bound, explicit human
+  UI search: generic local/cloud callers do not receive its sensitive-history
+  scope, deleted chats and SQL-wildcard expansion are excluded, and only bounded
+  titles/snippets plus content-free correlated audit receipts leave the owner.
 
 ## Done
 
@@ -54,15 +59,15 @@ identity, privacy, confirmation, recovery, or user authority.
 
 ## Next authorised action-registry slice
 
-- Evaluate `conversation.search`, the final already-registered capability that
-  remains outside the neutral catalog. Expose it only with a real active Chat
-  session, explicit human UI search, strict query/snippet/result bounds, and no
-  generic local/cloud agent scope.
-- Prove that searching history does not attach, promote, mutate, or leak raw
-  message bodies beyond the requested bounded snippets; preserve concise audit
-  receipts without query or message content.
-- Keep the catalog incremental. Do not expose additional mutations until their
-  confirmation, stale-state, rollback, replay, and UI contracts are complete.
+- Inspect the existing renderer/navigation ownership and determine whether a
+  trustworthy correlation-bound command/acknowledgement bridge can be added
+  without falsely reporting navigation before the renderer applies it.
+- If that prerequisite is sound, migrate one bounded navigation family with
+  exact UI/action equivalence and truthful applied/failed receipts. If it is not
+  sound, document the concrete blocker instead of labelling navigation complete.
+- Keep the catalog incremental. Do not expose destructive, repository, external
+  send, approval-decision, or other mutations until their confirmation,
+  stale-state, rollback, replay, and UI contracts are complete.
 
 ## Historical public-scaffold follow-ups
 

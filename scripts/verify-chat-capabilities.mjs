@@ -76,7 +76,10 @@ const deps = {
     calls.push(['listRuns', a]);
     return Array.from({ length: 30 }, (_, index) => ({ id: oversizedWorkboardText, title: oversizedWorkboardText, status: oversizedWorkboardText, created_at: oversizedWorkboardText, ignored: oversizedWorkboardText, index }));
   },
-  searchConversations: (a) => { calls.push(['searchConversations', a]); return Array.from({ length: 20 }, () => ({ session_id: 1, role: 'user', content: 'msg', created_at: 't' })); }
+  searchConversations: (a) => {
+    calls.push(['searchConversations', a]);
+    return Array.from({ length: 20 }, () => ({ session_id: 1, session_title: oversizedWorkboardText, role: 'user', content: oversizedWorkboardText, created_at: oversizedWorkboardText, ignored: oversizedWorkboardText }));
+  }
 };
 
 const reg = createCapabilityRegistry(deps);
@@ -177,7 +180,15 @@ await checkAsync('system.models bounded', async () => {
 });
 await checkAsync('conversation.search bounded', async () => {
   const r = await reg.invoke('conversation.search', { query: 'a', limit: 3 });
-  assert.ok(r.data.matches.length <= 3);
+  assert.equal(r.data.matches.length, 3);
+  for (const match of r.data.matches) {
+    assert.deepEqual(Object.keys(match).sort(), ['created_at', 'role', 'session_id', 'session_title', 'snippet']);
+    assert.ok(match.session_title.length <= reg.LIMITS.titleMaxLength);
+    assert.ok(match.snippet.length <= 200);
+    assert.ok(match.created_at.length <= reg.LIMITS.metadataMaxLength);
+    assert.match(match.snippet, /\[truncated \d+ chars\]$/);
+  }
+  assert.ok(JSON.stringify(r.data).length < 3000, 'complete conversation-search receipt stays bounded');
 });
 
 await throwsAsync(() => reg.invoke('knowledge.search', {}), /required/, 'missing required argument is rejected');
@@ -188,6 +199,8 @@ await throwsAsync(() => reg.invoke('workboard.read', { id: 1 }), /missing requir
 await throwsAsync(() => reg.invoke('workboard.read', { type: 'lane', id: 1 }), /must be one of/, 'unknown Workboard entity type is rejected');
 await throwsAsync(() => reg.invoke('workboard.read', { type: 'item', id: 999 }), /Action failed safely\. Reference/, 'correct type with unknown id fails safely');
 await throwsAsync(() => reg.invoke('knowledge.search', { query: 'x', scope: 'bogus' }), /must be one of/, 'invalid enum is rejected');
+await throwsAsync(() => reg.invoke('conversation.search', { query: '   ' }), /missing required argument "query"/, 'blank conversation search is rejected before the handler runs');
+await throwsAsync(() => createCapabilityRegistry({ searchConversations: () => [{ session_id: '1', content: 'coerced identity' }] }).invoke('conversation.search', { query: 'x' }), /Action failed safely\. Reference/, 'conversation search rejects malformed dependency identities');
 await throwsAsync(() => reg.invoke('nope.capability', {}), /Unknown capability/, 'unknown capability is rejected');
 
 await checkAsync('workboard.propose_create returns a confirmation-required proposal and performs no write', async () => {

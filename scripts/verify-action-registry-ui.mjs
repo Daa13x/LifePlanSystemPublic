@@ -33,7 +33,7 @@ const searchFunction = ui.slice(ui.indexOf('async function runPickerSearch('), u
 assert.match(searchFunction, /pickerPreviewRequestRef\.current \+= 1/, 'every picker search invalidates an in-flight preview');
 const closeFunction = ui.slice(ui.indexOf('function closePicker('), previewFunctionStart);
 assert.match(closeFunction, /pickerPreviewRequestRef\.current \+= 1/, 'closing the picker invalidates an in-flight preview');
-assert.match(ui, /useEffect\(\(\) => \{\s*loadContext\(\);\s*loadContextRecords\(\);\s*loadConnection\(\);\s*loadCloudChecks\(\);\s*setProposal\(null\);\s*pickerSearchRequestRef\.current \+= 1;\s*pickerPreviewRequestRef\.current \+= 1;\s*setPicker\(null\);\s*\}, \[selectedSession\]\);/s, 'changing chat sessions invalidates and clears an in-flight preview');
+assert.match(ui, /useEffect\(\(\) => \{\s*loadContext\(\);\s*loadContextRecords\(\);\s*loadConnection\(\);\s*loadCloudChecks\(\);\s*setProposal\(null\);\s*historySearchRequestRef\.current \+= 1;\s*setHistorySearchBusy\(false\);\s*setHistoryResults\(\[\]\);\s*pickerSearchRequestRef\.current \+= 1;\s*pickerPreviewRequestRef\.current \+= 1;\s*setPicker\(null\);\s*\}, \[selectedSession\]\);/s, 'changing chat sessions invalidates history search and clears an in-flight context preview');
 assert.match(ui, /invokeAction\('workboard\.propose_create'/, 'Workboard create preview uses the neutral action gateway');
 assert.doesNotMatch(ui, /invokeLegacyCapability\('workboard\.propose_create'/, 'Workboard create no longer uses the unbound legacy preview lane');
 const updateFunctionStart = ui.indexOf('async function submitProposeUpdate(');
@@ -47,6 +47,7 @@ assert.doesNotMatch(ui, /JSON\.stringify\(\{ proposal \}\)/, 'the UI never resub
 assert.match(ui, /invokeAction\('system\.status', \{\}\)/, 'Chat system-status check uses the neutral action gateway');
 assert.match(ui, /invokeAction\('system\.models', \{ limit: 5 \}\)/, 'Chat model check uses the neutral action gateway');
 assert.match(ui, /invokeAction\('system\.runs', \{ limit: 5 \}\)/, 'Chat recent-runs check uses the neutral action gateway');
+assert.match(ui, /invokeAction\('conversation\.search', \{ query, limit: 8 \}\)/, 'explicit Chat history search uses the neutral action gateway');
 
 const searchControls = [...picker.matchAll(/<(?:input|select)\b[^>]*\bonChange=\{\(e\) => onSearch\([^>]+>/g)].map((match) => match[0]);
 assert.equal(searchControls.length, 3, 'the bounded Context Picker slice has three search controls');
@@ -76,6 +77,8 @@ for (const actionId of ['system.models', 'system.runs']) {
   assert.equal(manifest[actionId].risk, 'READ_ONLY', `${actionId} remains read-only`);
   assert.equal(manifest[actionId].confirmation, 'none', `${actionId} requires no confirmation`);
 }
+assert.equal(manifest['conversation.search'].risk, 'SENSITIVE_DATA', 'conversation.search is explicitly classified as sensitive local data');
+assert.equal(manifest['conversation.search'].confirmation, 'none', 'explicit read-only conversation search requires no mutation confirmation');
 assert.equal(manifest['workboard.read'].risk, 'SENSITIVE_DATA', 'Workboard detail is explicitly classified as sensitive read data');
 assert.equal(manifest['workboard.read'].confirmation, 'none', 'the session-scoped Workboard read remains confirmation-free');
 assert.equal(manifest['workboard.propose_create'].risk, 'REVERSIBLE_WRITE', 'Workboard create remains a proposal write risk');
@@ -87,7 +90,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 15, 'the bounded slice has exactly fifteen mapped trigger/search/preview/proposal/system controls');
+assert.equal(mappedControls.length, 16, 'the bounded slice has exactly sixteen mapped trigger/search/preview/proposal/system/history controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -119,6 +122,7 @@ assert.deepEqual(
 );
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.models').map((mapping) => mapping.controlId), ['chat.connection.system-models-check'], 'the visible model control maps to system.models');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.runs').map((mapping) => mapping.controlId), ['chat.connection.system-runs-check'], 'the visible recent-runs control maps to system.runs');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'conversation.search').map((mapping) => mapping.controlId), ['chat.history-search.submit'], 'the explicit history-search submit control maps to conversation.search');
 const attachControlStart = picker.indexOf('<button className="picker-row"');
 const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
 const previewControlMarker = picker.indexOf('data-action-id="knowledge.read"');
@@ -144,8 +148,8 @@ assert.match(server, /app\.get\('\/api\/actions\/:id'/, 'server inspects one neu
 assert.match(server, /app\.post\('\/api\/actions\/:id\/invoke'/, 'server invokes one neutral action');
 assert.match(server, /capabilityRegistry\.execute\(req\.params\.id, req\.body\?\.args, \{ caller: 'human-ui' \}\)/, 'HTTP route assigns its trusted caller instead of accepting body scopes');
 assert.match(server, /bindWorkboardConfirmation\(sessionId, result\)/, 'the gateway binds Workboard create and update previews to the durable confirmation owner');
-assert.match(server, /requireWorkboardReadSession\(req\.params\.id, sessionId\)/, 'neutral Workboard read requires a real active Chat session before the handler runs');
-assert.match(server, /requireWorkboardReadSession\(name, sessionId\)/, 'legacy Workboard read requires the same real-session boundary');
+assert.match(server, /requireSessionScopedAction\(req\.params\.id, sessionId\)/, 'neutral sensitive reads require a real active Chat session before the handler runs');
+assert.match(server, /requireSessionScopedAction\(name, sessionId\)/, 'legacy sensitive reads require the same real-session boundary');
 assert.match(server, /keys\.length !== 2 \|\| keys\[0\] !== 'confirmationId' \|\| keys\[1\] !== 'token'/, 'the confirmation endpoint rejects replacement payload fields');
 assert.match(server, /JSON\.stringify\(liveState\) !== JSON\.stringify\(claimed\.beforeState\)/, 'Workboard update confirmation performs a full-state stale check inside the apply transaction');
 assert.match(server, /error\.confirmationCode = 'stale'/, 'a transactional stale race produces a truthful stale receipt');
@@ -171,5 +175,14 @@ assert.match(statusRenderer, /statusPreview\.sqlite\?\.ready/, 'status receipt i
 assert.match(statusRenderer, /modelsPreview\.models\.map/, 'bounded model summaries are rendered from the neutral action result');
 assert.match(statusRenderer, /runsPreview\.runs\.map/, 'bounded run summaries are rendered from the neutral action result');
 assert.doesNotMatch(statusRenderer, /dangerouslySetInnerHTML/, 'system status receipt renders only as React text');
+const historyFunctionStart = ui.indexOf('async function searchChatHistory(');
+const historyOpenStart = ui.indexOf('function openHistoryResult(', historyFunctionStart);
+const historySearchFunction = ui.slice(historyFunctionStart, historyOpenStart);
+assert.match(historySearchFunction, /invokeAction\('conversation\.search'/, 'history search invokes only its read action');
+assert.doesNotMatch(historySearchFunction, /context-records|memory|candidate|method:\s*['"](?:POST|PATCH|DELETE)['"]/, 'history search cannot attach, promote, or directly mutate');
+assert.match(historySearchFunction, /historySearchRequestRef\.current === requestId/, 'late history-search responses cannot replace the current result set');
+assert.match(ui, /historySearchRequestRef\.current \+= 1;[\s\S]*setHistoryResults\(\[\]\);[\s\S]*\}, \[selectedSession\]\);/, 'changing sessions invalidates and clears history-search results');
+assert.match(ui, /data-action-id="conversation\.search" data-control-id="chat\.history-search\.submit"/, 'history search has stable action/control IDs');
+assert.match(ui, /match\.session_title[\s\S]*match\.snippet/, 'bounded history result fields render as React text');
 
 console.log('Action registry UI mapping and neutral-gateway wiring verification passed.');

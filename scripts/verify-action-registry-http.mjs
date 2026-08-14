@@ -106,6 +106,7 @@ let workboardReadCorrelationId = '';
 let systemStatusCorrelationId = '';
 let systemModelsCorrelationId = '';
 let systemRunsCorrelationId = '';
+let conversationSearchCorrelationId = '';
 let workboardUpdateCorrelationId = '';
 let workboardUpdateToken = '';
 const knowledgePreviewTitle = 'Knowledge preview fixture';
@@ -133,6 +134,10 @@ try {
   for (const id of [700010, 700011, 700012, 700013, 700014, 700015, 700016, 700017, 700018]) {
     insertUpdateFixture.run(id, `Update fixture ${id}`, `Body ${id}`, `Next ${id}`);
   }
+  fixtureDb.prepare("INSERT INTO chat_sessions (id, title, deleted) VALUES (700100, ?, 0)").run('History title '.repeat(40));
+  fixtureDb.prepare("INSERT INTO chat_sessions (id, title, deleted) VALUES (700101, 'Deleted history fixture', 1)").run();
+  fixtureDb.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (700100, 'user', ?)").run(`history-marker ${'private-body-'.repeat(80)}`);
+  fixtureDb.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (700101, 'user', 'history-marker deleted-content-must-not-appear')").run();
   fixtureDb.close();
 
   const catalog = await api('/api/actions');
@@ -144,8 +149,9 @@ try {
   const systemStatus = catalog.body?.data?.find((action) => action.id === 'system.status');
   const systemModels = catalog.body?.data?.find((action) => action.id === 'system.models');
   const systemRuns = catalog.body?.data?.find((action) => action.id === 'system.runs');
+  const conversationSearch = catalog.body?.data?.find((action) => action.id === 'conversation.search');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 9 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns), 'neutral catalog exposes the bounded read, system-observability, and durable Workboard proposal slice');
+  line(catalog.body?.data?.length === 10 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch), 'neutral catalog exposes every bounded registered capability');
   line(knowledge?.permission === 'knowledge.read' && knowledge?.risk === 'READ_ONLY' && knowledge?.confirmation === 'none', 'catalog exposes permission, risk, and confirmation metadata');
   line(knowledgeRead?.permission === 'knowledge.read' && knowledgeRead?.risk === 'READ_ONLY' && knowledgeRead?.confirmation === 'none', 'Knowledge preview remains read-only and confirmation-free');
   line(workboardRead?.permission === 'workboard.detail.read' && workboardRead?.risk === 'SENSITIVE_DATA' && workboardRead?.confirmation === 'none', 'Workboard preview uses a distinct sensitive-detail scope and remains confirmation-free');
@@ -153,6 +159,7 @@ try {
   line(updateProposal?.permission === 'workboard.propose' && updateProposal?.risk === 'REVERSIBLE_WRITE' && updateProposal?.confirmation === 'user_confirmation', 'Workboard update advertises its write risk and user-confirmation requirement');
   line(systemStatus?.permission === 'system.read' && systemStatus?.risk === 'READ_ONLY' && systemStatus?.confirmation === 'none', 'system.status advertises its read-only no-confirmation contract');
   line(systemModels?.permission === 'models.read' && systemModels?.risk === 'READ_ONLY' && systemRuns?.permission === 'system.read' && systemRuns?.risk === 'READ_ONLY', 'model and run summaries advertise their read-only contracts');
+  line(conversationSearch?.permission === 'chat.history.read' && conversationSearch?.risk === 'SENSITIVE_DATA' && conversationSearch?.confirmation === 'none', 'conversation search advertises its sensitive read-only contract');
   line(!('handler' in (knowledge || {})) && !('check' in (knowledge?.availability || {})), 'catalog never exposes executable handler/check functions');
 
   const inspect = await api('/api/actions/knowledge.search');
@@ -163,6 +170,7 @@ try {
   line((await api('/api/actions/workboard.propose_update')).status === 200, 'durably bound Workboard update is inspectable');
   line((await api('/api/actions/system.status')).status === 200, 'bounded system.status is inspectable');
   line((await api('/api/actions/system.models')).status === 200 && (await api('/api/actions/system.runs')).status === 200, 'bounded system model/run actions are inspectable');
+  line((await api('/api/actions/conversation.search')).status === 200, 'session-bound conversation search is inspectable');
 
   const withoutCsrf = await api('/api/actions/knowledge.search/invoke', { method: 'POST', json: { args: { query: 'fixture' } }, includeCsrf: false });
   line(withoutCsrf.status === 403, 'action invocation without CSRF is rejected');
@@ -274,6 +282,32 @@ try {
   systemRunsCorrelationId = runsAction?.correlationId || '';
   line(modelsResponse.status === 200 && modelsAction?.status === 'success' && modelsAction?.actionId === 'system.models' && Array.isArray(modelsAction?.data?.models) && modelsAction.data.models.length <= 5, 'system.models returns a bounded registry receipt');
   line(runsResponse.status === 200 && runsAction?.status === 'success' && runsAction?.actionId === 'system.runs' && Array.isArray(runsAction?.data?.runs) && runsAction.data.runs.length <= 5, 'system.runs returns a bounded registry receipt');
+
+  const historyContextBefore = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  const historyItemsBefore = await api('/api/items?all=1');
+  const historyDbBefore = new DatabaseSync(dbPath, { readOnly: true });
+  const historyConfirmationsBefore = Number(historyDbBefore.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
+  historyDbBefore.close();
+  const historyResponse = await api('/api/actions/conversation.search/invoke', { method: 'POST', json: { session_id: sessionId, caller: 'cloud-agent', scopes: ['*'], args: { query: 'history-marker', limit: 8 } } });
+  const historyAction = historyResponse.body?.data;
+  conversationSearchCorrelationId = historyAction?.correlationId || '';
+  const historyMatch = historyAction?.data?.matches?.[0];
+  line(historyResponse.status === 200 && historyAction?.status === 'success' && historyAction?.actionId === 'conversation.search' && historyAction?.data?.matches?.length === 1 && historyMatch?.session_id === 700100, 'explicit history search returns only the matching active Chat identity');
+  line(historyMatch?.session_title?.length <= 240 && historyMatch?.snippet?.length <= 200 && /\[truncated \d+ chars\]$/.test(historyMatch?.snippet || '') && JSON.stringify(historyAction?.data || {}).length < 1000, 'history search strictly bounds the title, snippet, and total receipt');
+  line(!JSON.stringify(historyAction?.data || {}).includes('deleted-content-must-not-appear') && historyMatch?.role === 'user', 'deleted chats are excluded and the bounded role is preserved');
+  const wildcardHistory = await api('/api/actions/conversation.search/invoke', { method: 'POST', json: { session_id: sessionId, args: { query: '%', limit: 8 } } });
+  line(wildcardHistory.body?.data?.status === 'success' && wildcardHistory.body?.data?.data?.matches?.length === 0, 'SQL wildcard characters are searched literally rather than broadening history scope');
+  const blankHistory = await api('/api/actions/conversation.search/invoke', { method: 'POST', json: { session_id: sessionId, args: { query: '   ', limit: 8 } } });
+  line(blankHistory.body?.data?.status === 'blocked' && blankHistory.body?.data?.error?.code === 'INVALID_ARGUMENTS' && !blankHistory.body?.data?.data, 'blank history search is blocked before lookup without content');
+  const phantomHistory = await api('/api/actions/conversation.search/invoke', { method: 'POST', json: { session_id: 987654321, args: { query: 'history-marker', limit: 8 } } });
+  const legacyPhantomHistory = await api('/api/chat/capability', { method: 'POST', json: { session_id: 987654321, name: 'conversation.search', args: { query: 'history-marker', limit: 8 } } });
+  line(phantomHistory.body?.data?.status === 'blocked' && phantomHistory.body?.data?.error?.code === 'INVALID_CHAT_SESSION' && legacyPhantomHistory.body?.data?.status === 'blocked' && legacyPhantomHistory.body?.data?.error?.code === 'INVALID_CHAT_SESSION', 'neutral and compatibility history search both require a real active Chat session');
+  const historyContextAfter = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  const historyItemsAfter = await api('/api/items?all=1');
+  const historyDbAfter = new DatabaseSync(dbPath, { readOnly: true });
+  const historyConfirmationsAfter = Number(historyDbAfter.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
+  historyDbAfter.close();
+  line(historyContextBefore.body?.data?.length === historyContextAfter.body?.data?.length && historyItemsBefore.body?.data?.length === historyItemsAfter.body?.data?.length && historyConfirmationsBefore === historyConfirmationsAfter, 'history search creates no attachment, Workboard item, or confirmation');
 
   const readFixture = (id) => {
     const fixture = new DatabaseSync(dbPath, { readOnly: true });
@@ -603,6 +637,8 @@ try {
   const systemModelsAudit = auditRows.find((row) => row.correlation_id === systemModelsCorrelationId);
   const systemRunsAudit = auditRows.find((row) => row.correlation_id === systemRunsCorrelationId);
   line(systemModelsAudit?.capability === 'system.models' && systemModelsAudit?.detail === 'completed' && systemRunsAudit?.capability === 'system.runs' && systemRunsAudit?.detail === 'completed', 'system model/run audits store concise correlated receipts');
+  const conversationSearchAudit = auditRows.find((row) => row.correlation_id === conversationSearchCorrelationId);
+  line(conversationSearchAudit?.capability === 'conversation.search' && conversationSearchAudit?.outcome === 'success' && conversationSearchAudit?.detail === 'completed' && !String(conversationSearchAudit?.detail).includes('history-marker') && !String(conversationSearchAudit?.detail).includes('private-body'), 'conversation search audit is concise, correlated, and content-free');
   const proposalAudit = auditRows.filter((row) => row.correlation_id === durable?.correlationId);
   line(proposalAudit.some((row) => row.capability === 'workboard.propose_create' && row.outcome === 'proposed') && proposalAudit.some((row) => row.capability === 'workboard.create' && row.outcome === 'applied'), 'proposal and application audits share the action correlation ID');
   line(proposalAudit.every((row) => !String(row.detail).includes('Durable proposal fixture') && !String(row.detail).includes('Immutable body fixture') && !String(row.detail).includes(confirmationToken)), 'correlated audit receipts contain no proposal body, title, or token');

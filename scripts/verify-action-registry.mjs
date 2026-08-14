@@ -289,7 +289,8 @@ await check('caller policies are separate and body-like scope injection is ignor
     searchKnowledge: () => [],
     readWorkboard: ({ id, type }) => type === 'item' && id === 1
       ? { id, entity_type: 'item', type: 'goal', title: 'Policy fixture', body: 'body', source: 'fixture', status: 'active', confidence: 0.8, owner: 'user' }
-      : null
+      : null,
+    searchConversations: () => [{ session_id: 1, session_title: 'Policy chat', role: 'user', content: 'policy fixture', created_at: '2026-08-14T00:00:00.000Z' }]
   });
   assert.ok(CAPABILITY_CALLER_SCOPES['human-ui'].includes('knowledge.read'));
   assert.ok(CAPABILITY_CALLER_SCOPES['human-ui'].includes('workboard.propose'));
@@ -297,6 +298,7 @@ await check('caller policies are separate and body-like scope injection is ignor
   assert.ok(CAPABILITY_CALLER_SCOPES['local-agent'].includes('knowledge.read'));
   assert.equal(CAPABILITY_CALLER_SCOPES['local-agent'].includes('workboard.detail.read'), false);
   assert.equal(CAPABILITY_CALLER_SCOPES['local-agent'].includes('workboard.propose'), false);
+  assert.equal(CAPABILITY_CALLER_SCOPES['local-agent'].includes('chat.history.read'), false);
   assert.deepEqual(CAPABILITY_CALLER_SCOPES['cloud-agent'], []);
   const omitted = await registry.execute('knowledge.search', { query: 'x' });
   const denied = await registry.execute('knowledge.search', { query: 'x' }, { caller: 'cloud-agent', scopes: ['knowledge.read', '*'] });
@@ -305,6 +307,9 @@ await check('caller policies are separate and body-like scope injection is ignor
   const localProposal = await registry.execute('workboard.propose_create', { title: 'do not run' }, { caller: 'local-agent' });
   const localUpdate = await registry.execute('workboard.propose_update', { type: 'item', id: 1, changes: { status: 'stable' } }, { caller: 'local-agent' });
   const localWorkboardRead = await registry.execute('workboard.read', { type: 'project', id: 1 }, { caller: 'local-agent' });
+  const humanHistorySearch = await registry.execute('conversation.search', { query: 'policy' }, { caller: 'human-ui' });
+  const localHistorySearch = await registry.execute('conversation.search', { query: 'policy' }, { caller: 'local-agent' });
+  const cloudHistorySearch = await registry.execute('conversation.search', { query: 'policy' }, { caller: 'cloud-agent', scopes: ['chat.history.read', '*'] });
   const cloudProposal = await registry.execute('workboard.propose_create', { title: 'do not run' }, { caller: 'cloud-agent', scopes: ['workboard.propose', '*'] });
   assert.equal(omitted.status, 'blocked');
   assert.equal(omitted.error.code, 'UNAUTHORIZED');
@@ -318,6 +323,11 @@ await check('caller policies are separate and body-like scope injection is ignor
   assert.equal(localUpdate.error.code, 'UNAUTHORIZED');
   assert.equal(localWorkboardRead.status, 'blocked');
   assert.equal(localWorkboardRead.error.code, 'UNAUTHORIZED');
+  assert.equal(humanHistorySearch.status, 'success');
+  assert.equal(localHistorySearch.status, 'blocked');
+  assert.equal(localHistorySearch.error.code, 'UNAUTHORIZED');
+  assert.equal(cloudHistorySearch.status, 'blocked');
+  assert.equal(cloudHistorySearch.error.code, 'UNAUTHORIZED');
   assert.equal(cloudProposal.status, 'blocked');
   assert.equal(cloudProposal.error.code, 'UNAUTHORIZED');
 });

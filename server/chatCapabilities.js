@@ -207,6 +207,17 @@ function boundedRunResult(run) {
   };
 }
 
+function boundedConversationMatch(record) {
+  if (!Number.isSafeInteger(record?.session_id) || record.session_id <= 0) throw new Error('Conversation search returned an invalid session identity.');
+  return {
+    session_id: record.session_id,
+    session_title: truncate(record.session_title || `Chat ${record.session_id}`, LIMITS.titleMaxLength),
+    role: ['user', 'assistant', 'system'].includes(record.role) ? record.role : 'unknown',
+    snippet: truncate(record.content || '', 200),
+    created_at: record.created_at ? truncate(record.created_at, LIMITS.metadataMaxLength) : null
+  };
+}
+
 function workboardIdentity(record) {
   const type = asString(record?.entity_type);
   const id = record?.id;
@@ -333,7 +344,7 @@ const ACTION_METADATA = Object.freeze({
   },
   'conversation.search': {
     label: 'Search conversations', feature: 'Chat history', permission: 'chat.history.read', risk: ACTION_RISKS.SENSITIVE_DATA,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.conversation.search',
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.history-search.submit'], testId: 'action.conversation.search',
     resultSchema: resultObject(['matches', 'count', 'truncated'], { matches: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
   }
 });
@@ -342,7 +353,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -534,9 +545,11 @@ export function createCapabilityRegistry(deps) {
         limit: { type: 'integer', default: LIMITS.defaultLimit, min: LIMITS.minLimit, max: LIMITS.maxLimit }
       },
       async handler(args) {
-        const rows = await dep('searchConversations')({ query: args.query, limit: args.limit });
+        const query = args.query.trim();
+        if (!query) throw new Error('Conversation search query must not be blank.');
+        const rows = await dep('searchConversations')({ query, limit: args.limit });
         return {
-          matches: rows.slice(0, args.limit).map((r) => ({ session_id: r.session_id, role: r.role, snippet: truncate(r.content, 200), created_at: r.created_at })),
+          matches: rows.slice(0, args.limit).map(boundedConversationMatch),
           count: Math.min(rows.length, args.limit),
           truncated: rows.length > args.limit
         };

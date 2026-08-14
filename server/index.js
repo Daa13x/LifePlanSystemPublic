@@ -3017,14 +3017,15 @@ function realChatSessionId(value) {
   return db.prepare('SELECT 1 FROM chat_sessions WHERE id = ? AND deleted = 0').get(sessionId) ? sessionId : null;
 }
 
-function requireWorkboardReadSession(actionId, sessionValue) {
-  if (actionId !== 'workboard.read' || realChatSessionId(sessionValue)) return null;
+function requireSessionScopedAction(actionId, sessionValue) {
+  if (!['workboard.read', 'conversation.search'].includes(actionId) || realChatSessionId(sessionValue)) return null;
   const correlationId = crypto.randomUUID();
+  const historySearch = actionId === 'conversation.search';
   return {
     status: 'blocked',
-    actionId: 'workboard.read',
+    actionId,
     correlationId,
-    error: { code: 'INVALID_CHAT_SESSION', message: 'A valid active chat session is required to read Workboard records.' }
+    error: { code: 'INVALID_CHAT_SESSION', message: historySearch ? 'A valid active chat session is required to search local conversation history.' : 'A valid active chat session is required to read Workboard records.' }
   };
 }
 
@@ -3340,7 +3341,7 @@ const capabilityRegistry = createCapabilityRegistry({
   },
   searchConversations({ query, limit }) {
     const like = likeParam(query);
-    return allRows("SELECT session_id, role, content, created_at FROM chat_messages WHERE content LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?", [like, Math.min(limit * 2, 40)]);
+    return allRows("SELECT m.session_id, s.title AS session_title, m.role, m.content, m.created_at FROM chat_messages m JOIN chat_sessions s ON s.id = m.session_id AND s.deleted = 0 WHERE m.content LIKE ? ESCAPE '\\' ORDER BY m.id DESC LIMIT ?", [like, Math.min(limit * 2, 40)]);
   }
 });
 
@@ -3362,7 +3363,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
   const sessionId = Number(req.body?.session_id) || null;
   let result = null;
   try {
-    const sessionBlock = requireWorkboardReadSession(req.params.id, sessionId);
+    const sessionBlock = requireSessionScopedAction(req.params.id, sessionId);
     if (sessionBlock) {
       writeChatAudit(sessionId, sessionBlock.actionId, sessionBlock.status, sessionBlock.error.code, sessionBlock.correlationId);
       return ok(res, sessionBlock);
@@ -3397,7 +3398,7 @@ app.post('/api/chat/capability', async (req, res) => {
   const name = String(req.body?.name || '');
   const sessionId = Number(req.body?.session_id) || null;
   try {
-    const sessionBlock = requireWorkboardReadSession(name, sessionId);
+    const sessionBlock = requireSessionScopedAction(name, sessionId);
     if (sessionBlock) {
       writeChatAudit(sessionId, sessionBlock.actionId, sessionBlock.status, sessionBlock.error.code, sessionBlock.correlationId);
       return ok(res, sessionBlock);
