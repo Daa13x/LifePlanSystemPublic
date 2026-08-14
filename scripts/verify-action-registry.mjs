@@ -290,12 +290,14 @@ await check('caller policies are separate and body-like scope injection is ignor
   assert.ok(CAPABILITY_CALLER_SCOPES['human-ui'].includes('workboard.propose'));
   assert.ok(CAPABILITY_CALLER_SCOPES['legacy-human-ui'].includes('workboard.propose'));
   assert.ok(CAPABILITY_CALLER_SCOPES['local-agent'].includes('knowledge.read'));
+  assert.equal(CAPABILITY_CALLER_SCOPES['local-agent'].includes('workboard.detail.read'), false);
   assert.equal(CAPABILITY_CALLER_SCOPES['local-agent'].includes('workboard.propose'), false);
   assert.deepEqual(CAPABILITY_CALLER_SCOPES['cloud-agent'], []);
   const omitted = await registry.execute('knowledge.search', { query: 'x' });
   const denied = await registry.execute('knowledge.search', { query: 'x' }, { caller: 'cloud-agent', scopes: ['knowledge.read', '*'] });
   const humanProposal = await registry.execute('workboard.propose_create', { title: 'review me' }, { caller: 'human-ui' });
   const localProposal = await registry.execute('workboard.propose_create', { title: 'do not run' }, { caller: 'local-agent' });
+  const localWorkboardRead = await registry.execute('workboard.read', { type: 'project', id: 1 }, { caller: 'local-agent' });
   const cloudProposal = await registry.execute('workboard.propose_create', { title: 'do not run' }, { caller: 'cloud-agent', scopes: ['workboard.propose', '*'] });
   assert.equal(omitted.status, 'blocked');
   assert.equal(omitted.error.code, 'UNAUTHORIZED');
@@ -304,6 +306,8 @@ await check('caller policies are separate and body-like scope injection is ignor
   assert.equal(humanProposal.status, 'needs_confirmation');
   assert.equal(localProposal.status, 'blocked');
   assert.equal(localProposal.error.code, 'UNAUTHORIZED');
+  assert.equal(localWorkboardRead.status, 'blocked');
+  assert.equal(localWorkboardRead.error.code, 'UNAUTHORIZED');
   assert.equal(cloudProposal.status, 'blocked');
   assert.equal(cloudProposal.error.code, 'UNAUTHORIZED');
 });

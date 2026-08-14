@@ -25,6 +25,7 @@ const LIMITS = Object.freeze({
   provenanceSourceMaxLength: 240,
   provenanceEvidenceMaxLength: 480,
   metadataMaxLength: 80,
+  workboardChildrenMax: 12,
   minLimit: 1,
   maxLimit: 25,
   defaultLimit: 8
@@ -61,6 +62,68 @@ function provenanceFor(record) {
 // Fields that must never appear in tool arguments/results returned to the model.
 const KNOWLEDGE_SCOPES = ['all', 'approved', 'candidates', 'rules'];
 const WORKBOARD_VIEWS = ['overview', 'projects', 'roadmap', 'review', 'completed', 'blocked'];
+export const WORKBOARD_ENTITY_TYPES = Object.freeze(['project', 'item', 'roadmap', 'approval', 'candidate']);
+
+function workboardIdentity(record) {
+  const type = asString(record?.entity_type);
+  const id = record?.id;
+  if (!WORKBOARD_ENTITY_TYPES.includes(type) || !Number.isInteger(id) || id <= 0) {
+    throw new Error('Workboard dependency returned an invalid typed identity.');
+  }
+  return { type, id };
+}
+
+function boundedWorkboardSummary(summary) {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return null;
+  const bounded = {};
+  for (const [key, value] of Object.entries(summary).slice(0, 12)) {
+    if (/^[a-z][a-z0-9_]{0,39}$/.test(key) && Number.isFinite(value)) bounded[key] = Number(value);
+  }
+  return bounded;
+}
+
+function boundedWorkboardListRecord(record) {
+  return {
+    identity: workboardIdentity(record),
+    category: truncate(record.category || record.type || record.entity_type, LIMITS.metadataMaxLength),
+    title: truncate(record.title || record.name || `${record.entity_type} ${record.id}`, LIMITS.titleMaxLength),
+    status: record.status ? truncate(record.status, LIMITS.metadataMaxLength) : null,
+    detail: truncate(record.detail || record.body || record.next_action || '', 240),
+    provenance: provenanceFor(record)
+  };
+}
+
+function boundedWorkboardReadResult(record) {
+  const identity = workboardIdentity(record);
+  const children = Array.isArray(record.children)
+    ? record.children.slice(0, LIMITS.workboardChildrenMax).map((child) => ({
+      identity: workboardIdentity(child),
+      category: truncate(child.category || child.type || child.entity_type, LIMITS.metadataMaxLength),
+      title: truncate(child.title || child.name || `${child.entity_type} ${child.id}`, LIMITS.titleMaxLength),
+      status: child.status ? truncate(child.status, LIMITS.metadataMaxLength) : null,
+      next_action: child.next_action ? truncate(child.next_action, 400) : null
+    }))
+    : [];
+  const project = record.project && typeof record.project === 'object'
+    ? {
+      identity: workboardIdentity(record.project),
+      title: truncate(record.project.title || record.project.name || `project ${record.project.id}`, LIMITS.titleMaxLength)
+    }
+    : null;
+  return {
+    identity,
+    category: truncate(record.category || record.type || identity.type, LIMITS.metadataMaxLength),
+    title: truncate(record.title || record.name || `${identity.type} ${identity.id}`, LIMITS.titleMaxLength),
+    status: record.status ? truncate(record.status, LIMITS.metadataMaxLength) : null,
+    detail: truncate(record.detail || record.body || '', LIMITS.bodyMaxLength),
+    next_action: record.next_action ? truncate(record.next_action, 400) : null,
+    owner: record.owner ? truncate(record.owner, LIMITS.metadataMaxLength) : null,
+    project,
+    children,
+    provenance: provenanceFor(record),
+    truncated: Boolean(record.children?.length > children.length)
+  };
+}
 
 const ALWAYS_AVAILABLE = Object.freeze({
   description: 'The local application runtime and its authoritative repositories are ready.',
@@ -86,9 +149,12 @@ const ACTION_METADATA = Object.freeze({
     resultSchema: resultObject(['view', 'records', 'count', 'truncated'], { view: { type: 'string' }, summary: { type: ['object', 'null'] }, records: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
   },
   'workboard.read': {
-    label: 'Read Workboard record', feature: 'Workboard', permission: 'workboard.read', risk: ACTION_RISKS.READ_ONLY,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: [], testId: 'action.workboard.read',
-    resultSchema: resultObject(['kind'], { kind: { type: 'string' } }, true)
+    label: 'Preview Workboard record', feature: 'Chat context picker', permission: 'workboard.detail.read', risk: ACTION_RISKS.SENSITIVE_DATA,
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.context-picker.workboard-preview'], testId: 'action.workboard.read',
+    resultSchema: resultObject(
+      ['identity', 'category', 'title', 'status', 'detail', 'next_action', 'owner', 'project', 'children', 'provenance', 'truncated'],
+      { identity: { type: 'object' }, category: { type: 'string' }, title: { type: 'string' }, status: { type: ['string', 'null'] }, detail: { type: 'string' }, next_action: { type: ['string', 'null'] }, owner: { type: ['string', 'null'] }, project: { type: ['object', 'null'] }, children: { type: 'array' }, provenance: { type: 'object' }, truncated: { type: 'boolean' } }
+    )
   },
   'workboard.propose_create': {
     label: 'Preview new Workboard item', feature: 'Chat task proposal', permission: 'workboard.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
@@ -128,7 +194,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.propose_create']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -206,29 +272,24 @@ export function createCapabilityRegistry(deps) {
       },
       async handler(args) {
         const data = await dep('listWorkboard')({ view: args.view, limit: args.limit });
-        const records = (data.records || []).slice(0, args.limit).map((r) => ({
-          id: r.id,
-          type: r.type || r.record_kind || 'record',
-          title: r.title || r.name,
-          status: r.status || null,
-          detail: truncate(r.detail || r.body || r.next_action || '', 240),
-          provenance: provenanceFor(r)
-        }));
-        return { view: args.view, summary: data.summary || null, records, count: records.length, truncated: (data.records || []).length > records.length };
+        const records = (data.records || []).slice(0, args.limit).map(boundedWorkboardListRecord);
+        return { view: args.view, summary: boundedWorkboardSummary(data.summary), records, count: records.length, truncated: (data.records || []).length > records.length };
       }
     },
 
     'workboard.read': {
-      description: 'Read one Workboard project (with its items) or one Workboard item. Read-only.',
+      description: 'Read one precisely typed Workboard entity with bounded detail and relationships. Read-only.',
       readOnly: true,
       schema: {
+        type: { type: 'string', required: true, enum: WORKBOARD_ENTITY_TYPES },
         id: { type: 'id', required: true },
-        kind: { type: 'string', default: 'project', enum: ['project', 'item'] }
       },
       async handler(args) {
-        const record = await dep('readWorkboard')({ id: args.id, kind: args.kind });
-        if (!record) throw new Error(`Workboard ${args.kind} ${args.id} was not found.`);
-        return record;
+        const record = await dep('readWorkboard')({ id: args.id, type: args.type });
+        if (!record) throw new Error(`Workboard ${args.type} ${args.id} was not found.`);
+        const result = boundedWorkboardReadResult(record);
+        if (result.identity.type !== args.type || result.identity.id !== args.id) throw new Error('Workboard dependency returned a different identity.');
+        return result;
       }
     },
 
@@ -257,11 +318,12 @@ export function createCapabilityRegistry(deps) {
       description: 'Propose updating an existing Workboard item. Returns a before/after proposal for confirmation; never writes.',
       readOnly: false,
       schema: {
+        type: { type: 'string', required: true, enum: ['item'] },
         id: { type: 'id', required: true },
         changes: { type: 'object', required: true }
       },
       async handler(args) {
-        const current = await dep('readWorkboard')({ id: args.id, kind: 'item' });
+        const current = await dep('readWorkboard')({ id: args.id, type: args.type });
         if (!current) throw new Error(`Workboard item ${args.id} was not found.`);
         const allowed = ['status', 'title', 'body', 'next_action', 'confidence', 'due_at', 'reviewed'];
         const changes = {};

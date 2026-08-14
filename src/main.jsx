@@ -1746,7 +1746,13 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         results = (r.data.items || []).map((it) => ({ kind: it.kind === 'candidate' ? 'knowledge-candidate' : 'knowledge-item', ref_id: it.id, label: `${it.type || it.kind}: ${it.title}`, sub: it.snippet }));
       } else {
         const r = await invokeAction('workboard.list', { view: p.view || 'projects', limit: 15 });
-        results = (r.data.records || []).map((rec) => ({ kind: (p.view || 'projects') === 'projects' ? 'workboard-project' : 'workboard-item', ref_id: rec.id, label: `${rec.type}: ${rec.title}`, sub: rec.detail || rec.status || '' }));
+        results = (r.data.records || []).map((rec) => ({
+          kind: `workboard-${rec.identity.type}`,
+          entity_type: rec.identity.type,
+          ref_id: rec.identity.id,
+          label: `${rec.category}: ${rec.title}`,
+          sub: rec.detail || rec.status || ''
+        }));
       }
       if (pickerSearchRequestRef.current !== requestId) return;
       setPicker((current) => current?.domain === p.domain ? { ...p, loading: false, results } : current);
@@ -1771,26 +1777,28 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     setPicker(null);
   }
 
-  async function previewKnowledgeRecord(rec) {
-    if (!rec || !['knowledge-item', 'knowledge-candidate'].includes(rec.kind)) return;
+  async function previewContextRecord(rec) {
+    const isKnowledge = rec && ['knowledge-item', 'knowledge-candidate'].includes(rec.kind);
+    const isWorkboard = rec && ['project', 'item', 'roadmap', 'approval', 'candidate'].includes(rec.entity_type);
+    if (!isKnowledge && !isWorkboard) return;
     const requestId = ++pickerPreviewRequestRef.current;
     const key = `${rec.kind}-${rec.ref_id}`;
-    setPicker((current) => current?.domain === 'knowledge'
+    const expectedDomain = isKnowledge ? 'knowledge' : 'workboard';
+    setPicker((current) => current?.domain === expectedDomain
       ? { ...current, preview: { key, loading: true, data: null, error: '' } }
       : current);
     try {
-      const result = await invokeAction('knowledge.read', {
-        id: rec.ref_id,
-        kind: rec.kind === 'knowledge-candidate' ? 'candidate' : 'item'
-      });
+      const result = isKnowledge
+        ? await invokeAction('knowledge.read', { id: rec.ref_id, kind: rec.kind === 'knowledge-candidate' ? 'candidate' : 'item' })
+        : await invokeAction('workboard.read', { id: rec.ref_id, type: rec.entity_type });
       if (pickerPreviewRequestRef.current !== requestId) return;
-      setPicker((current) => current?.domain === 'knowledge'
+      setPicker((current) => current?.domain === expectedDomain
         ? { ...current, preview: { key, loading: false, data: result.data, error: '' } }
         : current);
     } catch (err) {
       if (pickerPreviewRequestRef.current !== requestId) return;
       setNotice(err.message);
-      setPicker((current) => current?.domain === 'knowledge'
+      setPicker((current) => current?.domain === expectedDomain
         ? { ...current, preview: { key, loading: false, data: null, error: 'Preview unavailable.' } }
         : current);
     }
@@ -2216,7 +2224,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
           <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
-        {picker && <ContextPicker picker={picker} onSearch={runPickerSearch} onPreview={previewKnowledgeRecord} onAttach={attachRecord} onClose={closePicker} />}
+        {picker && <ContextPicker picker={picker} onSearch={runPickerSearch} onPreview={previewContextRecord} onAttach={attachRecord} onClose={closePicker} />}
       </div>
     </section>
   );
@@ -2363,9 +2371,24 @@ function ContextPicker({ picker, onSearch, onPreview, onAttach, onClose }) {
                       >
                         {picker.preview?.loading && picker.preview?.key === `${rec.kind}-${rec.ref_id}` ? 'Loading…' : 'Preview'}
                       </button>
-                    ) : null}
+                    ) : (
+                      <button
+                        type="button"
+                        className="secondary picker-preview-button"
+                        data-action-id="workboard.read"
+                        data-control-id="chat.context-picker.workboard-preview"
+                        onClick={() => onPreview(rec)}
+                        disabled={picker.preview?.loading && picker.preview?.key === `${rec.kind}-${rec.ref_id}`}
+                      >
+                        {picker.preview?.loading && picker.preview?.key === `${rec.kind}-${rec.ref_id}` ? 'Loading…' : 'Preview'}
+                      </button>
+                    )}
                   </div>
-                  {picker.preview?.key === `${rec.kind}-${rec.ref_id}` ? <KnowledgeRecordPreview preview={picker.preview} /> : null}
+                  {picker.preview?.key === `${rec.kind}-${rec.ref_id}`
+                    ? picker.domain === 'knowledge'
+                      ? <KnowledgeRecordPreview preview={picker.preview} />
+                      : <WorkboardRecordPreview preview={picker.preview} />
+                    : null}
                 </div>
               ))}
         </div>
@@ -2393,6 +2416,37 @@ function KnowledgeRecordPreview({ preview }) {
         {provenance.updated_at ? <span>updated: {provenance.updated_at}</span> : null}
       </div>
       <small>This is a bounded plain-text preview with provenance. Attach remains a separate action.</small>
+    </div>
+  );
+}
+
+function WorkboardRecordPreview({ preview }) {
+  if (preview.loading) return <div className="picker-preview" role="status">Loading preview…</div>;
+  if (preview.error) return <div className="picker-preview" role="status">{preview.error}</div>;
+  const record = preview.data;
+  if (!record) return null;
+  return (
+    <div className="picker-preview" aria-label={`Workboard preview: ${record.title}`}>
+      <div className="picker-preview-head">
+        <strong>{record.title}</strong>
+        <span>{record.identity?.type}{record.status ? ` · ${record.status}` : ''}</span>
+      </div>
+      {record.detail ? <div className="picker-preview-body">{record.detail}</div> : null}
+      {record.next_action ? <p><strong>Next:</strong> {record.next_action}</p> : null}
+      {record.project ? <small>Project: {record.project.title}</small> : null}
+      {record.children?.length ? (
+        <div className="picker-preview-meta">
+          <strong>Linked items</strong>
+          {record.children.map((child) => <span key={`${child.identity.type}-${child.identity.id}`}>{child.title}{child.status ? ` · ${child.status}` : ''}</span>)}
+          {record.truncated ? <span>Additional linked items omitted.</span> : null}
+        </div>
+      ) : null}
+      <div className="picker-preview-meta">
+        <strong>Provenance</strong>
+        <span>source: {record.provenance?.source || 'not recorded'}</span>
+        <span>evidence: {record.provenance?.evidence || 'not recorded'}</span>
+      </div>
+      <small>This is a bounded plain-text preview. Attach remains a separate action.</small>
     </div>
   );
 }

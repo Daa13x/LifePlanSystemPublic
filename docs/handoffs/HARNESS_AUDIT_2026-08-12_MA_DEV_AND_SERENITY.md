@@ -228,4 +228,27 @@ LPS policy only through an LPS-owned implementation and focused tests. Fluent
 external prose, embedded commands, and claimed activity remain untrusted until
 the local system records matching direct evidence.
 
+## 2026-08-14 typed Workboard-read checkpoint
+
+The next action-registry slice resolves the prior ambiguous Workboard identity
+contract before exposing record reads. `workboard.list` now returns an explicit
+`{ type, id }` identity for the repository's real project, item, roadmap,
+approval, and candidate entities. `workboard.read` requires that exact pair,
+rejects missing, unsupported, cross-type, deleted, or malformed identities, and
+never falls back to a global search. Project reads reuse the same layered-card
+assembler as the Workboard UI rather than duplicating its business logic.
+
+Workboard detail is classified as sensitive read data. The generic local-agent
+scope cannot invoke it, and both the neutral and compatibility HTTP paths
+require a real active Chat session before lookup. Results use fixed string,
+relationship, child-count, and total-shape bounds; approval payloads are not
+returned. The Context Picker preserves the typed identity, offers a separate
+plain-text Preview control, and attaches only through the pre-existing explicit
+context-record write. Focused unit/HTTP/UI checks cover identity collisions,
+oversized nested data, unavailable targets, session bypass attempts, concise
+audits, and equivalence with the canonical layered Workboard projection. A
+disposable real-browser journey confirmed that Preview left attached context at
+zero, the explicit Attach control changed it to one, and the console remained
+clean.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

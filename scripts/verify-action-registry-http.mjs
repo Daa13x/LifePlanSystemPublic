@@ -102,6 +102,7 @@ base = server.base;
 let sessionId = 0;
 let phantomCorrelationId = '';
 let knowledgeReadCorrelationId = '';
+let workboardReadCorrelationId = '';
 const knowledgePreviewTitle = 'Knowledge preview fixture';
 const knowledgePreviewBody = `Preview body marker ${'z'.repeat(1400)}`;
 try {
@@ -115,15 +116,26 @@ try {
   });
   const knowledgeRecordId = Number(createdKnowledge.body?.data?.id);
   line(createdKnowledge.status === 200 && Number.isInteger(knowledgeRecordId) && knowledgeRecordId > 0, 'disposable Knowledge preview fixture is persisted');
+  const fixtureDb = new DatabaseSync(dbPath);
+  fixtureDb.prepare("INSERT INTO projects (id, name, status, owner, source, confidence, evidence, next_action) VALUES (700001, 'Typed project fixture', 'active', 'user', 'manual', 0.8, 'Project evidence', 'Project next')").run();
+  fixtureDb.prepare("INSERT INTO knowledge_items (id, type, title, body, source, status, confidence, evidence, owner, next_action, project_id) VALUES (700002, 'goal', 'Typed item fixture', 'Item detail', 'manual', 'active', 0.7, 'Item evidence', 'user', 'Item next', 700001)").run();
+  fixtureDb.prepare("INSERT INTO roadmap_items (id, title, detail, resume_notes, category, status) VALUES (700003, 'Typed roadmap fixture', 'Roadmap detail', 'Resume detail', 'feature', 'planned')").run();
+  fixtureDb.prepare("INSERT INTO approvals (id, action_type, title, payload, status, priority) VALUES (700004, 'update_project', 'Typed approval fixture', '{\"private\":\"must not leak\"}', 'pending', 'P1')").run();
+  fixtureDb.prepare("INSERT INTO memory_candidates (id, type, title, body, source, evidence, confidence, status) VALUES (700005, 'note', 'Typed candidate fixture', 'Candidate detail', 'fixture', 'Candidate evidence', 0.5, 'candidate')").run();
+  fixtureDb.prepare("INSERT INTO knowledge_items (id, type, title, body, source, status, confidence, evidence, owner, next_action) VALUES (700006, 'note', ?, ?, ?, 'active', 0.5, ?, 'user', ?)")
+    .run('T'.repeat(250000), 'B'.repeat(250000), 'S'.repeat(250000), 'E'.repeat(250000), 'N'.repeat(250000));
+  fixtureDb.close();
 
   const catalog = await api('/api/actions');
   const knowledge = catalog.body?.data?.find((action) => action.id === 'knowledge.search');
   const knowledgeRead = catalog.body?.data?.find((action) => action.id === 'knowledge.read');
+  const workboardRead = catalog.body?.data?.find((action) => action.id === 'workboard.read');
   const createProposal = catalog.body?.data?.find((action) => action.id === 'workboard.propose_create');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 4 && Boolean(knowledgeRead) && Boolean(createProposal) && !catalog.body.data.some((action) => action.id === 'workboard.propose_update'), 'neutral catalog adds only Knowledge preview and the durable Workboard-create proposal');
+  line(catalog.body?.data?.length === 5 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && !catalog.body.data.some((action) => action.id === 'workboard.propose_update'), 'neutral catalog adds typed Workboard preview while update remains masked');
   line(knowledge?.permission === 'knowledge.read' && knowledge?.risk === 'READ_ONLY' && knowledge?.confirmation === 'none', 'catalog exposes permission, risk, and confirmation metadata');
   line(knowledgeRead?.permission === 'knowledge.read' && knowledgeRead?.risk === 'READ_ONLY' && knowledgeRead?.confirmation === 'none', 'Knowledge preview remains read-only and confirmation-free');
+  line(workboardRead?.permission === 'workboard.detail.read' && workboardRead?.risk === 'SENSITIVE_DATA' && workboardRead?.confirmation === 'none', 'Workboard preview uses a distinct sensitive-detail scope and remains confirmation-free');
   line(createProposal?.permission === 'workboard.propose' && createProposal?.risk === 'REVERSIBLE_WRITE' && createProposal?.confirmation === 'user_confirmation', 'Workboard create advertises its write risk and user-confirmation requirement');
   line(!('handler' in (knowledge || {})) && !('check' in (knowledge?.availability || {})), 'catalog never exposes executable handler/check functions');
 
@@ -131,6 +143,7 @@ try {
   line(inspect.status === 200 && inspect.body?.data?.availability?.available === true && inspect.body?.data?.permitted === true, 'action inspection reports live availability and permission');
   line((await api('/api/actions/missing.action')).status === 404, 'unknown action inspection returns 404');
   line((await api('/api/actions/workboard.propose_create')).status === 200, 'durably bound Workboard create is inspectable');
+  line((await api('/api/actions/workboard.read')).status === 200, 'typed Workboard read is inspectable');
   line((await api('/api/actions/workboard.propose_update')).status === 404, 'unbound Workboard update remains masked');
 
   const withoutCsrf = await api('/api/actions/knowledge.search/invoke', { method: 'POST', json: { args: { query: 'fixture' } }, includeCsrf: false });
@@ -172,6 +185,45 @@ try {
     json: { session_id: sessionId, args: { id: 999999999, kind: 'item' } }
   });
   line(missingRead.body?.data?.status === 'failed' && missingRead.body?.data?.error?.code === 'HANDLER_FAILED' && /Reference /.test(missingRead.body?.data?.error?.message || '') && !String(missingRead.body?.data?.error?.message).includes('999999999'), 'missing Knowledge preview fails without exposing handler internals');
+
+  const workboardContextBefore = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  const typedFixtures = [
+    ['project', 700001, 'Typed project fixture'],
+    ['item', 700002, 'Typed item fixture'],
+    ['roadmap', 700003, 'Typed roadmap fixture'],
+    ['approval', 700004, 'Typed approval fixture'],
+    ['candidate', 700005, 'Typed candidate fixture']
+  ];
+  for (const [type, id, title] of typedFixtures) {
+    const readResult = await api('/api/actions/workboard.read/invoke', { method: 'POST', json: { session_id: sessionId, args: { type, id } } });
+    const action = readResult.body?.data;
+    if (type === 'project') workboardReadCorrelationId = action?.correlationId || '';
+    line(readResult.status === 200 && action?.status === 'success' && action?.data?.identity?.type === type && action?.data?.identity?.id === id && action?.data?.title === title, `typed Workboard read resolves only ${type}:${id}`);
+  }
+  const workboardContextAfter = await api(`/api/chat/sessions/${sessionId}/context-records`);
+  line(workboardContextBefore.body?.data?.length === workboardContextAfter.body?.data?.length, 'previewing Workboard records creates no chat attachment');
+  const projectCard = await api('/api/workboard/cards/700001');
+  const projectRead = await api('/api/actions/workboard.read/invoke', { method: 'POST', json: { session_id: sessionId, args: { type: 'project', id: 700001 } } });
+  line(projectCard.body?.data?.pinned?.title === projectRead.body?.data?.data?.title && projectCard.body?.data?.pinned?.status === projectRead.body?.data?.data?.status && projectCard.body?.data?.execution?.subtasks?.[0]?.id === projectRead.body?.data?.data?.children?.[0]?.identity?.id, 'action-registry project read matches the canonical layered Workboard UI projection');
+  const crossType = await api('/api/actions/workboard.read/invoke', { method: 'POST', json: { session_id: sessionId, args: { type: 'item', id: 700001 } } });
+  line(crossType.body?.data?.status === 'failed' && crossType.body?.data?.error?.code === 'HANDLER_FAILED', 'cross-type substitution fails even when the numeric ID exists');
+  const unknownType = await api('/api/actions/workboard.read/invoke', { method: 'POST', json: { session_id: sessionId, args: { type: 'lane', id: 700001 } } });
+  line(unknownType.body?.data?.status === 'blocked' && unknownType.body?.data?.error?.code === 'INVALID_ARGUMENTS', 'unsupported Workboard entity types fail before lookup');
+  const missingTyped = await api('/api/actions/workboard.read/invoke', { method: 'POST', json: { session_id: sessionId, args: { type: 'roadmap', id: 799999 } } });
+  line(missingTyped.body?.data?.status === 'failed' && missingTyped.body?.data?.error?.code === 'HANDLER_FAILED', 'deleted or unavailable typed Workboard identities fail safely');
+  const noSessionRead = await api('/api/actions/workboard.read/invoke', { method: 'POST', json: { session_id: 987654321, args: { type: 'project', id: 700001 } } });
+  line(noSessionRead.body?.data?.status === 'blocked' && noSessionRead.body?.data?.error?.code === 'INVALID_CHAT_SESSION' && !noSessionRead.body?.data?.data, 'Workboard read rejects a nonexistent Chat session before returning record data');
+  const legacyNoSessionRead = await api('/api/chat/capability', { method: 'POST', json: { session_id: 987654321, name: 'workboard.read', args: { type: 'project', id: 700001 } } });
+  line(legacyNoSessionRead.body?.data?.status === 'blocked' && legacyNoSessionRead.body?.data?.error?.code === 'INVALID_CHAT_SESSION' && !legacyNoSessionRead.body?.data?.data, 'legacy capability access cannot bypass the Workboard read session boundary');
+  const oversizedWorkboardRead = await api('/api/actions/workboard.read/invoke', { method: 'POST', json: { session_id: sessionId, args: { type: 'item', id: 700006 } } });
+  const oversizedResult = oversizedWorkboardRead.body?.data?.data;
+  line(oversizedWorkboardRead.body?.data?.status === 'success' && oversizedResult?.title?.length <= 240 && oversizedResult?.detail?.length <= 1200 && oversizedResult?.next_action?.length <= 400 && oversizedResult?.provenance?.source?.length <= 240 && oversizedResult?.provenance?.evidence?.length <= 480 && JSON.stringify(oversizedResult).length < 4000, 'all Workboard preview fields and the complete oversized result remain bounded');
+  line(!JSON.stringify((await api('/api/actions/workboard.read/invoke', { method: 'POST', json: { session_id: sessionId, args: { type: 'approval', id: 700004 } } })).body?.data?.data || {}).includes('must not leak'), 'approval payload content is excluded from Workboard preview');
+
+  const projectList = await api('/api/actions/workboard.list/invoke', { method: 'POST', json: { session_id: sessionId, args: { view: 'projects', limit: 25 } } });
+  const reviewList = await api('/api/actions/workboard.list/invoke', { method: 'POST', json: { session_id: sessionId, args: { view: 'review', limit: 25 } } });
+  line(projectList.body?.data?.data?.records?.some((record) => record.identity?.type === 'project' && record.identity?.id === 700001), 'Workboard project list emits the exact typed project identity');
+  line(reviewList.body?.data?.data?.records?.some((record) => record.identity?.type === 'approval' && record.identity?.id === 700004) && reviewList.body?.data?.data?.records?.some((record) => record.identity?.type === 'candidate' && record.identity?.id === 700005), 'mixed review results preserve approval and candidate identities without collisions');
 
   const malformed = await api('/api/actions/knowledge.search/invoke', { method: 'POST', json: { session_id: sessionId, args: [] } });
   line(malformed.status === 200 && malformed.body?.data?.status === 'blocked' && malformed.body?.data?.error?.code === 'INVALID_ARGUMENTS', 'malformed arguments fail closed with a structured outcome');
@@ -343,6 +395,9 @@ try {
   const knowledgeReadAudit = audit.body?.data?.find((row) => row.correlation_id === knowledgeReadCorrelationId);
   line(Boolean(knowledgeReadAudit) && knowledgeReadAudit.capability === 'knowledge.read' && knowledgeReadAudit.outcome === 'success' && knowledgeReadAudit.detail === 'completed', 'Knowledge preview audit links its correlation ID to a concise success receipt');
   line(!String(knowledgeReadAudit?.detail).includes(knowledgePreviewTitle) && !String(knowledgeReadAudit?.detail).includes('Preview body marker'), 'Knowledge preview audit stores no title or body content');
+  const workboardReadAudit = audit.body?.data?.find((row) => row.correlation_id === workboardReadCorrelationId);
+  line(Boolean(workboardReadAudit) && workboardReadAudit.capability === 'workboard.read' && workboardReadAudit.outcome === 'success' && workboardReadAudit.detail === 'completed', 'Workboard preview audit links its correlation ID to a concise success receipt');
+  line(!String(workboardReadAudit?.detail).includes('Typed project fixture') && !String(workboardReadAudit?.detail).includes('Project evidence'), 'Workboard preview audit stores no record title or evidence content');
   const proposalAudit = audit.body?.data?.filter((row) => row.correlation_id === durable?.correlationId) || [];
   line(proposalAudit.some((row) => row.capability === 'workboard.propose_create' && row.outcome === 'proposed') && proposalAudit.some((row) => row.capability === 'workboard.create' && row.outcome === 'applied'), 'proposal and application audits share the action correlation ID');
   line(proposalAudit.every((row) => !String(row.detail).includes('Durable proposal fixture') && !String(row.detail).includes('Immutable body fixture') && !String(row.detail).includes(confirmationToken)), 'correlated audit receipts contain no proposal body, title, or token');

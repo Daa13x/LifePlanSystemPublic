@@ -1551,6 +1551,21 @@ function resolveContextRecordContent(kind, refId) {
     const items = allRows("SELECT title, status FROM knowledge_items WHERE project_id = ? AND status NOT IN ('archived','deprecated','superseded') ORDER BY updated_at DESC LIMIT 10", [refId]);
     return { title: `project: ${r.name}`, provenance: `id=${r.id} status=${r.status} owner=${r.owner}`, text: `${r.next_action ? `Next: ${r.next_action}. ` : ''}${r.evidence ? `Evidence: ${r.evidence}. ` : ''}Items: ${items.map((i) => `${i.title} (${i.status})`).join('; ') || 'none'}` };
   }
+  if (kind === 'workboard-roadmap') {
+    const r = row('SELECT * FROM roadmap_items WHERE id = ?', [refId]);
+    if (!r) return null;
+    return { title: `roadmap: ${r.title}`, provenance: `id=${r.id} status=${r.status} category=${r.category}`, text: `${r.detail || ''}${r.resume_notes ? ` | Resume: ${r.resume_notes}` : ''}` };
+  }
+  if (kind === 'workboard-approval') {
+    const r = row('SELECT id, action_type, title, status, priority, created_at FROM approvals WHERE id = ?', [refId]);
+    if (!r) return null;
+    return { title: `approval: ${r.title}`, provenance: `id=${r.id} status=${r.status} priority=${r.priority}`, text: `Proposed action: ${r.action_type}. The approval payload is intentionally excluded from Chat context.` };
+  }
+  if (kind === 'workboard-candidate') {
+    const r = row('SELECT * FROM memory_candidates WHERE id = ?', [refId]);
+    if (!r) return null;
+    return { title: `candidate: ${r.title}`, provenance: `id=${r.id} status=${r.status} source=${r.source} confidence=${r.confidence} (candidate — not promoted)`, text: `${r.body || ''}${r.evidence ? ` | Evidence: ${r.evidence}` : ''}` };
+  }
   return null;
 }
 
@@ -2994,6 +3009,17 @@ function realChatSessionId(value) {
   return db.prepare('SELECT 1 FROM chat_sessions WHERE id = ? AND deleted = 0').get(sessionId) ? sessionId : null;
 }
 
+function requireWorkboardReadSession(actionId, sessionValue) {
+  if (actionId !== 'workboard.read' || realChatSessionId(sessionValue)) return null;
+  const correlationId = crypto.randomUUID();
+  return {
+    status: 'blocked',
+    actionId: 'workboard.read',
+    correlationId,
+    error: { code: 'INVALID_CHAT_SESSION', message: 'A valid active chat session is required to read Workboard records.' }
+  };
+}
+
 function chatConfirmationSessionId(sessionId) {
   return `chat:${sessionId}`;
 }
@@ -3075,6 +3101,18 @@ function resolveContextRecord(kind, refId) {
     const r = row('SELECT * FROM knowledge_items WHERE id = ?', [refId]);
     return r ? { label: `${r.type}: ${r.title}`, provenance: { kind, id: r.id, source: r.source, status: r.status } } : null;
   }
+  if (kind === 'workboard-roadmap') {
+    const r = row('SELECT * FROM roadmap_items WHERE id = ?', [refId]);
+    return r ? { label: `roadmap: ${r.title}`, provenance: { kind, id: r.id, status: r.status, category: r.category } } : null;
+  }
+  if (kind === 'workboard-approval') {
+    const r = row('SELECT id, action_type, title, status, priority FROM approvals WHERE id = ?', [refId]);
+    return r ? { label: `approval: ${r.title}`, provenance: { kind, id: r.id, status: r.status, priority: r.priority, action_type: r.action_type } } : null;
+  }
+  if (kind === 'workboard-candidate') {
+    const r = row('SELECT * FROM memory_candidates WHERE id = ?', [refId]);
+    return r ? { label: `candidate: ${r.title}`, provenance: { kind, id: r.id, source: r.source, evidence: r.evidence, confidence: r.confidence, status: r.status } } : null;
+  }
   return null;
 }
 
@@ -3115,43 +3153,69 @@ const capabilityRegistry = createCapabilityRegistry({
   async listWorkboard({ view, limit }) {
     if (view === 'projects') {
       const records = allRows('SELECT * FROM projects ORDER BY updated_at DESC LIMIT ?', [limit])
-        .map((p) => ({ ...p, title: p.name, type: 'project', record_kind: 'project' }));
+        .map((p) => ({ ...p, title: p.name, category: 'project', entity_type: 'project' }));
       return { summary: { projects: records.length }, records };
     }
     if (view === 'roadmap') {
       const records = allRows('SELECT * FROM roadmap_items ORDER BY sort_order ASC, updated_at DESC LIMIT ?', [limit])
-        .map((r) => ({ ...r, type: r.category || 'roadmap', detail: r.detail }));
+        .map((r) => ({ ...r, category: r.category || 'roadmap', detail: r.detail, entity_type: 'roadmap' }));
       return { summary: { roadmap: records.length }, records };
     }
     if (view === 'review') {
       const approvals = allRows("SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at DESC LIMIT ?", [limit])
-        .map((a) => ({ ...a, type: a.action_type || 'approval', detail: a.title }));
+        .map((a) => ({ ...a, category: a.action_type || 'approval', detail: a.title, entity_type: 'approval', evidence: null }));
       const candidates = allRows("SELECT * FROM memory_candidates WHERE status IN ('candidate','deferred') ORDER BY created_at DESC LIMIT ?", [limit])
-        .map((c) => ({ ...c, type: 'candidate' }));
+        .map((c) => ({ ...c, category: c.type || 'candidate', entity_type: 'candidate' }));
       return { summary: { approvals: approvals.length, candidates: candidates.length }, records: [...approvals, ...candidates].slice(0, limit) };
     }
     if (view === 'completed') {
-      const records = allRows("SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.status IN ('done','archived','deprecated','superseded') ORDER BY k.updated_at DESC LIMIT ?", [limit]);
+      const records = allRows("SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.status IN ('done','archived','deprecated','superseded') ORDER BY k.updated_at DESC LIMIT ?", [limit])
+        .map((item) => ({ ...item, category: item.type, entity_type: 'item' }));
       return { summary: { completed: records.length }, records };
     }
     const planner = await plannerData();
-    if (view === 'blocked') return { summary: planner.summary, records: planner.blockers };
-    return { summary: planner.summary, records: [...planner.focus, ...planner.blockers, ...planner.waiting].slice(0, limit) };
+    const asItems = (records) => records.map((item) => ({ ...item, category: item.type, entity_type: 'item' }));
+    if (view === 'blocked') return { summary: planner.summary, records: asItems(planner.blockers) };
+    return { summary: planner.summary, records: asItems([...planner.focus, ...planner.blockers, ...planner.waiting].slice(0, limit)) };
   },
-  async readWorkboard({ id, kind }) {
-    if (kind === 'project') {
+  async readWorkboard({ id, type }) {
+    if (type === 'project') {
       const project = row('SELECT * FROM projects WHERE id = ?', [id]);
       if (!project) return null;
-      const items = allRows("SELECT id, type, title, status, next_action, confidence FROM knowledge_items WHERE project_id = ? AND status NOT IN ('archived','deprecated','superseded') ORDER BY updated_at DESC LIMIT 25", [id]);
+      const card = assembleWorkOrder(project);
       return {
-        kind: 'project',
-        project: { id: project.id, name: project.name, status: project.status, owner: project.owner, confidence: project.confidence, next_action: project.next_action, evidence: project.evidence, updated_at: project.updated_at },
-        items
+        ...project,
+        entity_type: 'project',
+        title: card.pinned.title,
+        detail: card.context.latestEvidence || '',
+        next_action: card.execution.nextStep,
+        children: card.execution.subtasks.map((item) => ({ ...item, entity_type: 'item', category: item.type }))
       };
     }
-    const item = row('SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.id = ?', [id]);
-    if (!item) return null;
-    return { kind: 'item', id: item.id, type: item.type, title: item.title, body: item.body, status: item.status, confidence: item.confidence, next_action: item.next_action, due_at: item.due_at, source: item.source, evidence: item.evidence, project_name: item.project_name, updated_at: item.updated_at };
+    if (type === 'item') {
+      const item = row('SELECT k.*, p.name AS project_name FROM knowledge_items k LEFT JOIN projects p ON p.id = k.project_id WHERE k.id = ?', [id]);
+      if (!item) return null;
+      return {
+        ...item,
+        entity_type: 'item',
+        category: item.type,
+        detail: item.body,
+        project: item.project_id ? { entity_type: 'project', id: item.project_id, title: item.project_name } : null
+      };
+    }
+    if (type === 'roadmap') {
+      const roadmap = row('SELECT * FROM roadmap_items WHERE id = ?', [id]);
+      return roadmap ? { ...roadmap, entity_type: 'roadmap', category: roadmap.category, detail: `${roadmap.detail || ''}${roadmap.resume_notes ? `\n\nResume: ${roadmap.resume_notes}` : ''}` } : null;
+    }
+    if (type === 'approval') {
+      const approval = row('SELECT id, action_type, title, status, priority, created_at, decided_at FROM approvals WHERE id = ?', [id]);
+      return approval ? { ...approval, entity_type: 'approval', category: approval.action_type, detail: 'Approval payload excluded from the bounded Workboard preview.', source: 'approval queue' } : null;
+    }
+    if (type === 'candidate') {
+      const candidate = row('SELECT * FROM memory_candidates WHERE id = ?', [id]);
+      return candidate ? { ...candidate, entity_type: 'candidate', category: candidate.type, detail: candidate.body } : null;
+    }
+    return null;
   },
   async systemStatus() {
     const model = await localModelStatus();
@@ -3219,6 +3283,11 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
   const sessionId = Number(req.body?.session_id) || null;
   let result = null;
   try {
+    const sessionBlock = requireWorkboardReadSession(req.params.id, sessionId);
+    if (sessionBlock) {
+      writeChatAudit(sessionId, sessionBlock.actionId, sessionBlock.status, sessionBlock.error.code, sessionBlock.correlationId);
+      return ok(res, sessionBlock);
+    }
     result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui' });
     result = bindWorkboardCreateConfirmation(sessionId, result);
     const confirmationCreated = Boolean(result.confirmation);
@@ -3249,6 +3318,11 @@ app.post('/api/chat/capability', async (req, res) => {
   const name = String(req.body?.name || '');
   const sessionId = Number(req.body?.session_id) || null;
   try {
+    const sessionBlock = requireWorkboardReadSession(name, sessionId);
+    if (sessionBlock) {
+      writeChatAudit(sessionId, sessionBlock.actionId, sessionBlock.status, sessionBlock.error.code, sessionBlock.correlationId);
+      return ok(res, sessionBlock);
+    }
     let result = await capabilityRegistry.invoke(name, req.body?.args || {});
     result = bindWorkboardCreateConfirmation(sessionId, result);
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
@@ -3266,7 +3340,7 @@ app.get('/api/chat/sessions/:id/context-records', (req, res) => {
 app.post('/api/chat/sessions/:id/context-records', (req, res) => {
   const kind = String(req.body?.kind || '');
   const refId = Number(req.body?.ref_id);
-  if (!['knowledge-item', 'knowledge-candidate', 'workboard-project', 'workboard-item'].includes(kind)) return fail(res, 400, 'Unsupported context kind.');
+  if (!['knowledge-item', 'knowledge-candidate', 'workboard-project', 'workboard-item', 'workboard-roadmap', 'workboard-approval', 'workboard-candidate'].includes(kind)) return fail(res, 400, 'Unsupported context kind.');
   if (!Number.isInteger(refId) || refId <= 0) return fail(res, 400, 'A valid record id is required.');
   const resolved = resolveContextRecord(kind, refId);
   if (!resolved) return fail(res, 404, 'That record was not found.');
