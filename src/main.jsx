@@ -6072,6 +6072,10 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
   const [exportScope, setExportScope] = useState('all');
   const [publicExportPreview, setPublicExportPreview] = useState(null);
   const [publicExportBusy, setPublicExportBusy] = useState(false);
+  const [partnerRelay, setPartnerRelay] = useState(null);
+  const [partnerRelayEnabled, setPartnerRelayEnabled] = useState(false);
+  const [partnerRelayHost, setPartnerRelayHost] = useState('https://relay.mostlyarmless.co.uk');
+  const [partnerRelayToken, setPartnerRelayToken] = useState('');
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
@@ -6087,6 +6091,11 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
       if (!llamaCliPath && data.llamaCliPath) setLlamaCliPath(data.llamaCliPath);
     }).catch((err) => setNotice(err.message));
     api('/api/cloud/accounts').then(setCloudAccounts).catch((err) => setNotice(err.message));
+    api('/api/partner-relay/status').then((status) => {
+      setPartnerRelay(status);
+      setPartnerRelayEnabled(Boolean(status.enabled));
+      if (status.host) setPartnerRelayHost(status.host);
+    }).catch((err) => setNotice(err.message));
   }, []);
 
   useEffect(() => {
@@ -6255,6 +6264,30 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
     } catch (err) { setNotice(err.message); }
   }
 
+  async function savePartnerRelay() {
+    try {
+      const status = await api('/api/partner-relay/config', {
+        method: 'POST',
+        body: JSON.stringify({
+          enabled: partnerRelayEnabled,
+          host: partnerRelayHost,
+          pairToken: partnerRelayToken
+        })
+      });
+      setPartnerRelay(status);
+      setPartnerRelayToken('');
+      setNotice(status.enabled ? 'Partner relay is configured. Sync remains explicit and review-gated.' : 'Partner relay is disabled.');
+    } catch (err) { setNotice(err.message); }
+  }
+
+  async function syncPartnerRelay() {
+    try {
+      const result = await api('/api/partner-relay/sync', { method: 'POST', body: '{}' });
+      setPartnerRelay(await api('/api/partner-relay/status'));
+      setNotice(result.pulled ? `Received ${result.pulled} reviewed handoff checkpoint(s).` : 'Partner relay checked: no new handoff checkpoints.');
+    } catch (err) { setNotice(err.message); }
+  }
+
   async function previewPublicExport() {
     setPublicExportBusy(true);
     try {
@@ -6293,6 +6326,18 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
           <button onClick={openPrivateRepositorySync} title="Open the private repository sync controls"><Github size={16} /> Private repo sync <RefreshCcw size={14} /></button>
           <button onClick={openChatGptSync} title="Open ChatGPT provider window"><ChatGptMark size={16} /> Open ChatGPT <RefreshCcw size={14} /></button>
         </div>
+      </div>
+      <div className="panel service-sync-panel">
+        <h2>MA-Dev partner relay</h2>
+        <p>Optional, one-way checkpoint delivery from MA-Dev. Received PDFs are kept outside local-agent context until Alex explicitly reviews them.</p>
+        <label className="checkbox-row"><input type="checkbox" checked={partnerRelayEnabled} onChange={(event) => setPartnerRelayEnabled(event.target.checked)} /> Enable MA-Dev sync</label>
+        <label>Relay host<input value={partnerRelayHost} onChange={(event) => setPartnerRelayHost(event.target.value)} placeholder="https://relay.mostlyarmless.co.uk" /></label>
+        <label>Pairing token<input type="password" value={partnerRelayToken} onChange={(event) => setPartnerRelayToken(event.target.value)} placeholder={partnerRelay?.paired ? 'Stored locally (enter a new token only to rotate)' : 'Captain-provided one-time token'} autoComplete="new-password" /></label>
+        <div className="decision-row">
+          <button onClick={savePartnerRelay}>Save relay</button>
+          <button onClick={syncPartnerRelay} disabled={!partnerRelay?.enabled}>Sync approved handoffs</button>
+        </div>
+        {partnerRelay && <small>{partnerRelay.enabled ? `Enabled · ${partnerRelay.received || 0} received checkpoint(s) · cursor ${partnerRelay.cursor || 0}` : 'Disabled until explicitly paired.'}</small>}
       </div>
       <div className="panel">
         <h2>Assistant response detail</h2>

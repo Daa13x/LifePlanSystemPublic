@@ -15,7 +15,7 @@ db.exec('PRAGMA journal_mode = WAL');
 db.exec('PRAGMA foreign_keys = ON');
 db.exec('PRAGMA secure_delete = ON');
 
-export const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken', 'browserConnectorToken']);
+export const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken', 'browserConnectorToken', 'maRelayPairToken']);
 const DPAPI_PREFIX = 'dpapi:v1:';
 const warnedSecretDecryptions = new Set();
 const secretCache = new Map();
@@ -54,7 +54,7 @@ function parseStoredValue(value) {
 function migratePlaintextSecretSettings() {
   const rows = db.prepare(`
     SELECT key, value FROM settings
-    WHERE key IN ('hfToken', 'githubToken', 'browserConnectorToken')
+    WHERE key IN ('hfToken', 'githubToken', 'browserConnectorToken', 'maRelayPairToken')
   `).all();
   const plaintextRows = rows.filter((row) => {
     const value = String(parseStoredValue(row.value) || '');
@@ -488,6 +488,21 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (route, idempotency_key)
     );
+
+    -- MA partner relay artifacts are durable but deliberately outside Chat and
+    -- local-model context. Receiving a handoff never makes it prompt material.
+    CREATE TABLE IF NOT EXISTS partner_relay_artifacts (
+      id TEXT PRIMARY KEY,
+      sha256 TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      classification TEXT NOT NULL,
+      pdf_bytes BLOB NOT NULL,
+      received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      reviewed_at TEXT,
+      status TEXT NOT NULL DEFAULT 'received' CHECK (status IN ('received','reviewed','rejected')),
+      UNIQUE(id, sha256)
+    );
+    CREATE INDEX IF NOT EXISTS idx_partner_relay_artifacts_status ON partner_relay_artifacts(status, received_at);
   `);
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;

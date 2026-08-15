@@ -86,8 +86,10 @@ import { buildConsultationReceipt, effectiveValidatedAdviceHash } from './consul
 import { normalizeAdviceDisposition } from './browserAdviceDisposition.js';
 import { describeRunLease } from './leaseObservability.js';
 import { assertNoMaReferenceMaterial } from './maReferenceGuard.js';
+import { createPartnerRelayClient } from './partnerRelay.js';
 
 migrate();
+const partnerRelay = createPartnerRelayClient({ db, getSetting, setSetting });
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
 // It is never re-applied automatically — it becomes interrupted (requires
 // review) unless an idempotency receipt proves the external op completed.
@@ -5178,6 +5180,18 @@ function readSettingsRedacted() {
 
 app.get('/api/settings', (_req, res) => {
   ok(res, readSettingsRedacted());
+});
+
+app.get('/api/partner-relay/status', (_req, res) => {
+  try { ok(res, partnerRelay.status()); } catch (error) { fail(res, 400, error.message); }
+});
+
+app.post('/api/partner-relay/config', (req, res) => {
+  try { ok(res, partnerRelay.configure(req.body || {})); } catch (error) { fail(res, 400, error.message); }
+});
+
+app.post('/api/partner-relay/sync', async (_req, res) => {
+  try { ok(res, await partnerRelay.sync()); } catch (error) { fail(res, 400, error.message); }
 });
 
 app.post('/api/settings', (req, res) => {
