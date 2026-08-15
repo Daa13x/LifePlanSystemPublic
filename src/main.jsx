@@ -1815,6 +1815,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [proposalBusy, setProposalBusy] = useState(false);
   const [proposeOpen, setProposeOpen] = useState(false);
   const [proposeForm, setProposeForm] = useState({ type: 'note', title: '', next_action: '' });
+  const [plannerProposeOpen, setPlannerProposeOpen] = useState(false);
+  const [plannerProposeForm, setPlannerProposeForm] = useState({ title: '', next_action: '', deadline: '', importance: 3, effort: 3 });
+  const [plannerProposal, setPlannerProposal] = useState(null);
+  const [plannerProposalBusy, setPlannerProposalBusy] = useState(false);
   const [cloudChecks, setCloudChecks] = useState([]);
   const [cloudScope, setCloudScope] = useState('latest-turn');
   const [cloudPreview, setCloudPreview] = useState(null);
@@ -2178,6 +2182,41 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     finally { setProposalBusy(false); }
   }
 
+  async function submitProposePlannerCreate() {
+    if (!plannerProposeForm.title.trim() || plannerProposalBusy) return;
+    setPlannerProposalBusy(true);
+    try {
+      const args = {
+        title: plannerProposeForm.title,
+        next_action: plannerProposeForm.next_action,
+        importance: Number(plannerProposeForm.importance) || 3,
+        effort: Number(plannerProposeForm.effort) || 3
+      };
+      if (plannerProposeForm.deadline) args.deadline = plannerProposeForm.deadline;
+      const r = await invokeAction('planner.propose_create', args);
+      // A proposal only — no task exists yet until the user confirms below.
+      setPlannerProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
+    } catch (error) { setNotice(error.message); }
+    finally { setPlannerProposalBusy(false); }
+  }
+
+  async function confirmPlannerProposal() {
+    if (!plannerProposal || plannerProposalBusy) return;
+    const confirmationId = plannerProposal.confirmation?.confirmationId;
+    const token = plannerProposal.confirmation?.token;
+    if (!confirmationId || !token) return setNotice('This proposal has no valid confirmation receipt. Preview it again.');
+    setPlannerProposalBusy(true);
+    try {
+      const result = await api(`/api/chat/sessions/${selectedSession}/planner/confirm`, { method: 'POST', body: JSON.stringify({ confirmationId, token }) });
+      setNotice(`Daily Planner task created: ${result.record?.title || 'task'}.`);
+      setPlannerProposal(null);
+      setPlannerProposeOpen(false);
+      setPlannerProposeForm({ title: '', next_action: '', deadline: '', importance: 3, effort: 3 });
+      refreshAll();
+    } catch (err) { setNotice(err.message); }
+    finally { setPlannerProposalBusy(false); }
+  }
+
   async function sendViaJson(outgoing, optimisticId) {
     const result = await api(`/api/chat/sessions/${selectedSession}/messages`, {
       method: 'POST',
@@ -2494,6 +2533,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
             <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.open" onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
+            <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.open" onClick={() => { setPlannerProposeOpen((v) => !v); setPlannerProposal(null); }}><Plus size={15} /> Add planner task</button>
             <div className="inline-form compact">
               <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
                 <option value="">Attach repo file…</option>
@@ -2544,6 +2584,22 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             </div>
           )}
           {proposal && <ProposalCard proposal={proposal} busy={proposalBusy} onConfirm={confirmProposal} onCancel={() => setProposal(null)} />}
+          {plannerProposeOpen && (
+            <div className="propose-form">
+              <input value={plannerProposeForm.title} onChange={(e) => setPlannerProposeForm((f) => ({ ...f, title: e.target.value }))} placeholder="Planner task title" />
+              <input value={plannerProposeForm.next_action} onChange={(e) => setPlannerProposeForm((f) => ({ ...f, next_action: e.target.value }))} placeholder="Next action (optional)" />
+              <div className="quick-add-row">
+                <label>Deadline<input type="date" value={plannerProposeForm.deadline} onChange={(e) => setPlannerProposeForm((f) => ({ ...f, deadline: e.target.value }))} /></label>
+                <label>Importance<select value={plannerProposeForm.importance} onChange={(e) => setPlannerProposeForm((f) => ({ ...f, importance: Number(e.target.value) }))}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
+                <label>Effort<select value={plannerProposeForm.effort} onChange={(e) => setPlannerProposeForm((f) => ({ ...f, effort: Number(e.target.value) }))}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
+              </div>
+              <div className="quick-add-row">
+                <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.preview" className="primary" onClick={submitProposePlannerCreate} disabled={plannerProposalBusy || !plannerProposeForm.title.trim()}>{plannerProposalBusy ? 'Preparing…' : 'Preview proposal'}</button>
+                <button onClick={() => { setPlannerProposeOpen(false); setPlannerProposal(null); }} disabled={plannerProposalBusy}>Cancel</button>
+              </div>
+            </div>
+          )}
+          {plannerProposal && <PlannerProposalCard proposal={plannerProposal} busy={plannerProposalBusy} onConfirm={confirmPlannerProposal} onCancel={() => setPlannerProposal(null)} />}
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
@@ -2685,6 +2741,30 @@ function ProposalCard({ proposal, busy, onConfirm, onCancel }) {
         <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
       </div>
       <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. Nothing is written to the Workboard until you confirm.</small>
+    </div>
+  );
+}
+
+function PlannerProposalCard({ proposal, busy, onConfirm, onCancel }) {
+  const preview = proposal.preview || {};
+  return (
+    <div className="proposal-card">
+      <div className="proposal-head"><ShieldCheck size={16} /><strong>Confirm Daily Planner task</strong></div>
+      <p>{proposal.affects}</p>
+      <div className="proposal-diff">
+        <div><span>title</span><strong>{preview.title}</strong></div>
+        {preview.next_action ? <div><span>next action</span><strong>{preview.next_action}</strong></div> : null}
+        {preview.why ? <div><span>why</span><strong>{preview.why}</strong></div> : null}
+        <div><span>importance</span><strong>{String(preview.importance)}</strong></div>
+        <div><span>effort</span><strong>{String(preview.effort)}</strong></div>
+        {preview.estimated_minutes != null ? <div><span>estimate</span><strong>{preview.estimated_minutes} min</strong></div> : null}
+        {preview.deadline ? <div><span>deadline</span><strong>{preview.deadline}</strong></div> : null}
+      </div>
+      <div className="decision-row">
+        <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Creating…' : 'Confirm and create task'}</button>
+        <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
+      </div>
+      <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. No Daily Planner task exists until you confirm.</small>
     </div>
   );
 }

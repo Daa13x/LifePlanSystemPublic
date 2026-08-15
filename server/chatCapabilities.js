@@ -133,6 +133,20 @@ export function normalizeWorkboardItemChanges(value) {
   return changes;
 }
 
+// A Daily Planner deadline is either empty (no deadline) or a real YYYY-MM-DD date.
+// Reused by the proposal preview and, authoritatively, by the server-side canonical
+// validator at confirmation and apply time.
+export function normalizePlannerDeadline(value) {
+  const s = asString(value).trim();
+  if (!s) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)
+    || Number.isNaN(Date.parse(`${s}T00:00:00.000Z`))
+    || new Date(`${s}T00:00:00.000Z`).toISOString().slice(0, 10) !== s) {
+    throw new Error('planner.propose_create: deadline must be a real YYYY-MM-DD date or empty.');
+  }
+  return s;
+}
+
 function boundedUpdatePreviewValue(key, value) {
   if (typeof value !== 'string') return value;
   if (key === 'body') return truncate(value, LIMITS.bodyMaxLength);
@@ -352,6 +366,12 @@ const ACTION_METADATA = Object.freeze({
     sourceControls: ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm'], testId: 'action.workboard.propose_update',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'target', 'state_token', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target: { type: 'object' }, state_token: { type: 'string' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
+  'planner.propose_create': {
+    label: 'Propose a Planner task', feature: 'Chat task proposal', permission: 'planner.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
+    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Persists a time-limited review proposal; no Daily Planner task is created until the user confirms it.'],
+    sourceControls: ['chat.planner-proposal.open', 'chat.planner-proposal.preview', 'chat.planner-proposal.confirm'], testId: 'action.planner.propose_create',
+    resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
+  },
   'system.status': {
     label: 'Read system status', feature: 'System', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-status-check'], testId: 'action.system.status',
@@ -426,7 +446,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -576,6 +596,39 @@ export function createCapabilityRegistry(deps) {
           state_token: workboardItemStateToken(current),
           before,
           after,
+          confirmation_required: true
+        };
+      }
+    },
+
+    'planner.propose_create': {
+      description: 'Propose creating a new Daily Planner task. Returns a bounded proposal for confirmation; never writes.',
+      readOnly: false,
+      schema: {
+        title: { type: 'string', required: true, maxLength: 160 },
+        why: { type: 'string', default: '', maxLength: 400 },
+        next_action: { type: 'string', default: '', maxLength: 400 },
+        importance: { type: 'integer', default: 3, min: 1, max: 5 },
+        effort: { type: 'integer', default: 3, min: 1, max: 5 },
+        estimated_minutes: { type: 'integer', min: 0, max: 1440 },
+        deadline: { type: 'string', default: '', maxLength: 10 }
+      },
+      async handler(args) {
+        // No mutation here — only a structured proposal for explicit confirmation.
+        const deadline = normalizePlannerDeadline(args.deadline);
+        return {
+          proposal: true,
+          operation: 'planner.create',
+          affects: 'new Daily Planner task',
+          preview: {
+            title: args.title,
+            why: args.why,
+            next_action: args.next_action,
+            importance: args.importance,
+            effort: args.effort,
+            estimated_minutes: args.estimated_minutes ?? null,
+            deadline
+          },
           confirmation_required: true
         };
       }
@@ -792,6 +845,7 @@ export function createCapabilityRegistry(deps) {
 export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
+  'planner.propose_create',
   'system.status', 'system.models', 'system.runs',
   'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner'
 ];

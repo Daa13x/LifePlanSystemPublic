@@ -93,7 +93,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 21, 'the bounded slice has exactly twenty-one mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
+assert.equal(mappedControls.length, 24, 'the bounded slice has exactly twenty-four mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -131,6 +131,11 @@ assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navig
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.system').map((mapping) => mapping.controlId), ['chat.navigation.open-system'], 'the visible Open System control maps to the navigation.system action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.settings').map((mapping) => mapping.controlId), ['chat.navigation.open-settings'], 'the visible Assign / change control maps to the navigation.settings action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.planner').map((mapping) => mapping.controlId), ['chat.navigation.open-planner'], 'the visible Open Today control maps to the navigation.planner action');
+assert.deepEqual(
+  controlMappings.filter((mapping) => mapping.actionId === 'planner.propose_create').map((mapping) => mapping.controlId).sort(),
+  ['chat.planner-proposal.confirm', 'chat.planner-proposal.open', 'chat.planner-proposal.preview'],
+  'the complete visible Daily Planner create control family has stable identifiers'
+);
 const attachControlStart = picker.indexOf('<button className="picker-row"');
 const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
 const previewControlMarker = picker.indexOf('data-action-id="knowledge.read"');
@@ -163,6 +168,12 @@ assert.equal(manifest['navigation.settings'].risk, 'VIEW_NAVIGATION', 'navigatio
 assert.equal(manifest['navigation.settings'].confirmation, 'none', 'Settings navigation is confirmation-free');
 assert.equal(manifest['navigation.planner'].risk, 'VIEW_NAVIGATION', 'navigation.planner is classified as a bounded view-navigation action');
 assert.equal(manifest['navigation.planner'].confirmation, 'none', 'Daily Planner navigation is confirmation-free');
+assert.equal(manifest['planner.propose_create'].risk, 'REVERSIBLE_WRITE', 'planner.propose_create is a proposal write risk, not a view navigation');
+assert.equal(manifest['planner.propose_create'].confirmation, 'user_confirmation', 'Daily Planner task creation requires explicit user confirmation');
+assert.match(ui, /invokeAction\('planner\.propose_create'/, 'the Add planner task control invokes planner.propose_create through the neutral gateway');
+assert.match(ui, /\/api\/chat\/sessions\/\$\{selectedSession\}\/planner\/confirm/, 'the planner confirm control submits only to the durable planner confirmation endpoint');
+assert.match(server, /app\.post\('\/api\/chat\/sessions\/:id\/planner\/confirm'/, 'the server exposes the durable Daily Planner confirmation endpoint');
+assert.match(server, /bindPlannerCreateConfirmation\(sessionId, bindWorkboardConfirmation\(sessionId, result\)\)/, 'the gateway binds the planner create proposal to the durable confirmation owner');
 assert.match(ui, /invokeAction\('navigation\.workboard', \{\}\)/, 'the Open Workboard control invokes the navigation action through the neutral gateway');
 assert.match(ui, /invokeAction\('navigation\.system', \{\}\)/, 'the Open full System control invokes the navigation action through the neutral gateway');
 assert.match(ui, /invokeAction\('navigation\.settings', \{\}\)/, 'the Assign / change control invokes the navigation action through the neutral gateway');

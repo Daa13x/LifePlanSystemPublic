@@ -101,6 +101,7 @@ check('read capabilities are read-only; propose_* are writes', () => {
   for (const n of ['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today']) assert.equal(byName[n], true, `${n} must be read-only`);
   assert.equal(byName['workboard.propose_create'], false);
   assert.equal(byName['workboard.propose_update'], false);
+  assert.equal(byName['planner.propose_create'], false);
   assert.equal(byName['navigation.workboard'], false);
   assert.equal(byName['navigation.system'], false);
   assert.equal(byName['navigation.settings'], false);
@@ -128,6 +129,23 @@ await checkAsync('fixed navigation actions use the shared trusted renderer depen
     ['navigate', renderer, 'settings'],
     ['navigate', renderer, 'planner']
   ]);
+});
+
+await checkAsync('planner.propose_create returns a bounded proposal only and never calls a data dependency', async () => {
+  calls.length = 0;
+  const r = await reg.invoke('planner.propose_create', { title: 'Write the acceptance tests', why: 'coverage', next_action: 'draft', importance: 4, effort: 2, estimated_minutes: 45, deadline: '2026-12-01' });
+  assert.equal(r.status, 'needs_confirmation');
+  assert.equal(r.data.operation, 'planner.create');
+  assert.equal(r.data.confirmation_required, true);
+  assert.equal(r.data.preview.title, 'Write the acceptance tests');
+  assert.equal(r.data.preview.importance, 4);
+  assert.equal(r.data.preview.estimated_minutes, 45);
+  assert.equal(r.data.preview.deadline, '2026-12-01');
+  assert.equal(calls.length, 0, 'proposing a planner task calls no data/task dependency');
+});
+
+await checkAsync('planner.propose_create rejects a malformed deadline before proposing', async () => {
+  await assert.rejects(reg.invoke('planner.propose_create', { title: 'bad date', deadline: '2026-13-40' }));
 });
 
 await checkAsync('knowledge.search returns bounded results with provenance', async () => {

@@ -26,6 +26,7 @@ import {
   canonicalWorkboardItemState,
   createCapabilityRegistry,
   CAPABILITY_NAMES,
+  normalizePlannerDeadline,
   normalizeWorkboardItemChanges,
   workboardItemStateToken
 } from './chatCapabilities.js';
@@ -3015,6 +3016,8 @@ const CHAT_WORKBOARD_CREATE_ACTION = 'workboard.propose_create';
 const CHAT_WORKBOARD_CREATE_OPERATION = 'workboard.create';
 const CHAT_WORKBOARD_UPDATE_ACTION = 'workboard.propose_update';
 const CHAT_WORKBOARD_UPDATE_OPERATION = 'workboard.update';
+const CHAT_PLANNER_CREATE_ACTION = 'planner.propose_create';
+const CHAT_PLANNER_CREATE_OPERATION = 'planner.create';
 
 function realChatSessionId(value) {
   const sessionId = Number(value);
@@ -3088,6 +3091,73 @@ function bindWorkboardCreateConfirmation(sessionValue, result) {
     sessionId: chatConfirmationSessionId(sessionId),
     requiresRevalidation: false,
     idempotencyKey: `chat-workboard-create:${result.correlationId}`
+  });
+  return {
+    ...result,
+    confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt }
+  };
+}
+
+// The canonical, bounded Daily Planner create payload. This is the single
+// authoritative validator for a chat-proposed task: it allowlists exactly the
+// supported planner_tasks fields, rejects anything else, and is applied verbatim
+// at confirmation. A proposal for one payload can therefore never settle a
+// different one.
+function canonicalPlannerCreateState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The stored Planner proposal is invalid.');
+  const allowed = new Set(['title', 'why', 'next_action', 'importance', 'effort', 'estimated_minutes', 'deadline']);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error('The stored Planner proposal contains unsupported fields.');
+  const title = String(value.title || '').trim();
+  const why = String(value.why || '').trim();
+  const nextAction = String(value.next_action || '').trim();
+  if (!title || title.length > 160) throw new Error('The stored Planner proposal has an invalid title.');
+  if (why.length > 400 || nextAction.length > 400) throw new Error('The stored Planner proposal exceeds its allowed bounds.');
+  const importance = Number(value.importance);
+  const effort = Number(value.effort);
+  if (!Number.isInteger(importance) || importance < 1 || importance > 5) throw new Error('The stored Planner proposal has an invalid importance.');
+  if (!Number.isInteger(effort) || effort < 1 || effort > 5) throw new Error('The stored Planner proposal has an invalid effort.');
+  let estimatedMinutes = value.estimated_minutes;
+  if (estimatedMinutes === undefined || estimatedMinutes === null) estimatedMinutes = null;
+  else if (!Number.isInteger(estimatedMinutes) || estimatedMinutes < 0 || estimatedMinutes > 1440) throw new Error('The stored Planner proposal has an invalid estimated_minutes.');
+  const deadline = normalizePlannerDeadline(value.deadline);
+  return { title, why, next_action: nextAction, importance, effort, estimated_minutes: estimatedMinutes, deadline };
+}
+
+function plannerCreateOrigin(correlationId) {
+  return JSON.stringify({ source: 'chat-action-gateway', actionId: CHAT_PLANNER_CREATE_ACTION, correlationId });
+}
+
+function readPlannerCreateOrigin(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    if (parsed?.source !== 'chat-action-gateway' || parsed?.actionId !== CHAT_PLANNER_CREATE_ACTION || typeof parsed?.correlationId !== 'string' || !parsed.correlationId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bindPlannerCreateConfirmation(sessionValue, result) {
+  if (result?.actionId !== CHAT_PLANNER_CREATE_ACTION || result.status !== 'needs_confirmation') return result;
+  const sessionId = realChatSessionId(sessionValue);
+  if (!sessionId) {
+    const error = new Error('A valid active chat session is required to stage a Planner proposal.');
+    error.code = 'INVALID_CHAT_SESSION';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const afterState = canonicalPlannerCreateState(result.args);
+  const target = `${chatConfirmationSessionId(sessionId)}:planner:new`;
+  const confirmation = proposeConfirmation(db, {
+    operation: CHAT_PLANNER_CREATE_OPERATION,
+    target,
+    afterState,
+    reason: 'User-reviewed Chat Daily Planner create proposal.',
+    origin: plannerCreateOrigin(result.correlationId),
+    sessionId: chatConfirmationSessionId(sessionId),
+    requiresRevalidation: false,
+    idempotencyKey: `chat-planner-create:${result.correlationId}`
   });
   return {
     ...result,
@@ -3396,7 +3466,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
       return ok(res, sessionBlock);
     }
     result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui', renderer: extractRendererBinding(req.body) });
-    result = bindWorkboardConfirmation(sessionId, result);
+    result = bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result));
     const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
       sessionId,
@@ -3431,7 +3501,7 @@ app.post('/api/chat/capability', async (req, res) => {
       return ok(res, sessionBlock);
     }
     let result = await capabilityRegistry.invoke(name, req.body?.args || {}, { renderer: extractRendererBinding(req.body) });
-    result = bindWorkboardConfirmation(sessionId, result);
+    result = bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result));
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
@@ -3726,6 +3796,62 @@ app.post('/api/chat/sessions/:id/workboard/confirm', async (req, res) => {
   } catch {
     writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
     fail(res, 400, 'Workboard confirmation failed safely.');
+  }
+});
+
+// Apply only an immutable, session-bound Daily Planner create payload staged by the
+// action gateway. The client supplies only the one-time confirmation identifier and
+// token — never a task payload. Creation is atomic with confirmation settlement
+// (transactionalApply), so there is never a state where the task exists but the
+// confirmation is still reusable, or the confirmation is consumed without a task.
+app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
+  const sessionId = Number(req.params.id);
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const keys = Object.keys(body).sort();
+  const auditOperation = CHAT_PLANNER_CREATE_OPERATION;
+  try {
+    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
+      return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
+    }
+    const confirmationId = String(body.confirmationId || '');
+    const token = String(body.token || '');
+    if (!/^[a-f0-9]{32}$/.test(confirmationId) || !/^[a-f0-9]{64}$/.test(token)) return fail(res, 400, 'A valid confirmation identifier and token are required.');
+    const staged = getConfirmation(db, confirmationId);
+    const createConfirmation = staged?.operation === CHAT_PLANNER_CREATE_OPERATION
+      && staged.target === `${chatConfirmationSessionId(sessionId)}:planner:new`;
+    if (!staged || !createConfirmation) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION');
+      return fail(res, 400, 'That Planner confirmation is not available.');
+    }
+    const origin = readPlannerCreateOrigin(staged.origin);
+    if (!origin) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ORIGIN');
+      return fail(res, 400, 'That Planner confirmation is not available.');
+    }
+    const applyCreate = (claimed) => {
+      const p = canonicalPlannerCreateState(claimed.afterState);
+      const id = db.prepare(`INSERT INTO planner_tasks (title, why, next_action, importance, effort, estimated_minutes, deadline)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(p.title, p.why, p.next_action, p.importance, p.effort, p.estimated_minutes, p.deadline).lastInsertRowid;
+      return { operation: CHAT_PLANNER_CREATE_OPERATION, success: true, record: row('SELECT * FROM planner_tasks WHERE id = ?', [id]) };
+    };
+    const applied = await confirmAndApply(
+      db,
+      { id: confirmationId, token, sessionId: chatConfirmationSessionId(sessionId) },
+      applyCreate,
+      { transactionalApply: true }
+    );
+    if (!applied.ok) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', `CONFIRMATION_${String(applied.code || 'REJECTED').toUpperCase()}`, origin.correlationId);
+      return fail(res, 400, applied.error || 'The Planner confirmation was rejected.');
+    }
+    writeChatAudit(sessionId, auditOperation, 'applied', `task ${applied.result?.record?.id || 'created'}`, origin.correlationId);
+    return ok(res, applied.result);
+  } catch {
+    writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
+    fail(res, 400, 'Planner confirmation failed safely.');
   }
 });
 

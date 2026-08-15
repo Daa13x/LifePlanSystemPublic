@@ -155,8 +155,10 @@ try {
   const navigationSystem = catalog.body?.data?.find((action) => action.id === 'navigation.system');
   const navigationSettings = catalog.body?.data?.find((action) => action.id === 'navigation.settings');
   const navigationPlanner = catalog.body?.data?.find((action) => action.id === 'navigation.planner');
+  const plannerCreate = catalog.body?.data?.find((action) => action.id === 'planner.propose_create');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 15 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner), 'neutral catalog exposes every bounded registered capability');
+  line(catalog.body?.data?.length === 16 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate), 'neutral catalog exposes every bounded registered capability');
+  line(plannerCreate?.permission === 'planner.propose' && plannerCreate?.risk === 'REVERSIBLE_WRITE' && plannerCreate?.confirmation === 'user_confirmation', 'planner.propose_create advertises its write risk and user-confirmation requirement');
   line(navigationWorkboard?.permission === 'navigation.control' && navigationWorkboard?.risk === 'VIEW_NAVIGATION' && navigationWorkboard?.confirmation === 'none', 'navigation.workboard advertises its bounded view-navigation contract');
   line(navigationSystem?.permission === 'navigation.control' && navigationSystem?.risk === 'VIEW_NAVIGATION' && navigationSystem?.confirmation === 'none', 'navigation.system advertises the same bounded view-navigation contract');
   line(navigationSettings?.permission === 'navigation.control' && navigationSettings?.risk === 'VIEW_NAVIGATION' && navigationSettings?.confirmation === 'none', 'navigation.settings advertises the same bounded view-navigation contract');
@@ -639,6 +641,74 @@ try {
     json: { confirmationId: restartConfirmation.confirmationId, token: restartConfirmation.token }
   });
   line(afterRestart.status === 200 && afterRestart.body?.data?.record?.title === 'Restart persistence target', 'a durable confirmation survives a server restart');
+
+  // --- Daily Planner task creation: proposal -> durable confirmation -> atomic create ---
+  const plannerCount = () => { const d = new DatabaseSync(dbPath, { readOnly: true }); const n = Number(d.prepare('SELECT COUNT(*) AS c FROM planner_tasks').get()?.c || 0); d.close(); return n; };
+  const plannerConfirm = (routeSessionId, confirmation) => api(`/api/chat/sessions/${routeSessionId}/planner/confirm`, { method: 'POST', json: { confirmationId: confirmation?.confirmationId, token: confirmation?.token } });
+  const proposePlanner = (args, requestedSessionId = sessionId) => api('/api/actions/planner.propose_create/invoke', { method: 'POST', json: { session_id: requestedSessionId, args } });
+
+  const plannerBefore = plannerCount();
+  const plannerProposal = await proposePlanner({ title: 'Draft the LPS quarterly review', next_action: 'Outline sections', importance: 4, effort: 3, estimated_minutes: 90, deadline: '2026-09-30' });
+  const plannerDurable = plannerProposal.body?.data;
+  const plannerConfirmation = plannerDurable?.confirmation;
+  line(plannerProposal.status === 200 && plannerDurable?.status === 'needs_confirmation' && plannerDurable?.data?.confirmation_required === true && /^[a-f0-9]{32}$/.test(plannerConfirmation?.confirmationId || '') && /^[a-f0-9]{64}$/.test(plannerConfirmation?.token || ''), 'a planner task proposal returns a durable, session-bound confirmation');
+  line(plannerDurable?.data?.preview?.title === 'Draft the LPS quarterly review' && plannerDurable?.data?.preview?.deadline === '2026-09-30' && plannerDurable?.data?.preview?.importance === 4 && plannerDurable?.data?.preview?.estimated_minutes === 90, 'the proposal preview echoes the exact bounded task fields');
+  line(plannerCount() === plannerBefore, 'previewing a planner task creates no planner_tasks row');
+
+  const plannerStoredDb = new DatabaseSync(dbPath, { readOnly: true });
+  const plannerStored = plannerStoredDb.prepare('SELECT token_hash, session_id, operation, target, after_state, origin FROM confirmations WHERE id = ?').get(plannerConfirmation?.confirmationId);
+  plannerStoredDb.close();
+  line(plannerStored?.session_id === `chat:${sessionId}` && plannerStored?.operation === 'planner.create' && plannerStored?.target === `chat:${sessionId}:planner:new` && plannerStored?.token_hash !== plannerConfirmation?.token && !JSON.stringify(plannerStored).includes(plannerConfirmation?.token), 'the planner confirmation binds chat/operation/target and never stores the raw token');
+  line(!String(plannerStored?.origin || '').includes('quarterly review') && JSON.parse(plannerStored?.origin || '{}').correlationId === plannerDurable?.correlationId, 'planner origin stores correlation provenance without task content');
+
+  const plannerBadEnvelope = await api(`/api/chat/sessions/${sessionId}/planner/confirm`, { method: 'POST', json: { confirmationId: plannerConfirmation?.confirmationId, token: plannerConfirmation?.token, title: 'Injected replacement' } });
+  line(plannerBadEnvelope.status === 400 && plannerCount() === plannerBefore, 'a replacement field in the planner confirm envelope is rejected before mutation');
+  const plannerWrongToken = await plannerConfirm(sessionId, { confirmationId: plannerConfirmation?.confirmationId, token: '0'.repeat(64) });
+  line(plannerWrongToken.status === 400 && plannerCount() === plannerBefore, 'the wrong planner token cannot create a task');
+  const plannerOtherSession = await api('/api/chat/sessions', { method: 'POST', json: { title: 'Other planner session' } });
+  const plannerWrongSession = await plannerConfirm(Number(plannerOtherSession.body?.data?.id), plannerConfirmation);
+  line(plannerWrongSession.status === 400 && plannerCount() === plannerBefore, 'a different chat session cannot apply the planner confirmation');
+
+  const plannerApplied = await plannerConfirm(sessionId, plannerConfirmation);
+  const plannerRecord = plannerApplied.body?.data?.record;
+  line(plannerApplied.status === 200 && plannerApplied.body?.data?.operation === 'planner.create' && plannerCount() === plannerBefore + 1 && plannerRecord?.title === 'Draft the LPS quarterly review' && plannerRecord?.importance === 4 && plannerRecord?.effort === 3 && plannerRecord?.estimated_minutes === 90 && plannerRecord?.deadline === '2026-09-30' && plannerRecord?.status === 'active', 'exact confirmation creates one canonical planner_tasks row matching the reviewed payload');
+  const plannerReplay = await plannerConfirm(sessionId, plannerConfirmation);
+  line(plannerReplay.status === 400 && plannerCount() === plannerBefore + 1, 'a planner confirmation replay is rejected without a second task');
+
+  const plannerList = await api('/api/planner/tasks');
+  line(plannerList.body?.data?.some((t) => t.id === plannerRecord?.id && t.title === plannerRecord?.title && t.status === 'active'), 'the created task is visible through the canonical Planner endpoint');
+  const plannerTodayAfter = await api('/api/actions/planner.today/invoke', { method: 'POST', json: { session_id: sessionId, args: {} } });
+  const plannerTodayData = plannerTodayAfter.body?.data?.data;
+  line((plannerTodayData?.visible || []).some((t) => t.id === plannerRecord?.id) || (plannerTodayData?.deferred || []).some((t) => t.id === plannerRecord?.id), 'planner.today observes the newly created task');
+
+  const plannerConcProposal = await proposePlanner({ title: 'Concurrent planner task' });
+  const plannerConcConfirmation = plannerConcProposal.body?.data?.confirmation;
+  const beforeConc = plannerCount();
+  const plannerConcResults = await Promise.all([1, 2].map(() => plannerConfirm(sessionId, plannerConcConfirmation)));
+  line(plannerConcResults.filter((r) => r.status === 200).length === 1 && plannerConcResults.filter((r) => r.status === 400).length === 1 && plannerCount() === beforeConc + 1, 'concurrent planner confirmation creates exactly one task');
+
+  const plannerExpProposal = await proposePlanner({ title: 'Expired planner task' });
+  const plannerExpConfirmation = plannerExpProposal.body?.data?.confirmation;
+  const beforeExp = plannerCount();
+  const plannerExpDb = new DatabaseSync(dbPath);
+  plannerExpDb.prepare('UPDATE confirmations SET expires_at = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', plannerExpConfirmation.confirmationId);
+  plannerExpDb.close();
+  const plannerExpApply = await plannerConfirm(sessionId, plannerExpConfirmation);
+  line(plannerExpApply.status === 400 && plannerCount() === beforeExp, 'an expired planner confirmation is rejected without a task');
+
+  const plannerTamperProposal = await proposePlanner({ title: 'Tamper planner task' });
+  const plannerTamperConfirmation = plannerTamperProposal.body?.data?.confirmation;
+  const beforeTamper = plannerCount();
+  const plannerTamperDb = new DatabaseSync(dbPath);
+  plannerTamperDb.prepare('UPDATE confirmations SET after_state = ? WHERE id = ?').run(JSON.stringify({ title: 'Injected via tamper', why: '', next_action: '', importance: 5, effort: 5, estimated_minutes: null, deadline: null }), plannerTamperConfirmation.confirmationId);
+  plannerTamperDb.close();
+  const plannerTamperApply = await plannerConfirm(sessionId, plannerTamperConfirmation);
+  line(plannerTamperApply.status === 400 && plannerCount() === beforeTamper, 'a tampered stored planner payload fails the integrity digest before mutation');
+
+  const plannerMalformed = await proposePlanner({ title: 'Bad date task', deadline: '2026-02-31' });
+  line(['failed', 'blocked'].includes(plannerMalformed.body?.data?.status) && !plannerMalformed.body?.data?.confirmation && plannerCount() === beforeTamper, 'a malformed planner deadline fails closed with no confirmation and no task');
+  const plannerNoSession = await proposePlanner({ title: 'No session task' }, 987654321);
+  line(plannerNoSession.body?.data?.status === 'blocked' && plannerNoSession.body?.data?.error?.code === 'INVALID_CHAT_SESSION' && !plannerNoSession.body?.data?.confirmation, 'a planner proposal without a real chat session cannot stage a confirmation');
 
   const legacyRoute = await api('/api/chat/capability', {
     method: 'POST',
