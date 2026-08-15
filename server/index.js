@@ -5190,6 +5190,10 @@ app.post('/api/partner-relay/config', (req, res) => {
   try { ok(res, partnerRelay.configure(req.body || {})); } catch (error) { fail(res, 400, error.message); }
 });
 
+app.post('/api/partner-relay/pair', async (req, res) => {
+  try { ok(res, await partnerRelay.pair(req.body?.pairingCode)); } catch (error) { fail(res, 400, error.message); }
+});
+
 app.post('/api/partner-relay/sync', async (_req, res) => {
   try { ok(res, await partnerRelay.sync()); } catch (error) { fail(res, 400, error.message); }
 });

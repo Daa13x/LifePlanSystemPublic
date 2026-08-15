@@ -135,7 +135,10 @@ try {
   const { repository } = ensureRepository();
 
   if (mode === '--prepare') {
-    requireClean('sync preparation');
+    // Preparation establishes the commit base before a change is staged. It
+    // must therefore tolerate the uncommitted work it is about to protect;
+    // requiring a clean tree here made the documented prepare -> edit ->
+    // commit route impossible to resume after an interrupted edit.
     fetchMain();
     let { behind, ahead } = divergence();
     if (behind > 0 && ahead > 0) fail(`main has diverged from origin/main (behind ${behind}, ahead ${ahead}). Do not merge, rebase, reset, or force-push automatically; preserve the work and reconcile deliberately.`);
@@ -145,7 +148,6 @@ try {
       fetchMain();
       ({ behind, ahead } = divergence());
     }
-    requireClean('sync preparation');
     const head = requireExactSync();
     writeState(repository, 'prepare');
     console.log(`LPS sync preparation passed: ${repository} main@${head.slice(0, 12)} is clean and exactly matches origin/main.`);

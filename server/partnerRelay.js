@@ -52,7 +52,10 @@ export function createPartnerRelayClient({ db, getSetting, setSetting }) {
   `);
 
   function status() {
-    const enabled = Boolean(getSetting('maRelaySyncEnabled', false));
+    // A fresh LPS install is ready to receive a reviewed MA handoff as soon
+    // as Alex deliberately completes pairing. Without a host credential this
+    // remains inert; it never discovers or contacts MA by itself.
+    const enabled = Boolean(getSetting('maRelaySyncEnabled', true));
     const host = normalizeHost(getSetting('maRelayHost', DEFAULT_HOST));
     const cursor = asNonEmptyString(getSetting('maRelayCursor', ''));
     const deviceId = ensureDeviceId(getSetting, setSetting);
@@ -71,10 +74,26 @@ export function createPartnerRelayClient({ db, getSetting, setSetting }) {
   function configure(input = {}) {
     const enabled = Boolean(input.enabled);
     const host = normalizeHost(input.host || getSetting('maRelayHost', DEFAULT_HOST));
-    const pairToken = input.pairToken === undefined ? undefined : asNonEmptyString(input.pairToken);
     setSetting('maRelaySyncEnabled', enabled);
     setSetting('maRelayHost', host);
-    if (pairToken !== undefined) setSetting('maRelayPairToken', pairToken);
+    return status();
+  }
+
+  async function pair(pairingCode) {
+    const current = status();
+    const code = asNonEmptyString(pairingCode);
+    if (!code) throw new Error('A one-time pairing key is required.');
+    const response = await fetch(new URL('/v1/pair', current.host), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ pairingCode: code, deviceId: current.deviceId }),
+      signal: AbortSignal.timeout(30_000)
+    });
+    if (!response.ok) throw new Error('MA pairing key was rejected or expired. Generate a new key in MA-Dev.');
+    const packet = await response.json();
+    const token = asNonEmptyString(packet?.token);
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(token)) throw new Error('MA pairing response did not contain a valid scoped credential.');
+    setSetting('maRelayPairToken', token);
     return status();
   }
 
@@ -135,5 +154,5 @@ export function createPartnerRelayClient({ db, getSetting, setSetting }) {
     return { ...status(), pulled: artifacts.length };
   }
 
-  return { configure, status, sync };
+  return { configure, pair, status, sync };
 }

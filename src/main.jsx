@@ -6073,9 +6073,9 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
   const [publicExportPreview, setPublicExportPreview] = useState(null);
   const [publicExportBusy, setPublicExportBusy] = useState(false);
   const [partnerRelay, setPartnerRelay] = useState(null);
-  const [partnerRelayEnabled, setPartnerRelayEnabled] = useState(false);
+  const [partnerRelayEnabled, setPartnerRelayEnabled] = useState(true);
   const [partnerRelayHost, setPartnerRelayHost] = useState('https://relay.mostlyarmless.co.uk');
-  const [partnerRelayToken, setPartnerRelayToken] = useState('');
+  const [partnerRelayPairingCode, setPartnerRelayPairingCode] = useState('');
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
@@ -6097,6 +6097,14 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
       if (status.host) setPartnerRelayHost(status.host);
     }).catch((err) => setNotice(err.message));
   }, []);
+
+  useEffect(() => {
+    // One bounded pull on launch catches handoffs queued while LPS was off.
+    // Artifacts remain in the separate review store; this is not model-context
+    // ingestion and no retry loop is created when MA is unavailable.
+    if (!partnerRelay?.enabled || !partnerRelay?.paired) return;
+    syncPartnerRelay();
+  }, [partnerRelay?.enabled, partnerRelay?.paired]);
 
   useEffect(() => {
     if (!hardware || !recommendedQwen || repoTouched) return;
@@ -6270,13 +6278,23 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
         method: 'POST',
         body: JSON.stringify({
           enabled: partnerRelayEnabled,
-          host: partnerRelayHost,
-          pairToken: partnerRelayToken
+          host: partnerRelayHost
         })
       });
       setPartnerRelay(status);
-      setPartnerRelayToken('');
       setNotice(status.enabled ? 'Partner relay is configured. Sync remains explicit and review-gated.' : 'Partner relay is disabled.');
+    } catch (err) { setNotice(err.message); }
+  }
+
+  async function pairPartnerRelay() {
+    try {
+      const status = await api('/api/partner-relay/pair', {
+        method: 'POST',
+        body: JSON.stringify({ pairingCode: partnerRelayPairingCode })
+      });
+      setPartnerRelay(status);
+      setPartnerRelayPairingCode('');
+      setNotice('MA-Dev pairing complete. This LPS device can now pull Captain-approved handoff PDFs for review.');
     } catch (err) { setNotice(err.message); }
   }
 
@@ -6329,12 +6347,13 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
       </div>
       <div className="panel service-sync-panel">
         <h2>MA-Dev partner relay</h2>
-        <p>Optional, one-way checkpoint delivery from MA-Dev. Received PDFs are kept outside local-agent context until Alex explicitly reviews them.</p>
+        <p>Review-gated checkpoint delivery from MA-Dev. Fresh installs are ready to sync once Alex completes pairing; received PDFs stay outside local-agent context until explicit review.</p>
         <label className="checkbox-row"><input type="checkbox" checked={partnerRelayEnabled} onChange={(event) => setPartnerRelayEnabled(event.target.checked)} /> Enable MA-Dev sync</label>
         <label>Relay host<input value={partnerRelayHost} onChange={(event) => setPartnerRelayHost(event.target.value)} placeholder="https://relay.mostlyarmless.co.uk" /></label>
-        <label>Pairing token<input type="password" value={partnerRelayToken} onChange={(event) => setPartnerRelayToken(event.target.value)} placeholder={partnerRelay?.paired ? 'Stored locally (enter a new token only to rotate)' : 'Captain-provided one-time token'} autoComplete="new-password" /></label>
+        <label>One-time pairing key<input type="password" value={partnerRelayPairingCode} onChange={(event) => setPartnerRelayPairingCode(event.target.value)} placeholder={partnerRelay?.paired ? 'Paired locally; enter a new MA key only to rotate' : 'Generate in MA-Dev, then enter once'} autoComplete="one-time-code" /></label>
         <div className="decision-row">
           <button onClick={savePartnerRelay}>Save relay</button>
+          <button onClick={pairPartnerRelay} disabled={!partnerRelayPairingCode.trim()}>Pair this LPS device</button>
           <button onClick={syncPartnerRelay} disabled={!partnerRelay?.enabled}>Sync approved handoffs</button>
         </div>
         {partnerRelay && <small>{partnerRelay.enabled ? `Enabled · ${partnerRelay.received || 0} received checkpoint(s) · cursor ${partnerRelay.cursor || 0}` : 'Disabled until explicitly paired.'}</small>}
