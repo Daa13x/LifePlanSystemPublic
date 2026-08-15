@@ -93,7 +93,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 18, 'the bounded slice has exactly eighteen mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
+assert.equal(mappedControls.length, 19, 'the bounded slice has exactly nineteen mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -128,6 +128,7 @@ assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'syste
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'conversation.search').map((mapping) => mapping.controlId), ['chat.history-search.submit'], 'the explicit history-search submit control maps to conversation.search');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'planner.today').map((mapping) => mapping.controlId), ['chat.connection.planner-today-check'], 'the visible today control maps to planner.today');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.workboard').map((mapping) => mapping.controlId), ['chat.navigation.open-workboard'], 'the visible Open Workboard control maps to the navigation.workboard action');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.system').map((mapping) => mapping.controlId), ['chat.navigation.open-system'], 'the visible Open System control maps to the navigation.system action');
 const attachControlStart = picker.indexOf('<button className="picker-row"');
 const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
 const previewControlMarker = picker.indexOf('data-action-id="knowledge.read"');
@@ -154,7 +155,10 @@ assert.match(server, /app\.post\('\/api\/actions\/:id\/invoke'/, 'server invokes
 assert.match(server, /capabilityRegistry\.execute\(req\.params\.id, req\.body\?\.args, \{ caller: 'human-ui', renderer: extractRendererBinding\(req\.body\) \}\)/, 'HTTP route assigns its trusted caller and the trusted renderer binding instead of accepting body scopes');
 assert.equal(manifest['navigation.workboard'].risk, 'VIEW_NAVIGATION', 'navigation.workboard is classified as a bounded view-navigation action');
 assert.equal(manifest['navigation.workboard'].confirmation, 'none', 'view navigation is a direct reversible effect and requires no confirmation');
+assert.equal(manifest['navigation.system'].risk, 'VIEW_NAVIGATION', 'navigation.system is classified as a bounded view-navigation action');
+assert.equal(manifest['navigation.system'].confirmation, 'none', 'System view navigation is confirmation-free');
 assert.match(ui, /invokeAction\('navigation\.workboard', \{\}\)/, 'the Open Workboard control invokes the navigation action through the neutral gateway');
+assert.match(ui, /invokeAction\('navigation\.system', \{\}\)/, 'the Open full System control invokes the navigation action through the neutral gateway');
 assert.match(ui, /body\.renderer = binding/, 'navigation invocations carry this window\'s authenticated renderer binding');
 assert.match(server, /bindWorkboardConfirmation\(sessionId, result\)/, 'the gateway binds Workboard create and update previews to the durable confirmation owner');
 assert.match(server, /requireSessionScopedAction\(req\.params\.id, sessionId\)/, 'neutral sensitive reads require a real active Chat session before the handler runs');

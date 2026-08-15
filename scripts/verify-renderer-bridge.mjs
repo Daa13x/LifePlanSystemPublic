@@ -50,10 +50,11 @@ await check('destination catalog only offers destinations that round-trip throug
   const catalog = buildDestinationCatalog();
   const ids = [...catalog.keys()].sort();
   // planner is workboard/today; models has no canonical route and must be absent.
-  assert.deepEqual(ids, ['chat', 'knowledge', 'planner', 'settings', 'workboard']);
+  assert.deepEqual(ids, ['chat', 'knowledge', 'planner', 'settings', 'system', 'workboard']);
   assert.equal(catalog.get('workboard').route, '#workboard');
   assert.equal(catalog.get('planner').route, '#workboard/today');
   assert.equal(catalog.get('chat').route, '#chat');
+  assert.equal(catalog.get('system').route, '#system');
   assert.equal(catalog.get('settings').route, '#settings');
   assert.equal(catalog.has('models'), false);
 });

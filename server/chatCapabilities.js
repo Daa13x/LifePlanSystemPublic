@@ -389,6 +389,16 @@ const ACTION_METADATA = Object.freeze({
       ['destination', 'requested', 'applied', 'status'],
       { destination: { type: 'string' }, requested: { type: 'boolean' }, applied: { type: 'boolean' }, status: { type: 'string' }, route: { type: ['string', 'null'] }, failure_category: { type: ['string', 'null'] } }
     )
+  },
+  'navigation.system': {
+    label: 'Open System', feature: 'Chat navigation', permission: 'navigation.control', risk: ACTION_RISKS.VIEW_NAVIGATION,
+    confirmation: ACTION_CONFIRMATIONS.NONE,
+    sideEffects: ['Changes the active view of the requesting window to the System section; no stored data is modified and it is immediately reversible.'],
+    sourceControls: ['chat.navigation.open-system'], testId: 'action.navigation.system',
+    resultSchema: resultObject(
+      ['destination', 'requested', 'applied', 'status'],
+      { destination: { type: 'string' }, requested: { type: 'boolean' }, applied: { type: 'boolean' }, status: { type: 'string' }, route: { type: ['string', 'null'] }, failure_category: { type: ['string', 'null'] } }
+    )
   }
 });
 
@@ -396,7 +406,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -627,6 +637,24 @@ export function createCapabilityRegistry(deps) {
           failure_category: outcome?.failureCategory ? truncate(outcome.failureCategory, LIMITS.metadataMaxLength) : null
         };
       }
+    },
+
+    'navigation.system': {
+      description: 'Open the System section in the requesting window. A bounded, reversible view navigation to a fixed semantic destination; it changes no stored data.',
+      readOnly: false,
+      navigation: true,
+      schema: {},
+      async handler(_args, context) {
+        const outcome = await dep('navigate')({ renderer: context.renderer, destination: 'system', correlationId: context.correlationId });
+        return {
+          destination: 'system',
+          requested: Boolean(outcome?.requested),
+          applied: outcome?.status === 'APPLIED',
+          status: asString(outcome?.status || 'REJECTED') || 'REJECTED',
+          route: outcome?.route ? truncate(outcome.route, LIMITS.metadataMaxLength) : null,
+          failure_category: outcome?.failureCategory ? truncate(outcome.failureCategory, LIMITS.metadataMaxLength) : null
+        };
+      }
     }
   };
 
@@ -709,5 +737,5 @@ export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
   'system.status', 'system.models', 'system.runs',
-  'conversation.search', 'planner.today', 'navigation.workboard'
+  'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system'
 ];

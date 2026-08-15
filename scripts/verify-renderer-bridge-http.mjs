@@ -148,7 +148,7 @@ try {
   const reg = await api('/api/renderer/register', { method: 'POST', json: { windowId: 'window-A', chatSessionId: sessionId } });
   const rendererId = reg.body?.data?.rendererId;
   const token = reg.body?.data?.token;
-  line(reg.status === 200 && typeof rendererId === 'string' && typeof token === 'string' && Array.isArray(reg.body?.data?.destinations) && reg.body.data.destinations.includes('workboard'), 'registration issues a renderer id, secret token, and the semantic destination allowlist');
+  line(reg.status === 200 && typeof rendererId === 'string' && typeof token === 'string' && Array.isArray(reg.body?.data?.destinations) && reg.body.data.destinations.includes('workboard') && reg.body.data.destinations.includes('system'), 'registration issues a renderer id, secret token, and the semantic destination allowlist');
 
   const badStream = await openStream(rendererId, 'not-the-real-token');
   badStream.close();
@@ -168,6 +168,15 @@ try {
   const navData = invoked.body?.data?.data;
   line(invoked.status === 200 && invoked.body?.data?.status === 'success' && navData?.applied === true && navData?.status === 'APPLIED' && navData?.destination === 'workboard' && navData?.route === '#workboard', 'the navigation action reports an APPLIED, correlated success only after the renderer confirms');
   line(invoked.body?.data?.correlationId === command.correlationId, 'the action, command, and acknowledgement share one correlation id');
+
+  // A second registered action reuses the same authenticated bridge and canonical
+  // router for System; it does not invent a route or bypass acknowledgement.
+  const systemInvokePromise = api('/api/actions/navigation.system/invoke', { method: 'POST', json: { session_id: sessionId, args: {}, renderer: { rendererId, token } } });
+  const systemCommand = await waitFor(() => stream.commands.find((item) => item.destination === 'system'));
+  line(Boolean(systemCommand) && systemCommand.command === 'navigate' && systemCommand.route === '#system', 'the renderer receives the canonical System navigation command');
+  await api(`/api/renderer/${encodeURIComponent(rendererId)}/ack`, { method: 'POST', json: { commandId: systemCommand.commandId, correlationId: systemCommand.correlationId, token, commandToken: systemCommand.commandToken, status: 'APPLIED' } });
+  const systemInvoked = await systemInvokePromise;
+  line(systemInvoked.body?.data?.data?.applied === true && systemInvoked.body?.data?.data?.destination === 'system' && systemInvoked.body?.data?.data?.route === '#system', 'navigation.system reports success only after the renderer acknowledgement');
 
   // --- single-use ack / replay protection ---
   const replay = await api(`/api/renderer/${encodeURIComponent(rendererId)}/ack`, { method: 'POST', json: { commandId: command.commandId, correlationId: command.correlationId, token, commandToken: command.commandToken, status: 'APPLIED' } });

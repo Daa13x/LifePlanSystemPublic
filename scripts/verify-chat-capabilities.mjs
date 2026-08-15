@@ -84,6 +84,10 @@ const deps = {
     calls.push(['plannerToday']);
     const tasks = Array.from({ length: 20 }, (_, index) => ({ id: index + 1, title: oversizedWorkboardText, status: 'active', activeStep: oversizedWorkboardText, deadline: oversizedWorkboardText, blocker: index === 0 ? oversizedWorkboardText : '', pinned: index === 0, reasons: Array(20).fill(oversizedWorkboardText) }));
     return { mode: 'normal', visibleLimit: 7, pinnedCount: 1, visible: tasks, deferred: tasks };
+  },
+  navigate: async (a) => {
+    calls.push(['navigate', a]);
+    return { requested: true, status: 'APPLIED', failureCategory: null, route: `#${a.destination}` };
   }
 };
 
@@ -97,6 +101,23 @@ check('read capabilities are read-only; propose_* are writes', () => {
   for (const n of ['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today']) assert.equal(byName[n], true, `${n} must be read-only`);
   assert.equal(byName['workboard.propose_create'], false);
   assert.equal(byName['workboard.propose_update'], false);
+  assert.equal(byName['navigation.workboard'], false);
+  assert.equal(byName['navigation.system'], false);
+});
+
+await checkAsync('fixed navigation actions use the shared trusted renderer dependency and report only acknowledged success', async () => {
+  calls.length = 0;
+  const renderer = { rendererId: 'renderer-fixture', token: 'secret-fixture' };
+  const workboard = await reg.invoke('navigation.workboard', {}, { renderer });
+  const system = await reg.invoke('navigation.system', {}, { renderer });
+  assert.equal(workboard.data.destination, 'workboard');
+  assert.equal(system.data.destination, 'system');
+  assert.equal(workboard.data.applied, true);
+  assert.equal(system.data.applied, true);
+  assert.deepEqual(calls.map((entry) => [entry[0], entry[1].renderer, entry[1].destination]), [
+    ['navigate', renderer, 'workboard'],
+    ['navigate', renderer, 'system']
+  ]);
 });
 
 await checkAsync('knowledge.search returns bounded results with provenance', async () => {

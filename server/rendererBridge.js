@@ -46,6 +46,7 @@ const SEMANTIC_DESTINATIONS = Object.freeze({
   knowledge: { section: 'knowledge', tab: null },
   workboard: { section: 'workboard', tab: null },
   planner: { section: 'workboard', tab: 'today' },
+  system: { section: 'system', tab: null },
   settings: { section: 'settings', tab: null }
 });
 

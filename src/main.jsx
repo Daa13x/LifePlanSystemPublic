@@ -1914,6 +1914,20 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     }
   }
 
+  async function openSystemViaAction() {
+    if (systemCheckBusy) return;
+    setSystemCheckBusy('navigation-system');
+    try {
+      const result = await invokeAction('navigation.system', {});
+      if (result.data?.applied) setNotice('Opened System.');
+      else setNotice(`System navigation did not apply (${result.data?.status || 'unknown'}).`);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSystemCheckBusy('');
+    }
+  }
+
   async function checkSystemStatus() {
     if (systemCheckBusy) return;
     setSystemCheckBusy('status');
@@ -2429,7 +2443,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} />
+          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2537,7 +2551,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, runtime, generating, navigate, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard }) {
+function ChatConnectionBar({ connection, runtime, generating, navigate, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2561,7 +2575,7 @@ function ChatConnectionBar({ connection, runtime, generating, navigate, statusPr
         <button className="link" data-action-id="system.runs" data-control-id="chat.connection.system-runs-check" onClick={onCheckRuns} disabled={Boolean(checkBusy)}>{checkBusy === 'runs' ? 'Checking…' : 'Recent runs'}</button>
         <button className="link" data-action-id="planner.today" data-control-id="chat.connection.planner-today-check" onClick={onCheckPlanner} disabled={Boolean(checkBusy)}>{checkBusy === 'planner' ? 'Checking…' : 'Check today'}</button>
         <button className="link" data-action-id="navigation.workboard" data-control-id="chat.navigation.open-workboard" onClick={onOpenWorkboard} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation' ? 'Opening…' : 'Open Workboard'}</button>
-        <button className="link" onClick={() => navigate('system', 'status')}>Open full System</button>
+        <button className="link" data-action-id="navigation.system" data-control-id="chat.navigation.open-system" onClick={onOpenSystem} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation-system' ? 'Opening…' : 'Open full System'}</button>
         {statusPreview ? (
           <small role="status">
             DB {statusPreview.sqlite?.ready ? 'ready' : 'unavailable'} · model {statusPreview.model?.assigned ? 'assigned' : 'not assigned'} · repository {statusPreview.repository?.available ? statusPreview.repository.hasChanges ? 'has changes' : 'clean' : 'unavailable'} · browser connector {statusPreview.browserConnector?.connected ? 'connected' : 'disconnected'}
