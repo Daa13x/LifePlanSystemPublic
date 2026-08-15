@@ -185,6 +185,13 @@ try {
   const settingsInvoked = await settingsInvokePromise;
   line(settingsInvoked.body?.data?.data?.applied === true && settingsInvoked.body?.data?.data?.destination === 'settings' && settingsInvoked.body?.data?.data?.route === '#settings', 'navigation.settings reports success only after the renderer acknowledgement');
 
+  const plannerInvokePromise = api('/api/actions/navigation.planner/invoke', { method: 'POST', json: { session_id: sessionId, args: {}, renderer: { rendererId, token } } });
+  const plannerCommand = await waitFor(() => stream.commands.find((item) => item.destination === 'planner'));
+  line(Boolean(plannerCommand) && plannerCommand.command === 'navigate' && plannerCommand.route === '#workboard/today', 'the renderer receives the canonical Daily Planner navigation command');
+  await api(`/api/renderer/${encodeURIComponent(rendererId)}/ack`, { method: 'POST', json: { commandId: plannerCommand.commandId, correlationId: plannerCommand.correlationId, token, commandToken: plannerCommand.commandToken, status: 'APPLIED' } });
+  const plannerInvoked = await plannerInvokePromise;
+  line(plannerInvoked.body?.data?.data?.applied === true && plannerInvoked.body?.data?.data?.destination === 'planner' && plannerInvoked.body?.data?.data?.route === '#workboard/today', 'navigation.planner reports success only after the renderer acknowledgement');
+
   // --- single-use ack / replay protection ---
   const replay = await api(`/api/renderer/${encodeURIComponent(rendererId)}/ack`, { method: 'POST', json: { commandId: command.commandId, correlationId: command.correlationId, token, commandToken: command.commandToken, status: 'APPLIED' } });
   line(replay.status === 200 && replay.body?.data?.accepted === false && replay.body?.data?.error?.code === 'ALREADY_RESOLVED', 'a duplicate acknowledgement is rejected as already resolved (single-use)');

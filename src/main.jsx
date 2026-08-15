@@ -1960,6 +1960,20 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     }
   }
 
+  async function openPlannerViaAction() {
+    if (systemCheckBusy) return;
+    setSystemCheckBusy('navigation-planner');
+    try {
+      const result = await invokeAction('navigation.planner', {});
+      if (result.data?.applied) setNotice('Opened Today.');
+      else setNotice(`Daily Planner navigation did not apply (${result.data?.status || 'unknown'}).`);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSystemCheckBusy('');
+    }
+  }
+
   async function checkSystemStatus() {
     if (systemCheckBusy) return;
     setSystemCheckBusy('status');
@@ -2475,7 +2489,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} />
+          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2583,7 +2597,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings }) {
+function ChatConnectionBar({ connection, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings, onOpenPlanner }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2606,6 +2620,7 @@ function ChatConnectionBar({ connection, runtime, generating, statusPreview, mod
         <button className="link" data-action-id="system.models" data-control-id="chat.connection.system-models-check" onClick={onCheckModels} disabled={Boolean(checkBusy)}>{checkBusy === 'models' ? 'Checking…' : 'Check models'}</button>
         <button className="link" data-action-id="system.runs" data-control-id="chat.connection.system-runs-check" onClick={onCheckRuns} disabled={Boolean(checkBusy)}>{checkBusy === 'runs' ? 'Checking…' : 'Recent runs'}</button>
         <button className="link" data-action-id="planner.today" data-control-id="chat.connection.planner-today-check" onClick={onCheckPlanner} disabled={Boolean(checkBusy)}>{checkBusy === 'planner' ? 'Checking…' : 'Check today'}</button>
+        <button className="link" data-action-id="navigation.planner" data-control-id="chat.navigation.open-planner" onClick={onOpenPlanner} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation-planner' ? 'Opening…' : 'Open Today'}</button>
         <button className="link" data-action-id="navigation.workboard" data-control-id="chat.navigation.open-workboard" onClick={onOpenWorkboard} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation' ? 'Opening…' : 'Open Workboard'}</button>
         <button className="link" data-action-id="navigation.system" data-control-id="chat.navigation.open-system" onClick={onOpenSystem} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation-system' ? 'Opening…' : 'Open full System'}</button>
         {statusPreview ? (

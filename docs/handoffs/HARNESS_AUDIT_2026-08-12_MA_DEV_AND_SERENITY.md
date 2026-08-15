@@ -379,4 +379,18 @@ HTTP, UI, accessibility, and build checks pass. A second immediate-load browser
 journey reached `#settings`, rendered the real Settings page, displayed **Opened
 Settings**, and produced no console warnings or errors.
 
+## 2026-08-15 bounded Daily-Planner-navigation checkpoint
+
+`navigation.planner` completes the currently useful Chat destination family by
+opening the canonical Workboard/Today route already owned by the router. It is
+separate from `planner.today`: **Check today** remains a sensitive, bounded data
+read, while **Open Today** is a reversible view effect with no task mutation.
+
+The action uses the same authenticated renderer binding, ready-stream gate,
+single-use command token, correlation ID, and acknowledgement-only success rule
+as Workboard, System, and Settings navigation. Focused registry, bridge, HTTP,
+UI-mapping, accessibility, and build checks pass. An immediate-load real-browser
+journey reached `#workboard/today`, rendered the actual empty Daily Planner,
+displayed **Opened Today**, and produced no console warnings or errors.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

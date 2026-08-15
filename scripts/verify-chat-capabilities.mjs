@@ -104,6 +104,7 @@ check('read capabilities are read-only; propose_* are writes', () => {
   assert.equal(byName['navigation.workboard'], false);
   assert.equal(byName['navigation.system'], false);
   assert.equal(byName['navigation.settings'], false);
+  assert.equal(byName['navigation.planner'], false);
 });
 
 await checkAsync('fixed navigation actions use the shared trusted renderer dependency and report only acknowledged success', async () => {
@@ -112,16 +113,20 @@ await checkAsync('fixed navigation actions use the shared trusted renderer depen
   const workboard = await reg.invoke('navigation.workboard', {}, { renderer });
   const system = await reg.invoke('navigation.system', {}, { renderer });
   const settings = await reg.invoke('navigation.settings', {}, { renderer });
+  const planner = await reg.invoke('navigation.planner', {}, { renderer });
   assert.equal(workboard.data.destination, 'workboard');
   assert.equal(system.data.destination, 'system');
   assert.equal(settings.data.destination, 'settings');
+  assert.equal(planner.data.destination, 'planner');
   assert.equal(workboard.data.applied, true);
   assert.equal(system.data.applied, true);
   assert.equal(settings.data.applied, true);
+  assert.equal(planner.data.applied, true);
   assert.deepEqual(calls.map((entry) => [entry[0], entry[1].renderer, entry[1].destination]), [
     ['navigate', renderer, 'workboard'],
     ['navigate', renderer, 'system'],
-    ['navigate', renderer, 'settings']
+    ['navigate', renderer, 'settings'],
+    ['navigate', renderer, 'planner']
   ]);
 });
 

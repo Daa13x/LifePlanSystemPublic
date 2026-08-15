@@ -93,7 +93,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 20, 'the bounded slice has exactly twenty mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
+assert.equal(mappedControls.length, 21, 'the bounded slice has exactly twenty-one mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -130,6 +130,7 @@ assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'plann
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.workboard').map((mapping) => mapping.controlId), ['chat.navigation.open-workboard'], 'the visible Open Workboard control maps to the navigation.workboard action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.system').map((mapping) => mapping.controlId), ['chat.navigation.open-system'], 'the visible Open System control maps to the navigation.system action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.settings').map((mapping) => mapping.controlId), ['chat.navigation.open-settings'], 'the visible Assign / change control maps to the navigation.settings action');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.planner').map((mapping) => mapping.controlId), ['chat.navigation.open-planner'], 'the visible Open Today control maps to the navigation.planner action');
 const attachControlStart = picker.indexOf('<button className="picker-row"');
 const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
 const previewControlMarker = picker.indexOf('data-action-id="knowledge.read"');
@@ -160,9 +161,12 @@ assert.equal(manifest['navigation.system'].risk, 'VIEW_NAVIGATION', 'navigation.
 assert.equal(manifest['navigation.system'].confirmation, 'none', 'System view navigation is confirmation-free');
 assert.equal(manifest['navigation.settings'].risk, 'VIEW_NAVIGATION', 'navigation.settings is classified as a bounded view-navigation action');
 assert.equal(manifest['navigation.settings'].confirmation, 'none', 'Settings navigation is confirmation-free');
+assert.equal(manifest['navigation.planner'].risk, 'VIEW_NAVIGATION', 'navigation.planner is classified as a bounded view-navigation action');
+assert.equal(manifest['navigation.planner'].confirmation, 'none', 'Daily Planner navigation is confirmation-free');
 assert.match(ui, /invokeAction\('navigation\.workboard', \{\}\)/, 'the Open Workboard control invokes the navigation action through the neutral gateway');
 assert.match(ui, /invokeAction\('navigation\.system', \{\}\)/, 'the Open full System control invokes the navigation action through the neutral gateway');
 assert.match(ui, /invokeAction\('navigation\.settings', \{\}\)/, 'the Assign / change control invokes the navigation action through the neutral gateway');
+assert.match(ui, /invokeAction\('navigation\.planner', \{\}\)/, 'the Open Today control invokes the navigation action through the neutral gateway');
 assert.match(ui, /body\.renderer = binding/, 'navigation invocations carry this window\'s authenticated renderer binding');
 assert.match(ui, /if \(!binding\) await registerRenderer\(selectedSession\)/, 'a navigation invoked during startup establishes its renderer binding on demand');
 assert.match(ui, /else await rendererReadyPromise/, 'navigation waits for the authenticated command stream before invoking the server action');
