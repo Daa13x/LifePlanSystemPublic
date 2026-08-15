@@ -103,6 +103,7 @@ check('read capabilities are read-only; propose_* are writes', () => {
   assert.equal(byName['workboard.propose_update'], false);
   assert.equal(byName['navigation.workboard'], false);
   assert.equal(byName['navigation.system'], false);
+  assert.equal(byName['navigation.settings'], false);
 });
 
 await checkAsync('fixed navigation actions use the shared trusted renderer dependency and report only acknowledged success', async () => {
@@ -110,13 +111,17 @@ await checkAsync('fixed navigation actions use the shared trusted renderer depen
   const renderer = { rendererId: 'renderer-fixture', token: 'secret-fixture' };
   const workboard = await reg.invoke('navigation.workboard', {}, { renderer });
   const system = await reg.invoke('navigation.system', {}, { renderer });
+  const settings = await reg.invoke('navigation.settings', {}, { renderer });
   assert.equal(workboard.data.destination, 'workboard');
   assert.equal(system.data.destination, 'system');
+  assert.equal(settings.data.destination, 'settings');
   assert.equal(workboard.data.applied, true);
   assert.equal(system.data.applied, true);
+  assert.equal(settings.data.applied, true);
   assert.deepEqual(calls.map((entry) => [entry[0], entry[1].renderer, entry[1].destination]), [
     ['navigate', renderer, 'workboard'],
-    ['navigate', renderer, 'system']
+    ['navigate', renderer, 'system'],
+    ['navigate', renderer, 'settings']
   ]);
 });
 

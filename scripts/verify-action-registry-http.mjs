@@ -153,10 +153,12 @@ try {
   const plannerToday = catalog.body?.data?.find((action) => action.id === 'planner.today');
   const navigationWorkboard = catalog.body?.data?.find((action) => action.id === 'navigation.workboard');
   const navigationSystem = catalog.body?.data?.find((action) => action.id === 'navigation.system');
+  const navigationSettings = catalog.body?.data?.find((action) => action.id === 'navigation.settings');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 13 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem), 'neutral catalog exposes every bounded registered capability');
+  line(catalog.body?.data?.length === 14 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings), 'neutral catalog exposes every bounded registered capability');
   line(navigationWorkboard?.permission === 'navigation.control' && navigationWorkboard?.risk === 'VIEW_NAVIGATION' && navigationWorkboard?.confirmation === 'none', 'navigation.workboard advertises its bounded view-navigation contract');
   line(navigationSystem?.permission === 'navigation.control' && navigationSystem?.risk === 'VIEW_NAVIGATION' && navigationSystem?.confirmation === 'none', 'navigation.system advertises the same bounded view-navigation contract');
+  line(navigationSettings?.permission === 'navigation.control' && navigationSettings?.risk === 'VIEW_NAVIGATION' && navigationSettings?.confirmation === 'none', 'navigation.settings advertises the same bounded view-navigation contract');
   line(knowledge?.permission === 'knowledge.read' && knowledge?.risk === 'READ_ONLY' && knowledge?.confirmation === 'none', 'catalog exposes permission, risk, and confirmation metadata');
   line(knowledgeRead?.permission === 'knowledge.read' && knowledgeRead?.risk === 'READ_ONLY' && knowledgeRead?.confirmation === 'none', 'Knowledge preview remains read-only and confirmation-free');
   line(workboardRead?.permission === 'workboard.detail.read' && workboardRead?.risk === 'SENSITIVE_DATA' && workboardRead?.confirmation === 'none', 'Workboard preview uses a distinct sensitive-detail scope and remains confirmation-free');

@@ -362,4 +362,21 @@ multi-window isolation. A disposable real-browser journey moved the actual app
 from `#chat` to the canonical `#system` view, rendered the System page, displayed
 the truthful applied notice, and produced no console warnings or errors.
 
+## 2026-08-15 bounded Settings-navigation checkpoint
+
+`navigation.settings` reuses the same fixed-destination bridge and migrates
+Chat's existing **Assign / change** control away from a direct renderer callback.
+Like the other navigation actions, it accepts no route input, requires the
+requesting window's authenticated renderer binding, and reports applied only
+after the renderer acknowledges the canonical `#settings` route.
+
+The first immediate-load browser attempt exposed a real readiness race: a user
+could click before the renderer command stream finished registering and receive
+a truthful `REJECTED` result. The shared navigation client now establishes a
+missing binding on demand and awaits the authenticated stream's `ready` event
+before invoking any `navigation.*` action. Focused registry, renderer-bridge,
+HTTP, UI, accessibility, and build checks pass. A second immediate-load browser
+journey reached `#settings`, rendered the real Settings page, displayed **Opened
+Settings**, and produced no console warnings or errors.
+
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

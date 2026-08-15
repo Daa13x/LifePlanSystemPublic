@@ -127,6 +127,7 @@ let rendererBinding = null;      // { rendererId, token } once registered
 let rendererSource = null;       // the open EventSource command channel
 let rendererHeartbeat = null;    // heartbeat interval id
 let rendererStarted = false;
+let rendererReadyPromise = Promise.resolve(false);
 
 function getRendererBinding() {
   return rendererBinding;
@@ -144,8 +145,7 @@ async function registerRenderer(chatSessionId = null) {
       body: JSON.stringify({ windowId: RENDERER_WINDOW_ID, chatSessionId: chatSessionId == null ? null : String(chatSessionId) })
     });
     rendererBinding = { rendererId: data.rendererId, token: data.token };
-    openRendererStream(data.heartbeatMs);
-    return true;
+    return await openRendererStream(data.heartbeatMs);
   } catch {
     rendererBinding = null;
     return false;
@@ -153,18 +153,33 @@ async function registerRenderer(chatSessionId = null) {
 }
 
 function openRendererStream(heartbeatMs) {
-  if (!rendererBinding || typeof EventSource === 'undefined') return;
+  if (!rendererBinding || typeof EventSource === 'undefined') return Promise.resolve(false);
   closeRendererStream();
   const { rendererId, token } = rendererBinding;
   const source = new EventSource(`${API}/api/renderer/${encodeURIComponent(rendererId)}/commands?token=${encodeURIComponent(token)}`);
   rendererSource = source;
   source.addEventListener('command', (event) => { applyRendererCommand(event.data); });
+  rendererReadyPromise = new Promise((resolve) => {
+    let settled = false;
+    const settle = (ready) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(ready);
+    };
+    const timeout = setTimeout(() => settle(false), 3000);
+    source.addEventListener('ready', () => settle(true), { once: true });
+    source.addEventListener('error', () => {
+      if (source.readyState === EventSource.CLOSED) settle(false);
+    });
+  });
   source.onerror = () => {
     // The browser auto-reconnects transient drops. Persistent failure (e.g. the
     // server pruned this window) is recovered by the heartbeat re-registering.
     if (source.readyState === EventSource.CLOSED) scheduleRendererRecovery();
   };
   rendererHeartbeat = setInterval(() => { sendRendererHeartbeat(); }, Math.max(5000, Number(heartbeatMs) || 20000));
+  return rendererReadyPromise;
 }
 
 let rendererRecoveryTimer = null;
@@ -1890,7 +1905,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     // trusted request context, never a model-supplied argument.
     const body = { args, session_id: selectedSession };
     if (name.startsWith('navigation.')) {
-      const binding = getRendererBinding();
+      let binding = getRendererBinding();
+      if (!binding) await registerRenderer(selectedSession);
+      else await rendererReadyPromise;
+      binding = getRendererBinding();
       if (binding) body.renderer = binding;
     }
     const result = await api(`/api/actions/${encodeURIComponent(name)}/invoke`, { method: 'POST', body: JSON.stringify(body) });
@@ -1921,6 +1939,20 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       const result = await invokeAction('navigation.system', {});
       if (result.data?.applied) setNotice('Opened System.');
       else setNotice(`System navigation did not apply (${result.data?.status || 'unknown'}).`);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setSystemCheckBusy('');
+    }
+  }
+
+  async function openSettingsViaAction() {
+    if (systemCheckBusy) return;
+    setSystemCheckBusy('navigation-settings');
+    try {
+      const result = await invokeAction('navigation.settings', {});
+      if (result.data?.applied) setNotice('Opened Settings.');
+      else setNotice(`Settings navigation did not apply (${result.data?.status || 'unknown'}).`);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -2443,7 +2475,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} navigate={navigate} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} />
+          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2551,7 +2583,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, runtime, generating, navigate, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem }) {
+function ChatConnectionBar({ connection, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2565,7 +2597,7 @@ function ChatConnectionBar({ connection, runtime, generating, navigate, statusPr
       <div className="conn-item">
         <span>Model</span>
         <strong className={modelAssigned ? 'good' : 'warn'}>{modelName || 'None assigned'}</strong>
-        <button className="link" onClick={() => navigate('settings')}>Assign / change</button>
+        <button className="link" data-action-id="navigation.settings" data-control-id="chat.navigation.open-settings" onClick={onOpenSettings} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation-settings' ? 'Opening…' : 'Assign / change'}</button>
       </div>
       <div className="conn-item">
         <span>Runtime</span>

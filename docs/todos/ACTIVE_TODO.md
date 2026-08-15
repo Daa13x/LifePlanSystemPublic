@@ -64,14 +64,15 @@ identity, privacy, confirmation, recovery, or user authority.
 ## Next authorised action-registry slice
 
 - The authenticated server-to-specific-renderer command/acknowledgement bridge
-  is complete. `navigation.workboard` and `navigation.system` now reuse the
+  is complete. `navigation.workboard`, `navigation.system`, and
+  `navigation.settings` now reuse the
   canonical router and report success only after the addressed renderer applies
   the fixed semantic destination.
 - Continue migrating existing fixed, reversible navigation controls through that
-  bridge. `navigation.settings` is the next smallest truthful candidate because
-  Chat already exposes the equivalent **Assign / change** control. Keep arbitrary
-  URLs, free-form routes, scripts, external openers, and tab guessing outside the
-  action contract.
+  bridge. `navigation.planner` is the next smallest useful candidate because the
+  bridge already resolves the canonical Workboard/Today route and Chat already
+  exposes the read-only `planner.today` summary. Keep arbitrary URLs, free-form
+  routes, scripts, external openers, and tab guessing outside the action contract.
 - Keep the catalog incremental. Do not expose destructive, repository, external
   send, approval-decision, or other mutations until their confirmation,
   stale-state, rollback, replay, and UI contracts are complete.

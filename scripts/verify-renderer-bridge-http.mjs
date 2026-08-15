@@ -178,6 +178,13 @@ try {
   const systemInvoked = await systemInvokePromise;
   line(systemInvoked.body?.data?.data?.applied === true && systemInvoked.body?.data?.data?.destination === 'system' && systemInvoked.body?.data?.data?.route === '#system', 'navigation.system reports success only after the renderer acknowledgement');
 
+  const settingsInvokePromise = api('/api/actions/navigation.settings/invoke', { method: 'POST', json: { session_id: sessionId, args: {}, renderer: { rendererId, token } } });
+  const settingsCommand = await waitFor(() => stream.commands.find((item) => item.destination === 'settings'));
+  line(Boolean(settingsCommand) && settingsCommand.command === 'navigate' && settingsCommand.route === '#settings', 'the renderer receives the canonical Settings navigation command');
+  await api(`/api/renderer/${encodeURIComponent(rendererId)}/ack`, { method: 'POST', json: { commandId: settingsCommand.commandId, correlationId: settingsCommand.correlationId, token, commandToken: settingsCommand.commandToken, status: 'APPLIED' } });
+  const settingsInvoked = await settingsInvokePromise;
+  line(settingsInvoked.body?.data?.data?.applied === true && settingsInvoked.body?.data?.data?.destination === 'settings' && settingsInvoked.body?.data?.data?.route === '#settings', 'navigation.settings reports success only after the renderer acknowledgement');
+
   // --- single-use ack / replay protection ---
   const replay = await api(`/api/renderer/${encodeURIComponent(rendererId)}/ack`, { method: 'POST', json: { commandId: command.commandId, correlationId: command.correlationId, token, commandToken: command.commandToken, status: 'APPLIED' } });
   line(replay.status === 200 && replay.body?.data?.accepted === false && replay.body?.data?.error?.code === 'ALREADY_RESOLVED', 'a duplicate acknowledgement is rejected as already resolved (single-use)');
