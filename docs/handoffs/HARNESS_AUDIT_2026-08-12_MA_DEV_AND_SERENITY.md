@@ -337,11 +337,29 @@ A disposable real-browser check rendered the same normal/empty day as the
 canonical endpoint, created one concise successful audit, and left attachments
 and confirmations at zero.
 
-Navigation was inspected but not falsely registered. Current routing lives in
-the renderer (`pushState` plus React state), while the existing native WebView
-message channel accepts only renderer-to-host provider-window requests. A
-truthful navigation action first needs an authenticated server-to-specific-
-renderer command stream and correlation-bound applied/failed acknowledgement.
-That prerequisite remains a separate engineering slice.
+At this historical checkpoint, navigation was inspected but not registered:
+routing was renderer-local (`pushState` plus React state), while the native
+WebView message channel accepted only renderer-to-host provider-window requests.
+The required authenticated server-to-specific-renderer command stream and
+correlation-bound acknowledgement were completed in the later checkpoint below.
+
+## 2026-08-15 bounded System-navigation checkpoint
+
+The renderer bridge prerequisite is now implemented and independently verified.
+`navigation.system` is the second fixed semantic destination exposed through it,
+after `navigation.workboard`. The action accepts no route arguments, carries the
+requesting window's server-issued renderer binding as trusted request context,
+resolves `system` through the canonical router, and reports success only after
+that exact renderer acknowledges the single-use correlated command. It cannot
+carry a URL, path, script, opener, or arbitrary route, and it changes no stored
+application data.
+
+Chat's existing **Open full System** control now invokes the registered action
+instead of calling renderer-local navigation directly. Focused registry, bridge,
+HTTP, UI-mapping, accessibility, and build checks cover the added destination,
+including missing/forged renderer bindings, acknowledgement replay, timeout, and
+multi-window isolation. A disposable real-browser journey moved the actual app
+from `#chat` to the canonical `#system` view, rendered the System page, displayed
+the truthful applied notice, and produced no console warnings or errors.
 
 GIT AUTHORITY POLICY ACTIVE - all model automation is branchless; cloud models work only on main, and approved local models use detached worktrees with reviewed apply directly to main.

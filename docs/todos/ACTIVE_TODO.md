@@ -63,13 +63,15 @@ identity, privacy, confirmation, recovery, or user authority.
 
 ## Next authorised action-registry slice
 
-- Navigation remains prerequisite-blocked: routing is renderer-local and the
-  only native message channel is renderer-to-host. A trustworthy action needs an
-  authenticated server-to-specific-renderer command stream, correlation binding,
-  and applied/failed acknowledgement before it can report success.
-- Design and verify that bridge as its own safety slice before registering any
-  `navigation.*` action. Do not substitute a server-returned route suggestion for
-  evidence that the renderer actually navigated.
+- The authenticated server-to-specific-renderer command/acknowledgement bridge
+  is complete. `navigation.workboard` and `navigation.system` now reuse the
+  canonical router and report success only after the addressed renderer applies
+  the fixed semantic destination.
+- Continue migrating existing fixed, reversible navigation controls through that
+  bridge. `navigation.settings` is the next smallest truthful candidate because
+  Chat already exposes the equivalent **Assign / change** control. Keep arbitrary
+  URLs, free-form routes, scripts, external openers, and tab guessing outside the
+  action contract.
 - Keep the catalog incremental. Do not expose destructive, repository, external
   send, approval-decision, or other mutations until their confirmation,
   stale-state, rollback, replay, and UI contracts are complete.
