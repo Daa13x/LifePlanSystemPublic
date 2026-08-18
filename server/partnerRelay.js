@@ -44,6 +44,16 @@ function decodeArtifact(raw) {
   return { id, fileName, sha256, classification, bytes };
 }
 
+async function readRelayPacket(response, operation) {
+  const raw = await response.text();
+  if (!raw.trim()) throw new Error(`MA relay ${operation} returned an empty response (HTTP ${response.status}).`);
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`MA relay ${operation} returned an invalid response (HTTP ${response.status}).`);
+  }
+}
+
 export function createPartnerRelayClient({ db, getSetting, setSetting }) {
   const insertArtifact = db.prepare(`
     INSERT INTO partner_relay_artifacts (id, sha256, file_name, classification, pdf_bytes)
@@ -89,8 +99,8 @@ export function createPartnerRelayClient({ db, getSetting, setSetting }) {
       body: JSON.stringify({ pairingCode: code, deviceId: current.deviceId }),
       signal: AbortSignal.timeout(30_000)
     });
-    if (!response.ok) throw new Error('MA pairing key was rejected or expired. Generate a new key in MA-Dev.');
-    const packet = await response.json();
+    const packet = await readRelayPacket(response, 'pairing');
+    if (!response.ok) throw new Error(asNonEmptyString(packet?.error, 'MA pairing key was rejected or expired. Generate a new key in MA-Dev.'));
     const token = asNonEmptyString(packet?.token);
     if (!/^[A-Za-z0-9_-]{32,128}$/.test(token)) throw new Error('MA pairing response did not contain a valid scoped credential.');
     setSetting('maRelayPairToken', token);
@@ -113,8 +123,8 @@ export function createPartnerRelayClient({ db, getSetting, setSetting }) {
       },
       signal: AbortSignal.timeout(30_000)
     });
-    if (!response.ok) throw new Error(`MA relay pull failed (${response.status}).`);
-    const packet = await response.json();
+    const packet = await readRelayPacket(response, 'pull');
+    if (!response.ok) throw new Error(asNonEmptyString(packet?.error, `MA relay pull failed (${response.status}).`));
     if (!Array.isArray(packet?.artifacts) || !Number.isSafeInteger(packet?.cursor) || packet.cursor < 0) {
       throw new Error('MA relay response contract is invalid.');
     }
@@ -148,7 +158,10 @@ export function createPartnerRelayClient({ db, getSetting, setSetting }) {
       }),
       signal: AbortSignal.timeout(30_000)
     });
-    if (!acknowledgement.ok) throw new Error(`MA relay receipt failed (${acknowledgement.status}).`);
+    const acknowledgementPacket = await readRelayPacket(acknowledgement, 'receipt');
+    if (!acknowledgement.ok || acknowledgementPacket?.ok !== true) {
+      throw new Error(asNonEmptyString(acknowledgementPacket?.error, `MA relay receipt failed (${acknowledgement.status}).`));
+    }
     setSetting('maRelayCursor', String(packet.cursor));
 
     return { ...status(), pulled: artifacts.length };
