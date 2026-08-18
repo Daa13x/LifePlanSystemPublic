@@ -16,16 +16,23 @@ const freePort = () => new Promise((resolve, reject) => {
 });
 const port = await freePort();
 const baseUrl = `http://127.0.0.1:${port}`;
+const childStderr = [];
 const child = spawn(process.execPath, ['server/index.js'], {
   cwd: root,
   env: { ...process.env, LIFE_PLANNER_DB: dbPath, LIFE_PLANNER_PORT: String(port), LIFE_PLANNER_TEST_IMPORT_FAIL_AFTER: 'project' },
-  stdio: 'ignore', windowsHide: true
+  stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true
+});
+child.stderr.on('data', (chunk) => {
+  if (childStderr.join('').length < 8000) childStderr.push(String(chunk));
 });
 
 async function wait() {
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Fixture server exited (${child.exitCode}).`);
+    if (child.exitCode !== null) {
+      const detail = childStderr.join('').trim();
+      throw new Error(`Fixture server exited (${child.exitCode}).${detail ? ` stderr: ${detail}` : ''}`);
+    }
     try { if ((await fetch(`${baseUrl}/api/health`)).ok) return; } catch { /* starting */ }
     await new Promise((resolve) => setTimeout(resolve, 75));
   }
@@ -79,9 +86,27 @@ try {
   assert.equal(database.prepare('SELECT COUNT(*) AS count FROM knowledge_items').get().count, beforeKnowledge, 'failed import rolls back knowledge insert');
   assert.equal((await request('/api/import/json', { method: 'POST', body: JSON.stringify({ projects: [{}] }) })).status, 400, 'validation fails before writes');
   console.log('Classified export and transactional JSON import acceptance passed.');
+} catch (error) {
+  console.error(`Classified export/import acceptance failed: ${error.stack || error.message}`);
+  throw error;
 } finally {
   database?.close();
-  if (child.exitCode === null) child.kill();
-  await new Promise((resolve) => child.once('exit', resolve));
-  fs.rmSync(probe, { recursive: true, force: true });
+  if (child.exitCode === null) {
+    child.kill();
+    await new Promise((resolve) => child.once('exit', resolve));
+  }
+  // Windows can retain SQLite handles briefly after the child reports exit.
+  // Retry only inside this disposable test fixture rather than making CI flaky.
+  let cleanupError;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      fs.rmSync(probe, { recursive: true, force: true, maxRetries: 0 });
+      cleanupError = null;
+      break;
+    } catch (error) {
+      cleanupError = error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  if (cleanupError) throw new Error(`Fixture cleanup failed: ${cleanupError.message}`);
 }
