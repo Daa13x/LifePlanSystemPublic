@@ -101,8 +101,39 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install chromium
 
+      # Capture the runtime-safety output so a failure can be summarised. GitHub's
+      # bash shell runs with `-eo pipefail`, so `npm ... | tee` still fails the step
+      # (and the job) whenever the verify chain fails.
       - name: Verify runtime safety
-        run: npm run verify:runtime-safety
+        shell: bash
+        run: npm run verify:runtime-safety 2>&1 | tee "$RUNNER_TEMP/runtime-safety.log"
+
+      # verify:runtime-safety chains ~40 scripts with &&, so a single failing
+      # verifier is otherwise buried deep in the raw log. Surface the failing
+      # verifier and its error in the run summary. Failure-only and
+      # continue-on-error, so it can never affect a passing build.
+      - name: Summarise a verification failure
+        if: ${{ failure() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/runtime-safety.log"
+          {
+            echo "### Runtime-safety verification failed"
+            if [ -f "$log" ]; then
+              echo ""
+              echo "Failing verifier (the last one that started before the error):"
+              echo '```'
+              grep -E '> life-planner@[^ ]* (verify|check|build):' "$log" | tail -1 || echo "(no verifier marker captured)"
+              echo '```'
+              echo "Failure context:"
+              echo '```'
+              grep -iE 'FAIL|AssertionError|Error:|not ok|exit code' "$log" | tail -20 || echo "(no explicit failure line captured)"
+              echo '```'
+            else
+              echo "The failure occurred before the runtime-safety step (checkout, setup, npm ci, or build)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
