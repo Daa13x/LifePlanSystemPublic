@@ -147,6 +147,66 @@ export function normalizePlannerDeadline(value) {
   return s;
 }
 
+export const PLANNER_TASK_STATUSES = Object.freeze(['active', 'completed', 'deferred', 'parked']);
+
+// Allowlisted, bounded set of Daily Planner task edits a Chat proposal may request.
+// Anything outside the allowlist, or any out-of-bounds value, is rejected. This is
+// the single authoritative validator, applied at proposal, confirmation, and apply.
+export function normalizePlannerTaskChanges(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Planner task changes must be a plain object.');
+  const allowed = new Set(['title', 'why', 'next_action', 'importance', 'effort', 'estimated_minutes', 'deadline', 'status']);
+  const changes = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!allowed.has(key)) throw new Error(`planner.propose_update: field "${key}" cannot be changed from Chat.`);
+    if (key === 'title') {
+      if (typeof raw !== 'string') throw new Error('Planner task title must be a string.');
+      const title = raw.trim();
+      if (!title || title.length > 160) throw new Error('Planner task title must be 1-160 characters.');
+      changes.title = title;
+    } else if (key === 'why' || key === 'next_action') {
+      if (typeof raw !== 'string' || raw.length > 400) throw new Error(`Planner task ${key} must be a string of at most 400 characters.`);
+      changes[key] = raw.trim();
+    } else if (key === 'importance' || key === 'effort') {
+      if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 1 || raw > 5) throw new Error(`Planner task ${key} must be an integer from 1 to 5.`);
+      changes[key] = raw;
+    } else if (key === 'estimated_minutes') {
+      if (raw === null) changes.estimated_minutes = null;
+      else if (!Number.isInteger(raw) || raw < 0 || raw > 1440) throw new Error('Planner task estimated_minutes must be an integer 0-1440 or null.');
+      else changes.estimated_minutes = raw;
+    } else if (key === 'deadline') {
+      changes.deadline = normalizePlannerDeadline(raw);
+    } else if (key === 'status') {
+      if (typeof raw !== 'string' || !PLANNER_TASK_STATUSES.includes(raw)) throw new Error('Planner task status is invalid.');
+      changes.status = raw;
+    }
+  }
+  if (!Object.keys(changes).length) throw new Error('planner.propose_update: no permitted changes were supplied.');
+  return changes;
+}
+
+// Canonical, comparable snapshot of a planner task used for the stale-state token
+// and the before/after diff. Includes updated_at so any concurrent change is
+// detected at confirmation time.
+export function canonicalPlannerTaskState(record) {
+  if (!record || !Number.isInteger(record.id) || record.id <= 0) throw new Error('A canonical Planner task requires a positive id.');
+  return {
+    identity: { type: 'planner_task', id: record.id },
+    title: asString(record.title),
+    why: asString(record.why),
+    next_action: asString(record.next_action),
+    importance: Number.isFinite(record.importance) ? Number(record.importance) : null,
+    effort: Number.isFinite(record.effort) ? Number(record.effort) : null,
+    estimated_minutes: record.estimated_minutes == null ? null : Number(record.estimated_minutes),
+    deadline: record.deadline == null || record.deadline === '' ? null : asString(record.deadline),
+    status: asString(record.status),
+    updated_at: asString(record.updated_at)
+  };
+}
+
+export function plannerTaskStateToken(record) {
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalPlannerTaskState(record))).digest('hex');
+}
+
 function boundedUpdatePreviewValue(key, value) {
   if (typeof value !== 'string') return value;
   if (key === 'body') return truncate(value, LIMITS.bodyMaxLength);
@@ -372,6 +432,12 @@ const ACTION_METADATA = Object.freeze({
     sourceControls: ['chat.planner-proposal.open', 'chat.planner-proposal.preview', 'chat.planner-proposal.confirm'], testId: 'action.planner.propose_create',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
+  'planner.propose_update': {
+    label: 'Update a Planner task', feature: 'Chat task proposal', permission: 'planner.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
+    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Reads the current task and produces a review-only before/after proposal; no Daily Planner data is changed until the user confirms it.'],
+    sourceControls: ['chat.planner-update.open', 'chat.planner-update.preview', 'chat.planner-update.confirm'], testId: 'action.planner.propose_update',
+    resultSchema: resultObject(['proposal', 'operation', 'affects', 'target', 'state_token', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target: { type: 'object' }, state_token: { type: 'string' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
+  },
   'system.status': {
     label: 'Read system status', feature: 'System', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-status-check'], testId: 'action.system.status',
@@ -446,7 +512,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'planner.propose_update', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -629,6 +695,40 @@ export function createCapabilityRegistry(deps) {
             estimated_minutes: args.estimated_minutes ?? null,
             deadline
           },
+          confirmation_required: true
+        };
+      }
+    },
+
+    'planner.propose_update': {
+      description: 'Propose updating an existing Daily Planner task. Returns a before/after proposal for confirmation; never writes.',
+      readOnly: false,
+      schema: {
+        id: { type: 'id', required: true },
+        changes: { type: 'object', required: true }
+      },
+      async handler(args) {
+        const current = await dep('readPlannerTask')({ id: args.id });
+        if (!current) throw new Error(`Planner task ${args.id} was not found.`);
+        const state = canonicalPlannerTaskState(current);
+        const changes = normalizePlannerTaskChanges(args.changes);
+        const before = {};
+        const after = {};
+        for (const [key, value] of Object.entries(changes)) {
+          const currentValue = state[key] ?? null;
+          if (Object.is(currentValue, value)) continue;
+          before[key] = boundedUpdatePreviewValue(key, currentValue);
+          after[key] = value;
+        }
+        if (!Object.keys(after).length) throw new Error('planner.propose_update: the requested changes are already present.');
+        return {
+          proposal: true,
+          operation: 'planner.update',
+          affects: `Daily Planner task ${args.id} (${truncate(current.title, LIMITS.titleMaxLength)})`,
+          target: { type: 'planner_task', id: args.id },
+          state_token: plannerTaskStateToken(current),
+          before,
+          after,
           confirmation_required: true
         };
       }
@@ -845,7 +945,7 @@ export function createCapabilityRegistry(deps) {
 export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
-  'planner.propose_create',
+  'planner.propose_create', 'planner.propose_update',
   'system.status', 'system.models', 'system.runs',
   'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner'
 ];

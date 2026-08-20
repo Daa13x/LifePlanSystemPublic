@@ -88,6 +88,10 @@ const deps = {
   navigate: async (a) => {
     calls.push(['navigate', a]);
     return { requested: true, status: 'APPLIED', failureCategory: null, route: `#${a.destination}` };
+  },
+  readPlannerTask: ({ id }) => {
+    calls.push(['readPlannerTask', id]);
+    return id === 5 ? { id: 5, title: 'Existing task', why: '', next_action: 'do it', importance: 3, effort: 2, estimated_minutes: null, deadline: null, status: 'active', updated_at: '2026-08-19T00:00:00.000Z' } : null;
   }
 };
 
@@ -102,6 +106,7 @@ check('read capabilities are read-only; propose_* are writes', () => {
   assert.equal(byName['workboard.propose_create'], false);
   assert.equal(byName['workboard.propose_update'], false);
   assert.equal(byName['planner.propose_create'], false);
+  assert.equal(byName['planner.propose_update'], false);
   assert.equal(byName['navigation.workboard'], false);
   assert.equal(byName['navigation.system'], false);
   assert.equal(byName['navigation.settings'], false);
@@ -146,6 +151,27 @@ await checkAsync('planner.propose_create returns a bounded proposal only and nev
 
 await checkAsync('planner.propose_create rejects a malformed deadline before proposing', async () => {
   await assert.rejects(reg.invoke('planner.propose_create', { title: 'bad date', deadline: '2026-13-40' }));
+});
+
+await checkAsync('planner.propose_update returns a bounded before/after proposal with a stale-state token; no mutation', async () => {
+  calls.length = 0;
+  const r = await reg.invoke('planner.propose_update', { id: 5, changes: { title: 'Renamed task', status: 'completed', importance: 3, effort: 2, next_action: 'do it', deadline: '' } });
+  assert.equal(r.status, 'needs_confirmation');
+  assert.equal(r.data.operation, 'planner.update');
+  assert.deepEqual(r.data.target, { type: 'planner_task', id: 5 });
+  assert.match(r.data.state_token, /^[a-f0-9]{64}$/);
+  // Only genuinely changed fields appear in the diff (title + status; importance/effort/next_action/deadline were already current).
+  assert.deepEqual(Object.keys(r.data.after).sort(), ['status', 'title']);
+  assert.equal(r.data.before.title, 'Existing task');
+  assert.equal(r.data.after.title, 'Renamed task');
+  assert.equal(r.data.after.status, 'completed');
+  assert.deepEqual(calls, [['readPlannerTask', 5]], 'the proposal only reads the task; it never writes');
+});
+
+await checkAsync('planner.propose_update fails closed for a missing task, a forbidden field, and a no-op change', async () => {
+  await assert.rejects(reg.invoke('planner.propose_update', { id: 999, changes: { title: 'x' } }));
+  await assert.rejects(reg.invoke('planner.propose_update', { id: 5, changes: { pinned: true } }));
+  await assert.rejects(reg.invoke('planner.propose_update', { id: 5, changes: { title: 'Existing task' } }));
 });
 
 await checkAsync('knowledge.search returns bounded results with provenance', async () => {

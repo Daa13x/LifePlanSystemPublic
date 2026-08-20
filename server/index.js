@@ -23,11 +23,14 @@ import {
   importLegacyAsBackup
 } from './setupRecovery.js';
 import {
+  canonicalPlannerTaskState,
   canonicalWorkboardItemState,
   createCapabilityRegistry,
   CAPABILITY_NAMES,
   normalizePlannerDeadline,
+  normalizePlannerTaskChanges,
   normalizeWorkboardItemChanges,
+  plannerTaskStateToken,
   workboardItemStateToken
 } from './chatCapabilities.js';
 import { createRendererBridge } from './rendererBridge.js';
@@ -3018,6 +3021,8 @@ const CHAT_WORKBOARD_UPDATE_ACTION = 'workboard.propose_update';
 const CHAT_WORKBOARD_UPDATE_OPERATION = 'workboard.update';
 const CHAT_PLANNER_CREATE_ACTION = 'planner.propose_create';
 const CHAT_PLANNER_CREATE_OPERATION = 'planner.create';
+const CHAT_PLANNER_UPDATE_ACTION = 'planner.propose_update';
+const CHAT_PLANNER_UPDATE_OPERATION = 'planner.update';
 
 function realChatSessionId(value) {
   const sessionId = Number(value);
@@ -3163,6 +3168,77 @@ function bindPlannerCreateConfirmation(sessionValue, result) {
     ...result,
     confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt }
   };
+}
+
+function readPlannerTaskRecord(id) {
+  return row('SELECT * FROM planner_tasks WHERE id = ?', [id]);
+}
+
+// Validate the immutable stored update payload: exactly an {identity, changes} pair
+// for a positive planner-task id, with allowlisted, bounded changes. A tampered or
+// malformed payload cannot describe a different mutation.
+function canonicalPlannerUpdateConfirmationState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The stored Planner update is invalid.');
+  if (Object.keys(value).sort().join(',') !== 'changes,identity') throw new Error('The stored Planner update contains unsupported fields.');
+  if (!value.identity || value.identity.type !== 'planner_task' || !Number.isInteger(value.identity.id) || value.identity.id <= 0) throw new Error('The stored Planner update has an invalid identity.');
+  return { identity: { type: 'planner_task', id: value.identity.id }, changes: normalizePlannerTaskChanges(value.changes) };
+}
+
+function plannerUpdateOrigin(correlationId) {
+  return JSON.stringify({ source: 'chat-action-gateway', actionId: CHAT_PLANNER_UPDATE_ACTION, correlationId });
+}
+
+function readPlannerUpdateOrigin(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    if (parsed?.source !== 'chat-action-gateway' || parsed?.actionId !== CHAT_PLANNER_UPDATE_ACTION || typeof parsed?.correlationId !== 'string' || !parsed.correlationId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bindPlannerUpdateConfirmation(sessionValue, result) {
+  if (result?.actionId !== CHAT_PLANNER_UPDATE_ACTION || result.status !== 'needs_confirmation') return result;
+  const sessionId = realChatSessionId(sessionValue);
+  if (!sessionId) {
+    const error = new Error('A valid active chat session is required to stage a Planner update.');
+    error.code = 'INVALID_CHAT_SESSION';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const identity = result.data?.target;
+  if (!identity || identity.type !== 'planner_task' || !Number.isInteger(identity.id) || identity.id <= 0) throw new Error('The Planner update returned an invalid target.');
+  const current = readPlannerTaskRecord(identity.id);
+  if (!current) {
+    const error = new Error('The Planner task is no longer available.');
+    error.code = 'PLANNER_TARGET_UNAVAILABLE';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  if (plannerTaskStateToken(current) !== result.data?.state_token) {
+    const error = new Error('The Planner task changed while the proposal was being prepared. Review it again.');
+    error.code = 'STALE_PLANNER_STATE';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const beforeState = canonicalPlannerTaskState(current);
+  const afterState = canonicalPlannerUpdateConfirmationState({ identity, changes: result.data.after });
+  const confirmation = proposeConfirmation(db, {
+    operation: CHAT_PLANNER_UPDATE_OPERATION,
+    target: `planner:task:${identity.id}`,
+    beforeState,
+    afterState,
+    reason: 'User-reviewed Chat Daily Planner update proposal.',
+    origin: plannerUpdateOrigin(result.correlationId),
+    sessionId: chatConfirmationSessionId(sessionId),
+    requiresRevalidation: true,
+    idempotencyKey: `chat-planner-update:${result.correlationId}`
+  });
+  return { ...result, confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt } };
 }
 
 function readCanonicalWorkboardItem(id) {
@@ -3422,6 +3498,9 @@ const capabilityRegistry = createCapabilityRegistry({
   plannerToday() {
     return plannerDayData();
   },
+  readPlannerTask({ id }) {
+    return readPlannerTaskRecord(id);
+  },
   // View-navigation transport for navigation.* actions. Authenticates the target
   // renderer, issues one correlated single-use command over the bridge, and waits
   // for the renderer's acknowledgement (or timeout/cancellation). The bridge (its
@@ -3466,7 +3545,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
       return ok(res, sessionBlock);
     }
     result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui', renderer: extractRendererBinding(req.body) });
-    result = bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result));
+    result = bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result)));
     const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
       sessionId,
@@ -3501,7 +3580,7 @@ app.post('/api/chat/capability', async (req, res) => {
       return ok(res, sessionBlock);
     }
     let result = await capabilityRegistry.invoke(name, req.body?.args || {}, { renderer: extractRendererBinding(req.body) });
-    result = bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result));
+    result = bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result)));
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
@@ -3808,7 +3887,7 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
   const sessionId = Number(req.params.id);
   const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
   const keys = Object.keys(body).sort();
-  const auditOperation = CHAT_PLANNER_CREATE_OPERATION;
+  let auditOperation = 'planner.confirm';
   try {
     if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
     if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
@@ -3821,11 +3900,15 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
     const staged = getConfirmation(db, confirmationId);
     const createConfirmation = staged?.operation === CHAT_PLANNER_CREATE_OPERATION
       && staged.target === `${chatConfirmationSessionId(sessionId)}:planner:new`;
-    if (!staged || !createConfirmation) {
+    const updateTarget = staged?.operation === CHAT_PLANNER_UPDATE_OPERATION
+      ? /^planner:task:([1-9]\d*)$/.exec(staged.target)
+      : null;
+    if (!staged || (!createConfirmation && !updateTarget)) {
       writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION');
       return fail(res, 400, 'That Planner confirmation is not available.');
     }
-    const origin = readPlannerCreateOrigin(staged.origin);
+    auditOperation = staged.operation;
+    const origin = createConfirmation ? readPlannerCreateOrigin(staged.origin) : readPlannerUpdateOrigin(staged.origin);
     if (!origin) {
       writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ORIGIN');
       return fail(res, 400, 'That Planner confirmation is not available.');
@@ -3837,17 +3920,37 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
         .run(p.title, p.why, p.next_action, p.importance, p.effort, p.estimated_minutes, p.deadline).lastInsertRowid;
       return { operation: CHAT_PLANNER_CREATE_OPERATION, success: true, record: row('SELECT * FROM planner_tasks WHERE id = ?', [id]) };
     };
+    const applyUpdate = (claimed) => {
+      const proposal = canonicalPlannerUpdateConfirmationState(claimed.afterState);
+      const live = readPlannerTaskRecord(proposal.identity.id);
+      const liveState = live ? canonicalPlannerTaskState(live) : null;
+      if (!liveState || JSON.stringify(liveState) !== JSON.stringify(claimed.beforeState)) {
+        const error = new Error('The task changed after this confirmation was created. Review it again.');
+        error.confirmationCode = 'stale';
+        throw error;
+      }
+      const fields = { ...proposal.changes, updated_at: new Date().toISOString() };
+      const sets = Object.keys(fields).map((key) => `${key} = ?`).join(', ');
+      const changed = db.prepare(`UPDATE planner_tasks SET ${sets} WHERE id = ?`).run(...Object.values(fields), proposal.identity.id);
+      if (changed.changes !== 1) throw new Error('The Planner task update did not apply exactly once.');
+      return { operation: CHAT_PLANNER_UPDATE_OPERATION, success: true, record: row('SELECT * FROM planner_tasks WHERE id = ?', [proposal.identity.id]) };
+    };
+    const revalidateUpdate = (confirmation) => {
+      const proposal = canonicalPlannerUpdateConfirmationState(confirmation.afterState);
+      const current = readPlannerTaskRecord(proposal.identity.id);
+      return current ? canonicalPlannerTaskState(current) : null;
+    };
     const applied = await confirmAndApply(
       db,
       { id: confirmationId, token, sessionId: chatConfirmationSessionId(sessionId) },
-      applyCreate,
-      { transactionalApply: true }
+      createConfirmation ? applyCreate : applyUpdate,
+      { transactionalApply: true, revalidate: createConfirmation ? null : revalidateUpdate }
     );
     if (!applied.ok) {
       writeChatAudit(sessionId, auditOperation, 'blocked', `CONFIRMATION_${String(applied.code || 'REJECTED').toUpperCase()}`, origin.correlationId);
       return fail(res, 400, applied.error || 'The Planner confirmation was rejected.');
     }
-    writeChatAudit(sessionId, auditOperation, 'applied', `task ${applied.result?.record?.id || 'created'}`, origin.correlationId);
+    writeChatAudit(sessionId, auditOperation, 'applied', `task ${applied.result?.record?.id || 'changed'}`, origin.correlationId);
     return ok(res, applied.result);
   } catch {
     writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');

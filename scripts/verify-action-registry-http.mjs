@@ -156,9 +156,11 @@ try {
   const navigationSettings = catalog.body?.data?.find((action) => action.id === 'navigation.settings');
   const navigationPlanner = catalog.body?.data?.find((action) => action.id === 'navigation.planner');
   const plannerCreate = catalog.body?.data?.find((action) => action.id === 'planner.propose_create');
+  const plannerUpdate = catalog.body?.data?.find((action) => action.id === 'planner.propose_update');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 16 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate), 'neutral catalog exposes every bounded registered capability');
+  line(catalog.body?.data?.length === 17 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate), 'neutral catalog exposes every bounded registered capability');
   line(plannerCreate?.permission === 'planner.propose' && plannerCreate?.risk === 'REVERSIBLE_WRITE' && plannerCreate?.confirmation === 'user_confirmation', 'planner.propose_create advertises its write risk and user-confirmation requirement');
+  line(plannerUpdate?.permission === 'planner.propose' && plannerUpdate?.risk === 'REVERSIBLE_WRITE' && plannerUpdate?.confirmation === 'user_confirmation', 'planner.propose_update advertises its write risk and user-confirmation requirement');
   line(navigationWorkboard?.permission === 'navigation.control' && navigationWorkboard?.risk === 'VIEW_NAVIGATION' && navigationWorkboard?.confirmation === 'none', 'navigation.workboard advertises its bounded view-navigation contract');
   line(navigationSystem?.permission === 'navigation.control' && navigationSystem?.risk === 'VIEW_NAVIGATION' && navigationSystem?.confirmation === 'none', 'navigation.system advertises the same bounded view-navigation contract');
   line(navigationSettings?.permission === 'navigation.control' && navigationSettings?.risk === 'VIEW_NAVIGATION' && navigationSettings?.confirmation === 'none', 'navigation.settings advertises the same bounded view-navigation contract');
@@ -680,6 +682,56 @@ try {
   const plannerTodayAfter = await api('/api/actions/planner.today/invoke', { method: 'POST', json: { session_id: sessionId, args: {} } });
   const plannerTodayData = plannerTodayAfter.body?.data?.data;
   line((plannerTodayData?.visible || []).some((t) => t.id === plannerRecord?.id) || (plannerTodayData?.deferred || []).some((t) => t.id === plannerRecord?.id), 'planner.today observes the newly created task');
+
+  // --- planner.propose_update: proposal -> durable confirmation -> atomic update ---
+  const readTask = (id) => { const d = new DatabaseSync(dbPath, { readOnly: true }); const t = d.prepare('SELECT * FROM planner_tasks WHERE id = ?').get(id); d.close(); return t; };
+  const proposePlannerUpdate = (id, changes, requestedSessionId = sessionId) => api('/api/actions/planner.propose_update/invoke', { method: 'POST', json: { session_id: requestedSessionId, args: { id, changes } } });
+  const targetId = plannerRecord.id;
+  const beforeUpdate = readTask(targetId);
+
+  const updateProp = await proposePlannerUpdate(targetId, { title: 'Draft the LPS quarterly review (revised)', status: 'deferred', importance: 5 });
+  const updDurable = updateProp.body?.data;
+  const updConfirmation = updDurable?.confirmation;
+  line(updateProp.status === 200 && updDurable?.status === 'needs_confirmation' && updDurable?.data?.operation === 'planner.update' && updDurable?.data?.target?.id === targetId && /^[a-f0-9]{64}$/.test(updDurable?.data?.state_token || '') && /^[a-f0-9]{32}$/.test(updConfirmation?.confirmationId || ''), 'a planner update proposal returns a state-bound durable confirmation');
+  line(JSON.stringify(Object.keys(updDurable?.data?.after || {}).sort()) === JSON.stringify(['importance', 'status', 'title']) && updDurable?.data?.before?.title === 'Draft the LPS quarterly review', 'the update proposal diffs only the changed fields with before/after values');
+  line(JSON.stringify(readTask(targetId)) === JSON.stringify(beforeUpdate), 'previewing a planner update performs no mutation');
+
+  const updStoredDb = new DatabaseSync(dbPath, { readOnly: true });
+  const updStored = updStoredDb.prepare('SELECT token_hash, session_id, operation, target, after_state FROM confirmations WHERE id = ?').get(updConfirmation?.confirmationId);
+  updStoredDb.close();
+  line(updStored?.operation === 'planner.update' && updStored?.target === `planner:task:${targetId}` && updStored?.session_id === `chat:${sessionId}` && !JSON.stringify(updStored).includes(updConfirmation?.token) && JSON.parse(updStored?.after_state || '{}').identity?.id === targetId, 'the planner update confirmation binds the typed target and full state without the raw token');
+
+  const updWrongSession = await plannerConfirm(Number(plannerOtherSession.body?.data?.id), updConfirmation);
+  line(updWrongSession.status === 400 && readTask(targetId).status === beforeUpdate.status, 'a different chat session cannot apply the planner update');
+  const updWrongToken = await plannerConfirm(sessionId, { confirmationId: updConfirmation?.confirmationId, token: '0'.repeat(64) });
+  line(updWrongToken.status === 400 && readTask(targetId).status === beforeUpdate.status, 'the wrong planner update token cannot mutate the task');
+
+  const updApplied = await plannerConfirm(sessionId, updConfirmation);
+  const updRecord = updApplied.body?.data?.record;
+  line(updApplied.status === 200 && updApplied.body?.data?.operation === 'planner.update' && updRecord?.title === 'Draft the LPS quarterly review (revised)' && updRecord?.status === 'deferred' && updRecord?.importance === 5 && updRecord?.next_action === beforeUpdate.next_action && updRecord?.effort === beforeUpdate.effort, 'confirmation applies exactly the staged planner fields and preserves unrelated state');
+  const updReplay = await plannerConfirm(sessionId, updConfirmation);
+  line(updReplay.status === 400, 'a planner update confirmation replay is rejected');
+
+  const plStaleProp = await proposePlannerUpdate(targetId, { next_action: 'stale attempt' });
+  await api(`/api/planner/tasks/${targetId}`, { method: 'PATCH', json: { title: 'Changed by another writer' } });
+  const plStaleApply = await plannerConfirm(sessionId, plStaleProp.body?.data?.confirmation);
+  line(plStaleApply.status === 400 && readTask(targetId).next_action !== 'stale attempt', 'a planner update whose task changed after the proposal is rejected as stale');
+
+  const plTamperProp = await proposePlannerUpdate(targetId, { importance: 1 });
+  const plTamperConfirmation = plTamperProp.body?.data?.confirmation;
+  const plTamperBefore = readTask(targetId).importance;
+  const plTamperDb = new DatabaseSync(dbPath);
+  plTamperDb.prepare('UPDATE confirmations SET after_state = ? WHERE id = ?').run(JSON.stringify({ identity: { type: 'planner_task', id: targetId }, changes: { importance: 4 } }), plTamperConfirmation.confirmationId);
+  plTamperDb.close();
+  const plTamperApply = await plannerConfirm(sessionId, plTamperConfirmation);
+  line(plTamperApply.status === 400 && readTask(targetId).importance === plTamperBefore, 'a tampered stored planner update payload fails the integrity digest before mutation');
+
+  const updMissing = await proposePlannerUpdate(999999999, { title: 'nope' });
+  line(['failed', 'blocked'].includes(updMissing.body?.data?.status) && !updMissing.body?.data?.confirmation, 'updating a nonexistent planner task fails closed');
+  const updForbidden = await proposePlannerUpdate(targetId, { pinned: true });
+  line(['failed', 'blocked'].includes(updForbidden.body?.data?.status) && !updForbidden.body?.data?.confirmation, 'a forbidden planner field cannot be updated from Chat');
+  const updNoSession = await proposePlannerUpdate(targetId, { title: 'x' }, 987654321);
+  line(updNoSession.body?.data?.status === 'blocked' && updNoSession.body?.data?.error?.code === 'INVALID_CHAT_SESSION', 'a planner update without a real chat session cannot stage a confirmation');
 
   const plannerConcProposal = await proposePlanner({ title: 'Concurrent planner task' });
   const plannerConcConfirmation = plannerConcProposal.body?.data?.confirmation;

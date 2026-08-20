@@ -93,7 +93,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 24, 'the bounded slice has exactly twenty-four mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
+assert.equal(mappedControls.length, 27, 'the bounded slice has exactly twenty-seven mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -136,6 +136,11 @@ assert.deepEqual(
   ['chat.planner-proposal.confirm', 'chat.planner-proposal.open', 'chat.planner-proposal.preview'],
   'the complete visible Daily Planner create control family has stable identifiers'
 );
+assert.deepEqual(
+  controlMappings.filter((mapping) => mapping.actionId === 'planner.propose_update').map((mapping) => mapping.controlId).sort(),
+  ['chat.planner-update.confirm', 'chat.planner-update.open', 'chat.planner-update.preview'],
+  'the complete visible Daily Planner update control family has stable identifiers'
+);
 const attachControlStart = picker.indexOf('<button className="picker-row"');
 const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
 const previewControlMarker = picker.indexOf('data-action-id="knowledge.read"');
@@ -170,6 +175,9 @@ assert.equal(manifest['navigation.planner'].risk, 'VIEW_NAVIGATION', 'navigation
 assert.equal(manifest['navigation.planner'].confirmation, 'none', 'Daily Planner navigation is confirmation-free');
 assert.equal(manifest['planner.propose_create'].risk, 'REVERSIBLE_WRITE', 'planner.propose_create is a proposal write risk, not a view navigation');
 assert.equal(manifest['planner.propose_create'].confirmation, 'user_confirmation', 'Daily Planner task creation requires explicit user confirmation');
+assert.equal(manifest['planner.propose_update'].risk, 'REVERSIBLE_WRITE', 'planner.propose_update is a proposal write risk');
+assert.equal(manifest['planner.propose_update'].confirmation, 'user_confirmation', 'Daily Planner task update requires explicit user confirmation');
+assert.match(ui, /invokeAction\('planner\.propose_update', \{ id: form\.id, changes \}\)/, 'the planner Edit/Preview control invokes planner.propose_update with the typed id and bounded changes');
 assert.match(ui, /invokeAction\('planner\.propose_create'/, 'the Add planner task control invokes planner.propose_create through the neutral gateway');
 assert.match(ui, /\/api\/chat\/sessions\/\$\{selectedSession\}\/planner\/confirm/, 'the planner confirm control submits only to the durable planner confirmation endpoint');
 assert.match(server, /app\.post\('\/api\/chat\/sessions\/:id\/planner\/confirm'/, 'the server exposes the durable Daily Planner confirmation endpoint');

@@ -1819,6 +1819,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [plannerProposeForm, setPlannerProposeForm] = useState({ title: '', next_action: '', deadline: '', importance: 3, effort: 3 });
   const [plannerProposal, setPlannerProposal] = useState(null);
   const [plannerProposalBusy, setPlannerProposalBusy] = useState(false);
+  const [plannerUpdateForm, setPlannerUpdateForm] = useState(null);
   const [cloudChecks, setCloudChecks] = useState([]);
   const [cloudScope, setCloudScope] = useState('latest-turn');
   const [cloudPreview, setCloudPreview] = useState(null);
@@ -2208,12 +2209,55 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     setPlannerProposalBusy(true);
     try {
       const result = await api(`/api/chat/sessions/${selectedSession}/planner/confirm`, { method: 'POST', body: JSON.stringify({ confirmationId, token }) });
-      setNotice(`Daily Planner task created: ${result.record?.title || 'task'}.`);
+      setNotice(`Daily Planner task ${result.operation === 'planner.update' ? 'updated' : 'created'}: ${result.record?.title || 'task'}.`);
       setPlannerProposal(null);
       setPlannerProposeOpen(false);
       setPlannerProposeForm({ title: '', next_action: '', deadline: '', importance: 3, effort: 3 });
+      setPlannerUpdateForm(null);
       refreshAll();
     } catch (err) { setNotice(err.message); }
+    finally { setPlannerProposalBusy(false); }
+  }
+
+  // Open the edit form for one planner task, pre-filled from its exact current
+  // values (fetched from the canonical Planner endpoint) so the before/after diff
+  // is accurate and only genuinely changed fields become an update.
+  async function openPlannerUpdate(task) {
+    if (plannerProposalBusy) return;
+    setPlannerProposal(null);
+    try {
+      const tasks = await api('/api/planner/tasks');
+      const full = tasks.find((t) => t.id === task.id);
+      if (!full) return setNotice('That planner task is no longer available.');
+      setPlannerUpdateForm({
+        id: full.id,
+        title: full.title || '',
+        next_action: full.next_action || '',
+        deadline: full.deadline || '',
+        importance: full.importance ?? 3,
+        effort: full.effort ?? 3,
+        status: full.status || 'active'
+      });
+    } catch (error) { setNotice(error.message); }
+  }
+
+  async function submitProposePlannerUpdate() {
+    const form = plannerUpdateForm;
+    if (!form || !form.title.trim() || plannerProposalBusy) return;
+    setPlannerProposalBusy(true);
+    try {
+      const changes = {
+        title: form.title,
+        next_action: form.next_action,
+        importance: Number(form.importance) || 3,
+        effort: Number(form.effort) || 3,
+        deadline: form.deadline || '',
+        status: form.status
+      };
+      const r = await invokeAction('planner.propose_update', { id: form.id, changes });
+      // A proposal only — the task is not changed until the user confirms below.
+      setPlannerProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
+    } catch (error) { setNotice(error.message); }
     finally { setPlannerProposalBusy(false); }
   }
 
@@ -2528,7 +2572,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} />
+          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2599,6 +2643,23 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               </div>
             </div>
           )}
+          {plannerUpdateForm && (
+            <div className="propose-form">
+              <small>Editing Daily Planner task #{plannerUpdateForm.id}</small>
+              <input value={plannerUpdateForm.title} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, title: e.target.value }))} placeholder="Planner task title" />
+              <input value={plannerUpdateForm.next_action} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, next_action: e.target.value }))} placeholder="Next action (optional)" />
+              <div className="quick-add-row">
+                <label>Deadline<input type="date" value={plannerUpdateForm.deadline} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, deadline: e.target.value }))} /></label>
+                <label>Importance<select value={plannerUpdateForm.importance} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, importance: Number(e.target.value) }))}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
+                <label>Effort<select value={plannerUpdateForm.effort} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, effort: Number(e.target.value) }))}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
+                <label>Status<select value={plannerUpdateForm.status} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, status: e.target.value }))}>{['active', 'completed', 'deferred', 'parked'].map((s) => <option key={s} value={s}>{s}</option>)}</select></label>
+              </div>
+              <div className="quick-add-row">
+                <button data-action-id="planner.propose_update" data-control-id="chat.planner-update.preview" className="primary" onClick={submitProposePlannerUpdate} disabled={plannerProposalBusy || !plannerUpdateForm.title.trim()}>{plannerProposalBusy ? 'Preparing…' : 'Preview update'}</button>
+                <button onClick={() => { setPlannerUpdateForm(null); setPlannerProposal(null); }} disabled={plannerProposalBusy}>Cancel</button>
+              </div>
+            </div>
+          )}
           {plannerProposal && <PlannerProposalCard proposal={plannerProposal} busy={plannerProposalBusy} onConfirm={confirmPlannerProposal} onCancel={() => setPlannerProposal(null)} />}
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
@@ -2653,7 +2714,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings, onOpenPlanner }) {
+function ChatConnectionBar({ connection, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings, onOpenPlanner, onEditPlannerTask }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2686,7 +2747,19 @@ function ChatConnectionBar({ connection, runtime, generating, statusPreview, mod
         ) : null}
         {modelsPreview ? <small role="status">{modelsPreview.count} model(s): {modelsPreview.models.length ? modelsPreview.models.map((model) => model.name).join(', ') : 'none recorded'}</small> : null}
         {runsPreview ? <small role="status">{runsPreview.count} recent run(s): {runsPreview.runs.length ? runsPreview.runs.map((run) => `${run.title} (${run.status})`).join(', ') : 'none recorded'}</small> : null}
-        {plannerPreview ? <small role="status">Today · {plannerPreview.mode} · {plannerPreview.visible.length} task(s): {plannerPreview.visible.length ? plannerPreview.visible.map((task) => task.title).join(', ') : 'nothing scheduled'}</small> : null}
+        {plannerPreview ? (
+          <div className="planner-preview" role="status">
+            <small>Today · {plannerPreview.mode} · {plannerPreview.visible.length} task(s)</small>
+            {plannerPreview.visible.length
+              ? plannerPreview.visible.map((task) => (
+                <span key={task.id} className="planner-preview-task">
+                  {task.title}
+                  <button className="link" data-action-id="planner.propose_update" data-control-id="chat.planner-update.open" onClick={() => onEditPlannerTask(task)} disabled={Boolean(checkBusy)}>Edit</button>
+                </span>
+              ))
+              : <small>nothing scheduled</small>}
+          </div>
+        ) : null}
       </div>
       <div className="conn-item">
         <span>Always-on local sources</span>
@@ -2746,25 +2819,36 @@ function ProposalCard({ proposal, busy, onConfirm, onCancel }) {
 }
 
 function PlannerProposalCard({ proposal, busy, onConfirm, onCancel }) {
+  const isUpdate = proposal.operation === 'planner.update';
   const preview = proposal.preview || {};
   return (
     <div className="proposal-card">
-      <div className="proposal-head"><ShieldCheck size={16} /><strong>Confirm Daily Planner task</strong></div>
+      <div className="proposal-head"><ShieldCheck size={16} /><strong>Confirm Daily Planner {isUpdate ? 'update' : 'task'}</strong></div>
       <p>{proposal.affects}</p>
       <div className="proposal-diff">
-        <div><span>title</span><strong>{preview.title}</strong></div>
-        {preview.next_action ? <div><span>next action</span><strong>{preview.next_action}</strong></div> : null}
-        {preview.why ? <div><span>why</span><strong>{preview.why}</strong></div> : null}
-        <div><span>importance</span><strong>{String(preview.importance)}</strong></div>
-        <div><span>effort</span><strong>{String(preview.effort)}</strong></div>
-        {preview.estimated_minutes != null ? <div><span>estimate</span><strong>{preview.estimated_minutes} min</strong></div> : null}
-        {preview.deadline ? <div><span>deadline</span><strong>{preview.deadline}</strong></div> : null}
+        {isUpdate
+          ? Object.keys(proposal.after || {}).map((k) => (
+            <div key={k}><span>{k}</span><em>{String(proposal.before?.[k] ?? '—')}</em> → <strong>{String(proposal.after[k])}</strong></div>
+          ))
+          : (
+            <>
+              <div><span>title</span><strong>{preview.title}</strong></div>
+              {preview.next_action ? <div><span>next action</span><strong>{preview.next_action}</strong></div> : null}
+              {preview.why ? <div><span>why</span><strong>{preview.why}</strong></div> : null}
+              <div><span>importance</span><strong>{String(preview.importance)}</strong></div>
+              <div><span>effort</span><strong>{String(preview.effort)}</strong></div>
+              {preview.estimated_minutes != null ? <div><span>estimate</span><strong>{preview.estimated_minutes} min</strong></div> : null}
+              {preview.deadline ? <div><span>deadline</span><strong>{preview.deadline}</strong></div> : null}
+            </>
+          )}
       </div>
       <div className="decision-row">
-        <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Creating…' : 'Confirm and create task'}</button>
+        {isUpdate
+          ? <button data-action-id="planner.propose_update" data-control-id="chat.planner-update.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Confirm and update task'}</button>
+          : <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Creating…' : 'Confirm and create task'}</button>}
         <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
       </div>
-      <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. No Daily Planner task exists until you confirm.</small>
+      <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. {isUpdate ? 'No task is changed' : 'No Daily Planner task exists'} until you confirm.</small>
     </div>
   );
 }
