@@ -34,6 +34,7 @@ import {
   workboardItemStateToken
 } from './chatCapabilities.js';
 import { createRendererBridge } from './rendererBridge.js';
+import { buildManagedLlamaArgs, DEFAULT_LLAMA_GPU_LAYERS, normalizeLlamaGpuLayers } from './llamaLaunch.js';
 import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
 import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
 import { resolveAgentMode } from './agentMode.js';
@@ -1810,6 +1811,7 @@ async function localModelStatus() {
   const llamaServerPath = String(getSetting('llamaServerPath', '') || '').trim();
   const llamaServerPort = Number(getSetting('llamaServerPort', 8080) || 8080);
   const llamaContextSize = Number(getSetting('llamaContextSize', DEFAULT_LLAMA_CONTEXT_SIZE) || DEFAULT_LLAMA_CONTEXT_SIZE);
+  const llamaGpuLayers = normalizeLlamaGpuLayers(getSetting('llamaGpuLayers', DEFAULT_LLAMA_GPU_LAYERS));
   return {
     assigned: Boolean(model && modelFile.available),
     model,
@@ -1825,7 +1827,9 @@ async function localModelStatus() {
     llamaServerExists: Boolean(llamaServerPath && fs.existsSync(llamaServerPath)),
     llamaServerPort,
     llamaContextSize,
+    llamaGpuLayers,
     managedContextSize: managedLlamaServerLaunch?.contextSize || null,
+    managedGpuLayers: managedLlamaServerLaunch?.gpuLayers ?? null,
     managedServerRunning: Boolean(managedLlamaServer && !managedLlamaServer.killed),
     managedServerReady: Boolean(managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady),
     managedEndpoint: managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady ? `http://127.0.0.1:${llamaServerPort}` : '',
@@ -1865,13 +1869,15 @@ async function startManagedLlamaServer(options = {}) {
       throw new Error(`llama.cpp context size must be an integer from ${MIN_LLAMA_CONTEXT_SIZE} to ${MAX_LLAMA_CONTEXT_SIZE}.`);
     }
     const contextSize = requestedContextSize;
+    const gpuLayers = normalizeLlamaGpuLayers(options.gpuLayers ?? getSetting('llamaGpuLayers', DEFAULT_LLAMA_GPU_LAYERS));
     if (!serverPath || !fs.existsSync(serverPath)) throw new Error('The bundled llama-server runtime is missing. Repair the local model runtime from Settings.');
     const endpoint = `http://127.0.0.1:${port}`;
-    const requestedLaunch = { serverPath: path.resolve(serverPath), port, contextSize };
+    const requestedLaunch = { serverPath: path.resolve(serverPath), port, contextSize, gpuLayers };
     const launchMatches = managedLlamaServerLaunch
       && managedLlamaServerLaunch.serverPath === requestedLaunch.serverPath
       && managedLlamaServerLaunch.port === requestedLaunch.port
-      && managedLlamaServerLaunch.contextSize === requestedLaunch.contextSize;
+      && managedLlamaServerLaunch.contextSize === requestedLaunch.contextSize
+      && managedLlamaServerLaunch.gpuLayers === requestedLaunch.gpuLayers;
     if (managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady && launchMatches) return localModelStatus();
     await stopManagedLlamaServer();
 
@@ -1884,7 +1890,10 @@ async function startManagedLlamaServer(options = {}) {
     // Without it, a small reasoning model can spend the whole token budget inside
     // reasoning_content and return an empty content string, which the caller would
     // treat as "no runtime produced a response".
-    const args = ['-m', status.model.path, '--host', '127.0.0.1', '--port', String(port), '-c', String(contextSize), '--reasoning-budget', '0'];
+    // Default the small always-on Planner model to CPU so it remains responsive
+    // while a larger local coding model occupies GPU VRAM. An explicit bounded
+    // override remains available for machines where GPU coexistence is safe.
+    const args = buildManagedLlamaArgs({ modelPath: status.model.path, port, contextSize, gpuLayers });
     const child = spawn(serverPath, args, { cwd: path.dirname(serverPath), detached: false, stdio: ['ignore', stdoutFd, stderrFd], windowsHide: true });
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
@@ -1911,6 +1920,7 @@ async function startManagedLlamaServer(options = {}) {
     setSetting('llamaServerPath', serverPath);
     setSetting('llamaServerPort', port);
     setSetting('llamaContextSize', contextSize);
+    setSetting('llamaGpuLayers', gpuLayers);
     setSetting('localModelName', status.model.name || 'planner-assistant');
     return localModelStatus();
   })();
@@ -4779,7 +4789,8 @@ app.post('/api/models/server/start', async (req, res) => {
     const runtime = await startManagedLlamaServer({
       serverPath: req.body.llamaServerPath,
       port: req.body.port,
-      contextSize: req.body.contextSize
+      contextSize: req.body.contextSize,
+      gpuLayers: req.body.gpuLayers
     });
     ok(res, { message: `llama-server is healthy at ${runtime.managedEndpoint}`, runtime });
   } catch (error) {
@@ -5436,6 +5447,13 @@ app.post('/api/settings', (req, res) => {
       return fail(res, 400, `llama.cpp context size must be an integer from ${MIN_LLAMA_CONTEXT_SIZE} to ${MAX_LLAMA_CONTEXT_SIZE}. Use at least ${MIN_CODING_CONTEXT_SIZE} for local coding.`);
     }
     req.body.llamaContextSize = contextSize;
+  }
+  if (Object.hasOwn(req.body, 'llamaGpuLayers')) {
+    try {
+      req.body.llamaGpuLayers = normalizeLlamaGpuLayers(req.body.llamaGpuLayers);
+    } catch (error) {
+      return fail(res, 400, error.message);
+    }
   }
   for (const [key, value] of Object.entries(req.body)) {
     setSetting(key, value);

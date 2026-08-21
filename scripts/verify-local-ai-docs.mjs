@@ -63,6 +63,22 @@ try {
   });
   await waitForHealth();
 
+  const defaultRuntime = await jsonApi('/api/models/runtime');
+  assert.equal(defaultRuntime.response.status, 200);
+  assert.equal(defaultRuntime.body.data.llamaGpuLayers, 0);
+
+  const invalidGpuLayers = await jsonApi('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ llamaGpuLayers: -1 })
+  });
+  assert.equal(invalidGpuLayers.response.status, 400);
+  assert.match(invalidGpuLayers.body.error, /GPU layers must be an integer from 0 to 999/);
+
+  const overrideGpuLayers = await jsonApi('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ llamaGpuLayers: 24 })
+  });
+  assert.equal(overrideGpuLayers.response.status, 200);
+  assert.equal(overrideGpuLayers.body.data.llamaGpuLayers, 24);
+
   const openHands = await jsonApi('/api/tooling/openhands/status');
   assert.equal(openHands.response.status, 200);
   assert.equal(openHands.body.data.enabled, false);

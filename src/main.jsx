@@ -6223,6 +6223,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
   const [llamaServerPath, setLlamaServerPath] = useState(settings.llamaServerPath || '');
   const [llamaServerPort, setLlamaServerPort] = useState(settings.llamaServerPort || 8080);
   const [llamaContextSize, setLlamaContextSize] = useState(settings.llamaContextSize || 16384);
+  const [llamaGpuLayers, setLlamaGpuLayers] = useState(settings.llamaGpuLayers ?? 0);
   const [browserAgentMode, setBrowserAgentMode] = useState(settings.browserAgentMode || 'myChromeConnector');
   const [cloudEnabledProviders, setCloudEnabledProviders] = useState(settings.cloudEnabledProviders || ['ChatGPT']);
   const [cloudAccounts, setCloudAccounts] = useState([]);
@@ -6298,6 +6299,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
           llamaServerPath,
           llamaServerPort: Number(llamaServerPort),
           llamaContextSize: Number(llamaContextSize),
+          llamaGpuLayers: Number(llamaGpuLayers),
           browserAgentMode,
           cloudEnabledProviders,
           assistantResponseDetail: responseDetail
@@ -6391,7 +6393,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
     await saveSettings();
     const result = await api('/api/models/server/start', {
       method: 'POST',
-      body: JSON.stringify({ llamaServerPath, port: Number(llamaServerPort), contextSize: Number(llamaContextSize) })
+      body: JSON.stringify({ llamaServerPath, port: Number(llamaServerPort), contextSize: Number(llamaContextSize), gpuLayers: Number(llamaGpuLayers) })
     });
     setRuntime(result.runtime);
     setNotice(result.message);
@@ -6617,8 +6619,9 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
         <div className="inline-form">
           <input type="number" value={llamaServerPort} onChange={(event) => setLlamaServerPort(event.target.value)} placeholder="8080" />
           <input type="number" min="2048" max="131072" step="1024" value={llamaContextSize} onChange={(event) => setLlamaContextSize(event.target.value)} placeholder="16384" />
+          <input type="number" min="0" max="999" step="1" value={llamaGpuLayers} onChange={(event) => setLlamaGpuLayers(event.target.value)} aria-label="llama.cpp GPU layers" />
         </div>
-        <small>Use at least 16384 for local coding. LPS automatically restarts bundled llama.cpp at that minimum when a coding run needs it.</small>
+        <small>Context: use at least 16384 for local coding. GPU layers default to 0 (CPU) so Planner remains usable while a larger local coding model occupies GPU VRAM.</small>
         <div className="decision-row">
           <button onClick={saveSettings}><Check size={16} /> Save</button>
           <button className="primary" onClick={scan}><RefreshCcw size={16} /> Rescan GGUF</button>

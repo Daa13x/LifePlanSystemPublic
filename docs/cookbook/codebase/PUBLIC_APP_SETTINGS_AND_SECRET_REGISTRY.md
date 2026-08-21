@@ -102,6 +102,7 @@ The app does not currently read API tokens from environment variables. Tokens ar
 | `llamaServerPath` | empty string | Settings UI; server start | Runtime status and managed-server start | Active |
 | `llamaServerPort` | `8080` | Settings UI; server start | Managed endpoint/status | Active |
 | `llamaContextSize` | `16384` | Settings UI; server start; coding runtime upgrade | Managed llama-server arguments | Active; integer 2048-131072 |
+| `llamaGpuLayers` | `0` | Settings UI; server start | Managed llama-server `--n-gpu-layers` argument | Active; integer 0-999; CPU-first coexistence default |
 | `browserAgentMode` | `myChromeConnector` | Settings UI | Browser consultation routing | Active |
 | `browserAgentPort` | `4177` | Settings UI | Display text only in current frontend | Stored but ineffective |
 | `githubToken` | empty string | Dedicated Source token endpoint; generic settings endpoint can also write | Authenticated Source push/tag push | Active secret |

@@ -12,6 +12,10 @@ Planner Assistant, starts llama-server hidden, polls `/health`, and records logs
 
 When a user later downloads or loads another GGUF, LPS stops the old managed
 server, changes the assignment, starts the selected model, and waits for health.
+The managed Planner server explicitly defaults to `--n-gpu-layers 0`. This
+keeps the small always-on Planner model on CPU and responsive while a larger
+local coding model occupies GPU VRAM. Settings accepts a bounded explicit
+override for machines where GPU coexistence is known to be safe.
 An explicitly configured OpenAI-compatible chat endpoint takes precedence over
 the bundled server. Coding workers can use a separate endpoint/model; when those
 fields are blank they fall back to the chat endpoint or bundled llama.cpp.
@@ -77,6 +81,15 @@ classification and a confirmed final preview before it can be called safe.
 - provisioning source: `scripts/windows/Install-LlamaRuntime.ps1`
 
 ## Verification
+
+Repository-source acceptance on 2026-08-21 used a disposable SQLite database,
+separate application and llama ports, the normal `server/index.js` entry
+point, and the assigned Qwen 3.5 4B GGUF. The actual managed process command
+included `-c 16384 --reasoning-budget 0 --n-gpu-layers 0`. A first reply, a
+second reply without restart, cancellation, saved cancelled user input, a
+cancelled terminal assistant record, an immediate post-cancel reply, and a
+short reply after a complete repository-server restart all passed. The separate
+DSH/Qwen 30B coding system was not changed.
 
 ```powershell
 npm.cmd run verify:local-ai-docs
