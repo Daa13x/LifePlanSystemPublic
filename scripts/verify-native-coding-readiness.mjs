@@ -20,7 +20,7 @@ const authority = {
   ],
   receipt: { repository: 'daa13x/lifeplansystempublic', startingCommit: task.baseCommit, activeBranch: 'main' }
 };
-const ready = buildNativeCodingReadinessReceipt({
+const readyInput = {
   task,
   taskSealValid: true,
   evidenceReady: true,
@@ -43,7 +43,8 @@ const ready = buildNativeCodingReadinessReceipt({
   runLeaseState: 'available',
   applyLeaseState: 'available',
   worktreeAvailable: true
-});
+};
+const ready = buildNativeCodingReadinessReceipt(readyInput);
 
 assert.equal(ready.ready, true);
 assert.equal(ready.kind, 'native_coding.run_readiness');
@@ -77,5 +78,12 @@ assert.match(server, /nativeCodingModelConfig\(false\)/, 'readiness never starts
 assert.match(server, /assessNativeCodingRunReadiness[\s\S]*proposeCodingConfirmation/, 'run proposals use the shared readiness assessor');
 assert.match(server, /revalidate:\s*\(\)\s*=>\s*codingConfirmationSnapshot/, 'confirmation revalidation recomputes the same readiness-bound snapshot');
 assert.match(server, /authorizationGranted:\s*false|buildNativeCodingReadinessReceipt/, 'readiness remains explicitly non-authorizing');
+
+// determinism: identical input => identical digest
+const readyAgain = buildNativeCodingReadinessReceipt(readyInput);
+assert.equal(readyAgain.receiptHash, ready.receiptHash);
+// drift: any readiness change => different digest (confirmation can detect drift, fail closed)
+const drifted = buildNativeCodingReadinessReceipt({ ...readyInput, task: { ...readyInput.task, baseCommit: 'd'.repeat(40) } });
+assert.notEqual(drifted.receiptHash, ready.receiptHash);
 
 console.log('Native coding readiness receipt verification passed.');
