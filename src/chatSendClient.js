@@ -31,3 +31,8 @@ export async function awaitChatSendResult({
 export function isChatSendOriginActive(currentSessionId, originSessionId, instanceActive = true) {
   return Boolean(instanceActive) && currentSessionId != null && originSessionId != null && String(currentSessionId) === String(originSessionId);
 }
+
+export function isLatestChatConnectionRequest(currentRequestId, requestId, currentSessionId, originSessionId, instanceActive = true) {
+  return Number(currentRequestId) === Number(requestId)
+    && isChatSendOriginActive(currentSessionId, originSessionId, instanceActive);
+}

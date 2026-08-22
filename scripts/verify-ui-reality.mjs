@@ -62,6 +62,12 @@ for (const phrase of ['nothing recorded yet', 'Prepared — connection required'
 // Real records/routes/history must not be faked: counts shown to the user come
 // from server data (api(...)), never from a literal fabricated total.
 line(/api\('\/api\/feedback'\)/.test(ui) && /api\('\/api\/workboard\/cards'\)/.test(ui), 'user-facing lists read real server data, not fabricated literals');
+line(!/capabilities\?\.length\s*\?\?\s*\d+/.test(ui), 'Chat does not fabricate a capability count while connection truth is unavailable');
+line(ui.includes("connectionState === 'unavailable' ? 'Unavailable' : 'Checking…'"), 'Chat labels unresolved and failed capability discovery honestly');
+line(!ui.includes("settings.storageLocation || 'Checking local database…'"), 'System storage status does not depend on the dormant arbitrary storageLocation setting');
+line(ui.includes("const storageAvailable = Boolean(runtime?.activeDatabasePath)") && ui.includes("storageAvailable ? 'Local SQLite database' : boot ? 'Database unavailable'"), 'System storage availability derives from authoritative runtime diagnostics without exposing a filesystem path');
+line(ui.includes('<p role="status" aria-live="polite">{storage}</p>'), 'dynamic System storage truth is exposed as a polite status update');
+line(ui.includes('const connectionRequestRef = useRef(0)') && ui.includes('isLatestChatConnectionRequest('), 'late same-session connection probes cannot overwrite the latest capability truth');
 
 console.log(failures ? `\n${failures} check(s) FAILED` : '\nAll UI-reality guard checks passed.');
 process.exit(failures ? 1 : 0);

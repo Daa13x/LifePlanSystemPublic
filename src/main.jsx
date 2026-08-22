@@ -42,7 +42,7 @@ import {
 import './styles.css';
 import { PRIMARY_NAVIGATION, SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
 import { renderMarkdown } from './markdown.js';
-import { awaitChatSendResult, isChatSendOriginActive } from './chatSendClient.js';
+import { awaitChatSendResult, isChatSendOriginActive, isLatestChatConnectionRequest } from './chatSendClient.js';
 import {
   normalizeDetailMode,
   parseMessageMetadata,
@@ -1368,9 +1368,9 @@ function KnowledgeRules({ memory }) {
 }
 
 function SystemStatus({ boot, planner, sessions, models, setNotice, refreshSignal }) {
-  const settings = boot?.settings || {};
-  const storage = settings.storageLocation || 'Checking local database…';
   const runtime = boot?.runtimeDiagnostics;
+  const storageAvailable = Boolean(runtime?.activeDatabasePath);
+  const storage = storageAvailable ? 'Local SQLite database' : boot ? 'Database unavailable' : 'Checking local database…';
   const [live, setLive] = useState({ tooling: null, connector: null, source: null, coding: null });
   useEffect(() => {
     Promise.all([
@@ -1384,7 +1384,7 @@ function SystemStatus({ boot, planner, sessions, models, setNotice, refreshSigna
     <section className="status-grid">
       <div className="panel wide-panel"><h2>Local system status</h2><p>Reported from the current bootstrap response only; this page does not run synthetic checks.</p></div>
       <div className="panel"><h3>About / Build</h3><Pill tone={boot?.build?.dirty ? 'warn' : boot?.build?.commit && boot.build.commit !== 'unknown' ? 'good' : 'warn'}>{boot?.build ? `v${boot.build.version || '—'}` : 'Checking'}</Pill><p>Commit <code>{boot?.build?.shortCommit || 'unknown'}</code>{boot?.build?.dirty ? ' · built from a dirty tree' : ''}<br />Built {boot?.build?.buildTime ? new Date(boot.build.buildTime).toLocaleString() : 'time unknown'}<br />{boot?.build?.repository || 'Daa13x/LifePlanSystemPublic'}</p></div>
-      <div className="panel"><h3>Storage</h3><Pill tone={boot ? 'good' : 'warn'}>{boot ? 'Available' : 'Checking'}</Pill><p>{storage}</p></div>
+      <div className="panel"><h3>Storage</h3><Pill tone={storageAvailable ? 'good' : 'warn'}>{storageAvailable ? 'Available' : boot ? 'Unavailable' : 'Checking'}</Pill><p role="status" aria-live="polite">{storage}</p></div>
       <div className="panel wide-panel"><h3>Personal knowledge runtime</h3><Pill tone={runtime?.personalRetrievalEnabled ? 'good' : 'warn'}>{runtime?.personalRetrievalEnabled ? 'Enabled' : 'Checking'}</Pill><p>Build <code>{runtime?.build?.shortCommit || 'unknown'}</code> · database <code>{runtime?.activeDatabasePath ? 'local SQLite' : 'checking'}</code><br />{runtime ? `${runtime.coverage?.totalRetrievable || 0} eligible records: ${runtime.coverage?.counts?.activeKnowledge || 0} Knowledge, ${runtime.coverage?.counts?.activeProjects || 0} projects, ${runtime.coverage?.counts?.eligibleUserChatMessages || 0} user Chat, ${runtime.coverage?.counts?.privateRepositoryFiles || 0} private-repo files.` : 'Loading runtime diagnostics…'}<br />Last retrieval: {runtime?.lastPersonalRetrieval?.resultType || 'none'} ({runtime?.lastPersonalRetrieval?.sourceCount || 0} source(s)).</p></div>
       <div className="panel"><h3>Workboard</h3><strong>{planner?.summary?.focus ?? '—'} focus items</strong><p>{planner?.summary?.approvals ?? '—'} pending approvals · {planner?.summary?.candidates ?? '—'} memory candidates</p></div>
       <div className="panel"><h3>Chat</h3><strong>{sessions.length} active sessions</strong><p>Sessions are loaded from the local database.</p></div>
@@ -1799,6 +1799,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
   const [connection, setConnection] = useState(null);
+  const [connectionState, setConnectionState] = useState('checking');
   const [systemStatusPreview, setSystemStatusPreview] = useState(null);
   const [systemModelsPreview, setSystemModelsPreview] = useState(null);
   const [systemRunsPreview, setSystemRunsPreview] = useState(null);
@@ -1830,6 +1831,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [cloudInstruction, setCloudInstruction] = useState('');
   const selectedSessionRef = useRef(selectedSession);
   const chatInstanceActiveRef = useRef(true);
+  const connectionRequestRef = useRef(0);
   selectedSessionRef.current = selectedSession;
   useEffect(() => {
     chatInstanceActiveRef.current = true;
@@ -1877,14 +1879,38 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }, [selectedSession]);
 
   async function loadConnection(sessionId = selectedSession) {
-    if (!sessionId) return;
+    if (!sessionId) {
+      connectionRequestRef.current += 1;
+      setConnection(null);
+      setConnectionState('unavailable');
+      return;
+    }
+    if (!isChatSendOriginActive(selectedSessionRef.current, sessionId, chatInstanceActiveRef.current)) return;
+    const requestId = connectionRequestRef.current + 1;
+    connectionRequestRef.current = requestId;
+    const canApply = () => isLatestChatConnectionRequest(
+      connectionRequestRef.current,
+      requestId,
+      selectedSessionRef.current,
+      sessionId,
+      chatInstanceActiveRef.current
+    );
+    if (canApply()) {
+      setConnectionState('checking');
+    }
     try {
       const next = await api(`/api/chat/sessions/${sessionId}/connection`);
-      if (isChatSendOriginActive(selectedSessionRef.current, sessionId, chatInstanceActiveRef.current)) {
+      if (canApply()) {
         setConnection(next);
         setChatBusy(Boolean(next.generating));
+        setConnectionState('ready');
       }
-    } catch { /* connection state is best-effort */ }
+    } catch {
+      if (canApply()) {
+        setConnection(null);
+        setConnectionState('unavailable');
+      }
+    }
   }
   async function loadCloudChecks(sessionId = selectedSession) { if (sessionId) try { setCloudChecks(await api(`/api/chat/sessions/${sessionId}/cloud-checks`)); } catch {} }
   async function previewCloudCheck() { try { setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, model: cloudModel, instruction: cloudInstruction }) })); } catch (err) { setNotice(err.message); } }
@@ -2642,7 +2668,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} />
+          <ChatConnectionBar connection={connection} connectionState={connectionState} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2784,7 +2810,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings, onOpenPlanner, onEditPlannerTask }) {
+function ChatConnectionBar({ connection, connectionState, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings, onOpenPlanner, onEditPlannerTask }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2841,7 +2867,9 @@ function ChatConnectionBar({ connection, runtime, generating, statusPreview, mod
       </div>
       <div className="conn-item">
         <span>Capabilities</span>
-        <strong>{connection?.capabilities?.length ?? 11} tools</strong>
+        <strong role="status" aria-live="polite">{connectionState === 'ready' && Array.isArray(connection?.capabilities)
+          ? `${connection.capabilities.length} tools`
+          : connectionState === 'unavailable' ? 'Unavailable' : 'Checking…'}</strong>
       </div>
       <div className="conn-item">
         <span>Conversation</span>

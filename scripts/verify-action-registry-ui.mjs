@@ -210,6 +210,9 @@ assert.doesNotMatch(workboardPreviewRenderer, /dangerouslySetInnerHTML/, 'Workbo
 const statusRendererStart = ui.indexOf('function ChatConnectionBar(');
 const statusRendererEnd = ui.indexOf('\nfunction ProposalCard(', statusRendererStart);
 const statusRenderer = ui.slice(statusRendererStart, statusRendererEnd);
+assert.doesNotMatch(statusRenderer, /capabilities\?\.length\s*\?\?\s*\d+/, 'capability count never falls back to a fabricated registry size');
+assert.match(statusRenderer, /connectionState === 'ready'[\s\S]*connection\.capabilities\.length[\s\S]*'Unavailable'[\s\S]*'Checking…'/, 'capability count is shown only from a ready connection, with honest unavailable and checking states');
+assert.match(statusRenderer, /<strong role="status" aria-live="polite">\{connectionState/, 'dynamic capability discovery is announced as a polite status update');
 assert.match(statusRenderer, /data-action-id="system\.status" data-control-id="chat\.connection\.system-status-check"/, 'system status trigger carries stable registry and control IDs');
 assert.match(statusRenderer, /data-action-id="system\.models" data-control-id="chat\.connection\.system-models-check"/, 'system models trigger carries stable registry and control IDs');
 assert.match(statusRenderer, /data-action-id="system\.runs" data-control-id="chat\.connection\.system-runs-check"/, 'system runs trigger carries stable registry and control IDs');

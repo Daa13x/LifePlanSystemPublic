@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { awaitChatSendResult, isChatSendOriginActive } from '../src/chatSendClient.js';
+import { awaitChatSendResult, isChatSendOriginActive, isLatestChatConnectionRequest } from '../src/chatSendClient.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-chat-send-'));
@@ -261,6 +261,18 @@ try {
   assert.equal(isChatSendOriginActive('12', 12), true);
   assert.equal(isChatSendOriginActive(13, 12), false, 'a completed send from chat A cannot render after navigation to chat B');
   assert.equal(isChatSendOriginActive(12, 12, false), false, 'a stale completion cannot render after its Chat instance unmounts');
+  assert.equal(isLatestChatConnectionRequest(2, 2, 12, 12), true, 'the latest same-session connection response may update the UI');
+  assert.equal(isLatestChatConnectionRequest(2, 1, 12, 12), false, 'an older same-session connection response cannot overwrite a newer result');
+  assert.equal(isLatestChatConnectionRequest(2, 2, 13, 12), false, 'the latest response still cannot cross session boundaries');
+  const loadConnectionStart = ui.indexOf('async function loadConnection(');
+  const loadConnectionEnd = ui.indexOf('\n  async function loadCloudChecks(', loadConnectionStart);
+  const loadConnectionSource = ui.slice(loadConnectionStart, loadConnectionEnd);
+  assert.ok(loadConnectionStart >= 0 && loadConnectionEnd > loadConnectionStart, 'connection loader has a bounded source slice');
+  const obsoleteGuardIndex = loadConnectionSource.indexOf('if (!isChatSendOriginActive(selectedSessionRef.current, sessionId, chatInstanceActiveRef.current)) return;');
+  const requestAllocationIndex = loadConnectionSource.indexOf('const requestId = connectionRequestRef.current + 1;');
+  assert.ok(obsoleteGuardIndex >= 0, 'connection loader explicitly rejects an obsolete session');
+  assert.ok(requestAllocationIndex >= 0, 'connection loader allocates a monotonic request identity');
+  assert.ok(obsoleteGuardIndex < requestAllocationIndex, 'an obsolete session is rejected before it can invalidate the active session request counter');
   assert.match(ui, /if \(!originSessionId \|\| !connection\?\.generating/, 'a remounted Chat reattaches only when the durable connection reports an active send');
   assert.match(ui, /setChatBusy\(Boolean\(nextConnection\.generating\)\)/, 'the remounted Chat remains busy until the durable request reaches terminal state');
   assert.match(ui, /setConnection\(next\);\s*setChatBusy\(Boolean\(next\.generating\)\)/, 'switching from active chat A to inactive chat B clears session-scoped busy state');
