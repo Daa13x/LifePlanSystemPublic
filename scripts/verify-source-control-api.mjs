@@ -29,6 +29,7 @@ async function reserveLoopbackPort() {
 const port = await reserveLoopbackPort();
 const base = `http://127.0.0.1:${port}`;
 let server;
+let serverSpawnError = null;
 const serverOutput = [];
 
 function captureServerOutput(stream, label) {
@@ -65,14 +66,18 @@ async function api(route, options = {}) {
 }
 
 async function waitForHealth() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const startedAt = Date.now();
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    if (serverSpawnError) {
+      throw new Error(`Source API acceptance server failed to spawn after ${Date.now() - startedAt} ms: ${serverSpawnError.message}.\n${serverOutput.join('')}`);
+    }
     if (server?.exitCode !== null && server?.exitCode !== undefined) {
-      throw new Error(`Source API acceptance server exited with code ${server.exitCode}.\n${serverOutput.join('')}`);
+      throw new Error(`Source API acceptance server exited with code ${server.exitCode} after ${Date.now() - startedAt} ms.\n${serverOutput.join('')}`);
     }
     try { if ((await fetch(`${base}/api/health`)).ok) return; } catch {}
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Source API acceptance server did not become healthy on ${base}.\n${serverOutput.join('')}`);
+  throw new Error(`Source API acceptance server did not become healthy on ${base} after ${Date.now() - startedAt} ms (pid ${server?.pid || 'unavailable'}).\n${serverOutput.join('')}`);
 }
 
 try {
@@ -98,6 +103,10 @@ try {
     env: { ...process.env, LIFE_PLANNER_DB: path.join(probeRoot, 'source.sqlite'), LIFE_PLANNER_PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
+  });
+  server.once('error', (error) => {
+    serverSpawnError = error;
+    serverOutput.push(`[spawn] ${error.name}: ${error.message}`);
   });
   captureServerOutput(server.stdout, 'stdout');
   captureServerOutput(server.stderr, 'stderr');

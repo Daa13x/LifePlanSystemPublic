@@ -51,21 +51,34 @@ const dbPath = path.join(probeRoot, 'data', 'life-planner.sqlite');
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 async function startServer(port) {
   const output = [];
+  let spawnError = null;
   const child = spawn(process.execPath, ['server/index.js'], {
     cwd: appRoot,
     env: { ...process.env, LIFE_PLANNER_DB: dbPath, LIFE_PLANNER_PORT: String(port), LIFE_PLANNER_CONNECTOR_CONFIG: path.join(probeRoot, 'pairing.json') },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
   });
+  child.once('error', (error) => {
+    spawnError = error;
+    output.push(`[spawn] ${error.name}: ${error.message}`);
+  });
   child.stdout.on('data', (c) => output.push(String(c)));
   child.stderr.on('data', (c) => output.push(String(c)));
   const base = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Server exited early (${child.exitCode}).\n${output.join('')}`);
-    try { if ((await fetch(`${base}/api/health`)).ok) return { child, base }; } catch { /* starting */ }
-    await new Promise((r) => setTimeout(r, 100));
+  const startedAt = Date.now();
+  const deadline = startedAt + 30000;
+  try {
+    while (Date.now() < deadline) {
+      if (spawnError) throw new Error(`Server failed to spawn: ${spawnError.message}.`);
+      if (child.exitCode !== null) throw new Error(`Server exited early (${child.exitCode}).`);
+      try { if ((await fetch(`${base}/api/health`)).ok) return { child, base }; } catch { /* starting */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`Server did not become healthy after ${Date.now() - startedAt} ms (pid ${child.pid || 'unavailable'}).`);
+  } catch (error) {
+    if (child.exitCode === null && !child.killed) child.kill();
+    for (let attempt = 0; attempt < 40 && child.exitCode === null; attempt += 1) await new Promise((r) => setTimeout(r, 50));
+    throw new Error(`${error.message}\n${output.join('')}`, { cause: error });
   }
-  throw new Error(`Server did not become healthy.\n${output.join('')}`);
 }
 async function retryStart(attempts = 6) {
   let lastError;
@@ -73,7 +86,8 @@ async function retryStart(attempts = 6) {
     try { return await startServer(await freePort()); }
     catch (error) {
       lastError = error;
-      if (!/exited early|not become healthy/i.test(String(error && error.message))) throw error;
+      console.warn(`Lease acceptance server start attempt ${attempt}/${attempts} failed: ${String(error?.message || error).split('\n')[0]}`);
+      if (!/failed to spawn|exited early|not become healthy/i.test(String(error && error.message))) throw error;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
