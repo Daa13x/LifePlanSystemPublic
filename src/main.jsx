@@ -42,6 +42,7 @@ import {
 import './styles.css';
 import { PRIMARY_NAVIGATION, SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
 import { renderMarkdown } from './markdown.js';
+import { awaitChatSendResult, isChatSendOriginActive } from './chatSendClient.js';
 import {
   normalizeDetailMode,
   parseMessageMetadata,
@@ -1827,6 +1828,13 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [cloudProvider, setCloudProvider] = useState('ChatGPT');
   const [cloudModel, setCloudModel] = useState('');
   const [cloudInstruction, setCloudInstruction] = useState('');
+  const selectedSessionRef = useRef(selectedSession);
+  const chatInstanceActiveRef = useRef(true);
+  selectedSessionRef.current = selectedSession;
+  useEffect(() => {
+    chatInstanceActiveRef.current = true;
+    return () => { chatInstanceActiveRef.current = false; };
+  }, []);
 
   // --- ChatGPT-style auto-scroll for the message container (not the window) ---
   // autoFollow tracks whether the newest content should stick to the bottom. It
@@ -1870,7 +1878,13 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
 
   async function loadConnection(sessionId = selectedSession) {
     if (!sessionId) return;
-    try { setConnection(await api(`/api/chat/sessions/${sessionId}/connection`)); } catch { /* connection state is best-effort */ }
+    try {
+      const next = await api(`/api/chat/sessions/${sessionId}/connection`);
+      if (isChatSendOriginActive(selectedSessionRef.current, sessionId, chatInstanceActiveRef.current)) {
+        setConnection(next);
+        setChatBusy(Boolean(next.generating));
+      }
+    } catch { /* connection state is best-effort */ }
   }
   async function loadCloudChecks(sessionId = selectedSession) { if (sessionId) try { setCloudChecks(await api(`/api/chat/sessions/${sessionId}/cloud-checks`)); } catch {} }
   async function previewCloudCheck() { try { setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, model: cloudModel, instruction: cloudInstruction }) })); } catch (err) { setNotice(err.message); } }
@@ -2261,14 +2275,31 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     finally { setPlannerProposalBusy(false); }
   }
 
-  async function sendViaJson(outgoing, optimisticId) {
-    const result = await api(`/api/chat/sessions/${selectedSession}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({ content: outgoing })
+  async function sendViaJson(outgoing, optimisticId, requestKey, originSessionId) {
+    const canRenderOrigin = () => isChatSendOriginActive(selectedSessionRef.current, originSessionId, chatInstanceActiveRef.current);
+    const result = await awaitChatSendResult({
+      content: outgoing,
+      requestKey,
+      send: ({ content, requestKey: durableKey }) => api(`/api/chat/sessions/${originSessionId}/messages`, {
+        method: 'POST',
+        headers: { 'X-LPS-Idempotency-Key': durableKey },
+        body: JSON.stringify({ content })
+      }),
+      onPending: () => { if (canRenderOrigin()) setNotice('That message is still being processed. Waiting for the saved reply…'); }
     });
-    setMessages((current) => [...current.filter((m) => m.id !== optimisticId), ...result.messages]);
-    setRuntimeMode(result.runtime || '');
-    if (result.error) setNotice(result.error);
+    if (!result) {
+      const history = await api(`/api/chat/sessions/${originSessionId}/messages`);
+      if (canRenderOrigin()) {
+        setMessages(history);
+        setNotice('The reply is still processing after the bounded wait. It remains saved and will appear when this chat is reopened.');
+      }
+      return;
+    }
+    if (canRenderOrigin()) {
+      setMessages((current) => [...current.filter((m) => m.id !== optimisticId), ...result.messages]);
+      setRuntimeMode(result.runtime || '');
+      if (result.error) setNotice(result.error);
+    }
   }
 
   async function prepareDirectCloudRequest(outgoing) {
@@ -2302,6 +2333,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       return;
     }
     const optimisticId = `tmp-${Date.now()}`;
+    const requestKey = crypto.randomUUID().replaceAll('-', '');
+    const originSessionId = selectedSession;
+    const canRenderOrigin = () => isChatSendOriginActive(selectedSessionRef.current, originSessionId, chatInstanceActiveRef.current);
     setChatBusy(true);
     setDraft('');
     // Sending is a deliberate action: jump to the new message and follow the reply.
@@ -2311,9 +2345,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     setStreamingText('');
     let streamStarted = false;
     try {
-      const response = await fetch(`/api/chat/sessions/${selectedSession}/messages/stream`, {
+      const response = await fetch(`/api/chat/sessions/${originSessionId}/messages/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-LPS-CSRF': await mutationToken() },
+        headers: { 'Content-Type': 'application/json', 'X-LPS-CSRF': await mutationToken(), 'X-LPS-Idempotency-Key': requestKey },
         body: JSON.stringify({ content: outgoing })
       });
       if (!response.ok || !response.body) throw new Error('stream-unavailable');
@@ -2339,17 +2373,17 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           if (!event || !dataRaw) continue;
           let data;
           try { data = JSON.parse(dataRaw); } catch { continue; }
-          if (event === 'token') { acc += data.delta; setStreamingText(acc); setWarmupNote(''); }
-          else if (event === 'status') { if (data.phase === 'warming') setWarmupNote(data.message || 'Starting the local model…'); }
+          if (event === 'token') { acc += data.delta; if (canRenderOrigin()) { setStreamingText(acc); setWarmupNote(''); } }
+          else if (event === 'status') { if (data.phase === 'warming' && canRenderOrigin()) setWarmupNote(data.message || 'Starting the local model…'); }
           else if (event === 'done') {
             runtimeLabel = data.runtime || '';
-            setWarmupNote('');
+            if (canRenderOrigin()) setWarmupNote('');
             terminalEvent = true;
             break;
           } else if (event === 'error') {
             streamError = data.error;
             runtimeLabel = data.runtime || '';
-            setWarmupNote('');
+            if (canRenderOrigin()) setWarmupNote('');
             terminalEvent = true;
             break;
           }
@@ -2362,26 +2396,43 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           break readStream;
         }
       }
-      setRuntimeMode(runtimeLabel);
-      if (streamError) setNotice(streamError);
+      if (canRenderOrigin()) {
+        setRuntimeMode(runtimeLabel);
+        if (streamError) setNotice(streamError);
+      }
       // Reconcile with the server's persisted history so the list is always
       // exactly one user + one final assistant message (no duplicate rows).
-      setMessages(await api(`/api/chat/sessions/${selectedSession}/messages`));
+      const history = await api(`/api/chat/sessions/${originSessionId}/messages`);
+      if (canRenderOrigin()) setMessages(history);
     } catch (err) {
       if (!streamStarted) {
         // Streaming endpoint unavailable: use the non-streaming JSON endpoint.
-        try { await sendViaJson(outgoing, optimisticId); }
-        catch (jsonErr) { setNotice(jsonErr.message); setMessages((current) => current.filter((m) => m.id !== optimisticId)); }
+        try { await sendViaJson(outgoing, optimisticId, requestKey, originSessionId); }
+        catch (jsonErr) {
+          if (canRenderOrigin()) {
+            setNotice(jsonErr.message);
+            setMessages((current) => current.filter((m) => m.id !== optimisticId));
+          }
+        }
       } else {
-        setNotice('Streaming was interrupted; showing saved messages.');
-        try { setMessages(await api(`/api/chat/sessions/${selectedSession}/messages`)); } catch { /* keep current view */ }
+        if (canRenderOrigin()) setNotice('Streaming was interrupted; reconnecting to the same saved reply…');
+        try { await sendViaJson(outgoing, optimisticId, requestKey, originSessionId); }
+        catch (jsonErr) {
+          if (canRenderOrigin()) setNotice(`Streaming was interrupted and the saved reply could not be reconciled yet: ${jsonErr.message}`);
+          try {
+            const history = await api(`/api/chat/sessions/${originSessionId}/messages`);
+            if (canRenderOrigin()) setMessages(history);
+          } catch { /* keep current view */ }
+        }
       }
     } finally {
-      setStreamingText(null);
-      setWarmupNote('');
-      setChatBusy(false);
+      if (canRenderOrigin()) {
+        setStreamingText(null);
+        setWarmupNote('');
+        setChatBusy(false);
+      }
       refreshAll();
-      loadConnection();
+      if (canRenderOrigin()) loadConnection(originSessionId);
     }
   }
 
@@ -2503,6 +2554,25 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     pickerPreviewRequestRef.current += 1;
     setPicker(null);
   }, [selectedSession]);
+  useEffect(() => {
+    const originSessionId = selectedSession;
+    if (!originSessionId || !connection?.generating || String(connection.conversationId) !== String(originSessionId)) return undefined;
+    let active = true;
+    const timer = window.setInterval(async () => {
+      try {
+        const [nextConnection, history] = await Promise.all([
+          api(`/api/chat/sessions/${originSessionId}/connection`),
+          api(`/api/chat/sessions/${originSessionId}/messages`)
+        ]);
+        if (!active || !isChatSendOriginActive(selectedSessionRef.current, originSessionId, chatInstanceActiveRef.current)) return;
+        setConnection(nextConnection);
+        setMessages(history);
+        setChatBusy(Boolean(nextConnection.generating));
+        if (!nextConnection.generating) setNotice('The saved local reply finished and is now visible.');
+      } catch { /* the next bounded poll or manual refresh can recover */ }
+    }, 750);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [selectedSession, connection?.conversationId, connection?.generating]);
   useEffect(() => {
     if (!cloudChecks.some((check) => check.status === 'active')) return undefined;
     const timer = window.setInterval(() => loadCloudChecks(), 1500);

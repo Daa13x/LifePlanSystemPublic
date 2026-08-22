@@ -12,6 +12,7 @@ fs.mkdirSync(dataDir, { recursive: true });
 
 export const db = new DatabaseSync(dbPath);
 db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA busy_timeout = 5000');
 db.exec('PRAGMA foreign_keys = ON');
 db.exec('PRAGMA secure_delete = ON');
 
@@ -488,6 +489,30 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (route, idempotency_key)
     );
+
+    -- Durable ownership for long-running local Chat generation. Unlike the
+    -- generic final-response idempotency receipts above, these rows have an
+    -- explicit lifecycle and renewable lease so retries, cancellation, process
+    -- restart, and an accidental second server cannot create duplicate turns.
+    CREATE TABLE IF NOT EXISTS chat_send_requests (
+      session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      idempotency_key TEXT NOT NULL,
+      request_hash TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending','cancel_requested','completed','cancelled','retryable_error','interrupted')),
+      user_message_id INTEGER NOT NULL UNIQUE REFERENCES chat_messages(id) ON DELETE CASCADE,
+      candidate_id INTEGER REFERENCES memory_candidates(id) ON DELETE SET NULL,
+      assistant_message_id INTEGER UNIQUE REFERENCES chat_messages(id) ON DELETE SET NULL,
+      owner_token TEXT,
+      lease_expires_at TEXT,
+      result_json TEXT,
+      error_detail TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      settled_at TEXT,
+      PRIMARY KEY (session_id, idempotency_key)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_send_one_active_session
+      ON chat_send_requests(session_id) WHERE state IN ('pending','cancel_requested');
 
     -- MA partner relay artifacts are durable but deliberately outside Chat and
     -- local-model context. Receiving a handoff never makes it prompt material.

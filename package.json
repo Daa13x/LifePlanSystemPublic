@@ -48,7 +48,7 @@
     "verify:ma-lock-contract": "node scripts/verify-ma-lock-contract.mjs",
     "verify:ma-reference-guard": "node scripts/verify-ma-reference-guard.mjs",
     "verify:classified-export-import": "node scripts/verify-classified-export-import.mjs",
-    "verify:request-idempotency": "node scripts/verify-request-idempotency.mjs",
+    "verify:request-idempotency": "node scripts/verify-request-idempotency.mjs && node scripts/verify-chat-send-reliability.mjs",
     "verify:native-coding-worker": "node scripts/verify-native-coding-worker.mjs",
     "verify:validation-scope-preflight": "node scripts/verify-validation-scope-preflight.mjs",
     "verify:consultation-receipt": "node scripts/verify-consultation-receipt.mjs",

@@ -86,6 +86,7 @@ import {
 } from './sourceControlSafety.js';
 import { resolveWorkspacePath } from './workspacePathGuard.js';
 import { normalizeIdempotencyKey, hashRequest, runIdempotent, IdempotencyConflictError } from './idempotency.js';
+import { createChatSendCoordinator } from './chatSendRequests.js';
 import { assessValidationScope } from './validationScopePreflight.js';
 import { buildConsultationReceipt, effectiveValidatedAdviceHash } from './consultationReceipt.js';
 import { normalizeAdviceDisposition } from './browserAdviceDisposition.js';
@@ -94,6 +95,7 @@ import { assertNoMaReferenceMaterial } from './maReferenceGuard.js';
 import { createPartnerRelayClient } from './partnerRelay.js';
 
 migrate();
+const chatSendCoordinator = createChatSendCoordinator({ db, transaction });
 const partnerRelay = createPartnerRelayClient({ db, getSetting, setSetting });
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
 // It is never re-applied automatically — it becomes interrupted (requires
@@ -104,6 +106,26 @@ const partnerRelay = createPartnerRelayClient({ db, getSetting, setSetting });
     console.log(`Confirmations recovered on startup: ${recovered.applied} settled via receipt, ${recovered.interrupted} interrupted (need review).`);
   }
 }
+function recoverExpiredChatSends() {
+  const recovered = chatSendCoordinator.recoverExpired((state, request) => {
+    const cancelled = state === 'cancelled';
+    const content = cancelled
+      ? '_Generation cancelled. Your message was saved; you can retry when ready._'
+      : '_The app restarted before that reply completed. Your message was saved; please retry._';
+    const error = cancelled ? 'Local model generation was cancelled.' : 'Local model generation was interrupted by an app restart.';
+    const assistantMessageId = insertChatAssistantTurn(request.sessionId, content, { terminalState: state, retryable: true, error });
+    return {
+      assistantMessageId,
+      error,
+      result: buildChatSendResult(request.sessionId, request.userMessageId, assistantMessageId, request.candidateId, state, error, state)
+    };
+  });
+  if (recovered) console.log(`Recovered ${recovered} expired Chat generation request(s) as terminal retryable turns.`);
+  return recovered;
+}
+recoverExpiredChatSends();
+const chatSendRecoveryTimer = setInterval(recoverExpiredChatSends, 1000);
+chatSendRecoveryTimer.unref?.();
 seedRoadmapIfEmpty();
 
 // Safety net: a bug in one request handler must not silently take the whole
@@ -1380,28 +1402,42 @@ function transaction(fn) {
   }
 }
 
+function insertChatUserTurn(sessionId, content) {
+  const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'user', content).lastInsertRowid;
+  const candidateId = shouldCreateMemoryCandidate(content).create ? createCandidateFromMessage(sessionId, messageId, content) : null;
+  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+  return { messageId, candidateId, userMessage: row('SELECT * FROM chat_messages WHERE id = ?', [messageId]) };
+}
+
 function persistChatUserTurn(sessionId, content) {
-  return transaction(() => {
-    const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'user', content).lastInsertRowid;
-    const candidateId = shouldCreateMemoryCandidate(content).create ? createCandidateFromMessage(sessionId, messageId, content) : null;
-    db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
-    return { messageId, candidateId, userMessage: row('SELECT * FROM chat_messages WHERE id = ?', [messageId]) };
-  });
+  return transaction(() => insertChatUserTurn(sessionId, content));
+}
+
+function insertChatAssistantTurn(sessionId, content, metadata) {
+  const activeGuidance = allRows("SELECT id, consultation_id, provider, model FROM chat_cloud_checks WHERE session_id = ? AND guidance_active = 1 ORDER BY updated_at DESC", [sessionId]);
+  const storedMetadata = {
+    ...(metadata || {}),
+    cloudGuidance: activeGuidance.map((check) => ({ cloudCheckId: check.id, consultationId: check.consultation_id, provider: check.provider, model: check.model || null, advisory: true }))
+  };
+  const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)')
+    .run(sessionId, 'assistant', content, JSON.stringify(storedMetadata)).lastInsertRowid;
+  db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
+  db.prepare("UPDATE chat_cloud_checks SET guidance_active = 0, guidance_consumed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND guidance_active = 1").run(sessionId);
+  return assistantId;
 }
 
 function persistChatAssistantTurn(sessionId, content, metadata) {
-  return transaction(() => {
-    const activeGuidance = allRows("SELECT id, consultation_id, provider, model FROM chat_cloud_checks WHERE session_id = ? AND guidance_active = 1 ORDER BY updated_at DESC", [sessionId]);
-    const storedMetadata = {
-      ...(metadata || {}),
-      cloudGuidance: activeGuidance.map((check) => ({ cloudCheckId: check.id, consultationId: check.consultation_id, provider: check.provider, model: check.model || null, advisory: true }))
-    };
-    const assistantId = db.prepare('INSERT INTO chat_messages (session_id, role, content, metadata) VALUES (?, ?, ?, ?)')
-      .run(sessionId, 'assistant', content, JSON.stringify(storedMetadata)).lastInsertRowid;
-    db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
-    db.prepare("UPDATE chat_cloud_checks SET guidance_active = 0, guidance_consumed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE session_id = ? AND guidance_active = 1").run(sessionId);
-    return assistantId;
-  });
+  return transaction(() => insertChatAssistantTurn(sessionId, content, metadata));
+}
+
+function buildChatSendResult(sessionId, userMessageId, assistantMessageId, candidateId, runtime, error = null, terminalState = 'completed') {
+  return {
+    messages: allRows('SELECT * FROM chat_messages WHERE id IN (?, ?) ORDER BY id ASC', [userMessageId, assistantMessageId]),
+    candidateId,
+    runtime,
+    ...(error ? { error } : {}),
+    terminalState
+  };
 }
 
 function chatCloudScope(sessionId, scope) {
@@ -2890,15 +2926,93 @@ app.delete('/api/chat/sessions/:id/context/:contextId', (req, res) => {
   ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
 });
 
+function chatSendIdempotencyKey(req) {
+  const supplied = req.get('X-LPS-Idempotency-Key') || req.body?.requestKey || '';
+  const key = normalizeIdempotencyKey(supplied);
+  if (supplied && !key) {
+    const error = new Error('A supplied Chat idempotency key must use 8-200 safe characters.');
+    error.statusCode = 400;
+    throw error;
+  }
+  return key;
+}
+
+function claimChatSend(req, sessionId, content) {
+  const key = chatSendIdempotencyKey(req);
+  return chatSendCoordinator.claim({
+    sessionId,
+    key,
+    requestHash: hashRequest({ sessionId, content }),
+    createUserTurn: () => insertChatUserTurn(sessionId, content)
+  });
+}
+
+function chatSendIdentity(claim) {
+  return {
+    userMessageId: claim.created?.messageId ?? claim.request?.userMessageId,
+    candidateId: claim.created?.candidateId ?? claim.request?.candidateId,
+    userMessage: claim.created?.userMessage || row('SELECT * FROM chat_messages WHERE id = ?', [claim.request?.userMessageId])
+  };
+}
+
+function settleChatGeneration({ sessionId, claim, assistant = null, requestedState, startedAt, error = null }) {
+  const identity = chatSendIdentity(claim);
+  return chatSendCoordinator.settle({
+    sessionId,
+    key: claim.request?.key || null,
+    ownerToken: claim.ownerToken,
+    requestedState,
+    settleTurn: (state) => {
+      const cancelled = state === 'cancelled';
+      const failed = state === 'retryable_error';
+      const runtime = cancelled ? 'cancelled' : failed ? 'setup/runtime error' : assistant.mode;
+      const terminalError = cancelled
+        ? 'Local model generation was cancelled. Your message was saved.'
+        : failed ? `${error?.message || 'Local generation failed.'} Your message was saved; retry is available.` : null;
+      const content = cancelled
+        ? '_Generation cancelled. Your message was saved; you can retry when ready._'
+        : failed ? '_I could not complete that reply. Your message was saved; please retry._' : assistant.content;
+      const metadata = cancelled || failed
+        ? { terminalState: state, retryable: true, error: error?.message || terminalError }
+        : buildAssistantMetadata(sessionId, identity.candidateId, assistant, Date.now() - startedAt);
+      const assistantMessageId = insertChatAssistantTurn(sessionId, content, metadata);
+      const result = buildChatSendResult(sessionId, identity.userMessageId, assistantMessageId, identity.candidateId, runtime, terminalError, state);
+      return { assistantMessageId, result, error: terminalError };
+    }
+  });
+}
+
+function startChatSendHeartbeat(sessionId, claim) {
+  if (!claim.request?.key || !claim.ownerToken) return null;
+  const timer = setInterval(
+    () => chatSendCoordinator.heartbeat({ sessionId, key: claim.request.key, ownerToken: claim.ownerToken }),
+    Math.max(1000, Math.floor(chatSendCoordinator.leaseMs / 3))
+  );
+  timer.unref?.();
+  return timer;
+}
+
+function replayedChatResult(claim) {
+  return claim.request?.result || { pending: true, state: claim.request?.state || 'pending', userMessageId: claim.request?.userMessageId, candidateId: claim.request?.candidateId };
+}
+
 app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   const content = req.body.content?.trim();
   if (!content) return fail(res, 400, 'Message content is required.');
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
   const sessionId = Number(req.params.id);
-  const { messageId, candidateId, userMessage } = persistChatUserTurn(sessionId, content);
+  let claim;
+  try { claim = claimChatSend(req, sessionId, content); }
+  catch (error) { return fail(res, error.statusCode || 409, error.message); }
+  if (claim.replayed) {
+    const replay = replayedChatResult(claim);
+    if (replay.pending) return res.status(202).json({ ok: true, data: replay });
+    return ok(res, replay);
+  }
   const controller = new AbortController();
-  activeChatGenerations.set(String(req.params.id), controller);
+  activeChatGenerations.set(String(req.params.id), { controller, key: claim.request?.key || null, ownerToken: claim.ownerToken });
+  const heartbeat = startChatSendHeartbeat(sessionId, claim);
   const startedAt = Date.now();
   let assistant;
   try {
@@ -2906,29 +3020,15 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
-    const terminalContent = cancelled
-      ? '_Generation cancelled. Your message was saved; you can retry when ready._'
-      : '_I could not complete that reply. Your message was saved; please retry._';
-    const assistantId = persistChatAssistantTurn(sessionId, terminalContent, { terminalState: cancelled ? 'cancelled' : 'retryable_error', error: error.message || 'Local generation failed.' });
-    return ok(res, {
-      messages: allRows('SELECT * FROM chat_messages WHERE id IN (?, ?) ORDER BY id ASC', [messageId, assistantId]),
-      candidateId,
-      runtime: cancelled ? 'cancelled' : 'setup/runtime error',
-      error: cancelled ? 'Local model generation was cancelled. Your message was saved.' : `${error.message} Your message was saved for review; no assistant response was invented.`
-    });
+    const settled = settleChatGeneration({ sessionId, claim, requestedState: cancelled ? 'cancelled' : 'retryable_error', startedAt, error });
+    return ok(res, settled.result || settled.request?.result);
   } finally {
-    if (activeChatGenerations.get(String(req.params.id)) === controller) activeChatGenerations.delete(String(req.params.id));
+    if (heartbeat) clearInterval(heartbeat);
+    if (activeChatGenerations.get(String(req.params.id))?.controller === controller) activeChatGenerations.delete(String(req.params.id));
   }
   lastRuntimeResult = { ok: true, mode: assistant.mode, at: new Date().toISOString() };
-  // Store the natural answer only; diagnostics live in structured metadata so
-  // Clean mode stays conversational and Detailed/Developer can surface them.
-  const metadata = buildAssistantMetadata(sessionId, candidateId, assistant, Date.now() - startedAt);
-  const assistantId = persistChatAssistantTurn(sessionId, assistant.content, metadata);
-  ok(res, {
-    messages: allRows('SELECT * FROM chat_messages WHERE id IN (?, ?) ORDER BY id ASC', [messageId, assistantId]),
-    candidateId,
-    runtime: assistant.mode
-  });
+  const settled = settleChatGeneration({ sessionId, claim, assistant, requestedState: 'completed', startedAt });
+  ok(res, settled.result || settled.request?.result);
 });
 
 // Streaming counterpart of the message endpoint. It forwards visible tokens over
@@ -2942,7 +3042,9 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
   if (!session) return fail(res, 404, 'Session not found.');
   const sessionId = Number(req.params.id);
-  const { messageId, candidateId, userMessage } = persistChatUserTurn(sessionId, content);
+  let claim;
+  try { claim = claimChatSend(req, sessionId, content); }
+  catch (error) { return fail(res, error.statusCode || 409, error.message); }
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -2951,10 +3053,20 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
     'X-Accel-Buffering': 'no'
   });
   const emit = (event, data) => { if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`); };
-  emit('user', { message: userMessage, candidateId });
+  const identity = chatSendIdentity(claim);
+  emit('user', { message: identity.userMessage, candidateId: identity.candidateId, replayed: claim.replayed });
+  if (claim.replayed) {
+    const replay = replayedChatResult(claim);
+    if (replay.pending) emit('error', { runtime: 'already active', error: 'This message is already being processed; showing the saved conversation.', pending: true });
+    else if (replay.terminalState === 'completed') emit('done', { message: replay.messages?.find((message) => message.role === 'assistant'), runtime: replay.runtime, candidateId: replay.candidateId, replayed: true });
+    else emit('error', { runtime: replay.runtime, error: replay.error, message: replay.messages?.find((message) => message.role === 'assistant'), replayed: true });
+    res.end();
+    return;
+  }
 
   const controller = new AbortController();
-  activeChatGenerations.set(String(sessionId), controller);
+  activeChatGenerations.set(String(sessionId), { controller, key: claim.request?.key || null, ownerToken: claim.ownerToken });
+  const heartbeat = startChatSendHeartbeat(sessionId, claim);
   // Abort generation only if the client disconnects before we finish responding.
   // (res 'close' fires on real socket close; req 'close' fires as soon as the
   // small request body is fully read, which would abort every stream instantly.)
@@ -2967,32 +3079,32 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
-    const terminalContent = cancelled
-      ? '_Generation cancelled. Your message was saved; you can retry when ready._'
-      : '_I could not complete that reply. Your message was saved; please retry._';
-    const assistantId = persistChatAssistantTurn(sessionId, terminalContent, { terminalState: cancelled ? 'cancelled' : 'retryable_error', error: error.message || 'Local generation failed.' });
+    const settled = settleChatGeneration({ sessionId, claim, requestedState: cancelled ? 'cancelled' : 'retryable_error', startedAt, error });
+    const result = settled.result || settled.request?.result;
     emit('error', {
-      runtime: cancelled ? 'cancelled' : 'setup/runtime error',
-      error: cancelled ? 'Local model generation was cancelled. Your message was saved.' : `${error.message} Your message was saved; retry is available.`,
-      message: row('SELECT * FROM chat_messages WHERE id = ?', [assistantId])
+      runtime: result.runtime,
+      error: result.error,
+      message: result.messages?.find((message) => message.role === 'assistant')
     });
     res.end();
     return;
   } finally {
-    if (activeChatGenerations.get(String(sessionId)) === controller) activeChatGenerations.delete(String(sessionId));
+    if (heartbeat) clearInterval(heartbeat);
+    if (activeChatGenerations.get(String(sessionId))?.controller === controller) activeChatGenerations.delete(String(sessionId));
   }
   lastRuntimeResult = { ok: true, mode: assistant.mode, at: new Date().toISOString() };
-  // Store the natural answer only; diagnostics live in structured metadata.
-  const metadata = buildAssistantMetadata(sessionId, candidateId, assistant, Date.now() - startedAt);
-  const assistantId = persistChatAssistantTurn(sessionId, assistant.content, metadata);
-  emit('done', { message: row('SELECT * FROM chat_messages WHERE id = ?', [assistantId]), runtime: assistant.mode, candidateId });
+  const settled = settleChatGeneration({ sessionId, claim, assistant, requestedState: 'completed', startedAt });
+  const result = settled.result || settled.request?.result;
+  emit('done', { message: result.messages?.find((message) => message.role === 'assistant'), runtime: result.runtime, candidateId: result.candidateId });
   res.end();
 });
 
 app.post('/api/chat/sessions/:id/cancel', (req, res) => {
-  const controller = activeChatGenerations.get(String(req.params.id));
-  if (!controller) return ok(res, { cancelled: false, message: 'No local generation is active for this chat.' });
-  controller.abort();
+  const sessionId = Number(req.params.id);
+  const durable = chatSendCoordinator.requestCancel(sessionId);
+  const active = activeChatGenerations.get(String(req.params.id));
+  if (!durable && !active) return ok(res, { cancelled: false, message: 'No local generation is active for this chat.' });
+  active?.controller.abort();
   ok(res, { cancelled: true, message: 'Cancellation requested for the local model generation.' });
 });
 
@@ -3970,6 +4082,7 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
 
 app.get('/api/chat/sessions/:id/connection', async (req, res) => {
   const sessionId = Number(req.params.id);
+  const activeChatSend = chatSendCoordinator.active(sessionId);
   const model = await localModelStatus();
   const contextRecords = allRows('SELECT id, kind, ref_id, label FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
   const files = allRows('SELECT id, path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
@@ -3994,7 +4107,8 @@ app.get('/api/chat/sessions/:id/connection', async (req, res) => {
       sources: available.filter((record) => record.category === 'repository knowledge').slice(0, 20).map((record) => record.provenance)
     },
     capabilities: capabilityRegistry.list().map((c) => c.name),
-    generating: activeChatGenerations.has(String(sessionId))
+    generating: Boolean(activeChatSend),
+    generation: activeChatSend ? { state: activeChatSend.state, userMessageId: activeChatSend.userMessageId } : null
   });
 });
 
