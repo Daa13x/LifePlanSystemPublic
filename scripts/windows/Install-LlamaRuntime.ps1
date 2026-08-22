@@ -48,7 +48,19 @@ function Assert-ProvisioningPath([string]$Candidate) {
 }
 
 function Get-Sha256([string]$Path) {
-  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  # Use the framework primitive directly. Some locked-down or embedded Windows
+  # PowerShell hosts do not auto-load Microsoft.PowerShell.Utility, which made
+  # Get-FileHash disappear during an otherwise valid local portable build.
+  $stream = [System.IO.File]::OpenRead([System.IO.Path]::GetFullPath($Path))
+  $hasher = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = $hasher.ComputeHash($stream)
+    return ([System.BitConverter]::ToString($bytes)).Replace('-', '').ToLowerInvariant()
+  }
+  finally {
+    $hasher.Dispose()
+    $stream.Dispose()
+  }
 }
 
 function Test-LlamaRuntimePayload([string]$Root) {

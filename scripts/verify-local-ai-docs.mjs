@@ -50,6 +50,8 @@ try {
   assert.match(provisioner, /6deafbf1f065e02d5aba723ff015cfef642501264c1e30b31c89b70085dd1721/);
   assert.match(provisioner, /Qwen2\.5-1\.5B-Instruct-Q4_K_M\.gguf/);
   assert.match(provisioner, /1adf0b11065d8ad2e8123ea110d1ec956dab4ab038eab665614adba04b6c3370/);
+  assert.match(provisioner, /System\.Security\.Cryptography\.SHA256\]::Create\(\)/);
+  assert.doesNotMatch(provisioner, /\bGet-FileHash\s+-/);
   assert.match(serverSource, /waitForLlamaServer/);
   assert.match(serverSource, /fs\.renameSync\(partial, target\)/);
   assert.doesNotMatch(serverSource, /\/api\/tooling\/ollama/);
