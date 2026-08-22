@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { evaluateGitAuthority } from './gitAuthorityPolicy.js';
+import { effectiveValidatedAdviceHash } from './consultationReceipt.js';
 
 const TASK_ID = /^code-[A-Za-z0-9-]+$/;
 const MAX_CONTEXT_BYTES = 48000;
@@ -89,7 +90,7 @@ function limitUtf8(value, maxBytes = MAX_TOOL_RESULT_BYTES) {
   return `${source.slice(0, low)}\n[tool result truncated at ${maxBytes} bytes]`;
 }
 
-function taskSeal(task) {
+export function nativeCodingTaskSeal(task) {
   return digest({
     title: task.title,
     objective: task.objective,
@@ -331,7 +332,7 @@ export class NativeCodingWorker {
       preparation: null, browserAdvice: null, assessment: null,
       executionType: 'unclassified', gitAuthority: null, audit: []
     };
-    task.taskHash = taskSeal(task);
+    task.taskHash = nativeCodingTaskSeal(task);
     this.record(task, 'create', 'allow', `Task scope sealed as ${task.taskHash}.`);
     return this.save(task);
   }
@@ -652,11 +653,11 @@ export class NativeCodingWorker {
   async run(id, approval = {}) {
     const task = this.load(id);
     if (approval.confirm !== true) throw new Error('Explicit run approval is required.');
-    if (taskSeal(task) !== task.taskHash || approval.taskHash !== task.taskHash) throw new Error('Run approval does not match the current sealed task scope. Refresh and approve again.');
+    if (nativeCodingTaskSeal(task) !== task.taskHash || approval.taskHash !== task.taskHash) throw new Error('Run approval does not match the current sealed task scope. Refresh and approve again.');
     if (!['pending', 'prepared', 'failed', 'interrupted', 'cancelled'].includes(task.status)) throw new Error(`Task cannot run from status ${task.status}.`);
     if (task.baseCommit && !task.preparation?.evidenceHash) throw new Error('Prepare and review scoped workspace evidence before running this task.');
     if (task.baseCommit && approval.evidenceHash !== task.preparation?.evidenceHash) throw new Error('Run approval does not match the prepared workspace evidence. Refresh and approve again.');
-    const adviceHash = task.browserAdvice?.status === 'validated' ? String(task.browserAdvice.answerHash || '') : '';
+    const adviceHash = effectiveValidatedAdviceHash(task);
     if (task.baseCommit && String(approval.adviceHash || '') !== adviceHash) throw new Error('Run approval does not match the current validated browser advice. Refresh and approve again.');
     if (this.reserved || this.active.size) throw new Error('Another native coding task is active. LPS runs one mutation-capable worker at a time.');
     this.reserved = true;

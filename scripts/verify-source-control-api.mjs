@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -145,13 +146,45 @@ try {
   assert.equal(preparedCoding.response.status, 200, JSON.stringify(preparedCoding.body));
   assert.equal(preparedCoding.body.data.task.status, 'prepared');
   const sealed = preparedCoding.body.data.task;
+  const blockedRunProposal = await api(`/api/source/coding/tasks/${sealed.id}/run/propose`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ taskHash: sealed.taskHash, evidenceHash: sealed.preparation.evidenceHash, adviceHash: '' })
+  });
+  assert.equal(blockedRunProposal.response.status, 409, JSON.stringify(blockedRunProposal.body));
+  assert.equal(blockedRunProposal.body.data.readiness.ready, false, 'unavailable Git/model readiness creates no confirmation');
+  assert.equal(blockedRunProposal.body.data.confirmationId, undefined, 'blocked readiness returns no confirmation identity or token');
+  await api('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localCodeModelEndpoint: 'http://127.0.0.1:9', localCodeModelName: 'fixture/local-coder', localCodeModelLocalVerified: true })
+  });
+  git(['remote', 'set-url', 'origin', 'https://github.com/Daa13x/LifePlanSystemPublic.git'], client);
   const runProposal = await api(`/api/source/coding/tasks/${sealed.id}/run/propose`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ taskHash: sealed.taskHash, evidenceHash: sealed.preparation.evidenceHash, adviceHash: '' })
   });
   assert.equal(runProposal.response.status, 200, JSON.stringify(runProposal.body));
   assert.ok(/^[a-f0-9]{64}$/i.test(runProposal.body.data.token), 'run proposal returns one raw token only to its proposer');
+  assert.equal(runProposal.body.data.readiness.ready, true, 'run proposal returns a ready receipt only after all current gates pass');
+  assert.equal(runProposal.body.data.readiness.authorizesExecution, false, 'readiness never grants execution authority');
+  assert.equal(runProposal.body.data.readiness.effects.runtimeStarted, false, 'readiness does not start the configured runtime');
+  assert.equal(runProposal.body.data.snapshot.readiness.receiptHash, runProposal.body.data.readiness.receiptHash, 'the durable before-state binds the exact readiness receipt');
+  assert.ok(!JSON.stringify(runProposal.body.data.readiness).includes('127.0.0.1:9'), 'the receipt never exposes the configured endpoint');
   assert.equal(fs.readFileSync(path.join(client, 'version.txt'), 'utf8').trim(), 'one', 'proposing a coding run does not mutate the checkout');
+  assert.equal(fs.existsSync(path.join(client, '.lps', 'native-code', 'worktrees', sealed.id)), false, 'readiness creates no detached worktree');
+  await api('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ localCodeModelName: 'fixture/changed-model' })
+  });
+  const staleRunConfirm = await api(`/api/source/coding/tasks/${sealed.id}/run/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirmationId: runProposal.body.data.confirmationId, token: runProposal.body.data.token })
+  });
+  assert.equal(staleRunConfirm.response.status, 409, JSON.stringify(staleRunConfirm.body));
+  assert.match(staleRunConfirm.body.error, /target changed|Review it again/i, 'changed model identity stales readiness before claim');
+  const receiptDb = new DatabaseSync(path.join(probeRoot, 'source.sqlite'), { readOnly: true });
+  assert.equal(receiptDb.prepare('SELECT status FROM confirmations WHERE id = ?').get(runProposal.body.data.confirmationId).status, 'awaiting_confirmation', 'stale readiness leaves the confirmation unconsumed');
+  receiptDb.close();
+  assert.equal((await api('/api/source/coding/status')).body.data.tasks.find((task) => task.id === sealed.id)?.status, 'prepared', 'stale readiness starts no worker');
   const wrongRunConfirm = await api(`/api/source/coding/tasks/${sealed.id}/run/confirm`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ confirmationId: runProposal.body.data.confirmationId, token: 'wrong' })
@@ -159,6 +192,7 @@ try {
   assert.equal(wrongRunConfirm.response.status, 409, JSON.stringify(wrongRunConfirm.body));
   const codingAfterWrongToken = await api('/api/source/coding/status');
   assert.equal(codingAfterWrongToken.body.data.tasks.find((task) => task.id === sealed.id)?.status, 'prepared', 'a wrong confirmation token does not start the local worker');
+  git(['remote', 'set-url', 'origin', bare], client);
 
   fs.writeFileSync(path.join(upstream, 'version.txt'), 'two\n');
   git(['add', 'version.txt'], upstream);
@@ -213,6 +247,14 @@ try {
   console.log('Source Control API fetch, pull, publication, push gate, and installer status acceptance passed.');
 } finally {
   if (server && !server.killed) server.kill();
-  for (let attempt = 0; attempt < 30 && server?.exitCode === null; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));
-  fs.rmSync(probeRoot, { recursive: true, force: true });
+  for (let attempt = 0; attempt < 100 && server?.exitCode === null; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+  // Best-effort temp cleanup: on Windows, git pack objects are read-only and a
+  // just-exited child can briefly hold a handle, so rmSync of the probe root can
+  // EPERM even after retries. A cleanup failure must never fail an otherwise
+  // passing acceptance run, so swallow it and let the OS reclaim the temp dir.
+  try {
+    fs.rmSync(probeRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch (cleanupError) {
+    console.warn(`Temp cleanup warning (${cleanupError.code}): ${probeRoot} left for the OS to reclaim.`);
+  }
 }

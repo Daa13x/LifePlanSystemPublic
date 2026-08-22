@@ -65,7 +65,8 @@ import {
 } from './executorEnforcement.js';
 import { resolveRunCliCwd } from './runCliCwd.js';
 import { chromeProfileArgument, probeChromeExtension } from './browserExtensionInstall.js';
-import { NativeCodingWorker, NATIVE_CODING_LIMITS, NATIVE_CODING_VALIDATIONS } from './nativeCodingWorker.js';
+import { NativeCodingWorker, NATIVE_CODING_LIMITS, NATIVE_CODING_VALIDATIONS, nativeCodingTaskSeal } from './nativeCodingWorker.js';
+import { buildNativeCodingReadinessReceipt, publicNativeCodingReadiness } from './nativeCodingReadiness.js';
 import {
   FileIndexCache,
   buildWorkspaceEvidence,
@@ -5752,15 +5753,74 @@ async function prepareNativeCodingTask(task) {
   return nativeCodingWorker.save(task);
 }
 
-function codingConfirmationSnapshot(task, kind) {
+function inspectNativeCodingLease(id, operation) {
+  const file = nativeCodingWorker.operationLeaseFile(id, operation);
+  if (!fs.existsSync(file)) return 'available';
+  const lease = nativeCodingWorker.readOperationLease(id, operation);
+  if (!lease) return 'unreadable';
+  return nativeCodingWorker.leaseIsActive(lease) ? 'active' : 'available';
+}
+
+async function assessNativeCodingRunReadiness(task) {
+  const [status, head, branch, remote, model] = await Promise.all([
+    runCli('git', ['status', '--porcelain=v1'], { timeout: 30000, maxBuffer: 1024 * 1024, preserveOutput: true }),
+    runCli('git', ['rev-parse', 'HEAD'], { timeout: 30000, maxBuffer: 1024 * 1024 }),
+    runCli('git', ['branch', '--show-current'], { timeout: 30000, maxBuffer: 1024 * 1024 }),
+    runCli('git', ['remote', 'get-url', 'origin'], { timeout: 30000, maxBuffer: 1024 * 1024 }),
+    nativeCodingModelConfig(false)
+  ]);
+  const adviceHash = effectiveValidatedAdviceHash(task);
+  const validationScope = assessValidationScope({ allowedPaths: task.allowedPaths, validation: task.validation });
+  const authority = evaluateGitAuthority({
+    operation: 'detached_worktree',
+    executionType: 'local',
+    modelProvider: model.provider,
+    modelId: model.model,
+    inferenceEndpoint: model.endpoint,
+    localInferenceVerified: model.localInferenceVerified,
+    branchCreator: 'lifeplansystem-native-coding-controller',
+    repository: remote.ok ? remote.stdout : '',
+    startingCommit: head.ok ? head.stdout.trim() : '',
+    startingBranch: branch.ok ? branch.stdout.trim() : '',
+    activeBranch: branch.ok ? branch.stdout.trim() : '',
+    worktreeClean: status.ok && !status.stdout.trim(),
+    taskId: task.id,
+    taskCardValid: Boolean(task.title && task.objective && task.baseCommit && task.taskHash),
+    allowedPaths: task.allowedPaths,
+    protectedPathHits: (task.allowedPaths || []).filter((candidate) => nativeCodingForbiddenPath(candidate))
+  });
+  const receipt = buildNativeCodingReadinessReceipt({
+    task,
+    taskSealValid: nativeCodingTaskSeal(task) === task.taskHash,
+    evidenceReady: task.preparation?.status === 'ready'
+      && /^[a-f0-9]{64}$/i.test(String(task.preparation?.evidenceHash || ''))
+      && task.preparation?.baseCommit === task.baseCommit,
+    baseCurrent: head.ok && head.stdout.trim() === task.baseCommit,
+    evidenceHash: task.preparation?.evidenceHash || '',
+    adviceHash,
+    adviceCurrent: task.browserAdvice?.status !== 'validated' || Boolean(adviceHash),
+    validationScope,
+    model: { ...model, configured: Boolean(model.endpoint) },
+    authority,
+    workerAvailable: nativeCodingWorker.reserved !== true && nativeCodingWorker.active.size === 0,
+    runLeaseState: inspectNativeCodingLease(task.id, 'run'),
+    applyLeaseState: inspectNativeCodingLease(task.id, 'apply'),
+    worktreeAvailable: !fs.existsSync(path.join(nativeCodingWorker.worktreeDir, task.id)) || ['interrupted', 'cancelled'].includes(task.status)
+  });
+  return { receipt, observedAt: new Date().toISOString(), validationScope };
+}
+
+async function codingConfirmationSnapshot(task, kind, readiness = null) {
   if (kind === 'run') {
+    const assessment = readiness || await assessNativeCodingRunReadiness(task);
     return {
       kind, taskId: task.id, status: task.status, taskHash: task.taskHash,
       evidenceHash: task.preparation?.evidenceHash || '',
       // Only fresh, still-bound validated advice may be carried into a run; advice
       // whose task seal or prepared evidence has since changed is treated as stale.
       adviceHash: effectiveValidatedAdviceHash(task),
-      baseCommit: task.baseCommit
+      baseCommit: task.baseCommit,
+      readiness: assessment.receipt
     };
   }
   return {
@@ -5769,22 +5829,24 @@ function codingConfirmationSnapshot(task, kind) {
   };
 }
 
-function proposeCodingConfirmation(req, res, kind) {
+async function proposeCodingConfirmation(req, res, kind) {
   try {
     const task = nativeCodingWorker.load(req.params.id);
     // Validation-scope preflight (audit delta #3): never offer a run confirmation
     // for a task whose operator-selected validation cannot exercise the file
     // types in its allowed paths. The worker still runs the human-selected
     // command independently; this only blocks an under-covered task up front.
-    if (kind === 'run') {
-      const scope = assessValidationScope({ allowedPaths: task.allowedPaths, validation: task.validation });
-      if (!scope.ok) return fail(res, 400, `Validation scope insufficient: ${scope.reason} Seal a new task whose validation covers its files.`);
-    }
-    const snapshot = codingConfirmationSnapshot(task, kind);
+    const readiness = kind === 'run' ? await assessNativeCodingRunReadiness(task) : null;
+    if (kind === 'run' && !readiness.validationScope.ok) return fail(res, 400, `Validation scope insufficient: ${readiness.validationScope.reason} Seal a new task whose validation covers its files.`);
+    const snapshot = await codingConfirmationSnapshot(task, kind, readiness);
     const allowed = kind === 'run'
       ? ['prepared', 'failed', 'interrupted', 'cancelled'].includes(task.status) && Boolean(snapshot.evidenceHash) && req.body?.taskHash === snapshot.taskHash && req.body?.evidenceHash === snapshot.evidenceHash && String(req.body?.adviceHash || '') === snapshot.adviceHash
       : task.status === 'review' && Boolean(snapshot.patchHash) && req.body?.patchHash === snapshot.patchHash;
     if (!allowed) return fail(res, 409, kind === 'run' ? 'Run confirmation does not match the current sealed task, prepared evidence, and validated advice.' : 'Apply confirmation does not match the current reviewed patch.');
+    if (kind === 'run' && !readiness.receipt.ready) {
+      const blocked = readiness.receipt.gates.filter((item) => !item.ok).map((item) => item.reasonCode).join(', ');
+      return res.status(409).json({ ok: false, error: `Native coding run is not ready: ${blocked}.`, data: { readiness: publicNativeCodingReadiness(readiness.receipt, readiness.observedAt) } });
+    }
     const confirmation = proposeConfirmation(db, {
       operation: `native_coding.${kind}`,
       target: task.id,
@@ -5798,7 +5860,7 @@ function proposeCodingConfirmation(req, res, kind) {
     });
     nativeCodingWorker.record(task, `${kind}_confirmation_proposed`, 'allow', `Durable ${kind} confirmation ${confirmation.id} is bound to the current task snapshot.`);
     nativeCodingWorker.save(task);
-    ok(res, { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt, snapshot });
+    ok(res, { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt, snapshot, readiness: kind === 'run' ? publicNativeCodingReadiness(readiness.receipt, readiness.observedAt) : null });
   } catch (error) {
     fail(res, 409, error.message);
   }
@@ -5816,7 +5878,7 @@ async function confirmCodingConfirmation(req, res, kind) {
       { id: confirmationId, token, sessionId: CONFIRMATION_SESSION },
       async () => {
         const task = nativeCodingWorker.load(req.params.id);
-        const snapshot = codingConfirmationSnapshot(task, kind);
+        const snapshot = await codingConfirmationSnapshot(task, kind);
         return kind === 'run'
           ? nativeCodingWorker.run(task.id, { confirm: true, taskHash: snapshot.taskHash, evidenceHash: snapshot.evidenceHash, adviceHash: snapshot.adviceHash, approvedBy: 'user' })
           : nativeCodingWorker.apply(task.id, { confirm: true, patchHash: snapshot.patchHash, approvedBy: 'user' });
@@ -8077,9 +8139,9 @@ app.post('/api/source/coding/tasks/:id/advice/poll', async (req, res) => {
   }
 });
 
-app.post('/api/source/coding/tasks/:id/run/propose', (req, res) => proposeCodingConfirmation(req, res, 'run'));
+app.post('/api/source/coding/tasks/:id/run/propose', async (req, res) => proposeCodingConfirmation(req, res, 'run'));
 app.post('/api/source/coding/tasks/:id/run/confirm', async (req, res) => confirmCodingConfirmation(req, res, 'run'));
-app.post('/api/source/coding/tasks/:id/apply/propose', (req, res) => proposeCodingConfirmation(req, res, 'apply'));
+app.post('/api/source/coding/tasks/:id/apply/propose', async (req, res) => proposeCodingConfirmation(req, res, 'apply'));
 app.post('/api/source/coding/tasks/:id/apply/confirm', async (req, res) => confirmCodingConfirmation(req, res, 'apply'));
 
 app.post('/api/source/coding/tasks/:id/reject', async (req, res) => {
