@@ -11,7 +11,8 @@ import {
   validateQuestionForPhase,
   validateAttachmentManifest,
   detectNoProgress,
-  evaluateUnattendedSend
+  evaluateUnattendedSend,
+  questionSignature
 } from '../server/unattendedLoopGuard.js';
 
 let failures = 0;
@@ -65,6 +66,11 @@ line(validateQuestionForPhase('nonsense', 'execution').valid === false && valida
     { type: 'evidence-request', text: 'run 3', evidenceHash: 'e', stateHash: 's' }
   ], { limit: 3 });
   line(stagnant.blocked === true && /no progress/.test(stagnant.reason), 'the loop stops for human review after the no-progress limit');
+  line(questionSignature({ ...base, _trustedSignature: 'persisted-hash' }) === 'persisted-hash'
+    && detectNoProgress([{ ...base, _trustedSignature: 'persisted-hash' }, { ...base, text: 'not stored', _trustedSignature: 'persisted-hash' }]).blocked,
+  'server-trusted persisted signatures support duplicate detection without storing raw question text');
+  line(questionSignature({ type: 'clarification', text: '東京の選択' }) !== questionSignature({ type: 'clarification', text: '大阪の選択' }),
+    'distinct non-Latin questions retain distinct normalized signatures');
 }
 
 // --- full preparation gate ---

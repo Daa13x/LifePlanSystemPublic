@@ -44,7 +44,7 @@ import { buildWorkOrder } from './workOrder.js';
 import { normalizeFeedback, summarizeThemes, FEEDBACK_SENTIMENTS } from './feedbackIntake.js';
 import { normalizeFailure, normalizeCompleteFailureCounts, proposeRemediation, summarizeByCategory, evaluateImprovement, FAILURE_CATEGORIES, FAILURE_STATUSES } from './failureTaxonomy.js';
 import { summarizeRoutes, recommendRoute, shouldEscalate, effectiveCost, DEFAULT_ROUTE_TIERS, ROUTING_COST_UNIT, ROUTING_EFFORTS } from './costRouting.js';
-import { evaluateUnattendedSend } from './unattendedLoopGuard.js';
+import { evaluateUnattendedSend, questionSignature } from './unattendedLoopGuard.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
   OPENHANDS_MANDATORY_FORBIDDEN,
@@ -5020,6 +5020,205 @@ app.post('/api/loop/evaluate', (req, res) => {
     manifest: manifest || [], available: available || [], attempts: attempts || [],
     limit: limit ?? 3
   }));
+});
+
+const LOOP_ITEM_TYPES = new Set(['project', 'item']);
+const SAFE_LOOP_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/;
+
+function loopHttpError(status, message) {
+  const error = new Error(message);
+  error.httpStatus = status;
+  return error;
+}
+
+function boundedLoopText(value, label, max, { pattern = null } = {}) {
+  if (typeof value !== 'string') throw loopHttpError(400, `${label} must be text.`);
+  const text = value.trim();
+  if (!text || text.length > max || /[\u0000-\u001f\u007f]/.test(text) || (pattern && !pattern.test(text))) throw loopHttpError(400, `${label} is invalid or exceeds ${max} characters.`);
+  return text;
+}
+
+function normalizeLoopStringList(value, label, { maxItems = 20, maxLength = 300 } = {}) {
+  if (!Array.isArray(value) || !value.length || value.length > maxItems) throw loopHttpError(400, `${label} must contain 1-${maxItems} entries.`);
+  return value.map((entry) => boundedLoopText(entry, label, maxLength));
+}
+
+function normalizeLoopPath(value) {
+  const item = boundedLoopText(value, 'Attachment path', 260).replaceAll('\\', '/');
+  if (item.startsWith('/') || /^[A-Za-z]:\//.test(item) || item.split('/').some((part) => !part || part === '.' || part === '..')) throw loopHttpError(400, 'Attachment paths must be normalized repository-relative paths.');
+  return item;
+}
+
+function normalizeLoopAttemptRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw loopHttpError(400, 'Preparation attempt must be an object.');
+  const allowed = new Set(['runId', 'run_id', 'workItemType', 'work_item_type', 'workItemId', 'work_item_id', 'item', 'phase', 'question', 'manifest', 'available', 'limit', 'retryReason', 'retry_reason', 'transitionReason', 'transition_reason']);
+  const unexpected = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unexpected.length) throw loopHttpError(400, `Unexpected preparation field: ${unexpected[0]}.`);
+  const runId = routingAlias(body, 'runId', 'run_id');
+  const workItemType = routingAlias(body, 'workItemType', 'work_item_type');
+  const workItemId = routingAlias(body, 'workItemId', 'work_item_id');
+  if (typeof runId !== 'string' || !SAFE_LOOP_REF.test(runId)) throw loopHttpError(400, 'Run ID must be an 8-200 character opaque identifier.');
+  if (!LOOP_ITEM_TYPES.has(workItemType)) throw loopHttpError(400, 'Work item type must be project or item.');
+  if (!Number.isInteger(workItemId) || workItemId <= 0) throw loopHttpError(400, 'Work item ID must be a positive integer.');
+  const item = body.item;
+  if (!item || typeof item !== 'object' || Array.isArray(item)) throw loopHttpError(400, 'A bounded work item contract is required.');
+  const itemAllowed = new Set(['id', 'state', 'scope', 'requiredEvidence', 'expectedOutput', 'stopConditions']);
+  const itemUnexpected = Object.keys(item).filter((key) => !itemAllowed.has(key));
+  if (itemUnexpected.length) throw loopHttpError(400, `Unexpected work item contract field: ${itemUnexpected[0]}.`);
+  if (String(item.id) !== String(workItemId)) throw loopHttpError(400, 'Work item contract ID does not match the canonical target.');
+  const contract = {
+    id: workItemId,
+    state: boundedLoopText(item.state, 'Work item state', 80),
+    scope: normalizeLoopStringList(item.scope, 'Authorised scope', { maxLength: 260 }).map(normalizeLoopPath),
+    requiredEvidence: normalizeLoopStringList(item.requiredEvidence, 'Required evidence'),
+    expectedOutput: boundedLoopText(item.expectedOutput, 'Expected output', 1000),
+    stopConditions: normalizeLoopStringList(item.stopConditions, 'Stop conditions')
+  };
+  const question = body.question;
+  if (!question || typeof question !== 'object' || Array.isArray(question)) throw loopHttpError(400, 'A bounded question is required.');
+  const questionAllowed = new Set(['type', 'text', 'justifiedRetry']);
+  const questionUnexpected = Object.keys(question).filter((key) => !questionAllowed.has(key));
+  if (questionUnexpected.length) throw loopHttpError(400, `Unexpected question field: ${questionUnexpected[0]}.`);
+  const normalizedQuestion = {
+    type: boundedLoopText(question.type, 'Question type', 40),
+    text: boundedLoopText(question.text, 'Question text', 1000),
+    justifiedRetry: question.justifiedRetry === true
+  };
+  if (question.justifiedRetry !== undefined && typeof question.justifiedRetry !== 'boolean') throw loopHttpError(400, 'justifiedRetry must be a boolean.');
+  const retryReasonRaw = routingAlias(body, 'retryReason', 'retry_reason');
+  const transitionReasonRaw = routingAlias(body, 'transitionReason', 'transition_reason');
+  const retryReason = retryReasonRaw == null ? null : boundedLoopText(retryReasonRaw, 'Retry reason', 500);
+  const transitionReason = transitionReasonRaw == null ? null : boundedLoopText(transitionReasonRaw, 'Transition reason', 500);
+  if (normalizedQuestion.justifiedRetry && !retryReason) throw loopHttpError(400, 'A justified retry requires a retry reason.');
+  if (!normalizedQuestion.justifiedRetry && retryReason) throw loopHttpError(400, 'A retry reason is allowed only for a justified retry.');
+  const normalizeFile = (entry, available = false) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw loopHttpError(400, 'Attachment records must be objects.');
+    const allowedFile = new Set(available ? ['path', 'hash', 'stale'] : ['path', 'hash']);
+    if (Object.keys(entry).some((key) => !allowedFile.has(key))) throw loopHttpError(400, 'Attachment record contains an unexpected field.');
+    const result = { path: normalizeLoopPath(entry.path), hash: boundedLoopText(entry.hash, 'Attachment hash', 64, { pattern: /^[a-f0-9]{64}$/ }) };
+    if (available) {
+      if (entry.stale !== undefined && typeof entry.stale !== 'boolean') throw loopHttpError(400, 'Attachment stale state must be a boolean.');
+      result.stale = entry.stale === true;
+    }
+    return result;
+  };
+  if (!Array.isArray(body.manifest) || body.manifest.length > 30 || !Array.isArray(body.available) || body.available.length > 50) throw loopHttpError(400, 'Attachment manifest or availability list is invalid or oversized.');
+  const limit = body.limit ?? 3;
+  if (!Number.isInteger(limit) || limit < 2 || limit > 10) throw loopHttpError(400, 'No-progress limit must be an integer from 2 to 10.');
+  const manifest = body.manifest.map((entry) => normalizeFile(entry));
+  const available = body.available.map((entry) => normalizeFile(entry, true));
+  for (const [label, entries] of [['manifest', manifest], ['available', available]]) {
+    if (new Set(entries.map((entry) => entry.path.toLowerCase())).size !== entries.length) throw loopHttpError(400, `Attachment ${label} contains duplicate paths.`);
+  }
+  manifest.sort((a, b) => a.path.localeCompare(b.path, 'en', { sensitivity: 'base' }));
+  available.sort((a, b) => a.path.localeCompare(b.path, 'en', { sensitivity: 'base' }));
+  return {
+    runId, workItemType, workItemId, item: contract,
+    phase: boundedLoopText(body.phase, 'Workflow phase', 40), question: normalizedQuestion,
+    manifest, available,
+    limit, retryReason, transitionReason
+  };
+}
+
+function publicLoopAttempt(record) {
+  return {
+    id: record.id, runId: record.run_id, workItemType: record.work_item_type,
+    workItemId: record.work_item_id, phase: record.phase, questionType: record.question_type,
+    justifiedRetry: Boolean(record.justified_retry), retryReason: record.retry_reason,
+    transitionReason: record.transition_reason, attachmentCount: record.attachment_count,
+    ready: Boolean(record.ready), blocked: Boolean(record.blocked),
+    preparationOnly: true, authorizationGranted: false, sent: false, executed: false,
+    reasons: JSON.parse(record.reasons_json || '[]'), failureEventId: record.failure_event_id,
+    createdAt: record.created_at
+  };
+}
+
+app.post('/api/loop/attempts', (req, res) => {
+  const suppliedKey = req.get('X-LPS-Idempotency-Key');
+  const attemptKey = normalizeIdempotencyKey(suppliedKey);
+  if (!suppliedKey || !attemptKey) return fail(res, 400, 'A valid X-LPS-Idempotency-Key is required.');
+  let input;
+  try { input = normalizeLoopAttemptRequest(req.body); }
+  catch (error) { return fail(res, error.httpStatus || 400, error.message); }
+  const requestHash = hashRequest({ route: '/api/loop/attempts', ...input });
+  try {
+    const result = runIdempotent({
+      db, transaction, route: '/api/loop/attempts', key: attemptKey, requestHash,
+      execute: () => {
+        const canonical = input.workItemType === 'project'
+          ? row('SELECT id, name, status, owner, source, confidence, last_reviewed, evidence, next_action, shareability, created_at, updated_at FROM projects WHERE id = ?', [input.workItemId])
+          : row('SELECT id, type, title, body, source, status, confidence, last_reviewed, evidence, owner, next_action, project_id, due_at, shareability, created_at, updated_at FROM knowledge_items WHERE id = ?', [input.workItemId]);
+        if (!canonical) throw loopHttpError(404, 'Canonical Workboard item not found.');
+        if (canonical.status !== input.item.state) throw loopHttpError(409, 'Work item state changed; start again from current Workboard state.');
+        const canonicalStateHash = hashRequest({ workItemType: input.workItemType, record: canonical });
+        const prior = allRows('SELECT * FROM unattended_preparation_attempts WHERE run_id = ? AND work_item_type = ? AND work_item_id = ? ORDER BY id ASC', [input.runId, input.workItemType, input.workItemId]);
+        if (prior.some((attempt) => attempt.blocked)) throw loopHttpError(409, 'This preparation run is blocked for human review; start a new reviewed run to continue.');
+        const contractHash = hashRequest({ item: input.item, noProgressLimit: input.limit, canonicalStateHash });
+        if (prior.length && prior[0].contract_hash !== contractHash) throw loopHttpError(409, 'The bounded work item contract changed; start a new run.');
+        const previous = prior[prior.length - 1] || null;
+        const transitioned = Boolean(previous && previous.phase !== input.phase);
+        if (transitioned && !input.transitionReason) throw loopHttpError(400, 'A phase transition requires a transition reason.');
+        if (!transitioned && input.transitionReason) throw loopHttpError(400, 'A transition reason is allowed only when the phase changes.');
+        const signature = hashRequest(questionSignature(input.question));
+        const availableByPath = new Map(input.available.map((entry) => [entry.path.toLowerCase(), entry]));
+        const evidenceHash = hashRequest(input.manifest.map((entry) => {
+          const available = availableByPath.get(entry.path.toLowerCase());
+          return {
+            path: entry.path.toLowerCase(), expectedHash: entry.hash,
+            availableHash: available?.hash || null, stale: available ? available.stale : null
+          };
+        }));
+        const persistedHistory = prior.map((attempt) => ({
+          type: attempt.question_type, _trustedSignature: attempt.question_signature,
+          evidenceHash: attempt.evidence_hash, stateHash: attempt.canonical_state_hash,
+          justifiedRetry: Boolean(attempt.justified_retry)
+        }));
+        const currentQuestion = { ...input.question, _trustedSignature: signature, evidenceHash, stateHash: canonicalStateHash };
+        const evaluation = evaluateUnattendedSend({ ...input, question: currentQuestion, attempts: persistedHistory });
+        const manifestHash = hashRequest(input.manifest);
+        const blocked = evaluation.progress.blocked;
+        const id = db.prepare(`
+          INSERT INTO unattended_preparation_attempts
+          (attempt_key, request_hash, run_id, work_item_type, work_item_id, contract_hash, canonical_state_hash, no_progress_limit, phase, question_type, question_signature, evidence_hash, state_hash, justified_retry, retry_reason, transition_reason, manifest_hash, attachment_count, ready, blocked, reasons_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          attemptKey, requestHash, input.runId, input.workItemType, input.workItemId,
+          contractHash, canonicalStateHash, input.limit, input.phase, input.question.type, signature, evidenceHash,
+          canonicalStateHash, input.question.justifiedRetry ? 1 : 0, input.retryReason,
+          input.transitionReason, manifestHash, input.manifest.length,
+          evaluation.ready ? 1 : 0, blocked ? 1 : 0, JSON.stringify(evaluation.reasons)
+        ).lastInsertRowid;
+        let failureEventId = null;
+        if (blocked) {
+          const category = evaluation.progress.duplicateOf !== undefined ? 'repeated-question' : 'no-progress-loop';
+          failureEventId = db.prepare(`
+            INSERT INTO failure_events (category, status, source, task_ref, run_id, inputs, evidence, correction, outcome)
+            VALUES (?, 'observed', 'unattended-loop-guard', ?, ?, ?, ?, ?, ?)
+          `).run(
+            category, `${input.workItemType}:${input.workItemId}`, input.runId,
+            JSON.stringify({ contractHash, questionSignature: signature, manifestHash }),
+            JSON.stringify(evaluation.reasons),
+            'Review the blocker and start a new run only after evidence, state, or scope is deliberately changed.',
+            'Preparation blocked; nothing was sent or executed; human review is required.'
+          ).lastInsertRowid;
+          db.prepare('UPDATE unattended_preparation_attempts SET failure_event_id = ? WHERE id = ?').run(failureEventId, id);
+        }
+        return { statusCode: 200, body: publicLoopAttempt(row('SELECT * FROM unattended_preparation_attempts WHERE id = ?', [id])) };
+      }
+    });
+    ok(res, { ...result.body, replayed: result.replayed });
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) return fail(res, 409, error.message);
+    fail(res, error.httpStatus || 500, error.httpStatus ? error.message : 'Preparation attempt could not be stored.');
+  }
+});
+
+app.get('/api/loop/attempts', (req, res) => {
+  const runId = String(req.query.runId || req.query.run_id || '');
+  const workItemType = String(req.query.workItemType || req.query.work_item_type || '');
+  const workItemId = Number(req.query.workItemId || req.query.work_item_id);
+  if (!SAFE_LOOP_REF.test(runId) || !LOOP_ITEM_TYPES.has(workItemType) || !Number.isInteger(workItemId) || workItemId <= 0) return fail(res, 400, 'A valid run and Workboard identity are required.');
+  ok(res, allRows('SELECT * FROM unattended_preparation_attempts WHERE run_id = ? AND work_item_type = ? AND work_item_id = ? ORDER BY id ASC', [runId, workItemType, workItemId]).map(publicLoopAttempt));
 });
 
 // ── Knowledge items: direct CRUD ─────────────────────────────────────────────

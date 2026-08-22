@@ -503,6 +503,37 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_routing_obs_class ON routing_observations(task_class, route);
 
+    -- Durable, server-history-backed preparation receipts for unattended
+    -- Workboard safety checks. These rows authorize and execute nothing.
+    CREATE TABLE IF NOT EXISTS unattended_preparation_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      attempt_key TEXT NOT NULL UNIQUE,
+      request_hash TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      work_item_type TEXT NOT NULL CHECK (work_item_type IN ('project','item')),
+      work_item_id INTEGER NOT NULL,
+      contract_hash TEXT NOT NULL,
+      canonical_state_hash TEXT NOT NULL,
+      no_progress_limit INTEGER NOT NULL CHECK (no_progress_limit BETWEEN 2 AND 10),
+      phase TEXT NOT NULL,
+      question_type TEXT NOT NULL,
+      question_signature TEXT NOT NULL,
+      evidence_hash TEXT NOT NULL,
+      state_hash TEXT NOT NULL,
+      justified_retry INTEGER NOT NULL DEFAULT 0 CHECK (justified_retry IN (0,1)),
+      retry_reason TEXT,
+      transition_reason TEXT,
+      manifest_hash TEXT NOT NULL,
+      attachment_count INTEGER NOT NULL DEFAULT 0,
+      ready INTEGER NOT NULL CHECK (ready IN (0,1)),
+      blocked INTEGER NOT NULL CHECK (blocked IN (0,1)),
+      reasons_json TEXT NOT NULL,
+      failure_event_id INTEGER REFERENCES failure_events(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_unattended_attempt_run ON unattended_preparation_attempts(run_id, work_item_type, work_item_id, id);
+    CREATE INDEX IF NOT EXISTS idx_unattended_attempt_blocked ON unattended_preparation_attempts(blocked, created_at);
+
     -- Request idempotency for retry-unsafe multi-row mutations. A stored first
     -- result lets an identical client retry (dropped response, proxy timeout)
     -- replay instead of re-writing. The record is written in the same

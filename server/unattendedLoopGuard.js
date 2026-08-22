@@ -77,8 +77,9 @@ export function validateAttachmentManifest(manifest = [], available = [], { scop
   return { ok: violations.length === 0, violations };
 }
 
-function questionSignature(attempt = {}) {
-  const normalized = String(attempt.text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+export function questionSignature(attempt = {}) {
+  if (typeof attempt._trustedSignature === 'string' && attempt._trustedSignature) return attempt._trustedSignature;
+  const normalized = String(attempt.text || '').normalize('NFKC').toLocaleLowerCase('und').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   return `${String(attempt.type || '').toLowerCase()}::${normalized}`;
 }
 
