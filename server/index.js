@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
+import { execFileWithTreeAbort } from './processTree.js';
 // Imported before ./db.js so any staged database restore is applied before the
 // SQLite connection is opened.
 import './restoreBootstrap.js';
@@ -345,14 +346,17 @@ async function runCli(command, args, options = {}) {
   }
   try {
     const useShell = process.platform === 'win32' && /\.cmd$/i.test(command);
-    const result = await execFileAsync(command, args, {
+    const execOptions = {
       cwd: cwdResolution.cwd,
       timeout: timeoutMs,
       windowsHide: true,
       shell: useShell,
       env: options.env ? { ...process.env, ...options.env } : process.env,
       maxBuffer: maxBufferBytes
-    });
+    };
+    const result = options.signal
+      ? await execFileWithTreeAbort(command, args, execOptions, options.signal)
+      : await execFileAsync(command, args, execOptions);
     const stdout = options.preserveOutput ? String(result.stdout || '') : result.stdout.trim();
     const stderr = options.preserveOutput ? String(result.stderr || '') : result.stderr.trim();
     return { available: true, ok: true, stdout, stderr, timedOut: false, outputLimitHit: false, timeoutMs, maxBufferBytes };
@@ -5612,13 +5616,13 @@ function prepareNativeCodingDependencies(worktree) {
   return { ok: true, output: 'Reused the main checkout dependency tree through an isolated worktree link; no install was run.' };
 }
 
-async function validateNativeCodingWorktree({ worktree, validation, changedFiles }) {
+async function validateNativeCodingWorktree({ worktree, validation, changedFiles, signal }) {
   const checks = [];
-  const diffCheck = await runCli('git', ['-C', worktree, 'diff', '--check'], { timeout: 60000, maxBuffer: 2 * 1024 * 1024 });
+  const diffCheck = await runCli('git', ['-C', worktree, 'diff', '--check'], { timeout: 60000, maxBuffer: 2 * 1024 * 1024, signal });
   checks.push({ name: 'git diff --check', ok: diffCheck.ok, output: diffCheck.stdout || diffCheck.stderr });
   if (validation === 'syntax') {
     for (const file of changedFiles.filter((name) => /\.(?:c?js|mjs)$/i.test(name))) {
-      const result = await runCli('node', ['--check', file], { cwd: worktree, timeout: 60000, maxBuffer: 1024 * 1024 });
+      const result = await runCli('node', ['--check', file], { cwd: worktree, timeout: 60000, maxBuffer: 1024 * 1024, signal });
       checks.push({ name: `node --check ${file}`, ok: result.ok, output: result.stdout || result.stderr });
     }
     for (const file of changedFiles.filter((name) => /\.json$/i.test(name))) {
@@ -5637,17 +5641,17 @@ async function validateNativeCodingWorktree({ worktree, validation, changedFiles
     const dependencyGate = prepareNativeCodingDependencies(worktree);
     checks.push({ name: 'npm dependency gate', ...dependencyGate });
     if (dependencyGate.ok) {
-      const result = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { cwd: worktree, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+      const result = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { cwd: worktree, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, signal });
       checks.push({ name: 'npm run build (src-only proposal)', ok: result.ok, output: result.stdout || result.stderr });
     }
   } else if (validation === 'runtime' || validation === 'project') {
     const dependencyGate = prepareNativeCodingDependencies(worktree);
     checks.push({ name: 'npm dependency gate', ...dependencyGate });
     if (dependencyGate.ok) {
-      const runtimeResult = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'verify:runtime-safety'], { cwd: worktree, timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 });
+      const runtimeResult = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'verify:runtime-safety'], { cwd: worktree, timeout: 10 * 60 * 1000, maxBuffer: 8 * 1024 * 1024, signal });
       checks.push({ name: 'npm run verify:runtime-safety', ok: runtimeResult.ok, output: runtimeResult.stdout || runtimeResult.stderr });
       if (validation === 'project' && runtimeResult.ok) {
-        const buildResult = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { cwd: worktree, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 });
+        const buildResult = await runCli(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { cwd: worktree, timeout: 5 * 60 * 1000, maxBuffer: 4 * 1024 * 1024, signal });
         checks.push({ name: 'npm run build', ok: buildResult.ok, output: buildResult.stdout || buildResult.stderr });
       }
     }

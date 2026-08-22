@@ -16,7 +16,13 @@ const MAX_VALIDATION_REPAIR_ATTEMPTS = 1;
 const MAX_EVIDENCE_RECOVERY_ATTEMPTS = 5;
 const MAX_SCOPE_CORRECTION_ATTEMPTS = 5;
 const RUN_LEASE_MS = 30 * 60 * 1000;
+const RUN_LEASE_HEARTBEAT_MS = 60 * 1000;
+const APPLY_LEASE_MS = 10 * 60 * 1000;
 const MIN_EDIT_CONFIDENCE = 0.70;
+
+class LeaseOwnershipError extends Error {
+  constructor(message) { super(message); this.name = 'LeaseOwnershipError'; }
+}
 
 export const NATIVE_CODING_LIMITS = Object.freeze({
   maxToolRounds: MAX_TOOL_ROUNDS,
@@ -53,6 +59,16 @@ function atomicJson(file, value) {
 
 function digest(value) {
   return crypto.createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(Number(pid)) || Number(pid) <= 0) return false;
+  try { process.kill(Number(pid), 0); return true; }
+  catch (error) { return error?.code === 'EPERM'; }
+}
+
+function waitSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 function confidence(value, fallback) {
@@ -178,26 +194,65 @@ export class NativeCodingWorker {
     this.taskDir = path.join(this.baseDir, 'tasks');
     this.worktreeDir = path.join(this.baseDir, 'worktrees');
     this.leaseDir = path.join(this.baseDir, 'leases');
+    this.instanceDir = path.join(this.baseDir, 'instances');
+    this.applyReceiptDir = path.join(this.baseDir, 'apply-receipts');
+    this.instanceId = crypto.randomBytes(16).toString('hex');
     this.active = new Map();
     this.reserved = false;
+    this.recoverMalformedLeases();
     this.recoverInterruptedTasks();
+  }
+
+  recoverMalformedLeases() {
+    if (!fs.existsSync(this.leaseDir)) return;
+    for (const name of fs.readdirSync(this.leaseDir).filter((item) => item.endsWith('.json'))) {
+      const operation = name === 'global.apply.json' ? 'apply' : 'run';
+      const id = operation === 'apply' ? 'code-global' : name.slice(0, -5);
+      if (!TASK_ID.test(id)) continue;
+      this.withOperationGuard(id, operation, () => {
+        const file = this.operationLeaseFile(id, operation);
+        if (!fs.existsSync(file) || this.readOperationLease(id, operation)) return;
+        this.quarantineMalformedLease(id, operation);
+      });
+    }
   }
 
   recoverInterruptedTasks() {
     if (!fs.existsSync(this.taskDir)) return;
     for (const name of fs.readdirSync(this.taskDir).filter((item) => item.endsWith('.json'))) {
       try {
-        const task = JSON.parse(fs.readFileSync(path.join(this.taskDir, name), 'utf8'));
-        if (!['running', 'applying'].includes(task.status)) continue;
-        const wasApplying = task.status === 'applying';
-        task.status = wasApplying ? 'apply-interrupted' : 'interrupted';
-        task.phase = task.status;
-        task.error = wasApplying
-          ? 'LPS stopped while applying this patch. Inspect Source changes before any further action; LPS will not guess whether the patch reached the live checkout.'
-          : 'The LPS process stopped while this task was running. Reject it or explicitly rerun it; no model output from the interrupted process will be accepted.';
-        this.record(task, 'restart_recovery', 'deny', task.error);
-        this.releaseRunLease(task, { recovery: true });
-        this.save(task);
+        const initial = JSON.parse(fs.readFileSync(path.join(this.taskDir, name), 'utf8'));
+        if (!['running', 'applying'].includes(initial.status)) continue;
+        const operation = initial.status === 'applying' ? 'apply' : 'run';
+        this.withOperationGuard(initial.id, operation, () => {
+          const task = JSON.parse(fs.readFileSync(path.join(this.taskDir, name), 'utf8'));
+          if (!['running', 'applying'].includes(task.status)) return;
+          const wasApplying = task.status === 'applying';
+          const lease = this.readOperationLease(task.id, operation);
+          const leaseBelongsToTask = lease && (operation !== 'apply' || lease.taskId === task.id);
+          if (leaseBelongsToTask && this.leaseIsActive(lease)) return;
+          const applyReceipt = wasApplying ? this.readApplyReceipt(task.id) : null;
+          if (wasApplying && applyReceipt?.state === 'applied' && applyReceipt.patchHash === task.patchHash) {
+            if (fs.existsSync(this.operationLeaseFile(task.id, operation)) && leaseBelongsToTask) fs.unlinkSync(this.operationLeaseFile(task.id, operation));
+            task.status = 'applied'; task.phase = 'complete'; task.appliedAt = applyReceipt.appliedAt; task.applyLease = null;
+            this.record(task, 'apply_recovery', 'allow', `Durable apply receipt confirms patch ${task.patchHash} reached the live checkout before interruption.`);
+            this.save(task);
+            return;
+          }
+          if (fs.existsSync(this.operationLeaseFile(task.id, operation)) && (!lease || leaseBelongsToTask)) {
+            if (lease) fs.unlinkSync(this.operationLeaseFile(task.id, operation));
+            else this.quarantineMalformedLease(task.id, operation);
+          }
+          task.status = wasApplying ? 'apply-interrupted' : 'interrupted';
+          task.phase = task.status;
+          task.error = wasApplying
+            ? 'LPS stopped while applying this patch. Inspect Source changes before any further action; LPS will not guess whether the patch reached the live checkout.'
+            : 'The LPS process stopped while this task was running. Reject it or explicitly rerun it; no model output from the interrupted process will be accepted.';
+          if (wasApplying) task.applyLease = null;
+          else task.runLease = null;
+          this.record(task, 'restart_recovery', 'deny', task.error);
+          this.save(task);
+        });
       } catch { /* unreadable task records stay inert and are omitted from the UI */ }
     }
   }
@@ -343,49 +398,191 @@ export class NativeCodingWorker {
     return path.join(this.leaseDir, `${id}.json`);
   }
 
-  acquireRunLease(task) {
+  applyReceiptFile(id) {
+    if (!TASK_ID.test(String(id || ''))) throw new Error('Invalid coding task id.');
+    return path.join(this.applyReceiptDir, `${id}.json`);
+  }
+
+  readApplyReceipt(id) {
+    try { return JSON.parse(fs.readFileSync(this.applyReceiptFile(id), 'utf8')); }
+    catch { return null; }
+  }
+
+  writeApplyReceipt(task, state, detail = {}) {
+    const receipt = { schemaVersion: 1, taskId: task.id, patchHash: task.patchHash, state, at: new Date().toISOString(), ...detail };
+    atomicJson(this.applyReceiptFile(task.id), receipt);
+    return receipt;
+  }
+
+  operationLeaseFile(id, operation) {
+    if (!TASK_ID.test(String(id || ''))) throw new Error('Invalid coding task id.');
+    if (!['run', 'apply'].includes(operation)) throw new Error('Invalid coding operation lease.');
+    return operation === 'run' ? this.leaseFile(id) : path.join(this.leaseDir, `global.${operation}.json`);
+  }
+
+  operationGuardDir(id, operation) {
+    const lease = this.operationLeaseFile(id, operation);
+    return `${lease}.guard`;
+  }
+
+  withOperationGuard(id, operation, action) {
     fs.mkdirSync(this.leaseDir, { recursive: true });
-    const file = this.leaseFile(task.id);
-    const now = Date.now();
-    const lease = {
-      taskId: task.id,
-      token: crypto.randomBytes(24).toString('hex'),
-      acquiredAt: new Date(now).toISOString(),
-      expiresAt: new Date(now + RUN_LEASE_MS).toISOString()
-    };
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        fs.writeFileSync(file, JSON.stringify(lease), { encoding: 'utf8', flag: 'wx' });
-        task.runLease = { acquiredAt: lease.acquiredAt, expiresAt: lease.expiresAt, tokenHash: digest(lease.token) };
-        this.record(task, 'run_lease', 'allow', `Durable execution lease acquired until ${lease.expiresAt}.`);
-        this.save(task);
-        return lease;
-      } catch (error) {
+    const guard = this.operationGuardDir(id, operation);
+    let acquired = false;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      try { fs.mkdirSync(guard); acquired = true; break; }
+      catch (error) {
         if (error.code !== 'EEXIST') throw error;
-        let existing = null;
-        try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* unreadable lease is never silently trusted */ }
-        const expiresAt = Date.parse(existing?.expiresAt || '');
-        if (Number.isFinite(expiresAt) && expiresAt <= now) {
-          try { fs.unlinkSync(file); } catch { /* another process may have won the stale-lease cleanup */ }
-          continue;
-        }
-        throw new Error('Another LPS process holds the durable coding execution lease for this task. Wait for it to finish or let the lease expire before retrying.');
+        let stale = false;
+        try { stale = Date.now() - fs.statSync(guard).mtimeMs > 30000; } catch { /* retry */ }
+        if (stale) {
+          const quarantine = `${guard}.stale.${process.pid}.${Date.now()}`;
+          try { fs.renameSync(guard, quarantine); fs.rmSync(quarantine, { recursive: true }); } catch { /* another process won cleanup */ }
+        } else waitSync(10);
       }
     }
-    throw new Error('Unable to acquire the durable coding execution lease.');
+    if (!acquired) throw new Error(`Timed out acquiring the durable ${operation} lease guard.`);
+    try { return action(); }
+    finally { try { fs.rmdirSync(guard); } catch { /* a stale-guard recovery remains fail closed */ } }
+  }
+
+  readOperationLease(id, operation) {
+    try { return JSON.parse(fs.readFileSync(this.operationLeaseFile(id, operation), 'utf8')); }
+    catch { return null; }
+  }
+
+  leaseIsActive(lease) {
+    if (!lease) return false;
+    if (Date.parse(lease.expiresAt || '') > Date.now()) return true;
+    if (!/^[a-f0-9]{32}$/.test(String(lease.ownerInstanceId || ''))) return false;
+    let marker = null;
+    try { marker = JSON.parse(fs.readFileSync(path.join(this.instanceDir, `${lease.ownerInstanceId}.json`), 'utf8')); } catch { return false; }
+    return marker.instanceId === lease.ownerInstanceId
+      && Number(marker.ownerPid) === Number(lease.ownerPid)
+      && Date.now() - Date.parse(marker.lastSeen || '') < RUN_LEASE_HEARTBEAT_MS * 3
+      && processIsAlive(lease.ownerPid);
+  }
+
+  touchInstance() {
+    fs.mkdirSync(this.instanceDir, { recursive: true });
+    atomicJson(path.join(this.instanceDir, `${this.instanceId}.json`), { instanceId: this.instanceId, ownerPid: process.pid, lastSeen: new Date().toISOString() });
+  }
+
+  quarantineMalformedLease(id, operation) {
+    const file = this.operationLeaseFile(id, operation);
+    if (!fs.existsSync(file)) return;
+    const quarantine = `${file}.malformed.${Date.now()}`;
+    fs.renameSync(file, quarantine);
+  }
+
+  acquireRunLease(task) {
+    return this.withOperationGuard(task.id, 'run', () => {
+      const file = this.leaseFile(task.id);
+      const existing = this.readOperationLease(task.id, 'run');
+      if (fs.existsSync(file) && !existing) throw new Error('The durable coding execution lease is unreadable and requires restart recovery inspection.');
+      if (this.leaseIsActive(existing)) throw new Error('Another LPS process holds the durable coding execution lease for this task. Wait for it to finish.');
+      if (existing) fs.unlinkSync(file);
+      const now = Date.now();
+      this.touchInstance();
+      const lease = { taskId: task.id, token: crypto.randomBytes(24).toString('hex'), ownerPid: process.pid, ownerInstanceId: this.instanceId, acquiredAt: new Date(now).toISOString(), expiresAt: new Date(now + RUN_LEASE_MS).toISOString() };
+      fs.writeFileSync(file, JSON.stringify(lease), { encoding: 'utf8', flag: 'wx' });
+      task.runLease = { acquiredAt: lease.acquiredAt, expiresAt: lease.expiresAt, tokenHash: digest(lease.token) };
+      this.record(task, 'run_lease', 'allow', `Durable execution lease acquired until ${lease.expiresAt}.`);
+      this.save(task);
+      return lease;
+    });
+  }
+
+  renewRunLease(task, lease) {
+    return this.withOperationGuard(task.id, 'run', () => {
+      const file = this.leaseFile(task.id);
+      const existing = this.readOperationLease(task.id, 'run');
+      if (!existing || existing.token !== lease.token) throw new LeaseOwnershipError('Native coding execution lease ownership was lost. The stale owner stopped without writing task state or cleaning shared files.');
+      const expiresAt = new Date(Date.now() + RUN_LEASE_MS).toISOString();
+      this.touchInstance();
+      const renewed = { ...existing, ownerPid: process.pid, expiresAt };
+      atomicJson(file, renewed);
+      lease.expiresAt = expiresAt;
+      task.runLease = { ...task.runLease, expiresAt };
+      return lease;
+    });
+  }
+
+  startRunLeaseHeartbeat(task, lease) {
+    const timer = setInterval(() => {
+      try { this.renewRunLease(task, lease); this.save(task); }
+      catch { /* the owning run checks lease again before accepting model output */ }
+    }, RUN_LEASE_HEARTBEAT_MS);
+    timer.unref?.();
+    return timer;
+  }
+
+  acquireOperationLease(id, operation, durationMs = APPLY_LEASE_MS) {
+    return this.withOperationGuard(id, operation, () => {
+      const file = this.operationLeaseFile(id, operation);
+      const existing = this.readOperationLease(id, operation);
+      if (fs.existsSync(file) && !existing) throw new Error(`The durable ${operation} lease is unreadable and requires restart recovery inspection.`);
+      if (this.leaseIsActive(existing)) throw new Error(`Another LPS process is already ${operation === 'apply' ? `applying coding task ${existing.taskId || 'unknown'}` : 'running this coding task'}.`);
+      if (existing) fs.unlinkSync(file);
+      const now = Date.now();
+      this.touchInstance();
+      const lease = { taskId: id, operation, token: crypto.randomBytes(24).toString('hex'), ownerPid: process.pid, ownerInstanceId: this.instanceId, acquiredAt: new Date(now).toISOString(), expiresAt: new Date(now + durationMs).toISOString() };
+      fs.writeFileSync(file, JSON.stringify(lease), { encoding: 'utf8', flag: 'wx' });
+      return lease;
+    });
+  }
+
+  releaseOperationLease(id, operation, { lease = null, recovery = false, expectedTokenHash = '', beforeRelease = null } = {}) {
+    return this.withOperationGuard(id, operation, () => {
+      const file = this.operationLeaseFile(id, operation);
+      const existing = this.readOperationLease(id, operation);
+      const owns = existing && ((lease && existing.token === lease.token)
+        || (recovery && expectedTokenHash && digest(existing.token) === expectedTokenHash));
+      if (owns) {
+        if (typeof beforeRelease === 'function') beforeRelease();
+        try { fs.unlinkSync(file); } catch { /* owner recovery remains fail closed */ }
+      }
+      return Boolean(owns);
+    });
+  }
+
+  renewOperationLease(id, operation, lease, durationMs = APPLY_LEASE_MS) {
+    return this.withOperationGuard(id, operation, () => {
+      const file = this.operationLeaseFile(id, operation);
+      const existing = this.readOperationLease(id, operation);
+      if (!existing || existing.token !== lease.token || existing.taskId !== id) throw new LeaseOwnershipError(`Durable ${operation} ownership was lost. The stale owner stopped without settling shared state.`);
+      const expiresAt = new Date(Date.now() + durationMs).toISOString();
+      this.touchInstance();
+      atomicJson(file, { ...existing, ownerPid: process.pid, expiresAt });
+      lease.expiresAt = expiresAt;
+      return lease;
+    });
+  }
+
+  startOperationLeaseHeartbeat(id, operation, lease) {
+    const timer = setInterval(() => {
+      try { this.renewOperationLease(id, operation, lease); } catch { /* the owner rechecks immediately before settlement */ }
+    }, RUN_LEASE_HEARTBEAT_MS);
+    timer.unref?.();
+    return timer;
   }
 
   releaseRunLease(task, { lease = null, recovery = false } = {}) {
-    const file = this.leaseFile(task.id);
-    let existing = null;
-    try { existing = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* missing/unreadable lease needs no local action */ }
-    if (existing && (!lease || existing.token === lease.token)) {
-      try { fs.unlinkSync(file); } catch { /* cleanup remains best-effort; expiry prevents permanent exclusion */ }
-    }
-    if (task.runLease) {
-      task.runLease = null;
-      this.record(task, recovery ? 'run_lease_recovery' : 'run_lease_release', 'allow', recovery ? 'Stale durable execution lease released during restart recovery.' : 'Durable execution lease released.');
-    }
+    return this.withOperationGuard(task.id, 'run', () => {
+      const file = this.leaseFile(task.id);
+      const existing = this.readOperationLease(task.id, 'run');
+      const owns = existing && ((lease && existing.token === lease.token)
+        || (recovery && task.runLease?.tokenHash && digest(existing.token) === task.runLease.tokenHash));
+      if (task.runLease && (owns || !fs.existsSync(file))) {
+        task.runLease = null;
+        this.record(task, recovery ? 'run_lease_recovery' : 'run_lease_release', 'allow', recovery ? 'Stale durable execution lease released during restart recovery.' : 'Durable execution lease released.');
+        this.save(task);
+      }
+      if (owns) {
+        try { fs.unlinkSync(file); } catch { /* owner recovery remains fail closed */ }
+      }
+      return Boolean(owns);
+    });
   }
 
   executeReadOnlyTool(task, worktree, request = {}) {
@@ -469,6 +666,7 @@ export class NativeCodingWorker {
     let remote;
     let executionContext;
     let lease = null;
+    let leaseHeartbeat = null;
     try {
       if (['interrupted', 'cancelled'].includes(task.status)) await this.cleanupWorktree(task);
       [status, head, branch, remote, executionContext] = await Promise.all([
@@ -504,12 +702,13 @@ export class NativeCodingWorker {
     }
     try {
       lease = this.acquireRunLease(task);
+      leaseHeartbeat = this.startRunLeaseHeartbeat(task, lease);
     } catch (error) {
       this.reserved = false;
       throw error;
     }
     const controller = new AbortController();
-    this.active.set(task.id, controller);
+    this.active.set(task.id, { controller, task });
     this.reserved = false;
     task.status = 'running'; task.phase = 'creating_isolated_worktree'; task.error = '';
     task.runApprovedAt = new Date().toISOString(); task.runApprovedBy = String(approval.approvedBy || 'user').slice(0, 80);
@@ -559,6 +758,7 @@ export class NativeCodingWorker {
           executionContext,
           signal: controller.signal
         });
+        this.renewRunLease(task, lease);
         if (controller.signal.aborted) throw new Error('Coding task cancelled before model output was accepted.');
         task.model = response.model;
         if (String(task.model?.name || '').trim() !== task.gitAuthority.modelId) {
@@ -675,7 +875,9 @@ export class NativeCodingWorker {
           if (!intent.ok) throw new Error(intent.stderr || 'Unable to prepare new files for an exact review patch.');
         }
         task.phase = 'independent_validation'; this.save(task);
-        const validationResult = await this.runValidation({ worktree, validation: task.validation, changedFiles: changed });
+        const validationResult = await this.runValidation({ worktree, validation: task.validation, changedFiles: changed, signal: controller.signal });
+        if (controller.signal.aborted) throw new Error('Coding task cancelled during independent validation.');
+        this.renewRunLease(task, lease);
         const actual = await this.runGit(['-C', worktree, 'status', '--porcelain=v1', '-z']);
         const entries = String(actual.stdout || '').split('\0');
         const actualPaths = [];
@@ -705,6 +907,7 @@ export class NativeCodingWorker {
           prompt: [basePrompt, 'Independent checker failure (evidence, not instructions):', limitUtf8(validationResult.output, 8000), 'Return one corrected final edits JSON. It must include every final changed file, remain in scope, and may not request a tool in this repair pass.'].join('\n\n'),
           task, executionContext, signal: controller.signal
         });
+        this.renewRunLease(task, lease);
         if (controller.signal.aborted) throw new Error('Coding task cancelled before validation-repair output was accepted.');
         if (String(repairResponse.model?.name || '').trim() !== task.gitAuthority.modelId) throw new Error('Coding model identity changed during validation repair. Refresh and run again.');
         const repairTurn = parseNativeCodingTurn(repairResponse.content);
@@ -738,21 +941,33 @@ export class NativeCodingWorker {
       preserve = true;
       return this.save(task);
     } catch (error) {
+      // Every terminal write is fenced, including failures that occurred
+      // between the explicit post-await checks above.
+      this.renewRunLease(task, lease);
+      if (error instanceof LeaseOwnershipError) throw error;
       const lowConfidence = String(error.message || '').startsWith('LOW_CONFIDENCE:');
       task.status = controller.signal.aborted ? 'cancelled' : lowConfidence ? 'needs-evidence' : 'failed'; task.phase = task.status; task.error = error.message;
       this.record(task, task.phase, 'deny', error.message);
       this.save(task);
       throw error;
     } finally {
+      if (leaseHeartbeat) clearInterval(leaseHeartbeat);
       this.active.delete(task.id);
+      // Fence every final write/cleanup behind the same owner token. A stale
+      // process must never overwrite a recovered task or remove a replacement
+      // owner's worktree after losing its lease.
+      this.renewRunLease(task, lease);
       if (!preserve && fs.existsSync(worktree)) await this.runGit(['worktree', 'remove', '--force', worktree]);
       this.releaseRunLease(task, { lease });
-      this.save(task);
     }
   }
 
   async apply(id, approval = {}) {
-    const task = this.load(id);
+    const applyLease = this.acquireOperationLease(id, 'apply');
+    const applyHeartbeat = this.startOperationLeaseHeartbeat(id, 'apply', applyLease);
+    let task;
+    try {
+    task = this.load(id);
     if (approval.confirm !== true || task.status !== 'review') throw new Error('A review-ready task and explicit apply approval are required.');
     if (approval.patchHash !== task.patchHash || digest(task.diff) !== task.patchHash) throw new Error('Apply approval does not match the reviewed patch. Refresh and approve again.');
     const [head, status, branch] = await Promise.all([
@@ -768,24 +983,41 @@ export class NativeCodingWorker {
     const check = await this.runGit(['apply', '--check', patchFile]);
     if (!check.ok) throw new Error(check.stderr || 'Patch no longer applies cleanly.');
     task.status = 'applying'; task.phase = 'applying_reviewed_patch';
+    task.applyLease = { acquiredAt: applyLease.acquiredAt, expiresAt: applyLease.expiresAt, tokenHash: digest(applyLease.token) };
     this.record(task, 'apply_start', 'allow', `Patch ${task.patchHash} passed git apply --check.`);
     this.save(task);
+    this.writeApplyReceipt(task, 'applying');
+    this.renewOperationLease(id, 'apply', applyLease);
     const applied = await this.runGit(['apply', patchFile]);
+    this.renewOperationLease(id, 'apply', applyLease);
     if (!applied.ok) {
       task.status = 'review'; task.phase = 'awaiting_apply_approval';
+      this.writeApplyReceipt(task, 'failed', { errorHash: digest(applied.stderr || 'Patch apply failed.') });
       this.record(task, 'apply', 'deny', applied.stderr || 'Patch apply failed.');
       this.save(task);
       throw new Error(applied.stderr || 'Patch apply failed.');
     }
     task.status = 'applied'; task.phase = 'complete'; task.appliedAt = new Date().toISOString(); task.appliedBy = String(approval.approvedBy || 'user').slice(0, 80);
+    let appliedReceiptPersisted = true;
+    try { this.writeApplyReceipt(task, 'applied', { appliedAt: task.appliedAt }); }
+    catch {
+      appliedReceiptPersisted = false;
+      task.persistenceWarning = 'The patch command succeeded, but its durable apply receipt could not be written. The task and confirmation still record the applied outcome; inspect Source changes.';
+      this.record(task, 'apply_receipt_persistence', 'deny', task.persistenceWarning);
+    }
     this.record(task, 'apply_approval', 'allow', `One-shot approval matched patch hash ${task.patchHash}.`);
     try {
       this.save(task);
     } catch (error) {
-      const reversed = await this.runGit(['apply', '--reverse', patchFile]);
-      if (!reversed.ok) throw new Error(`Patch applied but result persistence failed, and rollback also failed: ${reversed.stderr || error.message}`);
-      task.status = 'review'; task.phase = 'awaiting_apply_approval'; task.appliedAt = '';
-      throw new Error(`Patch result persistence failed; the live patch was rolled back: ${error.message}`);
+      // The live patch command and durable applied receipt already succeeded.
+      // Never auto-reverse after that settlement point: a crash between reverse
+      // and receipt update could fabricate an applied recovery. Preserve the
+      // applied outcome and let the receipt repair task JSON on restart.
+      task.persistenceWarning = appliedReceiptPersisted
+        ? 'The patch command and durable apply receipt succeeded, but task persistence initially failed. The applied receipt remains authoritative; inspect Source changes.'
+        : 'The patch command succeeded, but both its applied receipt and initial task persistence failed. The durable confirmation settlement remains authoritative; inspect Source changes.';
+      this.record(task, 'apply_persistence', 'deny', task.persistenceWarning);
+      try { this.save(task); } catch { /* restart recovery reads the durable applied receipt */ }
     }
     try {
       await this.cleanupWorktree(task);
@@ -795,23 +1027,53 @@ export class NativeCodingWorker {
       try { this.save(task); } catch { /* applied state was already durably recorded */ }
     }
     return task;
+    } finally {
+      clearInterval(applyHeartbeat);
+      this.releaseOperationLease(id, 'apply', {
+        lease: applyLease,
+        beforeRelease: () => {
+          if (task?.applyLease?.tokenHash !== digest(applyLease.token)) return;
+          task.applyLease = null;
+          try { this.save(task); }
+          catch (error) {
+            if (task.status !== 'applied') throw error;
+            // Applied outcome, task state, and receipt were already persisted.
+            // Lease metadata cleanup cannot turn that completed mutation into a
+            // false failed confirmation; expiry/restart cleanup remains safe.
+          }
+        }
+      });
+    }
   }
 
   async reject(id) {
+    const finalizeLease = this.acquireOperationLease(id, 'apply');
+    try {
     const task = this.load(id);
-    if (!['review', 'failed', 'pending', 'prepared', 'needs-scope', 'needs-evidence', 'awaiting-advice', 'interrupted', 'cancelled', 'evidence_only'].includes(task.status)) throw new Error(`Task cannot be rejected from status ${task.status}.`);
+    if (!['review', 'failed', 'pending', 'prepared', 'needs-scope', 'needs-evidence', 'awaiting-advice', 'interrupted', 'apply-interrupted', 'cancelled', 'evidence_only'].includes(task.status)) throw new Error(`Task cannot be rejected from status ${task.status}.`);
+    const interruptedApply = task.status === 'apply-interrupted';
     task.status = 'rejected'; task.phase = 'complete'; task.rejectedAt = new Date().toISOString();
-    this.record(task, 'reject', 'allow', 'User rejected the proposal; no live checkout change was accepted.');
+    this.record(task, 'reject', 'allow', interruptedApply
+      ? 'User closed an interrupted apply after inspection. Closing this record does not assert whether the earlier patch reached the live checkout.'
+      : 'User rejected the proposal; no live checkout change was accepted.');
     this.save(task);
-    await this.cleanupWorktree(task);
+    try { await this.cleanupWorktree(task); }
+    catch (error) {
+      task.cleanupPending = true;
+      this.record(task, 'cleanup', 'deny', `Task was rejected, but isolated cleanup remains pending: ${error.message}`);
+      this.save(task);
+    }
     return task;
+    } finally {
+      this.releaseOperationLease(id, 'apply', { lease: finalizeLease });
+    }
   }
 
   cancel(id) {
-    const task = this.load(id);
-    const controller = this.active.get(task.id);
-    if (!controller) throw new Error('Coding task is not actively running.');
-    controller.abort();
+    const active = this.active.get(String(id));
+    if (!active) throw new Error('Coding task is not actively running.');
+    const task = active.task;
+    active.controller.abort();
     this.record(task, 'cancel_request', 'allow', 'User requested cancellation.');
     this.save(task);
     return task;

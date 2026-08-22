@@ -112,6 +112,13 @@ try {
   assert.match(productionServer, /\/api\/source\/coding\/tasks\/:id\/run\/confirm/, 'coding run must require the token-backed confirmation route');
   assert.match(productionServer, /\/api\/source\/coding\/tasks\/:id\/apply\/propose/, 'patch apply must start with a durable confirmation proposal route');
   assert.match(productionServer, /confirmAndApply\([\s\S]*codingConfirmationSnapshot/, 'coding confirmations must revalidate the sealed task snapshot before side effects');
+  assert.match(productionServer, /execFileWithTreeAbort[\s\S]*options\.signal/, 'runCli forwards cancellation through the bounded process-tree helper');
+  const processTreeSource = fs.readFileSync(new URL('../server/processTree.js', import.meta.url), 'utf8');
+  assert.match(processTreeSource, /taskkill\.exe[\s\S]*\/T/, 'the bounded helper terminates the full Windows process tree');
+  assert.match(processTreeSource, /forceTermination\('timeout'\)/, 'the bounded helper tree-terminates timed-out validation');
+  assert.match(processTreeSource, /forceTermination\('maxBuffer'\)/, 'the bounded helper tree-terminates output-limited validation');
+  assert.match(processTreeSource, /forceTermination\('abort'\)/, 'the bounded helper tree-terminates cancelled validation');
+  assert.match(productionServer, /validateNativeCodingWorktree\(\{ worktree, validation, changedFiles, signal \}\)/, 'native validation accepts the active run cancellation signal');
   assert.throws(() => worker.create({ title: 'Traversal', objective: 'Must fail.', allowedPaths: ['src/../../secret.txt'] }), /unsafe or protected/);
   const baseCommit = (await run('git', ['rev-parse', 'HEAD'])).stdout.trim();
   assert.throws(() => worker.create({ title: 'Unpinned task', objective: 'Must never acquire a base commit after user approval.', allowedPaths: ['src/value.js'] }), /base commit is required/);
@@ -150,6 +157,95 @@ try {
   assert.match(status.stdout, /src\/value\.js|src\\value\.js/);
 
   await run('git', ['restore', '--worktree', '--', 'src/value.js']);
+  const concurrentApplyTask = createPreparedTask({ title: 'Serialize apply fixture', objective: 'Prove two independently valid apply calls cannot race the same reviewed patch.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax' });
+  const concurrentApplyReview = await runPreparedTask(concurrentApplyTask);
+  const concurrentApplyResults = await Promise.allSettled([
+    worker.apply(concurrentApplyTask.id, { confirm: true, patchHash: concurrentApplyReview.patchHash, approvedBy: 'acceptance' }),
+    worker.apply(concurrentApplyTask.id, { confirm: true, patchHash: concurrentApplyReview.patchHash, approvedBy: 'acceptance' })
+  ]);
+  assert.equal(concurrentApplyResults.filter((result) => result.status === 'fulfilled').length, 1, 'exactly one concurrent apply owns the durable apply lease');
+  assert.equal(concurrentApplyResults.filter((result) => result.status === 'rejected').length, 1, 'the second concurrent apply is rejected before touching the live checkout');
+  assert.match(String(concurrentApplyResults.find((result) => result.status === 'rejected')?.reason?.message || ''), /already applying/, 'the losing apply reports durable ownership contention');
+  assert.equal(worker.load(concurrentApplyTask.id).status, 'applied', 'the winning apply leaves one truthful terminal task state');
+  await run('git', ['restore', '--worktree', '--', 'src/value.js']);
+  const persistenceFaultTask = createPreparedTask({ title: 'Apply settlement fixture', objective: 'Keep a truthful applied receipt if task persistence and rollback both fail.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax' });
+  const persistenceFaultReview = await runPreparedTask(persistenceFaultTask);
+  const normalSave = worker.save.bind(worker);
+  let rejectAppliedSaveOnce = true;
+  worker.save = (candidate) => {
+    if (candidate.id === persistenceFaultTask.id && candidate.status === 'applied' && rejectAppliedSaveOnce) {
+      rejectAppliedSaveOnce = false;
+      throw new Error('injected applied-state persistence failure');
+    }
+    return normalSave(candidate);
+  };
+  const persistenceFaultResult = await worker.apply(persistenceFaultTask.id, { confirm: true, patchHash: persistenceFaultReview.patchHash });
+  worker.save = normalSave;
+  assert.equal(persistenceFaultResult.status, 'applied', 'a succeeded patch command and durable receipt never report a false failed outcome');
+  assert.equal(worker.readApplyReceipt(persistenceFaultTask.id)?.state, 'applied', 'the durable apply receipt survives task persistence failure');
+  assert.match(worker.load(persistenceFaultTask.id).persistenceWarning || '', /durable apply receipt/, 'the repaired task state preserves the settlement warning');
+  await run('git', ['restore', '--worktree', '--', 'src/value.js']);
+  const receiptFaultTask = createPreparedTask({ title: 'Apply receipt failure fixture', objective: 'A succeeded patch command remains an applied outcome when the WAL receipt write fails.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax' });
+  const receiptFaultReview = await runPreparedTask(receiptFaultTask);
+  const normalWriteApplyReceipt = worker.writeApplyReceipt.bind(worker);
+  worker.writeApplyReceipt = (candidate, state, detail) => {
+    if (candidate.id === receiptFaultTask.id && state === 'applied') throw new Error('injected applied receipt failure');
+    return normalWriteApplyReceipt(candidate, state, detail);
+  };
+  let rejectReceiptFaultSaveOnce = true;
+  worker.save = (candidate) => {
+    if (candidate.id === receiptFaultTask.id && candidate.status === 'applied' && rejectReceiptFaultSaveOnce) {
+      rejectReceiptFaultSaveOnce = false;
+      throw new Error('injected initial applied task persistence failure');
+    }
+    return normalSave(candidate);
+  };
+  const receiptFaultResult = await worker.apply(receiptFaultTask.id, { confirm: true, patchHash: receiptFaultReview.patchHash });
+  worker.writeApplyReceipt = normalWriteApplyReceipt;
+  worker.save = normalSave;
+  assert.equal(receiptFaultResult.status, 'applied', 'receipt persistence failure cannot turn a succeeded patch command into a failed confirmation outcome');
+  assert.match(worker.load(receiptFaultTask.id).persistenceWarning || '', /both its applied receipt and initial task persistence failed/, 'task state accurately records the combined degraded settlement');
+  await run('git', ['restore', '--worktree', '--', 'src/value.js']);
+  const cleanupFaultTask = createPreparedTask({ title: 'Apply lease cleanup failure fixture', objective: 'Auxiliary lease metadata cleanup cannot falsify an applied outcome.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax' });
+  const cleanupFaultReview = await runPreparedTask(cleanupFaultTask);
+  let rejectCleanupSaveOnce = true;
+  worker.save = (candidate) => {
+    if (candidate.id === cleanupFaultTask.id && candidate.status === 'applied' && candidate.applyLease === null && rejectCleanupSaveOnce) {
+      rejectCleanupSaveOnce = false;
+      throw new Error('injected final lease metadata cleanup failure');
+    }
+    return normalSave(candidate);
+  };
+  const cleanupFaultResult = await worker.apply(cleanupFaultTask.id, { confirm: true, patchHash: cleanupFaultReview.patchHash });
+  worker.save = normalSave;
+  assert.equal(cleanupFaultResult.status, 'applied', 'auxiliary lease metadata cleanup cannot turn an applied mutation into a failed confirmation');
+  assert.equal(worker.load(cleanupFaultTask.id).status, 'applied', 'the durable task outcome remains applied after cleanup metadata failure');
+  await run('git', ['restore', '--worktree', '--', 'src/value.js']);
+  const globalApplyTaskA = createPreparedTask({ title: 'Global apply A', objective: 'Prove the live checkout has one global apply owner.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax' });
+  const globalApplyTaskB = createPreparedTask({ title: 'Global apply B', objective: 'Prove another task cannot mutate the live checkout concurrently.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax' });
+  const globalReviewA = await runPreparedTask(globalApplyTaskA);
+  const globalReviewB = await runPreparedTask(globalApplyTaskB);
+  let applyPreflightResolve;
+  let releaseApplyResolve;
+  const applyPreflight = new Promise((resolve) => { applyPreflightResolve = resolve; });
+  const releaseApply = new Promise((resolve) => { releaseApplyResolve = resolve; });
+  const delayedRunGit = async (args) => {
+    if (args[0] === 'status' && args[1] === '--porcelain=v1') { applyPreflightResolve(); await releaseApply; }
+    return run('git', args);
+  };
+  const makeApplyWorker = (runGit) => new NativeCodingWorker({ root: temp, runGit, runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath, getExecutionContext: worker.getExecutionContext });
+  const applyWorkerA = makeApplyWorker(delayedRunGit);
+  const applyWorkerB = makeApplyWorker((args) => run('git', args));
+  const firstGlobalApply = applyWorkerA.apply(globalReviewA.id, { confirm: true, patchHash: globalReviewA.patchHash });
+  await applyPreflight;
+  await assert.rejects(applyWorkerB.apply(globalReviewB.id, { confirm: true, patchHash: globalReviewB.patchHash }), /already applying coding task/, 'a different task cannot acquire the single live-checkout apply owner');
+  await assert.rejects(applyWorkerB.reject(globalReviewA.id), /already applying coding task/, 'reject cannot race and overwrite a task whose patch apply owns the live checkout');
+  releaseApplyResolve();
+  await firstGlobalApply;
+  assert.equal(worker.load(globalReviewA.id).status, 'applied');
+  assert.equal(worker.load(globalReviewB.id).status, 'review', 'the losing task remains review-ready and unmodified');
+  await run('git', ['restore', '--worktree', '--', 'src/value.js']);
+  await worker.reject(globalReviewB.id);
   modelMode = 'tools';
   const toolTask = createPreparedTask({ title: 'Inspect fixture', objective: 'List, search, and read approved files before changing one.', allowedPaths: ['src'], maxFilesChanged: 1 });
   const toolReview = await runPreparedTask(toolTask);
@@ -189,8 +285,30 @@ try {
   const leasedTask = createPreparedTask({ title: 'Durable lease fixture', objective: 'Prove another process cannot enter the same sealed task while its execution lease exists.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
   const heldLease = worker.acquireRunLease(leasedTask);
   await assert.rejects(runPreparedTask(leasedTask), /durable coding execution lease/, 'a durable lease blocks a second run even without an in-memory active worker');
+  const wrongLease = { ...heldLease, token: 'wrong-owner-token' };
+  assert.equal(worker.releaseRunLease(leasedTask, { lease: wrongLease }), false, 'a wrong-token release does not claim lease ownership');
+  assert.equal(worker.readOperationLease(leasedTask.id, 'run')?.token, heldLease.token, 'a wrong-token release cannot delete the real owner lease');
+  assert.ok(leasedTask.runLease?.tokenHash, 'a wrong-token release cannot clear the task owner metadata');
   worker.releaseRunLease(leasedTask, { lease: heldLease });
   worker.save(leasedTask);
+  const staleApplyLease = worker.acquireOperationLease(leasedTask.id, 'apply');
+  fs.writeFileSync(worker.operationLeaseFile(leasedTask.id, 'apply'), JSON.stringify({ ...staleApplyLease, token: 'replacement-owner-token', taskId: 'code-replacement-owner' }));
+  let staleApplySettlementWrites = 0;
+  assert.equal(worker.releaseOperationLease(leasedTask.id, 'apply', { lease: staleApplyLease, beforeRelease: () => { staleApplySettlementWrites += 1; } }), false, 'a stale apply owner cannot release a replacement owner lease');
+  assert.equal(staleApplySettlementWrites, 0, 'a stale apply owner cannot execute final task persistence after token loss');
+  fs.unlinkSync(worker.operationLeaseFile(leasedTask.id, 'apply'));
+  const liveOwnerTask = createPreparedTask({ title: 'Live-owner restart fixture', objective: 'Prove startup cannot recover a task owned by another live unexpired lease.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  const liveOwnerLease = worker.acquireRunLease(liveOwnerTask);
+  liveOwnerTask.status = 'running';
+  liveOwnerTask.phase = 'local_coder_inference';
+  worker.save(liveOwnerTask);
+  const observingWorker = new NativeCodingWorker({ root: temp, runGit: (args) => run('git', args), runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath });
+  assert.equal(observingWorker.load(liveOwnerTask.id).status, 'running', 'a second process preserves a task with an unexpired durable owner lease');
+  assert.equal(observingWorker.readOperationLease(liveOwnerTask.id, 'run')?.token, liveOwnerLease.token, 'startup recovery never deletes another process owner token');
+  worker.releaseRunLease(liveOwnerTask, { lease: liveOwnerLease });
+  liveOwnerTask.status = 'interrupted';
+  liveOwnerTask.phase = 'interrupted';
+  worker.save(liveOwnerTask);
   const staleLeaseTask = createPreparedTask({ title: 'Stale lease fixture', objective: 'Prove an expired execution lease is reclaimed rather than blocking recovery forever.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
   fs.mkdirSync(worker.leaseDir, { recursive: true });
   fs.writeFileSync(worker.leaseFile(staleLeaseTask.id), JSON.stringify({ taskId: staleLeaseTask.id, token: 'expired', expiresAt: new Date(Date.now() - 1000).toISOString() }));
@@ -198,6 +316,30 @@ try {
   assert.notEqual(reclaimedLease.token, 'expired', 'expired lease is atomically replaced with a new owner token');
   worker.releaseRunLease(staleLeaseTask, { lease: reclaimedLease });
   worker.save(staleLeaseTask);
+  const reusedPidTask = createPreparedTask({ title: 'PID reuse fixture', objective: 'An unrelated live process ID cannot keep an expired owner lease alive.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  fs.writeFileSync(worker.leaseFile(reusedPidTask.id), JSON.stringify({ taskId: reusedPidTask.id, token: 'expired-reused-pid', ownerPid: process.pid, ownerInstanceId: 'f'.repeat(32), expiresAt: new Date(Date.now() - 1000).toISOString() }));
+  const pidReclaimedLease = worker.acquireRunLease(reusedPidTask);
+  assert.notEqual(pidReclaimedLease.token, 'expired-reused-pid', 'an expired lease needs a fresh matching instance heartbeat, not merely a reused live PID');
+  worker.releaseRunLease(reusedPidTask, { lease: pidReclaimedLease });
+  const malformedLeaseTask = createPreparedTask({ title: 'Malformed lease fixture', objective: 'Quarantine an unreadable crashed-owner lease without silently trusting it.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  malformedLeaseTask.status = 'running'; malformedLeaseTask.phase = 'local_coder_inference'; worker.save(malformedLeaseTask);
+  fs.mkdirSync(worker.leaseDir, { recursive: true });
+  fs.writeFileSync(worker.leaseFile(malformedLeaseTask.id), '{not-json', 'utf8');
+  const malformedRecoveryWorker = new NativeCodingWorker({ root: temp, runGit: (args) => run('git', args), runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath });
+  assert.equal(malformedRecoveryWorker.load(malformedLeaseTask.id).status, 'interrupted', 'startup marks a task with an unreadable crashed-owner lease for explicit review');
+  assert.equal(fs.existsSync(worker.leaseFile(malformedLeaseTask.id)), false, 'the malformed lease no longer blocks future explicitly approved runs');
+  assert.ok(fs.readdirSync(worker.leaseDir).some((name) => name.startsWith(`${malformedLeaseTask.id}.json.malformed.`)), 'the unreadable lease is quarantined for inspection rather than discarded');
+  const preparedMalformedTask = createPreparedTask({ title: 'Prepared malformed lease fixture', objective: 'Recover a torn lease created before the running status transition.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
+  fs.writeFileSync(worker.leaseFile(preparedMalformedTask.id), '{torn', 'utf8');
+  const preparedMalformedRecovery = new NativeCodingWorker({ root: temp, runGit: (args) => run('git', args), runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath });
+  assert.equal(preparedMalformedRecovery.load(preparedMalformedTask.id).status, 'prepared', 'a torn acquisition-window lease does not fabricate a started run');
+  const preparedRecoveredLease = preparedMalformedRecovery.acquireRunLease(preparedMalformedTask);
+  preparedMalformedRecovery.releaseRunLease(preparedMalformedTask, { lease: preparedRecoveredLease });
+  fs.writeFileSync(worker.operationLeaseFile(preparedMalformedTask.id, 'apply'), '{torn-global', 'utf8');
+  const globalMalformedRecovery = new NativeCodingWorker({ root: temp, runGit: (args) => run('git', args), runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath });
+  const recoveredGlobalApplyLease = globalMalformedRecovery.acquireOperationLease(preparedMalformedTask.id, 'apply');
+  globalMalformedRecovery.releaseOperationLease(preparedMalformedTask.id, 'apply', { lease: recoveredGlobalApplyLease });
+  assert.ok(fs.readdirSync(worker.leaseDir).some((name) => name.startsWith('global.apply.json.malformed.')), 'a torn global apply lease is quarantined and cannot block every future Apply or Reject');
 
   modelMode = 'evidence-recovery';
   const evidenceRecoveryTask = createPreparedTask({ title: 'Resolve own evidence gap', objective: 'Use an approved read to close a concrete gap before proposing the fixture edit.', allowedPaths: ['src/value.js'], maxFilesChanged: 1 });
@@ -313,6 +455,43 @@ try {
   fs.writeFileSync(interruptedFile, JSON.stringify({ ...interrupted, status: 'running', phase: 'local_coder_inference' }, null, 2));
   const recovered = new NativeCodingWorker({ root: temp, runGit: (args) => run('git', args), runValidation: worker.runValidation, invokeModel: worker.invokeModel, forbiddenPath: worker.forbiddenPath });
   assert.equal(recovered.load(interrupted.id).status, 'interrupted');
+  const applyInterrupted = createTask({ title: 'Interrupted apply fixture', objective: 'Require explicit inspection before closing an interrupted apply.', allowedPaths: ['src/value.js'] });
+  applyInterrupted.status = 'apply-interrupted';
+  applyInterrupted.phase = 'apply-interrupted';
+  worker.save(applyInterrupted);
+  const closedInterruptedApply = await worker.reject(applyInterrupted.id);
+  assert.equal(closedInterruptedApply.status, 'rejected', 'an inspected apply-interrupted record has an explicit closure path');
+  assert.match(closedInterruptedApply.audit.at(-1).detail, /does not assert whether/, 'closing an interrupted apply never claims the live patch state');
+
+  let validationStartedResolve;
+  let validationReleaseResolve;
+  const validationStarted = new Promise((resolve) => { validationStartedResolve = resolve; });
+  const validationRelease = new Promise((resolve) => { validationReleaseResolve = resolve; });
+  const cancellationWorker = new NativeCodingWorker({
+    root: temp,
+    runGit: (args) => run('git', args),
+    runValidation: async () => {
+      validationStartedResolve();
+      await validationRelease;
+      return { ok: true, output: 'validation completed after cancellation request' };
+    },
+    invokeModel: async () => ({ content: JSON.stringify({ action: 'propose_edits', confidence: 0.9, evidence_basis: 'The approved fixture source establishes the bounded cancellation test edit.', summary: 'Cancellation test edit.', edits: [{ path: 'src/value.js', content: 'export const value = 2;\n' }] }), model: { name: 'fake-local-coder' } }),
+    forbiddenPath: worker.forbiddenPath,
+    getExecutionContext: worker.getExecutionContext
+  });
+  const cancellationTask = cancellationWorker.create({ title: 'Cancel during validation', objective: 'Prove cancellation cannot settle a completed checker as review-ready.', allowedPaths: ['src/value.js'], maxFilesChanged: 1, validation: 'syntax', baseCommit });
+  cancellationTask.preparation = { status: 'ready', baseCommit, evidenceHash: 'd'.repeat(64), evidence: { anchors: [{ path: 'src/value.js' }] } };
+  cancellationTask.status = 'prepared';
+  cancellationTask.phase = 'evidence_ready';
+  cancellationWorker.save(cancellationTask);
+  const cancellationRun = cancellationWorker.run(cancellationTask.id, { confirm: true, taskHash: cancellationTask.taskHash, evidenceHash: cancellationTask.preparation.evidenceHash, adviceHash: '' });
+  await validationStarted;
+  cancellationWorker.cancel(cancellationTask.id);
+  validationReleaseResolve();
+  await assert.rejects(cancellationRun, /cancelled during independent validation/, 'a cancellation committed during validation cannot become review-ready afterward');
+  const cancelledDuringValidation = cancellationWorker.load(cancellationTask.id);
+  assert.equal(cancelledDuringValidation.status, 'cancelled');
+  assert.ok(cancelledDuringValidation.audit.some((event) => event.phase === 'cancel_request'), 'the cancellation request remains in the same durable task object and is not overwritten by run settlement');
 
   console.log('Native coding worker acceptance passed: traversal rejection, base-commit/evidence sealing, bounded read-only tool loop, tool-scope refusal, safe deletion review, single-flight execution, sealed approvals, isolated tracked/new edits, validation evidence, patch-hash apply, restart recovery, and out-of-scope rejection are real.');
 } finally {
