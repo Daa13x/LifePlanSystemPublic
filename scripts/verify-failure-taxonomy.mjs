@@ -6,6 +6,7 @@ import {
   FAILURE_CATEGORIES,
   FAILURE_STATUSES,
   normalizeFailure,
+  normalizeCompleteFailureCounts,
   isConfirmed,
   proposeRemediation,
   summarizeByCategory,
@@ -57,6 +58,20 @@ line(FAILURE_CATEGORIES.length === 12 && ['repeated-question', 'no-progress-loop
 }
 
 line(FAILURE_STATUSES.join(',') === 'observed,confirmed,converted,dismissed', 'the failure lifecycle statuses are defined');
+
+const fullCounts = Object.fromEntries(FAILURE_CATEGORIES.map((category) => [category, category === 'user-correction' ? 2 : 0]));
+line(JSON.stringify(normalizeCompleteFailureCounts(fullCounts)) === JSON.stringify(fullCounts), 'a complete bounded failure-count snapshot is accepted canonically');
+for (const [label, value] of [
+  ['partial', { 'user-correction': 1 }],
+  ['extra', { ...fullCounts, invented: 0 }],
+  ['string', { ...fullCounts, 'user-correction': '2' }],
+  ['negative', { ...fullCounts, 'user-correction': -1 }],
+  ['fraction', { ...fullCounts, 'user-correction': 1.5 }]
+]) {
+  let rejected = false;
+  try { normalizeCompleteFailureCounts(value); } catch { rejected = true; }
+  line(rejected, `${label} durable count snapshots fail closed`);
+}
 
 console.log(failures ? `\n${failures} check(s) FAILED` : '\nAll failure-taxonomy checks passed.');
 process.exit(failures ? 1 : 0);

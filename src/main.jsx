@@ -1162,6 +1162,7 @@ function QualityReview({ setNotice, refreshSignal }) {
   const [failures, setFailures] = useState(null);
   const [routing, setRouting] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [evaluationDrafts, setEvaluationDrafts] = useState({});
   const load = async () => {
     try { setFailures(await api('/api/failures')); setRouting(await api('/api/routing/summary')); }
     catch (err) { setNotice(err.message); }
@@ -1171,6 +1172,29 @@ function QualityReview({ setNotice, refreshSignal }) {
     setBusy(true);
     try { await api(`/api/failures/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); await load(); }
     catch (err) { setNotice(err.message); } finally { setBusy(false); }
+  };
+  const updateEvaluationDraft = (id, patch) => setEvaluationDrafts((drafts) => ({ ...drafts, [id]: { ...(drafts[id] || {}), ...patch } }));
+  const updateEvaluationCount = (id, phase, category, value) => setEvaluationDrafts((drafts) => ({
+    ...drafts,
+    [id]: { ...(drafts[id] || {}), [phase]: { ...(drafts[id]?.[phase] || {}), [category]: value } }
+  }));
+  const evaluateFailure = async (item) => {
+    if (busy) return;
+    const draft = evaluationDrafts[item.id] || {};
+    const categories = failures.categories || [];
+    if (!draft.regressionRef?.trim() || !categories.length || !categories.every((category) => draft.before?.[category] !== undefined && draft.before[category] !== '' && draft.after?.[category] !== undefined && draft.after[category] !== '')) {
+      return setNotice('Add a regression/test reference and complete every before/after failure count.');
+    }
+    const before = Object.fromEntries(categories.map((category) => [category, Number(draft.before[category])]));
+    const after = Object.fromEntries(categories.map((category) => [category, Number(draft.after[category])]));
+    setBusy(true);
+    try {
+      const result = await api(`/api/failures/${item.id}/evaluations`, { method: 'POST', body: JSON.stringify({ regressionRef: draft.regressionRef, before, after }) });
+      setNotice(result.converted
+        ? `Failure #${item.id} converted through passing evaluation #${result.evaluation.id}. No behaviour changed automatically.`
+        : `Evaluation #${result.evaluation.id} did not pass: ${result.evaluation.reason}`);
+      await load();
+    } catch (err) { setNotice(err.message); } finally { setBusy(false); }
   };
   if (!failures || !routing) return <Empty title="Loading quality signals" body="Gathering failures and routing evidence." />;
   const proposals = failures.proposals || [];
@@ -1195,9 +1219,40 @@ function QualityReview({ setNotice, refreshSignal }) {
                 </div>
                 <div className="button-row">
                   {item.status === 'observed' && <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'confirmed')}>Confirm</button>}
-                  {item.status === 'confirmed' && <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'converted')}>Mark converted</button>}
                   <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'dismissed')}>Dismiss</button>
                 </div>
+                {item.status === 'confirmed' && (
+                  <details className="evaluation-form">
+                    <summary>Evaluate refinement</summary>
+                    <p className="muted">Conversion requires a complete before/after snapshot. A passing evaluation marks this failure converted and records evidence only; it never changes prompts, rules, memory, or runtime behaviour.</p>
+                    <label>Regression or test reference<input value={evaluationDrafts[item.id]?.regressionRef || ''} onChange={(event) => updateEvaluationDraft(item.id, { regressionRef: event.target.value })} maxLength={200} /></label>
+                    <div className="table-scroll">
+                      <table className="data-table">
+                        <thead><tr><th>Failure category</th><th>Before</th><th>After</th></tr></thead>
+                        <tbody>{(failures.categories || []).map((category) => (
+                          <tr key={category}>
+                            <td>{category}</td>
+                            <td><input aria-label={`${category} before count`} type="number" min="0" max="1000000" step="1" value={evaluationDrafts[item.id]?.before?.[category] ?? ''} onChange={(event) => updateEvaluationCount(item.id, 'before', category, event.target.value)} /></td>
+                            <td><input aria-label={`${category} after count`} type="number" min="0" max="1000000" step="1" value={evaluationDrafts[item.id]?.after?.[category] ?? ''} onChange={(event) => updateEvaluationCount(item.id, 'after', category, event.target.value)} /></td>
+                          </tr>
+                        ))}</tbody>
+                      </table>
+                    </div>
+                    <button className="secondary" disabled={busy} onClick={() => evaluateFailure(item)}>Evaluate and convert if passing</button>
+                  </details>
+                )}
+                {item.evaluations?.length > 0 && (
+                  <details className="evaluation-history">
+                    <summary>Recorded evaluations ({item.evaluations.length})</summary>
+                    {item.evaluations.map((evaluation) => (
+                      <div className="item-meta" key={evaluation.id}>
+                        <strong>#{evaluation.id} · {evaluation.improved ? 'passed' : 'did not pass'} · {evaluation.regressionRef}</strong>
+                        <span>{evaluation.reason}</span>
+                        <code>before {JSON.stringify(evaluation.before)} · after {JSON.stringify(evaluation.after)}</code>
+                      </div>
+                    ))}
+                  </details>
+                )}
               </div>
             ))}
           </div>

@@ -92,6 +92,21 @@ export function summarizeByCategory(records = []) {
   return counts;
 }
 
+// Persisted evaluations must compare complete category snapshots. The looser
+// pure evaluator remains useful for ad-hoc previews, but durable evidence may
+// not silently treat omitted categories as zero.
+export function normalizeCompleteFailureCounts(value, label = 'Failure counts') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object containing every failure category.`);
+  const keys = Object.keys(value).sort();
+  const expected = [...FAILURE_CATEGORIES].sort();
+  if (JSON.stringify(keys) !== JSON.stringify(expected)) throw new Error(`${label} must contain exactly every failure category.`);
+  return Object.fromEntries(FAILURE_CATEGORIES.map((category) => {
+    const count = value[category];
+    if (!Number.isInteger(count) || count < 0 || count > 1000000) throw new Error(`${label}.${category} must be an integer from 0 to 1000000.`);
+    return [category, count];
+  }));
+}
+
 // Before/after evaluation. `target` is the failure class a refinement aimed to
 // reduce. It counts as an improvement ONLY if the target class fell AND no other
 // class rose. `before`/`after` are category→count maps.

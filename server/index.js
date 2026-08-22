@@ -42,7 +42,7 @@ import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowled
 import { assessLocalAnswerability } from './localAnswerability.js';
 import { buildWorkOrder } from './workOrder.js';
 import { normalizeFeedback, summarizeThemes, FEEDBACK_SENTIMENTS } from './feedbackIntake.js';
-import { normalizeFailure, proposeRemediation, summarizeByCategory, evaluateImprovement, FAILURE_CATEGORIES, FAILURE_STATUSES } from './failureTaxonomy.js';
+import { normalizeFailure, normalizeCompleteFailureCounts, proposeRemediation, summarizeByCategory, evaluateImprovement, FAILURE_CATEGORIES, FAILURE_STATUSES } from './failureTaxonomy.js';
 import { summarizeRoutes, recommendRoute, shouldEscalate, effectiveCost, DEFAULT_ROUTE_TIERS } from './costRouting.js';
 import { evaluateUnattendedSend } from './unattendedLoopGuard.js';
 import { openFolderInExplorer } from './openFolder.js';
@@ -4742,6 +4742,9 @@ app.get('/api/failures/categories', (_req, res) => ok(res, { categories: FAILURE
 app.post('/api/failures', (req, res) => {
   let record;
   try {
+    if (req.body?.status !== undefined && String(req.body.status).toLowerCase() !== 'observed') {
+      return fail(res, 400, 'New failures must begin as observed.');
+    }
     record = normalizeFailure(req.body);
   } catch (error) {
     return fail(res, 400, error.message);
@@ -4755,30 +4758,145 @@ app.post('/api/failures', (req, res) => {
 
 app.get('/api/failures', (req, res) => {
   const includeResolved = req.query.all === '1';
-  const rows = includeResolved
+  const storedRows = includeResolved
     ? allRows('SELECT * FROM failure_events ORDER BY created_at DESC')
     : allRows("SELECT * FROM failure_events WHERE status IN ('observed','confirmed') ORDER BY created_at DESC");
+  const rows = storedRows.map((failure) => {
+    const evaluationRows = allRows('SELECT id, target_category, regression_ref, before_counts, after_counts, improved, reason, converted_at, created_at FROM failure_evaluations WHERE failure_event_id = ? ORDER BY id DESC LIMIT 10', [failure.id]);
+    const evaluations = evaluationRows.map((evaluation) => ({
+      id: evaluation.id,
+      target: evaluation.target_category,
+      regressionRef: evaluation.regression_ref,
+      before: JSON.parse(evaluation.before_counts),
+      after: JSON.parse(evaluation.after_counts),
+      improved: Boolean(evaluation.improved),
+      reason: evaluation.reason,
+      convertedAt: evaluation.converted_at,
+      createdAt: evaluation.created_at
+    }));
+    const evaluation = evaluations.find((item) => item.convertedAt);
+    return {
+      ...failure,
+      conversion: evaluation
+        ? { state: 'evaluated', evaluationId: evaluation.id, target: evaluation.target, regressionRef: evaluation.regressionRef, improved: evaluation.improved, reason: evaluation.reason, convertedAt: evaluation.convertedAt }
+        : failure.status === 'converted' ? { state: 'legacy-unlinked' } : null,
+      evaluations
+    };
+  });
   const proposals = rows
     .map((rowItem) => ({ id: rowItem.id, category: rowItem.category, ...proposeRemediation({ status: rowItem.status, category: rowItem.category }) }))
     .filter((proposal) => proposal.propose);
-  ok(res, { failures: rows, categoryCounts: summarizeByCategory(rows), proposals });
+  ok(res, { failures: rows, categoryCounts: summarizeByCategory(rows), categories: FAILURE_CATEGORIES, proposals });
 });
 
 app.patch('/api/failures/:id', (req, res) => {
-  const existing = row('SELECT * FROM failure_events WHERE id = ?', [req.params.id]);
-  if (!existing) return fail(res, 404, 'Failure not found.');
   const status = String(req.body?.status || '').toLowerCase();
   if (!FAILURE_STATUSES.includes(status)) return fail(res, 400, `Status must be one of: ${FAILURE_STATUSES.join(', ')}.`);
-  const regressionRef = req.body?.regressionRef !== undefined ? String(req.body.regressionRef || '').slice(0, 200) || null : existing.regression_ref;
-  db.prepare('UPDATE failure_events SET status = ?, regression_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, regressionRef, existing.id);
-  ok(res, { failure: row('SELECT * FROM failure_events WHERE id = ?', [existing.id]), remediation: proposeRemediation({ status, category: existing.category }) });
+  if (status === 'converted') return fail(res, 409, 'A failure can be converted only by a stored passing evaluation.');
+  try {
+    const result = transaction(() => {
+      const existing = row('SELECT * FROM failure_events WHERE id = ?', [req.params.id]);
+      if (!existing) {
+        const error = new Error('Failure not found.'); error.httpStatus = 404; throw error;
+      }
+      if (existing.status === 'converted' || existing.status === 'dismissed') {
+        const error = new Error(`A ${existing.status} failure is terminal and cannot be triaged again.`); error.httpStatus = 409; throw error;
+      }
+      if (existing.status === 'observed' && !['observed', 'confirmed', 'dismissed'].includes(status)) {
+        const error = new Error('An observed failure may only be confirmed or dismissed.'); error.httpStatus = 409; throw error;
+      }
+      if (existing.status === 'confirmed' && !['confirmed', 'dismissed'].includes(status)) {
+        const error = new Error('A confirmed failure may only be evaluated or dismissed.'); error.httpStatus = 409; throw error;
+      }
+      const regressionRef = req.body?.regressionRef !== undefined ? String(req.body.regressionRef || '').slice(0, 200) || null : existing.regression_ref;
+      db.prepare('UPDATE failure_events SET status = ?, regression_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, regressionRef, existing.id);
+      return { failure: row('SELECT * FROM failure_events WHERE id = ?', [existing.id]), remediation: proposeRemediation({ status, category: existing.category }) };
+    });
+    ok(res, result);
+  } catch (error) {
+    fail(res, error.httpStatus || 500, error.httpStatus ? error.message : 'Failure triage could not be applied.');
+  }
 });
 
 // Before/after evaluation: prove a refinement reduced the target failure class
 // without raising another. Pure compute over provided category→count maps.
 app.post('/api/failures/evaluate', (req, res) => {
   const { target, before, after } = req.body || {};
-  ok(res, evaluateImprovement(target, before || {}, after || {}));
+  try {
+    ok(res, evaluateImprovement(target, normalizeCompleteFailureCounts(before, 'Before counts'), normalizeCompleteFailureCounts(after, 'After counts')));
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
+function normalizeRegressionReference(value) {
+  if (typeof value !== 'string') throw new Error('Regression reference must be a string.');
+  const reference = value.trim();
+  if (!reference || reference.length > 200 || /[\u0000-\u001f\u007f]/.test(reference)) throw new Error('Regression reference must be 1-200 characters on one line.');
+  return reference;
+}
+
+// Persist an immutable, complete before/after evaluation. A passing evaluation
+// and the converted failure status commit atomically; failed evaluations remain
+// useful negative evidence and never change runtime behaviour.
+app.post('/api/failures/:id/evaluations', (req, res) => {
+  let before;
+  let after;
+  let regressionRef;
+  try {
+    regressionRef = normalizeRegressionReference(req.body?.regressionRef);
+    before = normalizeCompleteFailureCounts(req.body?.before, 'Before counts');
+    after = normalizeCompleteFailureCounts(req.body?.after, 'After counts');
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+  const beforeJson = JSON.stringify(before);
+  const afterJson = JSON.stringify(after);
+  try {
+    const result = transaction(() => {
+      const current = row('SELECT * FROM failure_events WHERE id = ?', [req.params.id]);
+      if (!current) {
+        const error = new Error('Failure not found.');
+        error.httpStatus = 404;
+        throw error;
+      }
+      const priorConversion = row('SELECT * FROM failure_evaluations WHERE failure_event_id = ? AND converted_at IS NOT NULL', [current.id]);
+      if (priorConversion) {
+        if (priorConversion.regression_ref === regressionRef && priorConversion.before_counts === beforeJson && priorConversion.after_counts === afterJson) {
+          return { converted: true, replayed: true, evaluation: { id: priorConversion.id, target: priorConversion.target_category, regressionRef: priorConversion.regression_ref, improved: true, reason: priorConversion.reason, convertedAt: priorConversion.converted_at } };
+        }
+        const error = new Error('This failure was already converted by a different passing evaluation.');
+        error.httpStatus = 409;
+        throw error;
+      }
+      if (current.status !== 'confirmed') {
+        const error = new Error('Only a confirmed failure can be evaluated for conversion.');
+        error.httpStatus = 409;
+        throw error;
+      }
+      const evaluation = evaluateImprovement(current.category, before, after);
+      const priorExact = row(`SELECT * FROM failure_evaluations
+        WHERE failure_event_id = ? AND regression_ref = ? AND before_counts = ? AND after_counts = ?`, [current.id, regressionRef, beforeJson, afterJson]);
+      if (priorExact) {
+        return { converted: false, replayed: true, evaluation: { id: priorExact.id, target: priorExact.target_category, regressionRef: priorExact.regression_ref, improved: Boolean(priorExact.improved), reason: priorExact.reason, convertedAt: priorExact.converted_at } };
+      }
+      db.prepare(`INSERT OR IGNORE INTO failure_evaluations
+        (failure_event_id, target_category, regression_ref, before_counts, after_counts, improved, reason, converted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(current.id, current.category, regressionRef, beforeJson, afterJson, evaluation.improved ? 1 : 0, evaluation.reason, evaluation.improved ? new Date().toISOString() : null);
+      const stored = row(`SELECT * FROM failure_evaluations
+        WHERE failure_event_id = ? AND regression_ref = ? AND before_counts = ? AND after_counts = ?`, [current.id, regressionRef, beforeJson, afterJson]);
+      if (!stored) throw new Error('The failure evaluation was not stored.');
+      if (evaluation.improved) {
+        const changed = db.prepare("UPDATE failure_events SET status = 'converted', regression_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'confirmed'").run(regressionRef, current.id);
+        if (changed.changes !== 1) throw new Error('The evaluated failure did not convert exactly once.');
+      }
+      return { converted: evaluation.improved, replayed: false, evaluation: { id: stored.id, target: stored.target_category, regressionRef: stored.regression_ref, improved: Boolean(stored.improved), reason: stored.reason, convertedAt: stored.converted_at } };
+    });
+    ok(res, result);
+  } catch (error) {
+    fail(res, error.httpStatus || 500, error.httpStatus ? error.message : 'Failure evaluation could not be stored.');
+  }
 });
 
 // ── Adaptive reasoning-effort & cost routing ─────────────────────────────────

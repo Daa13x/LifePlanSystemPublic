@@ -459,6 +459,24 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_failure_events_cat ON failure_events(category, status);
 
+    -- Append-only, failure-bound before/after evaluations. A failure may move
+    -- to converted only through an explicitly selected passing row.
+    CREATE TABLE IF NOT EXISTS failure_evaluations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      failure_event_id INTEGER NOT NULL REFERENCES failure_events(id) ON DELETE CASCADE,
+      target_category TEXT NOT NULL,
+      regression_ref TEXT NOT NULL,
+      before_counts TEXT NOT NULL,
+      after_counts TEXT NOT NULL,
+      improved INTEGER NOT NULL CHECK (improved IN (0,1)),
+      reason TEXT NOT NULL,
+      converted_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(failure_event_id, regression_ref, before_counts, after_counts)
+    );
+    CREATE INDEX IF NOT EXISTS idx_failure_evaluations_failure ON failure_evaluations(failure_event_id, id DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_failure_evaluations_converted ON failure_evaluations(failure_event_id) WHERE converted_at IS NOT NULL;
+
     -- Adaptive cost-routing observations: measured model/effort outcomes used to
     -- route future work to the cheapest route that meets the acceptance bar.
     -- Recorded evidence only; routing decisions are computed, never stored as
