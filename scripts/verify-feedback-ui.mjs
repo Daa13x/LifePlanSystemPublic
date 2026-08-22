@@ -28,15 +28,21 @@ assert.match(control, /catch \{ \/\* feedback capture must never disrupt the con
 // Review queue: reads the queue, shows consolidation proposals, and triages.
 assert.match(ui, /function FeedbackReview\(/, 'FeedbackReview component exists');
 assert.match(ui, /api\('\/api\/feedback'\)/, 'the review view reads the feedback queue');
-assert.match(ui, /api\(`\/api\/feedback\/\$\{id\}`, \{ method: 'PATCH', body: JSON\.stringify\(\{ status \}\) \}\)/, 'review triages feedback via the status endpoint');
-const review = ui.slice(ui.indexOf('function FeedbackReview'), ui.indexOf('function FeedbackReview') + 2000);
+assert.match(ui, /api\(`\/api\/feedback\/\$\{item\.id\}`, \{ method: 'PATCH', body: JSON\.stringify\(\{ status \}\) \}\)/, 'review triages feedback via the status endpoint');
+const reviewStart = ui.indexOf('function FeedbackReview');
+const reviewEnd = ui.indexOf('\nfunction CompletedWorkboard', reviewStart);
+assert.ok(reviewStart >= 0 && reviewEnd > reviewStart, 'FeedbackReview has a bounded source slice');
+const review = ui.slice(reviewStart, reviewEnd);
 assert.match(review, /proposeConsolidation/, 'the review surfaces recurring-theme consolidation proposals');
 assert.match(review, /never changes prompts, rules, memory, or behaviour automatically/, 'the review states feedback never changes behaviour on its own');
 assert.match(review, /local only/, 'sensitive feedback is marked local-only in the queue');
+assert.match(review, /Boolean\(item\.actionable\).*Route to Quality review/s, 'only actionable feedback exposes the Quality routing control');
+assert.match(review, /result\.destination\?\.failureEventId/, 'routing reports the exact observed Quality destination');
 
 // The server endpoints the UI depends on exist.
 assert.match(server, /app\.post\('\/api\/feedback'/, 'the feedback capture endpoint exists');
 assert.match(server, /app\.get\('\/api\/feedback'/, 'the feedback queue endpoint exists');
 assert.match(server, /app\.patch\('\/api\/feedback\/:id'/, 'the feedback triage endpoint exists');
+assert.match(server, /INSERT INTO failure_events[\s\S]*'user-correction', 'observed', 'user-feedback'/, 'routing creates only an observed Quality failure for later human review');
 
 console.log('Continuous-feedback UI wiring verification passed.');

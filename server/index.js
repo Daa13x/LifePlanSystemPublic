@@ -4686,12 +4686,49 @@ app.get('/api/feedback', (req, res) => {
 });
 
 app.patch('/api/feedback/:id', (req, res) => {
-  const existing = row('SELECT * FROM feedback WHERE id = ?', [req.params.id]);
-  if (!existing) return fail(res, 404, 'Feedback not found.');
   const status = String(req.body?.status || '').toLowerCase();
   if (!FEEDBACK_STATUSES.has(status)) return fail(res, 400, `Status must be one of: ${[...FEEDBACK_STATUSES].join(', ')}.`);
-  db.prepare('UPDATE feedback SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, existing.id);
-  ok(res, row('SELECT * FROM feedback WHERE id = ?', [existing.id]));
+  try {
+    const result = transaction(() => {
+      // Re-read only after BEGIN IMMEDIATE owns the write lock. Two runtimes may
+      // receive the same click/retry concurrently; the second must observe the
+      // first backlink rather than create an orphan duplicate failure.
+      const current = row('SELECT * FROM feedback WHERE id = ?', [req.params.id]);
+      if (!current) {
+        const error = new Error('Feedback not found.');
+        error.httpStatus = 404;
+        throw error;
+      }
+      if (status === 'routed' && !current.actionable) {
+        const error = new Error('Only actionable feedback can be routed to Quality review.');
+        error.httpStatus = 400;
+        throw error;
+      }
+      let failureEventId = current.failure_event_id || null;
+      if (status === 'routed' && !failureEventId) {
+        failureEventId = db.prepare(`
+          INSERT INTO failure_events (category, status, source, task_ref, run_id, evidence, correction, outcome)
+          VALUES ('user-correction', 'observed', 'user-feedback', ?, ?, ?, ?, ?)
+        `).run(
+          current.work_item || current.surface || `feedback:${current.id}`,
+          current.run_id,
+          current.evidence,
+          current.note,
+          `Routed from feedback ${current.id} for human review; no behaviour changed automatically.`
+        ).lastInsertRowid;
+      }
+      db.prepare('UPDATE feedback SET status = ?, failure_event_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .run(status, failureEventId, current.id);
+      const feedback = row('SELECT * FROM feedback WHERE id = ?', [current.id]);
+      return {
+        ...feedback,
+        destination: failureEventId ? { kind: 'quality-failure-review', failureEventId } : null
+      };
+    });
+    ok(res, result);
+  } catch (error) {
+    fail(res, error.httpStatus || 500, error.httpStatus ? error.message : 'Feedback triage failed.');
+  }
 });
 
 // ── Failure taxonomy & reviewed self-improvement ─────────────────────────────

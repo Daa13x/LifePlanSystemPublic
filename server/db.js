@@ -430,6 +430,7 @@ export function migrate() {
       actionable INTEGER NOT NULL DEFAULT 0,
       theme_key TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','triaged','routed','dismissed')),
+      failure_event_id INTEGER REFERENCES failure_events(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -529,6 +530,15 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_partner_relay_artifacts_status ON partner_relay_artifacts(status, received_at);
   `);
+
+  // Existing databases predate the explicit feedback -> Quality review bridge.
+  // The backlink makes routing idempotent and inspectable without promoting or
+  // confirming the observed failure automatically.
+  try {
+    db.exec('ALTER TABLE feedback ADD COLUMN failure_event_id INTEGER REFERENCES failure_events(id) ON DELETE SET NULL');
+  } catch (error) {
+    if (!/duplicate column name:\s*failure_event_id/i.test(String(error?.message || ''))) throw error;
+  }
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
   if (projectCount === 0) {

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 // HTTP acceptance for continuous user feedback on a disposable LIFE_PLANNER_DB
 // (never the user's data): CSRF-gated capture, the review queue with theme
@@ -13,6 +14,30 @@ const appRoot = path.resolve(import.meta.dirname, '..');
 const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-feedback-'));
 const dbPath = path.join(probeRoot, 'data', 'life-planner.sqlite');
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
+// Seed the pre-bridge feedback schema so server startup must migrate a real
+// existing database rather than only proving fresh-install creation.
+const legacyDb = new DatabaseSync(dbPath);
+legacyDb.exec(`
+  CREATE TABLE feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sentiment TEXT NOT NULL CHECK (sentiment IN ('useful','wrong','confusing','broken','unnecessary','incomplete')),
+    surface TEXT NOT NULL DEFAULT '',
+    work_item TEXT,
+    run_id TEXT,
+    provider TEXT,
+    app_version TEXT,
+    note TEXT,
+    evidence TEXT,
+    sensitive INTEGER NOT NULL DEFAULT 0,
+    actionable INTEGER NOT NULL DEFAULT 0,
+    theme_key TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','triaged','routed','dismissed')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+legacyDb.close();
 
 let failures = 0;
 const line = (ok, msg) => { if (!ok) failures++; console.log(`${ok ? 'ok  ' : 'FAIL'}  ${msg}`); };
@@ -62,17 +87,19 @@ async function stopServer(child) { if (child.exitCode === null) child.kill(); fo
 
 let base = '';
 let token = '';
-async function api(route, { method = 'GET', json, csrf = 'valid' } = {}) {
+async function apiAt(baseUrl, csrfToken, route, { method = 'GET', json, csrf = 'valid' } = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  if (method !== 'GET') { headers.Origin = base; if (csrf === 'valid') headers['X-LPS-CSRF'] = token; }
-  const res = await fetch(`${base}${route}`, { method, headers, body: json === undefined ? undefined : JSON.stringify(json) });
+  if (method !== 'GET') { headers.Origin = baseUrl; if (csrf === 'valid') headers['X-LPS-CSRF'] = csrfToken; }
+  const res = await fetch(`${baseUrl}${route}`, { method, headers, body: json === undefined ? undefined : JSON.stringify(json) });
   let body = null; try { body = await res.json(); } catch { /* non-JSON */ }
   return { status: res.status, body };
 }
+const api = (route, options) => apiAt(base, token, route, options);
 
 console.log('--- feedback HTTP verification ---');
 const server = await retryStart();
 base = server.base;
+let secondServer = null;
 try {
   token = (await (await fetch(`${base}/api/csrf-token`)).json()).data.token;
 
@@ -104,10 +131,38 @@ try {
   // Triage transitions the item and removes it from the open queue.
   const id = created.body.data.id;
   line((await api(`/api/feedback/${id}`, { method: 'PATCH', json: { status: 'nope' } })).status === 400, 'an invalid triage status is rejected');
-  line((await api(`/api/feedback/${id}`, { method: 'PATCH', json: { status: 'routed' } })).status === 200, 'feedback can be triaged to routed');
+  const routed = await api(`/api/feedback/${id}`, { method: 'PATCH', json: { status: 'routed' } });
+  line(routed.status === 200 && routed.body.data.failure_event_id > 0 && routed.body.data.destination.failureEventId === routed.body.data.failure_event_id, 'actionable feedback routes to an explicit Quality review destination');
+  const failureId = routed.body.data.failure_event_id;
+  let failureQueue = await api('/api/failures?all=1');
+  const routedFailure = failureQueue.body.data.failures.find((failure) => failure.id === failureId);
+  line(routedFailure?.category === 'user-correction' && routedFailure.status === 'observed' && routedFailure.source === 'user-feedback', 'routing creates one observed user-correction without auto-confirming it');
+  line(routedFailure?.task_ref === 'planner' && routedFailure.run_id === 'r1' && routedFailure.correction === 'The Today tab crashed on load', 'the Quality record retains bounded feedback attribution and correction evidence');
+  const replay = await api(`/api/feedback/${id}`, { method: 'PATCH', json: { status: 'routed' } });
+  failureQueue = await api('/api/failures?all=1');
+  line(replay.body.data.failure_event_id === failureId && failureQueue.body.data.failures.filter((failure) => failure.source === 'user-feedback' && failure.run_id === 'r1').length === 1, 'repeating Route to review is idempotent and creates no duplicate failure');
+  const memoryAfterRoute = await api('/api/memory');
+  const candidateCountAfterRoute = Array.isArray(memoryAfterRoute.body?.data?.candidates) ? memoryAfterRoute.body.data.candidates.length : (Array.isArray(memoryAfterRoute.body?.data) ? memoryAfterRoute.body.data.length : 0);
+  line(candidateCountAfterRoute === 0, 'routing feedback still creates no memory candidate or automatic behaviour change');
   const openAfter = (await api('/api/feedback')).body.data.feedback.some((f) => f.id === id);
   line(!openAfter, 'a routed item leaves the open review queue');
+
+  const useful = await api('/api/feedback', { method: 'POST', json: { sentiment: 'useful', surface: 'chat:reply' } });
+  line((await api(`/api/feedback/${useful.body.data.id}`, { method: 'PATCH', json: { status: 'routed' } })).status === 400, 'non-actionable feedback cannot fabricate a Quality failure');
+
+  const concurrent = await api('/api/feedback', { method: 'POST', json: { sentiment: 'wrong', surface: 'chat:reply', runId: 'concurrent-route', note: 'One routed correction' } });
+  secondServer = await retryStart();
+  const secondToken = (await (await fetch(`${secondServer.base}/api/csrf-token`)).json()).data.token;
+  const [firstRoute, secondRoute] = await Promise.all([
+    api(`/api/feedback/${concurrent.body.data.id}`, { method: 'PATCH', json: { status: 'routed' } }),
+    apiAt(secondServer.base, secondToken, `/api/feedback/${concurrent.body.data.id}`, { method: 'PATCH', json: { status: 'routed' } })
+  ]);
+  const concurrentFailureId = firstRoute.body?.data?.failure_event_id;
+  line(firstRoute.status === 200 && secondRoute.status === 200 && concurrentFailureId > 0 && secondRoute.body.data.failure_event_id === concurrentFailureId, 'two runtimes concurrently route to the same single Quality destination');
+  const concurrentFailures = (await api('/api/failures?all=1')).body.data.failures.filter((failure) => failure.source === 'user-feedback' && failure.run_id === 'concurrent-route');
+  line(concurrentFailures.length === 1 && concurrentFailures[0].id === concurrentFailureId, 'concurrent routing creates exactly one observed failure with no orphan duplicate');
 } finally {
+  if (secondServer) await stopServer(secondServer.child);
   await stopServer(server.child);
   fs.rmSync(probeRoot, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 });
 }

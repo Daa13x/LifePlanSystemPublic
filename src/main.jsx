@@ -1271,9 +1271,15 @@ function FeedbackReview({ setNotice, refreshSignal }) {
   const [busy, setBusy] = useState(false);
   const load = async () => { try { setData(await api('/api/feedback')); } catch (err) { setNotice(err.message); } };
   useEffect(() => { load(); }, [refreshSignal]);
-  const triage = async (id, status) => {
+  const triage = async (item, status) => {
     setBusy(true);
-    try { await api(`/api/feedback/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); await load(); } catch (err) { setNotice(err.message); } finally { setBusy(false); }
+    try {
+      const result = await api(`/api/feedback/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
+      if (status === 'routed' && result.destination?.failureEventId) {
+        setNotice(`Routed to Quality review as observed failure #${result.destination.failureEventId}. No behaviour changed automatically.`);
+      }
+      await load();
+    } catch (err) { setNotice(err.message); } finally { setBusy(false); }
   };
   if (!data) return <Empty title="Loading feedback" body="Gathering the review queue." />;
   const { feedback, themes } = data;
@@ -1298,8 +1304,8 @@ function FeedbackReview({ setNotice, refreshSignal }) {
                   <div className="item-meta"><span>{item.provider ? `${item.provider} · ` : ''}{item.run_id ? `run ${item.run_id} · ` : ''}{item.created_at}</span></div>
                 </div>
                 <div className="button-row">
-                  <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'routed')}>Route to review</button>
-                  <button className="secondary" disabled={busy} onClick={() => triage(item.id, 'dismissed')}>Dismiss</button>
+                  {Boolean(item.actionable) && <button className="secondary" disabled={busy} onClick={() => triage(item, 'routed')}>Route to Quality review</button>}
+                  <button className="secondary" disabled={busy} onClick={() => triage(item, 'dismissed')}>Dismiss</button>
                 </div>
               </div>
             ))}
