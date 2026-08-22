@@ -38,6 +38,10 @@ assert.match(slice, /Cost \/ successful task/, 'routing evidence labels measured
 assert.match(slice, /route\.costPerSuccessfulTask == null \? '—' : route\.costPerSuccessfulTask\.toFixed\(2\)/, 'routing evidence renders an honest unavailable value when no successful task exists');
 assert.match(slice, /route\.avgEffectiveCost == null \? '—' : route\.avgEffectiveCost\.toFixed\(2\)/, 'routing evidence renders invalid historical average cost as unavailable');
 assert.match(slice, /do not change execution routes automatically/, 'the Quality UI states that routing recommendations are evidence-only');
+assert.match(slice, /Model \/ effort/, 'routing evidence exposes the exact model and effort variant');
+assert.match(slice, /route\.provenanceComplete \? `\$\{route\.model\} \/ \$\{route\.effort\}` : 'Legacy \/ incomplete'/, 'legacy and incomplete routing evidence is labelled rather than blended into a measured variant');
+assert.match(slice, /route\.costUnit \|\| '—'/, 'routing evidence exposes the comparable cost unit without fabricating one for legacy rows');
+assert.match(slice, /key=\{`\$\{route\.taskClass\}\|\$\{route\.route\}\|\$\{route\.model \|\| ''\}\|\$\{route\.effort \|\| ''\}\|\$\{route\.costUnit \|\| ''\}`\}/, 'each exact routing variant has a stable distinct React row key');
 assert.doesNotMatch(slice, /\.sort\(/, 'the quality view does not re-order server data');
 
 // The endpoints it depends on exist.

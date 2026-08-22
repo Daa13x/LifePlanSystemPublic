@@ -21,6 +21,9 @@ export const DEFAULT_ROUTE_TIERS = [
   { id: 'cloud', costWeight: 10 }
 ];
 
+export const ROUTING_COST_UNIT = 'lps-effective-unit-v1';
+export const ROUTING_EFFORTS = ['fixed', 'low', 'medium', 'high', 'max'];
+
 // Total cost of a task attempt: base (token/compute) cost PLUS the cost of the
 // retries it took and any human review time. Cheap-per-token but retry-heavy
 // routes are correctly penalised.
@@ -50,6 +53,16 @@ function measuredEffectiveCost(record = {}, options = {}) {
   return Number.isFinite(total) && total >= 0 ? total : null;
 }
 
+function completeProvenance(record = {}) {
+  const verified = record.verificationPassed ?? record.verification_passed;
+  return typeof record.model === 'string' && Boolean(record.model)
+    && ROUTING_EFFORTS.includes(record.effort)
+    && (record.costUnit ?? record.cost_unit) === ROUTING_COST_UNIT
+    && typeof (record.runRef ?? record.run_ref) === 'string' && Boolean(record.runRef ?? record.run_ref)
+    && typeof (record.taskRef ?? record.task_ref) === 'string' && Boolean(record.taskRef ?? record.task_ref)
+    && (!verified || (typeof (record.verificationRef ?? record.verification_ref) === 'string' && Boolean(record.verificationRef ?? record.verification_ref)));
+}
+
 // Decide whether to escalate off the current route. Escalation is driven only by
 // negative evidence; a passing route is never escalated on perceived difficulty.
 export function shouldEscalate(signals = {}) {
@@ -76,11 +89,17 @@ export function shouldEscalate(signals = {}) {
 export function summarizeRoutes(history = [], options = {}) {
   const groups = new Map();
   for (const record of Array.isArray(history) ? history : []) {
-    const key = `${record.taskClass || record.task_class || ''}|${record.route || ''}`;
-    if (!groups.has(key)) groups.set(key, { taskClass: record.taskClass || record.task_class || '', route: record.route || '', attempts: 0, successes: 0, totalCost: 0, costEvidenceValid: true });
+    const taskClass = record.taskClass || record.task_class || '';
+    const route = record.route || '';
+    const model = record.model || null;
+    const effort = record.effort || null;
+    const costUnit = record.costUnit ?? record.cost_unit ?? null;
+    const key = JSON.stringify([taskClass, route, model, effort, costUnit]);
+    if (!groups.has(key)) groups.set(key, { taskClass, route, model, effort, costUnit, attempts: 0, successes: 0, totalCost: 0, costEvidenceValid: true, provenanceComplete: true });
     const group = groups.get(key);
     group.attempts += 1;
     if (succeeded(record)) group.successes += 1;
+    if (!completeProvenance(record)) group.provenanceComplete = false;
     const measuredCost = measuredEffectiveCost(record, options);
     if (measuredCost === null) group.costEvidenceValid = false;
     else group.totalCost += measuredCost;
@@ -88,8 +107,8 @@ export function summarizeRoutes(history = [], options = {}) {
   return [...groups.values()].map((group) => ({
     ...group,
     successRate: group.attempts ? group.successes / group.attempts : 0,
-    avgEffectiveCost: group.costEvidenceValid && group.attempts ? group.totalCost / group.attempts : null,
-    costPerSuccessfulTask: group.costEvidenceValid && group.successes ? group.totalCost / group.successes : null
+    avgEffectiveCost: group.provenanceComplete && group.costEvidenceValid && group.attempts ? group.totalCost / group.attempts : null,
+    costPerSuccessfulTask: group.provenanceComplete && group.costEvidenceValid && group.successes ? group.totalCost / group.successes : null
   }));
 }
 
@@ -103,15 +122,20 @@ export function recommendRoute(taskClass, history = [], {
 } = {}) {
   const orderedTiers = [...tiers].sort((a, b) => a.costWeight - b.costWeight);
   const stats = summarizeRoutes(history.filter((record) => (record.taskClass || record.task_class) === taskClass), costOptions);
-  const statByRoute = new Map(stats.map((stat) => [stat.route, stat]));
   const highRisk = highRiskClasses.includes(taskClass);
 
-  const eligible = orderedTiers
-    .map((tier) => ({ tier, stat: statByRoute.get(tier.id) }))
+  const eligible = stats
+    .map((stat) => ({ tier: orderedTiers.find((tier) => tier.id === stat.route), stat }))
+    .filter(({ tier }) => Boolean(tier))
     .filter(({ stat }) => stat && stat.attempts >= minAttempts && stat.successRate >= acceptanceThreshold && Number.isFinite(stat.costPerSuccessfulTask))
     .sort((left, right) => left.stat.costPerSuccessfulTask - right.stat.costPerSuccessfulTask
+      || right.stat.successRate - left.stat.successRate
+      || right.stat.attempts - left.stat.attempts
       || left.tier.costWeight - right.tier.costWeight
-      || left.tier.id.localeCompare(right.tier.id));
+      || left.tier.id.localeCompare(right.tier.id)
+      || left.stat.model.localeCompare(right.stat.model)
+      || left.stat.effort.localeCompare(right.stat.effort)
+      || left.stat.costUnit.localeCompare(right.stat.costUnit));
   if (eligible.length) {
     const { tier, stat } = eligible[0];
     return {
@@ -121,6 +145,9 @@ export function recommendRoute(taskClass, history = [], {
       attempts: stat.attempts,
       successRate: stat.successRate,
       costPerSuccessfulTask: stat.costPerSuccessfulTask,
+      model: stat.model,
+      effort: stat.effort,
+      costUnit: stat.costUnit,
       highRisk,
       requiresDeterministicChecks: highRisk
     };

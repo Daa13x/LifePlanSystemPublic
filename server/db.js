@@ -485,6 +485,14 @@ export function migrate() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       task_class TEXT NOT NULL,
       route TEXT NOT NULL,
+      model TEXT,
+      effort TEXT,
+      run_ref TEXT,
+      task_ref TEXT,
+      cost_unit TEXT,
+      verification_ref TEXT,
+      observation_key TEXT,
+      request_hash TEXT,
       cost REAL NOT NULL DEFAULT 0,
       latency_ms INTEGER,
       retries INTEGER NOT NULL DEFAULT 0,
@@ -557,6 +565,25 @@ export function migrate() {
   } catch (error) {
     if (!/duplicate column name:\s*failure_event_id/i.test(String(error?.message || ''))) throw error;
   }
+
+  // Existing routing evidence predates provenance and unit attribution.
+  // Preserve those rows as explicitly incomplete; never fabricate a backfill.
+  // Migration failures other than the expected duplicate-column condition
+  // remain fatal.
+  for (const [column, type] of [
+    ['model', 'TEXT'], ['effort', 'TEXT'], ['run_ref', 'TEXT'], ['task_ref', 'TEXT'],
+    ['cost_unit', 'TEXT'], ['verification_ref', 'TEXT'], ['observation_key', 'TEXT'],
+    ['request_hash', 'TEXT']
+  ]) {
+    try {
+      db.exec(`ALTER TABLE routing_observations ADD COLUMN ${column} ${type}`);
+    } catch (error) {
+      if (!new RegExp(`duplicate column name:\\s*${column}`, 'i').test(String(error?.message || ''))) throw error;
+    }
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_routing_obs_key ON routing_observations(observation_key) WHERE observation_key IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_routing_obs_run_variant ON routing_observations(run_ref, route, model, effort, cost_unit) WHERE run_ref IS NOT NULL');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_routing_obs_variant ON routing_observations(task_class, route, model, effort, cost_unit)');
 
   const projectCount = db.prepare('SELECT COUNT(*) AS count FROM projects').get().count;
   if (projectCount === 0) {

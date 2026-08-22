@@ -43,7 +43,7 @@ import { assessLocalAnswerability } from './localAnswerability.js';
 import { buildWorkOrder } from './workOrder.js';
 import { normalizeFeedback, summarizeThemes, FEEDBACK_SENTIMENTS } from './feedbackIntake.js';
 import { normalizeFailure, normalizeCompleteFailureCounts, proposeRemediation, summarizeByCategory, evaluateImprovement, FAILURE_CATEGORIES, FAILURE_STATUSES } from './failureTaxonomy.js';
-import { summarizeRoutes, recommendRoute, shouldEscalate, effectiveCost, DEFAULT_ROUTE_TIERS } from './costRouting.js';
+import { summarizeRoutes, recommendRoute, shouldEscalate, effectiveCost, DEFAULT_ROUTE_TIERS, ROUTING_COST_UNIT, ROUTING_EFFORTS } from './costRouting.js';
 import { evaluateUnattendedSend } from './unattendedLoopGuard.js';
 import { openFolderInExplorer } from './openFolder.js';
 import {
@@ -4904,7 +4904,7 @@ app.post('/api/failures/:id/evaluations', (req, res) => {
 // them. Routing never fabricates a tier ordering from labels, and escalation is
 // evidence-driven — a passing route is not escalated on perceived complexity.
 function routingHistory() {
-  return allRows('SELECT task_class AS taskClass, route, cost, latency_ms AS latencyMs, retries, review_minutes AS reviewMinutes, verification_passed AS verificationPassed, accepted FROM routing_observations ORDER BY created_at DESC')
+  return allRows('SELECT task_class AS taskClass, route, model, effort, run_ref AS runRef, task_ref AS taskRef, cost_unit AS costUnit, verification_ref AS verificationRef, cost, latency_ms AS latencyMs, retries, review_minutes AS reviewMinutes, verification_passed AS verificationPassed, accepted FROM routing_observations ORDER BY created_at DESC')
     .map((r) => ({ ...r, verificationPassed: Boolean(r.verificationPassed), accepted: r.accepted === null ? null : Boolean(r.accepted) }));
 }
 
@@ -4917,12 +4917,22 @@ function routingAlias(body, camel, snake) {
 
 function normalizeRoutingObservation(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Routing observation must be an object.');
-  const allowed = new Set(['taskClass', 'task_class', 'route', 'cost', 'latencyMs', 'latency_ms', 'retries', 'reviewMinutes', 'review_minutes', 'verificationPassed', 'verification_passed', 'accepted']);
+  const allowed = new Set(['taskClass', 'task_class', 'route', 'model', 'effort', 'runRef', 'run_ref', 'taskRef', 'task_ref', 'costUnit', 'cost_unit', 'verificationRef', 'verification_ref', 'cost', 'latencyMs', 'latency_ms', 'retries', 'reviewMinutes', 'review_minutes', 'verificationPassed', 'verification_passed', 'accepted']);
   const unexpected = Object.keys(body).filter((key) => !allowed.has(key));
   if (unexpected.length) throw new Error(`Unexpected routing observation field: ${unexpected[0]}.`);
   const taskClassRaw = routingAlias(body, 'taskClass', 'task_class');
   if (typeof taskClassRaw !== 'string' || !taskClassRaw.trim() || taskClassRaw.trim().length > 100 || /[\u0000-\u001f\u007f]/.test(taskClassRaw)) throw new Error('Task class must be 1-100 characters on one line.');
   if (typeof body.route !== 'string' || !DEFAULT_ROUTE_TIERS.some((tier) => tier.id === body.route)) throw new Error(`Route must be one of: ${DEFAULT_ROUTE_TIERS.map((tier) => tier.id).join(', ')}.`);
+  const model = typeof body.model === 'string' ? body.model.trim() : '';
+  if (!/^[A-Za-z0-9._-]{1,80}\/[A-Za-z0-9][A-Za-z0-9._:-]{0,118}$/.test(model) || model.length > 200) throw new Error('Model must be a bounded namespaced technical identifier such as local/model-name.');
+  if (typeof body.effort !== 'string' || !ROUTING_EFFORTS.includes(body.effort)) throw new Error(`Effort must be one of: ${ROUTING_EFFORTS.join(', ')}.`);
+  const runRef = routingAlias(body, 'runRef', 'run_ref');
+  const taskRef = routingAlias(body, 'taskRef', 'task_ref');
+  const refPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+  if (typeof runRef !== 'string' || !refPattern.test(runRef)) throw new Error('Run reference must be a 1-200 character opaque technical identifier.');
+  if (typeof taskRef !== 'string' || !refPattern.test(taskRef)) throw new Error('Task reference must be a 1-200 character opaque technical identifier.');
+  const costUnit = routingAlias(body, 'costUnit', 'cost_unit');
+  if (costUnit !== ROUTING_COST_UNIT) throw new Error(`Cost unit must be ${ROUTING_COST_UNIT}.`);
   if (typeof body.cost !== 'number' || !Number.isFinite(body.cost) || body.cost < 0 || body.cost > 1000000000) throw new Error('Cost must be a finite number from 0 to 1000000000.');
   const latencyMs = routingAlias(body, 'latencyMs', 'latency_ms');
   if (latencyMs !== undefined && latencyMs !== null && (!Number.isInteger(latencyMs) || latencyMs < 0 || latencyMs > 1000000000)) throw new Error('Latency must be a non-negative integer or null.');
@@ -4932,23 +4942,56 @@ function normalizeRoutingObservation(body) {
   if (typeof reviewMinutes !== 'number' || !Number.isFinite(reviewMinutes) || reviewMinutes < 0 || reviewMinutes > 100000) throw new Error('Review minutes must be a finite number from 0 to 100000.');
   const verificationPassed = routingAlias(body, 'verificationPassed', 'verification_passed');
   if (typeof verificationPassed !== 'boolean') throw new Error('verificationPassed must be a boolean.');
+  const verificationRefRaw = routingAlias(body, 'verificationRef', 'verification_ref');
+  const verificationRef = verificationRefRaw === undefined || verificationRefRaw === null ? null : verificationRefRaw;
+  if (verificationRef !== null && (typeof verificationRef !== 'string' || !refPattern.test(verificationRef))) throw new Error('Verification reference must be a 1-200 character opaque technical identifier or null.');
+  if (verificationPassed && !verificationRef) throw new Error('A verification reference is required when verification passed.');
   if (body.accepted !== undefined && body.accepted !== null && typeof body.accepted !== 'boolean') throw new Error('Accepted must be a boolean or null.');
-  return { taskClass: taskClassRaw.trim(), route: body.route, cost: body.cost, latencyMs: latencyMs ?? null, retries, reviewMinutes, verificationPassed, accepted: body.accepted ?? null };
+  return { taskClass: taskClassRaw.trim(), route: body.route, model, effort: body.effort, runRef, taskRef, costUnit, verificationRef, cost: body.cost, latencyMs: latencyMs ?? null, retries, reviewMinutes, verificationPassed, accepted: body.accepted ?? null };
 }
 
 app.post('/api/routing/observations', (req, res) => {
+  const suppliedKey = req.get('X-LPS-Idempotency-Key');
+  const idempotencyKey = normalizeIdempotencyKey(suppliedKey);
+  if (!suppliedKey || !idempotencyKey) return fail(res, 400, 'A valid X-LPS-Idempotency-Key is required.');
   let observation;
   try { observation = normalizeRoutingObservation(req.body); }
   catch (error) { return fail(res, 400, error.message); }
-  const id = db.prepare(`
-    INSERT INTO routing_observations (task_class, route, cost, latency_ms, retries, review_minutes, verification_passed, accepted)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    observation.taskClass, observation.route, observation.cost, observation.latencyMs,
-    observation.retries, observation.reviewMinutes, observation.verificationPassed ? 1 : 0,
-    observation.accepted === null ? null : (observation.accepted ? 1 : 0)
-  ).lastInsertRowid;
-  ok(res, row('SELECT * FROM routing_observations WHERE id = ?', [id]));
+  const requestHash = hashRequest({ route: '/api/routing/observations', ...observation });
+  try {
+    const result = runIdempotent({
+      db, transaction, route: '/api/routing/observations', key: idempotencyKey, requestHash,
+      execute: () => {
+        const existing = row('SELECT * FROM routing_observations WHERE observation_key = ?', [idempotencyKey]);
+        if (existing) {
+          if (existing.request_hash !== requestHash) throw new IdempotencyConflictError('This observation key was already used with different routing evidence.');
+          return { statusCode: 200, body: { ...existing, replayed: true } };
+        }
+        const existingRun = row('SELECT * FROM routing_observations WHERE run_ref = ? AND route = ? AND model = ? AND effort = ? AND cost_unit = ?', [
+          observation.runRef, observation.route, observation.model, observation.effort, observation.costUnit
+        ]);
+        if (existingRun) {
+          if (existingRun.request_hash !== requestHash) throw new IdempotencyConflictError('This run and route variant already has different routing evidence.');
+          return { statusCode: 200, body: { ...existingRun, replayed: true } };
+        }
+        const id = db.prepare(`
+          INSERT INTO routing_observations (task_class, route, model, effort, run_ref, task_ref, cost_unit, verification_ref, observation_key, request_hash, cost, latency_ms, retries, review_minutes, verification_passed, accepted)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          observation.taskClass, observation.route, observation.model, observation.effort,
+          observation.runRef, observation.taskRef, observation.costUnit, observation.verificationRef,
+          idempotencyKey, requestHash, observation.cost, observation.latencyMs,
+          observation.retries, observation.reviewMinutes, observation.verificationPassed ? 1 : 0,
+          observation.accepted === null ? null : (observation.accepted ? 1 : 0)
+        ).lastInsertRowid;
+        return { statusCode: 200, body: row('SELECT * FROM routing_observations WHERE id = ?', [id]) };
+      }
+    });
+    ok(res, { ...result.body, replayed: result.replayed || result.body.replayed === true });
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) return fail(res, 409, error.message);
+    return fail(res, 500, 'Routing observation could not be stored.');
+  }
 });
 
 app.get('/api/routing/summary', (_req, res) => {

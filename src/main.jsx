@@ -1260,15 +1260,15 @@ function QualityReview({ setNotice, refreshSignal }) {
       </div>
 
       <div className="panel">
-        <div className="panel-heading"><div><h2>Routing evidence</h2><p>Measured route outcomes. Recommendations prefer the lowest measured cost per successful task among routes meeting the acceptance bar; they do not change execution routes automatically.</p></div><Pill tone="default">{routing.observationCount}</Pill></div>
+        <div className="panel-heading"><div><h2>Routing evidence</h2><p>Measured route outcomes are compared only within complete model, effort, and cost-unit provenance. Legacy or incomplete evidence stays visible but is excluded. Recommendations do not change execution routes automatically.</p></div><Pill tone="default">{routing.observationCount}</Pill></div>
         {routing.routes.length ? (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th>Task class</th><th>Route</th><th>Attempts</th><th>Success rate</th><th>Avg attempt cost</th><th>Cost / successful task</th></tr></thead>
+              <thead><tr><th>Task class</th><th>Route</th><th>Model / effort</th><th>Cost unit</th><th>Attempts</th><th>Success rate</th><th>Avg attempt cost</th><th>Cost / successful task</th></tr></thead>
               <tbody>
                 {routing.routes.map((route) => (
-                  <tr key={`${route.taskClass}|${route.route}`}>
-                    <td>{route.taskClass || '—'}</td><td>{route.route}</td><td>{route.attempts}</td>
+                  <tr key={`${route.taskClass}|${route.route}|${route.model || ''}|${route.effort || ''}|${route.costUnit || ''}`}>
+                    <td>{route.taskClass || '—'}</td><td>{route.route}</td><td>{route.provenanceComplete ? `${route.model} / ${route.effort}` : 'Legacy / incomplete'}</td><td>{route.costUnit || '—'}</td><td>{route.attempts}</td>
                     <td>{Math.round(route.successRate * 100)}%</td><td>{route.avgEffectiveCost == null ? '—' : route.avgEffectiveCost.toFixed(2)}</td><td>{route.costPerSuccessfulTask == null ? '—' : route.costPerSuccessfulTask.toFixed(2)}</td>
                   </tr>
                 ))}
