@@ -117,6 +117,13 @@ jobs:
           -SkipDependencyInstall
           -SkipBuild
 
+      # Exercise the packaged Node runtime + production dist in a real browser
+      # before either artifact can be uploaded or published. The verifier uses
+      # a disposable database and proves CSRF, durable Chat idempotency, local
+      # grounding, persistence/reopen, and cloud-egress review boundaries.
+      - name: Verify packaged Chat
+        run: npm run verify:installed-chat -- release/LifePlannerPortable
+
       - name: Upload portable bundle
         uses: actions/upload-artifact@v7
         with:
