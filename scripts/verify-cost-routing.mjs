@@ -55,6 +55,19 @@ line(shouldEscalate({ acceptanceScore: 0.4, acceptanceThreshold: 0.7 }).escalate
   const rec2 = recommendRoute('code', failingCheap, { acceptanceThreshold: 0.7, minAttempts: 3 });
   line(rec2.route === 'local-high', 'a cheap route that repeatedly fails is skipped for the next tier that meets the bar');
 
+  const measuredCostConflict = [
+    ...Array.from({ length: 4 }, () => ({ taskClass: 'measured-cost', route: 'local-low', cost: 10, verificationPassed: true, accepted: true })),
+    ...Array.from({ length: 4 }, () => ({ taskClass: 'measured-cost', route: 'local-high', cost: 3, verificationPassed: true, accepted: true }))
+  ];
+  const recCost = recommendRoute('measured-cost', measuredCostConflict, { acceptanceThreshold: 0.7, minAttempts: 3 });
+  line(recCost.route === 'local-high' && recCost.costPerSuccessfulTask === 3, 'measured cost per successful task overrides the static tier label');
+
+  const equalMeasuredCost = [
+    ...Array.from({ length: 3 }, () => ({ taskClass: 'tie', route: 'local-low', cost: 2, verificationPassed: true, accepted: true })),
+    ...Array.from({ length: 3 }, () => ({ taskClass: 'tie', route: 'local-high', cost: 2, verificationPassed: true, accepted: true }))
+  ];
+  line(recommendRoute('tie', equalMeasuredCost).route === 'local-low', 'equal measured cost uses static tier weight only as a deterministic tie-break');
+
   // Insufficient evidence -> configured default, flagged as not measured.
   const rec3 = recommendRoute('novel', [], { defaultRoute: 'local-low', minAttempts: 3 });
   line(rec3.route === 'local-low' && rec3.measured === false, 'with no measured evidence the configured default is used and flagged unmeasured');
@@ -73,6 +86,19 @@ line(shouldEscalate({ acceptanceScore: 0.4, acceptanceThreshold: 0.7 }).escalate
   const stat = stats.find((s) => s.route === 'local-low');
   line(stat.attempts === 2 && stat.successes === 1 && stat.successRate === 0.5, 'route summary reports attempts, successes, and success rate');
   line(stat.avgEffectiveCost === (1 + 3) / 2, 'route summary averages the effective (retry-inclusive) cost');
+  line(stat.costPerSuccessfulTask === 4, 'cost per successful task includes the cost of failed and retried attempts in its numerator');
+  const noSuccess = summarizeRoutes([{ taskClass: 'x', route: 'cloud', cost: 5, verificationPassed: false, accepted: false }])[0];
+  line(noSuccess.costPerSuccessfulTask === null, 'a route with no successful task has no fabricated cost-per-success value');
+  const invalidLegacy = summarizeRoutes([
+    { taskClass: 'legacy', route: 'local-high', cost: -5, verificationPassed: true, accepted: true },
+    { taskClass: 'legacy', route: 'local-high', cost: 1, verificationPassed: true, accepted: true }
+  ])[0];
+  line(invalidLegacy.costEvidenceValid === false && invalidLegacy.avgEffectiveCost === null && invalidLegacy.costPerSuccessfulTask === null, 'invalid historical cost evidence is exposed as incomplete and never silently clamped');
+  const invalidChoice = recommendRoute('legacy-choice', [
+    ...Array.from({ length: 4 }, () => ({ taskClass: 'legacy-choice', route: 'local-low', cost: 2, verificationPassed: true, accepted: true })),
+    ...Array.from({ length: 4 }, () => ({ taskClass: 'legacy-choice', route: 'local-high', cost: -5, verificationPassed: true, accepted: true }))
+  ]);
+  line(invalidChoice.route === 'local-low' && invalidChoice.measured === true, 'invalid historical cost rows cannot win measured route selection');
 }
 
 console.log(failures ? `\n${failures} check(s) FAILED` : '\nAll cost-routing checks passed.');

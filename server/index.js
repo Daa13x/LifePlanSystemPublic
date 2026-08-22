@@ -4908,21 +4908,45 @@ function routingHistory() {
     .map((r) => ({ ...r, verificationPassed: Boolean(r.verificationPassed), accepted: r.accepted === null ? null : Boolean(r.accepted) }));
 }
 
+function routingAlias(body, camel, snake) {
+  const hasCamel = Object.hasOwn(body, camel);
+  const hasSnake = Object.hasOwn(body, snake);
+  if (hasCamel && hasSnake && !Object.is(body[camel], body[snake])) throw new Error(`${camel} and ${snake} must not conflict.`);
+  return hasCamel ? body[camel] : body[snake];
+}
+
+function normalizeRoutingObservation(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Routing observation must be an object.');
+  const allowed = new Set(['taskClass', 'task_class', 'route', 'cost', 'latencyMs', 'latency_ms', 'retries', 'reviewMinutes', 'review_minutes', 'verificationPassed', 'verification_passed', 'accepted']);
+  const unexpected = Object.keys(body).filter((key) => !allowed.has(key));
+  if (unexpected.length) throw new Error(`Unexpected routing observation field: ${unexpected[0]}.`);
+  const taskClassRaw = routingAlias(body, 'taskClass', 'task_class');
+  if (typeof taskClassRaw !== 'string' || !taskClassRaw.trim() || taskClassRaw.trim().length > 100 || /[\u0000-\u001f\u007f]/.test(taskClassRaw)) throw new Error('Task class must be 1-100 characters on one line.');
+  if (typeof body.route !== 'string' || !DEFAULT_ROUTE_TIERS.some((tier) => tier.id === body.route)) throw new Error(`Route must be one of: ${DEFAULT_ROUTE_TIERS.map((tier) => tier.id).join(', ')}.`);
+  if (typeof body.cost !== 'number' || !Number.isFinite(body.cost) || body.cost < 0 || body.cost > 1000000000) throw new Error('Cost must be a finite number from 0 to 1000000000.');
+  const latencyMs = routingAlias(body, 'latencyMs', 'latency_ms');
+  if (latencyMs !== undefined && latencyMs !== null && (!Number.isInteger(latencyMs) || latencyMs < 0 || latencyMs > 1000000000)) throw new Error('Latency must be a non-negative integer or null.');
+  const retries = body.retries ?? 0;
+  if (!Number.isInteger(retries) || retries < 0 || retries > 100) throw new Error('Retries must be an integer from 0 to 100.');
+  const reviewMinutes = routingAlias(body, 'reviewMinutes', 'review_minutes') ?? 0;
+  if (typeof reviewMinutes !== 'number' || !Number.isFinite(reviewMinutes) || reviewMinutes < 0 || reviewMinutes > 100000) throw new Error('Review minutes must be a finite number from 0 to 100000.');
+  const verificationPassed = routingAlias(body, 'verificationPassed', 'verification_passed');
+  if (typeof verificationPassed !== 'boolean') throw new Error('verificationPassed must be a boolean.');
+  if (body.accepted !== undefined && body.accepted !== null && typeof body.accepted !== 'boolean') throw new Error('Accepted must be a boolean or null.');
+  return { taskClass: taskClassRaw.trim(), route: body.route, cost: body.cost, latencyMs: latencyMs ?? null, retries, reviewMinutes, verificationPassed, accepted: body.accepted ?? null };
+}
+
 app.post('/api/routing/observations', (req, res) => {
-  const taskClass = String(req.body?.taskClass ?? req.body?.task_class ?? '').trim();
-  const route = String(req.body?.route ?? '').trim();
-  if (!taskClass || !route) return fail(res, 400, 'A task class and route are required.');
-  const accepted = req.body?.accepted;
+  let observation;
+  try { observation = normalizeRoutingObservation(req.body); }
+  catch (error) { return fail(res, 400, error.message); }
   const id = db.prepare(`
     INSERT INTO routing_observations (task_class, route, cost, latency_ms, retries, review_minutes, verification_passed, accepted)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    taskClass, route, Number(req.body?.cost) || 0,
-    req.body?.latencyMs ?? req.body?.latency_ms ?? null,
-    Math.max(0, Number(req.body?.retries) || 0),
-    Math.max(0, Number(req.body?.reviewMinutes ?? req.body?.review_minutes) || 0),
-    (req.body?.verificationPassed ?? req.body?.verification_passed) ? 1 : 0,
-    accepted === undefined || accepted === null ? null : (accepted ? 1 : 0)
+    observation.taskClass, observation.route, observation.cost, observation.latencyMs,
+    observation.retries, observation.reviewMinutes, observation.verificationPassed ? 1 : 0,
+    observation.accepted === null ? null : (observation.accepted ? 1 : 0)
   ).lastInsertRowid;
   ok(res, row('SELECT * FROM routing_observations WHERE id = ?', [id]));
 });

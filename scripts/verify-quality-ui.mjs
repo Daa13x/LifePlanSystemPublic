@@ -34,6 +34,10 @@ assert.match(slice, /Recorded evaluations \(\{item\.evaluations\.length\}\)/, 'p
 assert.match(slice, /JSON\.stringify\(evaluation\.before\)[^\n]*JSON\.stringify\(evaluation\.after\)/, 'reviewers can inspect the persisted complete before/after snapshots');
 assert.match(slice, /changes nothing|never change|changes nothing automatically|A single failure changes nothing/, 'the boundary (no automatic change) is stated');
 assert.match(slice, /successRate/, 'routing evidence shows measured success rate');
+assert.match(slice, /Cost \/ successful task/, 'routing evidence labels measured cost per successful task');
+assert.match(slice, /route\.costPerSuccessfulTask == null \? '—' : route\.costPerSuccessfulTask\.toFixed\(2\)/, 'routing evidence renders an honest unavailable value when no successful task exists');
+assert.match(slice, /route\.avgEffectiveCost == null \? '—' : route\.avgEffectiveCost\.toFixed\(2\)/, 'routing evidence renders invalid historical average cost as unavailable');
+assert.match(slice, /do not change execution routes automatically/, 'the Quality UI states that routing recommendations are evidence-only');
 assert.doesNotMatch(slice, /\.sort\(/, 'the quality view does not re-order server data');
 
 // The endpoints it depends on exist.

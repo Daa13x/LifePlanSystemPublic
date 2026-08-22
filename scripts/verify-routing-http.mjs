@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 // HTTP acceptance for the adaptive cost-routing routes on a disposable
 // LIFE_PLANNER_DB (never the user's data): CSRF-gated recording, measured
@@ -98,6 +99,38 @@ try {
 
   const summary = await api('/api/routing/summary');
   line(summary.status === 200 && summary.body.data.observationCount === 12 && summary.body.data.routes.some((r) => r.route === 'local-low'), 'the summary reports measured routes and observation count');
+  line(summary.body.data.routes.every((route) => Object.hasOwn(route, 'costPerSuccessfulTask')), 'the summary exposes measured cost per successful task without removing compatibility fields');
+
+  const invalidObservations = [
+    { taskClass: 'x', route: 'unknown', cost: 1, verificationPassed: true },
+    { taskClass: 'x', route: 'local-low', cost: '1', verificationPassed: true },
+    { taskClass: 'x', route: 'local-low', cost: -1, verificationPassed: true },
+    { taskClass: 'x', route: 'local-low', cost: 1, verificationPassed: 'false' },
+    { taskClass: 'x', route: 'local-low', cost: 1, verificationPassed: true, accepted: 1 },
+    { taskClass: 'x', route: 'local-low', cost: 1, verificationPassed: true, retries: 1.5 },
+    { taskClass: 'x', route: 'local-low', cost: 1, verificationPassed: true, reviewMinutes: -1 },
+    { taskClass: 'x', task_class: 'different', route: 'local-low', cost: 1, verificationPassed: true },
+    { taskClass: 'x', route: 'local-low', cost: 1, verificationPassed: true, invented: true },
+    { taskClass: 'x'.repeat(101), route: 'local-low', cost: 1, verificationPassed: true }
+  ];
+  for (const invalid of invalidObservations) line((await observe(invalid)).status === 400, 'malformed or coercion-shaped routing evidence is rejected');
+  const snake = await observe({ task_class: 'snake-case', route: 'local-low', cost: 2, latency_ms: 10, retries: 0, review_minutes: 0.5, verification_passed: true, accepted: null });
+  line(snake.status === 200, 'bounded snake_case observation aliases remain compatible');
+
+  for (let i = 0; i < 4; i += 1) await observe({ taskClass: 'measured-cost', route: 'local-low', cost: 10, verificationPassed: true, accepted: true });
+  for (let i = 0; i < 4; i += 1) await observe({ taskClass: 'measured-cost', route: 'local-high', cost: 3, verificationPassed: true, accepted: true });
+  const measuredCost = await api('/api/routing/recommend?taskClass=measured-cost');
+  line(measuredCost.body.data.route === 'local-high' && measuredCost.body.data.costPerSuccessfulTask === 3 && /lowest measured cost per successful task/.test(measuredCost.body.data.reason), 'HTTP recommendation uses measured cost per successful task rather than a static tier label');
+
+  const legacyDb = new DatabaseSync(dbPath);
+  const insertLegacy = legacyDb.prepare('INSERT INTO routing_observations (task_class, route, cost, verification_passed, accepted) VALUES (?, ?, ?, 1, 1)');
+  for (let i = 0; i < 4; i += 1) insertLegacy.run('legacy-invalid-cost', 'local-low', 2);
+  for (let i = 0; i < 4; i += 1) insertLegacy.run('legacy-invalid-cost', 'local-high', -5);
+  legacyDb.close();
+  const legacyRecommendation = await api('/api/routing/recommend?taskClass=legacy-invalid-cost');
+  const legacySummary = await api('/api/routing/summary');
+  const invalidRoute = legacySummary.body.data.routes.find((route) => route.taskClass === 'legacy-invalid-cost' && route.route === 'local-high');
+  line(legacyRecommendation.body.data.route === 'local-low' && legacyRecommendation.body.data.measured === true && invalidRoute.costEvidenceValid === false && invalidRoute.costPerSuccessfulTask === null, 'legacy invalid cost evidence is visible as incomplete and cannot influence measured selection');
 
   // Escalation endpoint is evidence-driven.
   line((await api('/api/routing/escalation', { method: 'POST', json: { contradictsTests: true } })).body.data.escalate === true, 'a test contradiction escalates via the endpoint');

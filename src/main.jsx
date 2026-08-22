@@ -1260,16 +1260,16 @@ function QualityReview({ setNotice, refreshSignal }) {
       </div>
 
       <div className="panel">
-        <div className="panel-heading"><div><h2>Routing evidence</h2><p>Measured route outcomes. Routing prefers the cheapest route meeting the acceptance bar; it never assumes a label equals a tier.</p></div><Pill tone="default">{routing.observationCount}</Pill></div>
+        <div className="panel-heading"><div><h2>Routing evidence</h2><p>Measured route outcomes. Recommendations prefer the lowest measured cost per successful task among routes meeting the acceptance bar; they do not change execution routes automatically.</p></div><Pill tone="default">{routing.observationCount}</Pill></div>
         {routing.routes.length ? (
           <div className="table-scroll">
             <table className="data-table">
-              <thead><tr><th>Task class</th><th>Route</th><th>Attempts</th><th>Success rate</th><th>Avg effective cost</th></tr></thead>
+              <thead><tr><th>Task class</th><th>Route</th><th>Attempts</th><th>Success rate</th><th>Avg attempt cost</th><th>Cost / successful task</th></tr></thead>
               <tbody>
                 {routing.routes.map((route) => (
                   <tr key={`${route.taskClass}|${route.route}`}>
                     <td>{route.taskClass || '—'}</td><td>{route.route}</td><td>{route.attempts}</td>
-                    <td>{Math.round(route.successRate * 100)}%</td><td>{route.avgEffectiveCost.toFixed(2)}</td>
+                    <td>{Math.round(route.successRate * 100)}%</td><td>{route.avgEffectiveCost == null ? '—' : route.avgEffectiveCost.toFixed(2)}</td><td>{route.costPerSuccessfulTask == null ? '—' : route.costPerSuccessfulTask.toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>

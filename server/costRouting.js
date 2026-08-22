@@ -39,6 +39,17 @@ function succeeded(record = {}) {
   return Boolean(verified) && accepted !== false && accepted !== 0;
 }
 
+function measuredEffectiveCost(record = {}, options = {}) {
+  const cost = record.cost;
+  const retries = record.retries ?? 0;
+  const reviewMinutes = record.reviewMinutes ?? record.review_minutes ?? 0;
+  if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) return null;
+  if (typeof retries !== 'number' || !Number.isFinite(retries) || !Number.isInteger(retries) || retries < 0) return null;
+  if (typeof reviewMinutes !== 'number' || !Number.isFinite(reviewMinutes) || reviewMinutes < 0) return null;
+  const total = effectiveCost({ cost, retries, reviewMinutes }, options);
+  return Number.isFinite(total) && total >= 0 ? total : null;
+}
+
 // Decide whether to escalate off the current route. Escalation is driven only by
 // negative evidence; a passing route is never escalated on perceived difficulty.
 export function shouldEscalate(signals = {}) {
@@ -66,16 +77,19 @@ export function summarizeRoutes(history = [], options = {}) {
   const groups = new Map();
   for (const record of Array.isArray(history) ? history : []) {
     const key = `${record.taskClass || record.task_class || ''}|${record.route || ''}`;
-    if (!groups.has(key)) groups.set(key, { taskClass: record.taskClass || record.task_class || '', route: record.route || '', attempts: 0, successes: 0, totalCost: 0 });
+    if (!groups.has(key)) groups.set(key, { taskClass: record.taskClass || record.task_class || '', route: record.route || '', attempts: 0, successes: 0, totalCost: 0, costEvidenceValid: true });
     const group = groups.get(key);
     group.attempts += 1;
     if (succeeded(record)) group.successes += 1;
-    group.totalCost += effectiveCost(record, options);
+    const measuredCost = measuredEffectiveCost(record, options);
+    if (measuredCost === null) group.costEvidenceValid = false;
+    else group.totalCost += measuredCost;
   }
   return [...groups.values()].map((group) => ({
     ...group,
     successRate: group.attempts ? group.successes / group.attempts : 0,
-    avgEffectiveCost: group.attempts ? group.totalCost / group.attempts : 0
+    avgEffectiveCost: group.costEvidenceValid && group.attempts ? group.totalCost / group.attempts : null,
+    costPerSuccessfulTask: group.costEvidenceValid && group.successes ? group.totalCost / group.successes : null
   }));
 }
 
@@ -92,11 +106,24 @@ export function recommendRoute(taskClass, history = [], {
   const statByRoute = new Map(stats.map((stat) => [stat.route, stat]));
   const highRisk = highRiskClasses.includes(taskClass);
 
-  for (const tier of orderedTiers) {
-    const stat = statByRoute.get(tier.id);
-    if (stat && stat.attempts >= minAttempts && stat.successRate >= acceptanceThreshold) {
-      return { route: tier.id, reason: `cheapest route meeting the measured acceptance bar (${Math.round(stat.successRate * 100)}% over ${stat.attempts} attempts)`, measured: true, highRisk, requiresDeterministicChecks: highRisk };
-    }
+  const eligible = orderedTiers
+    .map((tier) => ({ tier, stat: statByRoute.get(tier.id) }))
+    .filter(({ stat }) => stat && stat.attempts >= minAttempts && stat.successRate >= acceptanceThreshold && Number.isFinite(stat.costPerSuccessfulTask))
+    .sort((left, right) => left.stat.costPerSuccessfulTask - right.stat.costPerSuccessfulTask
+      || left.tier.costWeight - right.tier.costWeight
+      || left.tier.id.localeCompare(right.tier.id));
+  if (eligible.length) {
+    const { tier, stat } = eligible[0];
+    return {
+      route: tier.id,
+      reason: `lowest measured cost per successful task (${stat.costPerSuccessfulTask.toFixed(2)}; ${Math.round(stat.successRate * 100)}% success over ${stat.attempts} attempts)`,
+      measured: true,
+      attempts: stat.attempts,
+      successRate: stat.successRate,
+      costPerSuccessfulTask: stat.costPerSuccessfulTask,
+      highRisk,
+      requiresDeterministicChecks: highRisk
+    };
   }
   const fallback = defaultRoute || orderedTiers[0].id;
   return { route: fallback, reason: 'insufficient measured evidence — using the configured default route', measured: false, highRisk, requiresDeterministicChecks: highRisk };
