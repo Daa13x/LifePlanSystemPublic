@@ -712,6 +712,23 @@ try {
   const updReplay = await plannerConfirm(sessionId, updConfirmation);
   line(updReplay.status === 400, 'a planner update confirmation replay is rejected');
 
+  const completeBefore = readTask(targetId);
+  const completeProp = await proposePlannerUpdate(targetId, { status: 'completed' });
+  const completeConfirmation = completeProp.body?.data?.confirmation;
+  line(completeProp.body?.data?.status === 'needs_confirmation' && completeProp.body?.data?.data?.after?.status === 'completed' && readTask(targetId).status === 'deferred' && readTask(targetId).completed_at == null, 'Done stages an exact status-only diff without mutating the Planner task');
+  const completeApplied = await plannerConfirm(sessionId, completeConfirmation);
+  const completedTask = readTask(targetId);
+  line(completeApplied.status === 200 && completedTask.status === 'completed', 'confirming Done applies the canonical completed status');
+  line(Boolean(completedTask.completed_at), 'confirming Done records the canonical completion timestamp');
+  line(completedTask.title === completeBefore.title && completedTask.importance === completeBefore.importance, 'confirming Done preserves unrelated Planner fields');
+
+  const deferProp = await proposePlannerUpdate(targetId, { status: 'deferred' });
+  const deferConfirmation = deferProp.body?.data?.confirmation;
+  line(deferProp.body?.data?.status === 'needs_confirmation' && readTask(targetId).status === 'completed', 'Not today remains review-only until its explicit confirmation');
+  const deferApplied = await plannerConfirm(sessionId, deferConfirmation);
+  const deferredTask = readTask(targetId);
+  line(deferApplied.status === 200 && deferredTask.status === 'deferred' && deferredTask.completed_at == null && deferredTask.title === completedTask.title, 'confirming Not today applies canonical defer semantics and clears the completion timestamp');
+
   const plStaleProp = await proposePlannerUpdate(targetId, { next_action: 'stale attempt' });
   await api(`/api/planner/tasks/${targetId}`, { method: 'PATCH', json: { title: 'Changed by another writer' } });
   const plStaleApply = await plannerConfirm(sessionId, plStaleProp.body?.data?.confirmation);

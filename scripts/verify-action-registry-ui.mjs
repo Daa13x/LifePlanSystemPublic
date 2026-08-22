@@ -93,7 +93,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 27, 'the bounded slice has exactly twenty-seven mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
+assert.equal(mappedControls.length, 29, 'the bounded slice has exactly twenty-nine mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -138,7 +138,7 @@ assert.deepEqual(
 );
 assert.deepEqual(
   controlMappings.filter((mapping) => mapping.actionId === 'planner.propose_update').map((mapping) => mapping.controlId).sort(),
-  ['chat.planner-update.confirm', 'chat.planner-update.open', 'chat.planner-update.preview'],
+  ['chat.planner-status.complete', 'chat.planner-status.defer', 'chat.planner-update.confirm', 'chat.planner-update.open', 'chat.planner-update.preview'],
   'the complete visible Daily Planner update control family has stable identifiers'
 );
 const attachControlStart = picker.indexOf('<button className="picker-row"');
@@ -178,6 +178,18 @@ assert.equal(manifest['planner.propose_create'].confirmation, 'user_confirmation
 assert.equal(manifest['planner.propose_update'].risk, 'REVERSIBLE_WRITE', 'planner.propose_update is a proposal write risk');
 assert.equal(manifest['planner.propose_update'].confirmation, 'user_confirmation', 'Daily Planner task update requires explicit user confirmation');
 assert.match(ui, /invokeAction\('planner\.propose_update', \{ id: form\.id, changes \}\)/, 'the planner Edit/Preview control invokes planner.propose_update with the typed id and bounded changes');
+assert.match(ui, /invokeAction\('planner\.propose_update', \{ id: task\.id, changes: \{ status \} \}\)/, 'the Done and Not today controls invoke the same typed planner update action');
+const statusProposalStart = ui.indexOf('async function proposePlannerStatus');
+const statusProposalEnd = ui.indexOf('\n  async function sendViaJson', statusProposalStart);
+const statusProposal = ui.slice(statusProposalStart, statusProposalEnd);
+assert.ok(statusProposalStart >= 0 && statusProposalEnd > statusProposalStart, 'the bounded planner status adapter is present');
+assert.doesNotMatch(statusProposal, /\/api\/planner\/tasks|method:\s*'PATCH'|method:\s*'POST'/, 'the planner status adapter cannot mutate a task directly');
+const plannerConfirmStart = ui.indexOf('async function confirmPlannerProposal');
+const plannerConfirmEnd = ui.indexOf('\n  // Open the edit form', plannerConfirmStart);
+const plannerConfirm = ui.slice(plannerConfirmStart, plannerConfirmEnd);
+assert.ok(plannerConfirmStart >= 0 && plannerConfirmEnd > plannerConfirmStart, 'the bounded Planner confirmation adapter is present');
+assert.match(plannerConfirm, /const today = await invokeAction\('planner\.today', \{\}\);\s*setPlannerTodayPreview\(today\.data\)/, 'a successful Planner mutation refreshes the canonical Today preview');
+assert.match(plannerConfirm, /catch \{[\s\S]*setPlannerTodayPreview\(null\)/, 'a failed post-mutation refresh clears stale Today data rather than retaining it');
 assert.match(ui, /invokeAction\('planner\.propose_create'/, 'the Add planner task control invokes planner.propose_create through the neutral gateway');
 assert.match(ui, /\/api\/chat\/sessions\/\$\{selectedSession\}\/planner\/confirm/, 'the planner confirm control submits only to the durable planner confirmation endpoint');
 assert.match(server, /app\.post\('\/api\/chat\/sessions\/:id\/planner\/confirm'/, 'the server exposes the durable Daily Planner confirmation endpoint');

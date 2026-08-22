@@ -4052,6 +4052,8 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
         throw error;
       }
       const fields = { ...proposal.changes, updated_at: new Date().toISOString() };
+      if (proposal.changes.status === 'completed') fields.completed_at = fields.updated_at;
+      else if (proposal.changes.status) fields.completed_at = null;
       const sets = Object.keys(fields).map((key) => `${key} = ?`).join(', ');
       const changed = db.prepare(`UPDATE planner_tasks SET ${sets} WHERE id = ?`).run(...Object.values(fields), proposal.identity.id);
       if (changed.changes !== 1) throw new Error('The Planner task update did not apply exactly once.');

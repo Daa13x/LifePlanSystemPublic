@@ -168,6 +168,15 @@ await checkAsync('planner.propose_update returns a bounded before/after proposal
   assert.deepEqual(calls, [['readPlannerTask', 5]], 'the proposal only reads the task; it never writes');
 });
 
+await checkAsync('planner.propose_update stages a status-only lifecycle change without mutation', async () => {
+  calls.length = 0;
+  const r = await reg.invoke('planner.propose_update', { id: 5, changes: { status: 'completed' } });
+  assert.equal(r.status, 'needs_confirmation');
+  assert.deepEqual(r.data.before, { status: 'active' });
+  assert.deepEqual(r.data.after, { status: 'completed' });
+  assert.deepEqual(calls, [['readPlannerTask', 5]], 'the status proposal only reads the task');
+});
+
 await checkAsync('planner.propose_update fails closed for a missing task, a forbidden field, and a no-op change', async () => {
   await assert.rejects(reg.invoke('planner.propose_update', { id: 999, changes: { title: 'x' } }));
   await assert.rejects(reg.invoke('planner.propose_update', { id: 5, changes: { pinned: true } }));

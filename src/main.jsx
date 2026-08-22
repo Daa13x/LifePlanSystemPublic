@@ -2260,6 +2260,13 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       setPlannerProposeOpen(false);
       setPlannerProposeForm({ title: '', next_action: '', deadline: '', importance: 3, effort: 3 });
       setPlannerUpdateForm(null);
+      try {
+        const today = await invokeAction('planner.today', {});
+        setPlannerTodayPreview(today.data);
+      } catch {
+        // Never retain a stale pre-mutation preview if the canonical refresh fails.
+        setPlannerTodayPreview(null);
+      }
       refreshAll();
     } catch (err) { setNotice(err.message); }
     finally { setPlannerProposalBusy(false); }
@@ -2302,6 +2309,18 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       };
       const r = await invokeAction('planner.propose_update', { id: form.id, changes });
       // A proposal only — the task is not changed until the user confirms below.
+      setPlannerProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
+    } catch (error) { setNotice(error.message); }
+    finally { setPlannerProposalBusy(false); }
+  }
+
+  async function proposePlannerStatus(task, status) {
+    if (!task?.id || plannerProposalBusy) return;
+    setPlannerProposalBusy(true);
+    setPlannerProposal(null);
+    try {
+      const r = await invokeAction('planner.propose_update', { id: task.id, changes: { status } });
+      // Status controls use the same state-bound review and confirmation path as Edit.
       setPlannerProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
     } catch (error) { setNotice(error.message); }
     finally { setPlannerProposalBusy(false); }
@@ -2674,7 +2693,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} connectionState={connectionState} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} />
+          <ChatConnectionBar connection={connection} connectionState={connectionState} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} proposalBusy={plannerProposalBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} onProposePlannerStatus={proposePlannerStatus} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -2816,7 +2835,7 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, connectionState, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings, onOpenPlanner, onEditPlannerTask }) {
+function ChatConnectionBar({ connection, connectionState, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, proposalBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings, onOpenPlanner, onEditPlannerTask, onProposePlannerStatus }) {
   const modelName = connection?.model?.name || runtime?.model?.name || null;
   const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
   const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
@@ -2856,7 +2875,9 @@ function ChatConnectionBar({ connection, connectionState, runtime, generating, s
               ? plannerPreview.visible.map((task) => (
                 <span key={task.id} className="planner-preview-task">
                   {task.title}
-                  <button className="link" data-action-id="planner.propose_update" data-control-id="chat.planner-update.open" onClick={() => onEditPlannerTask(task)} disabled={Boolean(checkBusy)}>Edit</button>
+                  <button className="link" data-action-id="planner.propose_update" data-control-id="chat.planner-update.open" onClick={() => onEditPlannerTask(task)} disabled={Boolean(checkBusy || proposalBusy)}>Edit</button>
+                  <button className="link" data-action-id="planner.propose_update" data-control-id="chat.planner-status.complete" onClick={() => onProposePlannerStatus(task, 'completed')} disabled={Boolean(checkBusy || proposalBusy)}>Done</button>
+                  <button className="link" data-action-id="planner.propose_update" data-control-id="chat.planner-status.defer" onClick={() => onProposePlannerStatus(task, 'deferred')} disabled={Boolean(checkBusy || proposalBusy)}>Not today</button>
                 </span>
               ))
               : <small>nothing scheduled</small>}

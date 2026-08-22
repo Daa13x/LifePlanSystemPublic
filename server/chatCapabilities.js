@@ -435,7 +435,7 @@ const ACTION_METADATA = Object.freeze({
   'planner.propose_update': {
     label: 'Update a Planner task', feature: 'Chat task proposal', permission: 'planner.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
     confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Reads the current task and produces a review-only before/after proposal; no Daily Planner data is changed until the user confirms it.'],
-    sourceControls: ['chat.planner-update.open', 'chat.planner-update.preview', 'chat.planner-update.confirm'], testId: 'action.planner.propose_update',
+    sourceControls: ['chat.planner-update.open', 'chat.planner-update.preview', 'chat.planner-update.confirm', 'chat.planner-status.complete', 'chat.planner-status.defer'], testId: 'action.planner.propose_update',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'target', 'state_token', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target: { type: 'object' }, state_token: { type: 'string' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
   'system.status': {
