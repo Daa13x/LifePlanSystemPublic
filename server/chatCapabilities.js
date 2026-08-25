@@ -432,6 +432,12 @@ const ACTION_METADATA = Object.freeze({
     sourceControls: ['chat.planner-proposal.open', 'chat.planner-proposal.preview', 'chat.planner-proposal.confirm'], testId: 'action.planner.propose_create',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
+  'project.propose_create': {
+    label: 'Propose a Workboard card', feature: 'Chat task proposal', permission: 'workboard.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
+    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Persists a time-limited review proposal; no Workboard card (project) is created until the user confirms it.'],
+    sourceControls: ['chat.project-proposal.open', 'chat.project-proposal.preview', 'chat.project-proposal.confirm'], testId: 'action.project.propose_create',
+    resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
+  },
   'planner.propose_update': {
     label: 'Update a Planner task', feature: 'Chat task proposal', permission: 'planner.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
     confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Reads the current task and produces a review-only before/after proposal; no Daily Planner data is changed until the user confirms it.'],
@@ -700,6 +706,26 @@ export function createCapabilityRegistry(deps) {
       }
     },
 
+    'project.propose_create': {
+      description: 'Propose creating a new Workboard card (a project). Returns a bounded proposal for confirmation; never writes.',
+      readOnly: false,
+      schema: {
+        title: { type: 'string', required: true, maxLength: 160 },
+        body: { type: 'string', default: '', maxLength: 2000 },
+        next_action: { type: 'string', default: '', maxLength: 400 }
+      },
+      async handler(args) {
+        // No mutation here — only a structured proposal for explicit confirmation.
+        return {
+          proposal: true,
+          operation: 'project.create',
+          affects: 'new Workboard card',
+          preview: { title: args.title, body: args.body, next_action: args.next_action },
+          confirmation_required: true
+        };
+      }
+    },
+
     'planner.propose_update': {
       description: 'Propose updating an existing Daily Planner task. Returns a before/after proposal for confirmation; never writes.',
       readOnly: false,
@@ -946,6 +972,7 @@ export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
   'planner.propose_create', 'planner.propose_update',
+  'project.propose_create',
   'system.status', 'system.models', 'system.runs',
   'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner'
 ];

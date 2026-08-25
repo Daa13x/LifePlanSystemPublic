@@ -559,6 +559,49 @@ try {
   });
   line(replay.status === 400 && (await api('/api/items?all=1')).body?.data?.length === applyAfter, 'a replay is rejected without a second write');
 
+  // project.propose_create: Chat can also originate a Workboard CARD (the
+  // richer, audit-trail-bearing `projects` table the LayeredCard UI reads),
+  // not only a lighter knowledge_items row. This is the durable-confirmation
+  // create path plus proof that createProjectRecord seeds exactly one
+  // project_events row atomically with the project insert.
+  const projectsBefore = (await api('/api/workboard/cards')).body?.data?.length;
+  const projectProposal = await api('/api/chat/capability', {
+    method: 'POST',
+    json: { session_id: sessionId, name: 'project.propose_create', args: { title: 'Card fixture', body: 'Immutable evidence fixture', next_action: 'Review the card' } }
+  });
+  const projectDurable = projectProposal.body?.data;
+  line(projectDurable?.status === 'needs_confirmation' && projectDurable?.data?.confirmation_required === true && projectDurable?.confirmation?.confirmationId && projectDurable?.confirmation?.token, 'project proposal returns a time-limited durable confirmation envelope');
+  line(projectsBefore === (await api('/api/workboard/cards')).body?.data?.length, 'project proposal creation performs no Workboard write');
+
+  const projectConfirmationId = projectDurable?.confirmation?.confirmationId;
+  const projectConfirmationToken = projectDurable?.confirmation?.token;
+  const projectStoredDb = new DatabaseSync(dbPath, { readOnly: true });
+  const projectStored = projectStoredDb.prepare('SELECT session_id, operation, target, after_state FROM confirmations WHERE id = ?').get(projectConfirmationId);
+  projectStoredDb.close();
+  line(projectStored?.session_id === `chat:${sessionId}` && projectStored?.operation === 'project.create' && projectStored?.target === `chat:${sessionId}:project:new`, 'the project confirmation is bound to the real chat, action, and target');
+
+  const projectConfirmed = await api(`/api/chat/sessions/${sessionId}/project/confirm`, {
+    method: 'POST',
+    json: { confirmationId: projectConfirmationId, token: projectConfirmationToken }
+  });
+  const createdCard = projectConfirmed.body?.data?.record;
+  line(projectConfirmed.status === 200 && createdCard?.name === 'Card fixture' && createdCard?.evidence === 'Immutable evidence fixture' && createdCard?.source === 'chat', 'confirmation creates exactly the immutable stored proposal as a Workboard card');
+  const cardWorkOrder = (await api(`/api/workboard/cards/${createdCard?.id}`)).body?.data;
+  const cardEvents = cardWorkOrder?.history?.events || [];
+  line(cardEvents.length === 1 && cardEvents[0]?.type === 'created' && cardEvents[0]?.evidence === 'Immutable evidence fixture', 'the LayeredCard History layer carries exactly the one seeded audit-trail event');
+  line(cardWorkOrder?.history?.populated === true && cardWorkOrder?.proof?.populated === true, 'a Chat-created card is born with a populated History layer and Proof layer, not empty ones');
+
+  const projectEventsDb = new DatabaseSync(dbPath, { readOnly: true });
+  const projectEventRows = projectEventsDb.prepare('SELECT event_type, evidence FROM project_events WHERE project_id = ?').all(createdCard?.id);
+  projectEventsDb.close();
+  line(projectEventRows.length === 1 && projectEventRows[0].event_type === 'created' && projectEventRows[0].evidence === 'Immutable evidence fixture', 'exactly one seeding project_events row is written atomically with the project');
+
+  const projectReplay = await api(`/api/chat/sessions/${sessionId}/project/confirm`, {
+    method: 'POST',
+    json: { confirmationId: projectConfirmationId, token: projectConfirmationToken }
+  });
+  line(projectReplay.status === 400 && (await api('/api/workboard/cards')).body?.data?.length === projectsBefore + 1, 'a project confirmation replay is rejected without a second card or event');
+
   const tamperProposal = await api('/api/actions/workboard.propose_create/invoke', {
     method: 'POST',
     json: { session_id: sessionId, args: { title: 'Tamper target', type: 'note' } }

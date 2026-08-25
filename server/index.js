@@ -3150,6 +3150,8 @@ const CHAT_PLANNER_CREATE_ACTION = 'planner.propose_create';
 const CHAT_PLANNER_CREATE_OPERATION = 'planner.create';
 const CHAT_PLANNER_UPDATE_ACTION = 'planner.propose_update';
 const CHAT_PLANNER_UPDATE_OPERATION = 'planner.update';
+const CHAT_PROJECT_CREATE_ACTION = 'project.propose_create';
+const CHAT_PROJECT_CREATE_OPERATION = 'project.create';
 
 function realChatSessionId(value) {
   const sessionId = Number(value);
@@ -3223,6 +3225,65 @@ function bindWorkboardCreateConfirmation(sessionValue, result) {
     sessionId: chatConfirmationSessionId(sessionId),
     requiresRevalidation: false,
     idempotencyKey: `chat-workboard-create:${result.correlationId}`
+  });
+  return {
+    ...result,
+    confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt }
+  };
+}
+
+// The canonical, bounded Workboard CARD (projects table) create payload. This
+// mirrors canonicalWorkboardCreateState but targets the richer, audit-trail-
+// bearing `projects` table (the LayeredCard Workboard) rather than a lighter
+// `knowledge_items` row. `body` maps to the card's `evidence` field, matching
+// the direct POST /api/projects route's own `evidence` field.
+function canonicalProjectCreateState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The stored Workboard card proposal is invalid.');
+  const allowed = new Set(['title', 'body', 'next_action']);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error('The stored Workboard card proposal contains unsupported fields.');
+  const title = String(value.title || '').trim();
+  const body = String(value.body || '').trim();
+  const nextAction = String(value.next_action || '').trim();
+  if (!title || title.length > 160) throw new Error('The stored Workboard card proposal has an invalid title.');
+  if (body.length > 2000 || nextAction.length > 400) throw new Error('The stored Workboard card proposal exceeds its allowed bounds.');
+  return { title, body, next_action: nextAction };
+}
+
+function projectCreateOrigin(correlationId) {
+  return JSON.stringify({ source: 'chat-action-gateway', actionId: CHAT_PROJECT_CREATE_ACTION, correlationId });
+}
+
+function readProjectCreateOrigin(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    if (parsed?.source !== 'chat-action-gateway' || parsed?.actionId !== CHAT_PROJECT_CREATE_ACTION || typeof parsed?.correlationId !== 'string' || !parsed.correlationId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bindProjectCreateConfirmation(sessionValue, result) {
+  if (result?.actionId !== CHAT_PROJECT_CREATE_ACTION || result.status !== 'needs_confirmation') return result;
+  const sessionId = realChatSessionId(sessionValue);
+  if (!sessionId) {
+    const error = new Error('A valid active chat session is required to stage a Workboard card proposal.');
+    error.code = 'INVALID_CHAT_SESSION';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const afterState = canonicalProjectCreateState(result.args);
+  const target = `${chatConfirmationSessionId(sessionId)}:project:new`;
+  const confirmation = proposeConfirmation(db, {
+    operation: CHAT_PROJECT_CREATE_OPERATION,
+    target,
+    afterState,
+    reason: 'User-reviewed Chat Workboard card create proposal.',
+    origin: projectCreateOrigin(result.correlationId),
+    sessionId: chatConfirmationSessionId(sessionId),
+    requiresRevalidation: false,
+    idempotencyKey: `chat-project-create:${result.correlationId}`
   });
   return {
     ...result,
@@ -3672,7 +3733,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
       return ok(res, sessionBlock);
     }
     result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui', renderer: extractRendererBinding(req.body) });
-    result = bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result)));
+    result = bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result))));
     const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
       sessionId,
@@ -3707,7 +3768,7 @@ app.post('/api/chat/capability', async (req, res) => {
       return ok(res, sessionBlock);
     }
     let result = await capabilityRegistry.invoke(name, req.body?.args || {}, { renderer: extractRendererBinding(req.body) });
-    result = bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result)));
+    result = bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result))));
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
@@ -4002,6 +4063,65 @@ app.post('/api/chat/sessions/:id/workboard/confirm', async (req, res) => {
   } catch {
     writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
     fail(res, 400, 'Workboard confirmation failed safely.');
+  }
+});
+
+// Apply only an immutable, session-bound Workboard CARD (projects table) create
+// payload staged by the action gateway. This is the create-only counterpart of
+// workboard/confirm above, targeting the richer, audit-trail-bearing `projects`
+// table instead of `knowledge_items`. Creation is atomic with confirmation
+// settlement (transactionalApply), and createProjectRecord seeds the first
+// project_events row inside that same transaction.
+app.post('/api/chat/sessions/:id/project/confirm', async (req, res) => {
+  const sessionId = Number(req.params.id);
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const keys = Object.keys(body).sort();
+  let auditOperation = 'project.confirm';
+  try {
+    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
+      return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
+    }
+    const confirmationId = String(body.confirmationId || '');
+    const token = String(body.token || '');
+    if (!/^[a-f0-9]{32}$/.test(confirmationId) || !/^[a-f0-9]{64}$/.test(token)) return fail(res, 400, 'A valid confirmation identifier and token are required.');
+    const staged = getConfirmation(db, confirmationId);
+    const createConfirmation = staged?.operation === CHAT_PROJECT_CREATE_OPERATION
+      && staged.target === `${chatConfirmationSessionId(sessionId)}:project:new`;
+    if (!staged || !createConfirmation) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION');
+      return fail(res, 400, 'That Workboard card confirmation is not available.');
+    }
+    auditOperation = staged.operation;
+    const origin = readProjectCreateOrigin(staged.origin);
+    if (!origin) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ORIGIN');
+      return fail(res, 400, 'That Workboard card confirmation is not available.');
+    }
+    const applyCreate = (claimed) => {
+      const p = canonicalProjectCreateState(claimed.afterState);
+      const id = createProjectRecord(
+        { name: p.title, status: 'active', owner: 'user', source: 'chat', confidence: 0.75, evidence: p.body || p.title, nextAction: p.next_action },
+        { type: 'created', actor: 'user', detail: `Card created from Chat: ${p.title}`, evidence: p.body || null }
+      );
+      return { operation: CHAT_PROJECT_CREATE_OPERATION, success: true, record: row('SELECT * FROM projects WHERE id = ?', [id]) };
+    };
+    const applied = await confirmAndApply(
+      db,
+      { id: confirmationId, token, sessionId: chatConfirmationSessionId(sessionId) },
+      applyCreate,
+      { transactionalApply: true }
+    );
+    if (!applied.ok) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', `CONFIRMATION_${String(applied.code || 'REJECTED').toUpperCase()}`, origin.correlationId);
+      return fail(res, 400, applied.error || 'The Workboard card confirmation was rejected.');
+    }
+    writeChatAudit(sessionId, auditOperation, 'applied', `project ${applied.result?.record?.id || 'changed'}`, origin.correlationId);
+    return ok(res, applied.result);
+  } catch {
+    writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
+    fail(res, 400, 'Workboard card confirmation failed safely.');
   }
 });
 
@@ -4418,10 +4538,17 @@ app.post('/api/approvals/:id/:decision', async (req, res) => {
           evidence: `Approval ${approval.id}`,
           nextAction: 'Define next action.'
         });
-        db.prepare(`
-          INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
-          VALUES (?, ?, ?, 'approved proposal', ?, date('now'), ?, ?)
-        `).run(project.name, project.status, project.owner, project.confidence, project.evidence, project.nextAction);
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          createProjectRecord(
+            { name: project.name, status: project.status, owner: project.owner, source: 'approved proposal', confidence: project.confidence, evidence: project.evidence, nextAction: project.nextAction },
+            { type: 'created', actor: project.owner, detail: `Card created via approval ${approval.id}` }
+          );
+          db.exec('COMMIT');
+        } catch (error) {
+          try { db.exec('ROLLBACK'); } catch { /* transaction was not active */ }
+          return fail(res, 500, error.message || 'The approved Workboard card could not be created.');
+        }
       }
       if (approval.action_type === 'update_project') {
         if (!Number.isInteger(payload.id) || payload.id <= 0) return fail(res, 400, 'Project approval must identify a valid project.');
@@ -4628,6 +4755,28 @@ function recordProjectEvent(projectId, { type, fromStatus = null, toStatus = nul
     .run(projectId, String(type), fromStatus, toStatus, actor || 'user', detail, evidence);
 }
 
+// Insert a project row and its seeding audit event as two statements. This
+// issues no BEGIN/COMMIT of its own, so it composes safely inside an
+// already-open transaction — confirmAndApply's own `BEGIN IMMEDIATE` for the
+// chat-confirmation path, or a caller-managed explicit transaction for the
+// direct and approval-based create routes. Previously the direct route wrote
+// the project and its event as two untransacted statements, and the
+// approval-based create_project path skipped the event entirely, so a
+// Workboard Card could exist with no audit-trail row at all.
+function createProjectRecord({ name, status, owner, source, confidence, evidence, nextAction }, event) {
+  const id = db.prepare(`
+    INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
+    VALUES (?, ?, ?, ?, ?, date('now'), ?, ?)
+  `).run(name, status, owner, source, confidence, evidence, nextAction).lastInsertRowid;
+  // Note: the event's evidence intentionally does NOT default to the project's
+  // own `evidence` field. A plain manual/approved create has no evidence to
+  // report yet, and the Proof layer must stay honestly unpopulated for it —
+  // only a caller that actually has reviewable evidence (e.g. the Chat create
+  // path) should pass `event.evidence` explicitly.
+  recordProjectEvent(id, { type: event.type, toStatus: status, actor: event.actor || owner, detail: event.detail, evidence: event.evidence ?? null });
+  return id;
+}
+
 function assembleWorkOrder(project) {
   const events = allRows('SELECT * FROM project_events WHERE project_id = ? ORDER BY id ASC', [project.id]);
   const items = allRows('SELECT id, title, type, status, next_action FROM knowledge_items WHERE project_id = ? ORDER BY updated_at DESC', [project.id]);
@@ -4641,11 +4790,18 @@ app.post('/api/projects', (req, res) => {
   } catch (error) {
     return fail(res, 400, error.message);
   }
-  const id = db.prepare(`
-    INSERT INTO projects (name, status, owner, source, confidence, last_reviewed, evidence, next_action)
-    VALUES (?, ?, ?, 'manual', ?, date('now'), ?, ?)
-  `).run(project.name, project.status, project.owner, project.confidence, project.evidence, project.nextAction).lastInsertRowid;
-  recordProjectEvent(id, { type: 'created', toStatus: project.status, actor: project.owner || 'user', detail: `Card created: ${project.name}` });
+  let id;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    id = createProjectRecord(
+      { name: project.name, status: project.status, owner: project.owner, source: 'manual', confidence: project.confidence, evidence: project.evidence, nextAction: project.nextAction },
+      { type: 'created', actor: project.owner, detail: `Card created: ${project.name}` }
+    );
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction was not active */ }
+    return fail(res, 500, error.message || 'The Workboard card could not be created.');
+  }
   ok(res, row('SELECT * FROM projects WHERE id = ?', [id]));
 });
 
