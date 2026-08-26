@@ -1881,6 +1881,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [plannerProposeOpen, setPlannerProposeOpen] = useState(false);
   const [plannerProposeForm, setPlannerProposeForm] = useState({ title: '', next_action: '', deadline: '', importance: 3, effort: 3 });
   const [plannerProposal, setPlannerProposal] = useState(null);
+  const [projectProposeOpen, setProjectProposeOpen] = useState(false);
+  const [projectProposeForm, setProjectProposeForm] = useState({ title: '', body: '', next_action: '' });
+  const [projectProposal, setProjectProposal] = useState(null);
+  const [projectProposalBusy, setProjectProposalBusy] = useState(false);
   const [plannerProposalBusy, setPlannerProposalBusy] = useState(false);
   const [plannerUpdateForm, setPlannerUpdateForm] = useState(null);
   const [cloudChecks, setCloudChecks] = useState([]);
@@ -2282,6 +2286,34 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       refreshAll();
     } catch (err) { setNotice(err.message); }
     finally { setProposalBusy(false); }
+  }
+
+  async function submitProposeProjectCreate() {
+    if (!projectProposeForm.title.trim() || projectProposalBusy) return;
+    setProjectProposalBusy(true);
+    try {
+      const r = await invokeAction('project.propose_create', { title: projectProposeForm.title, body: projectProposeForm.body, next_action: projectProposeForm.next_action });
+      if (!r.confirmation?.confirmationId || !r.confirmation?.token) throw new Error('The Workboard card proposal was not bound to a confirmation.');
+      setProjectProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
+      setProjectProposeOpen(false);
+      setProjectProposeForm({ title: '', body: '', next_action: '' });
+    } catch (err) { setNotice(err.message); }
+    finally { setProjectProposalBusy(false); }
+  }
+
+  async function confirmProjectProposal() {
+    if (!projectProposal || projectProposalBusy) return;
+    const confirmationId = projectProposal.confirmation?.confirmationId;
+    const token = projectProposal.confirmation?.token;
+    if (!confirmationId || !token) return setNotice('This proposal has no valid confirmation receipt. Preview it again.');
+    setProjectProposalBusy(true);
+    try {
+      const result = await api(`/api/chat/sessions/${selectedSession}/project/confirm`, { method: 'POST', body: JSON.stringify({ confirmationId, token }) });
+      setNotice(`Workboard card created: ${result.record?.name || ''}.`);
+      setProjectProposal(null);
+      refreshAll();
+    } catch (err) { setNotice(err.message); }
+    finally { setProjectProposalBusy(false); }
   }
 
   async function submitProposePlannerCreate() {
@@ -2754,6 +2786,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
             <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.open" onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
             <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.open" onClick={() => { setPlannerProposeOpen((v) => !v); setPlannerProposal(null); }}><Plus size={15} /> Add planner task</button>
+            <button data-action-id="project.propose_create" data-control-id="chat.project-proposal.open" onClick={() => { setProjectProposeOpen((v) => !v); setProjectProposal(null); }}><Plus size={15} /> Propose card</button>
             <div className="inline-form compact">
               <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
                 <option value="">Attach repo file…</option>
@@ -2837,6 +2870,18 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             </div>
           )}
           {plannerProposal && <PlannerProposalCard proposal={plannerProposal} busy={plannerProposalBusy} onConfirm={confirmPlannerProposal} onCancel={() => setPlannerProposal(null)} />}
+          {projectProposeOpen && (
+            <div className="propose-form">
+              <input value={projectProposeForm.title} onChange={(e) => setProjectProposeForm((f) => ({ ...f, title: e.target.value }))} placeholder="Workboard card title" />
+              <input value={projectProposeForm.body} onChange={(e) => setProjectProposeForm((f) => ({ ...f, body: e.target.value }))} placeholder="Evidence / details (optional)" />
+              <input value={projectProposeForm.next_action} onChange={(e) => setProjectProposeForm((f) => ({ ...f, next_action: e.target.value }))} placeholder="Next action (optional)" />
+              <div className="quick-add-row">
+                <button data-action-id="project.propose_create" data-control-id="chat.project-proposal.preview" className="primary" onClick={submitProposeProjectCreate} disabled={projectProposalBusy || !projectProposeForm.title.trim()}>{projectProposalBusy ? 'Preparing…' : 'Preview proposal'}</button>
+                <button onClick={() => setProjectProposeOpen(false)} disabled={projectProposalBusy}>Cancel</button>
+              </div>
+            </div>
+          )}
+          {projectProposal && <ProjectProposalCard proposal={projectProposal} busy={projectProposalBusy} onConfirm={confirmProjectProposal} onCancel={() => setProjectProposal(null)} />}
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
@@ -3029,6 +3074,26 @@ function PlannerProposalCard({ proposal, busy, onConfirm, onCancel }) {
         <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
       </div>
       <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. {isUpdate ? 'No task is changed' : 'No Daily Planner task exists'} until you confirm.</small>
+    </div>
+  );
+}
+
+function ProjectProposalCard({ proposal, busy, onConfirm, onCancel }) {
+  const preview = proposal.preview || {};
+  return (
+    <div className="proposal-card">
+      <div className="proposal-head"><ShieldCheck size={16} /><strong>Confirm Workboard card</strong></div>
+      <p>{proposal.affects}</p>
+      <div className="proposal-diff">
+        <div><span>title</span><strong>{preview.title}</strong></div>
+        {preview.body ? <div><span>evidence</span><strong>{preview.body}</strong></div> : null}
+        {preview.next_action ? <div><span>next action</span><strong>{preview.next_action}</strong></div> : null}
+      </div>
+      <div className="decision-row">
+        <button data-action-id="project.propose_create" data-control-id="chat.project-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Creating…' : 'Confirm and create card'}</button>
+        <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
+      </div>
+      <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. No Workboard card exists until you confirm.</small>
     </div>
   );
 }

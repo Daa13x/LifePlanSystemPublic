@@ -157,8 +157,10 @@ try {
   const navigationPlanner = catalog.body?.data?.find((action) => action.id === 'navigation.planner');
   const plannerCreate = catalog.body?.data?.find((action) => action.id === 'planner.propose_create');
   const plannerUpdate = catalog.body?.data?.find((action) => action.id === 'planner.propose_update');
+  const projectCreateProposal = catalog.body?.data?.find((action) => action.id === 'project.propose_create');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 17 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate), 'neutral catalog exposes every bounded registered capability');
+  line(catalog.body?.data?.length === 18 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate) && Boolean(projectCreateProposal), 'neutral catalog exposes every bounded registered capability');
+  line(projectCreateProposal?.permission === 'workboard.propose' && projectCreateProposal?.risk === 'REVERSIBLE_WRITE' && projectCreateProposal?.confirmation === 'user_confirmation', 'project.propose_create advertises its write risk and user-confirmation requirement');
   line(plannerCreate?.permission === 'planner.propose' && plannerCreate?.risk === 'REVERSIBLE_WRITE' && plannerCreate?.confirmation === 'user_confirmation', 'planner.propose_create advertises its write risk and user-confirmation requirement');
   line(plannerUpdate?.permission === 'planner.propose' && plannerUpdate?.risk === 'REVERSIBLE_WRITE' && plannerUpdate?.confirmation === 'user_confirmation', 'planner.propose_update advertises its write risk and user-confirmation requirement');
   line(navigationWorkboard?.permission === 'navigation.control' && navigationWorkboard?.risk === 'VIEW_NAVIGATION' && navigationWorkboard?.confirmation === 'none', 'navigation.workboard advertises its bounded view-navigation contract');
@@ -564,6 +566,19 @@ try {
   // not only a lighter knowledge_items row. This is the durable-confirmation
   // create path plus proof that createProjectRecord seeds exactly one
   // project_events row atomically with the project insert.
+  //
+  // The "Propose card" UI button calls invokeAction(), which posts to the
+  // NEUTRAL gateway (/api/actions/:id/invoke, restricted to NEUTRAL_ACTION_NAMES)
+  // rather than /api/chat/capability. Prove that exact path also stages a
+  // valid confirmation, since project.propose_create must be reachable both
+  // ways for the shipped UI control to actually work.
+  const neutralProjectProposal = await api('/api/actions/project.propose_create/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { title: 'Neutral gateway card fixture', body: '', next_action: '' } }
+  });
+  const neutralProjectDurable = neutralProjectProposal.body?.data;
+  line(neutralProjectDurable?.status === 'needs_confirmation' && neutralProjectDurable?.confirmation?.confirmationId && neutralProjectDurable?.confirmation?.token, 'the UI "Propose card" button\'s exact invocation path (the neutral action gateway) also stages a valid confirmation');
+
   const projectsBefore = (await api('/api/workboard/cards')).body?.data?.length;
   const projectProposal = await api('/api/chat/capability', {
     method: 'POST',

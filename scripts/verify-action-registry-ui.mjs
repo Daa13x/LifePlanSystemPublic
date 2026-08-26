@@ -49,6 +49,7 @@ assert.match(ui, /invokeAction\('system\.models', \{ limit: 5 \}\)/, 'Chat model
 assert.match(ui, /invokeAction\('system\.runs', \{ limit: 5 \}\)/, 'Chat recent-runs check uses the neutral action gateway');
 assert.match(ui, /invokeAction\('conversation\.search', \{ query, limit: 8 \}\)/, 'explicit Chat history search uses the neutral action gateway');
 assert.match(ui, /invokeAction\('planner\.today', \{\}\)/, 'Daily Planner check uses the neutral action gateway');
+assert.match(ui, /invokeAction\('project\.propose_create', \{ title: projectProposeForm\.title, body: projectProposeForm\.body, next_action: projectProposeForm\.next_action \}\)/, 'Workboard card create preview uses the neutral action gateway');
 
 const searchControls = [...picker.matchAll(/<(?:input|select)\b[^>]*\bonChange=\{\(e\) => onSearch\([^>]+>/g)].map((match) => match[0]);
 assert.equal(searchControls.length, 3, 'the bounded Context Picker slice has three search controls');
@@ -93,7 +94,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 29, 'the bounded slice has exactly twenty-nine mapped trigger/search/preview/proposal/system/history/planner/navigation controls');
+assert.equal(mappedControls.length, 32, 'the bounded slice has exactly thirty-two mapped trigger/search/preview/proposal/system/history/planner/project/navigation controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
