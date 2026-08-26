@@ -639,8 +639,28 @@ export function migrate() {
 
   const sessionCount = db.prepare('SELECT COUNT(*) AS count FROM chat_sessions').get().count;
   if (sessionCount === 0) {
-    const sessionId = db.prepare('INSERT INTO chat_sessions (title, pinned) VALUES (?, 1)').run('Life Planner kickoff').lastInsertRowid;
-    db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'assistant', 'Life Planner is ready to collect context. I will treat chat as candidate memory until you approve it.');
+    // Atomic: sessionCount === 0 only ever fires once, so a partial write here
+    // (session created but onboarding settings missing) would be permanent --
+    // the guided question would be seeded with no forced-capture/acknowledgement
+    // behavior ever again. Guided first-run capture (Phase 2): the reply to
+    // this one seeded question is force-captured as a memory candidate (see
+    // insertChatUserTurn / generateAssistantTurn in server/index.js) even if it
+    // does not match the ordinary durable-signal heuristic, and gets a
+    // deterministic acknowledgement so this works before any model is
+    // configured. onboarding.sessionId/onboarding.step are workflow state only
+    // -- the answer content itself still goes through the existing candidate ->
+    // review -> approval lifecycle, never an automatic promotion.
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const sessionId = db.prepare('INSERT INTO chat_sessions (title, pinned) VALUES (?, 1)').run('Life Planner kickoff').lastInsertRowid;
+      db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'assistant', "Life Planner is ready to collect context. I will treat chat as candidate memory until you approve it.\n\nTo get started: what's one thing going on in your life right now that you'd like Life Planner to help you keep track of?");
+      setSetting('onboarding.sessionId', String(sessionId));
+      setSetting('onboarding.step', 'pending');
+      db.exec('COMMIT');
+    } catch (error) {
+      try { db.exec('ROLLBACK'); } catch { /* transaction was not active */ }
+      throw error;
+    }
   }
 
   migratePlaintextSecretSettings();

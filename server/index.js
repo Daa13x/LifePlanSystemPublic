@@ -1407,11 +1407,30 @@ function transaction(fn) {
   }
 }
 
+function isPendingOnboardingAnswer(sessionId) {
+  return getSetting('onboarding.step', '') === 'pending'
+    && Number(getSetting('onboarding.sessionId', 0)) === Number(sessionId);
+}
+
 function insertChatUserTurn(sessionId, content) {
   const messageId = db.prepare('INSERT INTO chat_messages (session_id, role, content) VALUES (?, ?, ?)').run(sessionId, 'user', content).lastInsertRowid;
-  const candidateId = shouldCreateMemoryCandidate(content).create ? createCandidateFromMessage(sessionId, messageId, content) : null;
+  // The reply to the seeded first-run guided question is captured as a
+  // reviewable memory candidate unconditionally: it was explicitly asked for
+  // and explicitly answered, so the ordinary durable-signal heuristic (tuned
+  // for incidental chatter) must not silently drop it. It still only ever
+  // becomes a candidate -- never an automatic promotion. The 'pending' ->
+  // 'complete' settings flip happens HERE, inside the same transaction as the
+  // message/candidate insert (this function always runs inside claimChatSend's
+  // transaction()), so a crash between persisting the answer and generating
+  // the acknowledgement can never leave onboarding pending against an already
+  // -captured answer and force-capture a later, unrelated message instead.
+  const onboarding = isPendingOnboardingAnswer(sessionId);
+  const candidateId = (shouldCreateMemoryCandidate(content).create || onboarding)
+    ? createCandidateFromMessage(sessionId, messageId, content, { force: onboarding })
+    : null;
+  if (onboarding) setSetting('onboarding.step', 'complete');
   db.prepare('UPDATE chat_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(sessionId);
-  return { messageId, candidateId, userMessage: row('SELECT * FROM chat_messages WHERE id = ?', [messageId]) };
+  return { messageId, candidateId, onboardingAnswered: onboarding, userMessage: row('SELECT * FROM chat_messages WHERE id = ?', [messageId]) };
 }
 
 function persistChatUserTurn(sessionId, content) {
@@ -1481,9 +1500,14 @@ function classifyCandidate(text) {
   return 'current state';
 }
 
-function createCandidateFromMessage(sessionId, messageId, content) {
+function createCandidateFromMessage(sessionId, messageId, content, { force = false } = {}) {
   const trimmed = content.trim();
-  if (trimmed.length < 24) return null;
+  // The 24-character floor exists to keep incidental chatter out of review.
+  // A forced call (an explicit answer to an explicit guided question) is never
+  // incidental regardless of length, so it bypasses the floor rather than
+  // silently returning null while the caller still reports success.
+  if (!force && trimmed.length < 24) return null;
+  if (force && !trimmed) return null;
   const type = classifyCandidate(trimmed);
   const title = trimmed.split(/[.!?\n]/)[0].slice(0, 96) || 'Chat memory candidate';
   const conflict = row("SELECT id FROM knowledge_items WHERE type = ? AND title = ? AND status IN ('active','stable') ORDER BY updated_at DESC LIMIT 1", [type, title]);
@@ -1800,7 +1824,23 @@ async function answerDataQuery(intent) {
 
 // Single entry point for a chat turn: explicit data questions are answered from
 // local data without the model; everything else is an ordinary conversation.
-async function generateAssistantTurn(sessionId, userMessage, signal, onToken, onStatus) {
+async function generateAssistantTurn(sessionId, userMessage, signal, onToken, onStatus, candidateId = null, onboardingAnswered = false) {
+  // Guided first-run capture: the deterministic acknowledgement for the one
+  // seeded onboarding question. This must work even when no Planner Assistant
+  // model is configured yet, which is the normal state on a fresh install.
+  // onboardingAnswered/candidateId are the caller's actual insertChatUserTurn
+  // result for THIS turn -- the 'pending'->'complete' settings flip already
+  // happened atomically there, so re-reading the setting here would be stale
+  // (always 'complete' by now) and cannot distinguish this turn from the next
+  // one. The acknowledgement text is chosen from candidateId, never claimed
+  // unconditionally, so a genuinely empty answer cannot be told it was saved.
+  if (onboardingAnswered) {
+    const content = candidateId
+      ? "Thanks — I've saved that as a reviewable memory candidate. You can approve, edit, or dismiss it anytime from the Review Queue on the Workboard."
+      : "Thanks for the reply. I didn't find anything to save as a memory candidate from that message, but you can always tell me something to remember later.";
+    if (typeof onToken === 'function') onToken(content);
+    return { mode: 'onboarding acknowledgment', content, diagnostics: { endpointType: 'onboarding-acknowledgment', candidateCreated: Boolean(candidateId) } };
+  }
   const intent = classifyChatIntent(userMessage);
   if (intent !== 'conversation') {
     const answer = await answerDataQuery(intent);
@@ -3021,7 +3061,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   const startedAt = Date.now();
   let assistant;
   try {
-    assistant = await generateAssistantTurn(sessionId, content, controller.signal);
+    assistant = await generateAssistantTurn(sessionId, content, controller.signal, undefined, undefined, claim.created?.candidateId ?? null, Boolean(claim.created?.onboardingAnswered));
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
@@ -3080,7 +3120,7 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   const startedAt = Date.now();
   let assistant;
   try {
-    assistant = await generateAssistantTurn(sessionId, content, controller.signal, (delta) => emit('token', { delta }), (status) => emit('status', status));
+    assistant = await generateAssistantTurn(sessionId, content, controller.signal, (delta) => emit('token', { delta }), (status) => emit('status', status), claim.created?.candidateId ?? null, Boolean(claim.created?.onboardingAnswered));
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
