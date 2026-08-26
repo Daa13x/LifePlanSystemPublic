@@ -16,7 +16,7 @@ import crypto from 'node:crypto';
 export async function runBrowserAssistedTask({
   worker, task, approval, root, worktree, forbiddenPath, cache,
   consultationStore, phase = 'advice', requestFingerprint,
-  dispatchConsultation, pollConsultation, maxPolls = 30,
+  dispatchConsultation, pollConsultation, maxPolls = null,
   connectorConnected = true
 }) {
   // §6/§8: a missing connector is a transport failure ("incomplete; retry,
@@ -67,7 +67,9 @@ export async function runBrowserAssistedTask({
 
   // 4) Poll the SAME recorded job to a single terminal result. No redispatch.
   let terminal = null;
-  for (let i = 0; i < maxPolls; i += 1) {
+  let pollCount = 0;
+  while (maxPolls === null || pollCount < maxPolls) {
+    pollCount += 1;
     const res = await consultationStore.poll(task.id, phase, pollConsultation);
     if (res.rejected) {
       return { outcome: 'incomplete', ...classifyFailure('transport'), reason: `consultation reply rejected: ${res.rejected}` };
@@ -75,6 +77,8 @@ export async function runBrowserAssistedTask({
     if (res.terminal) { terminal = res.record; break; }
   }
   if (!terminal) {
+    // A poll ceiling is an explicit caller/test policy, never the production
+    // default. Slow visible provider work retains its durable job ownership.
     consultationStore.markTimeout(task.id, phase);
     return { outcome: 'incomplete', ...classifyFailure('probe-timeout'), reason: 'no terminal browser reply within the poll budget; nothing was changed' };
   }
