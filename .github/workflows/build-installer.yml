@@ -104,6 +104,12 @@ jobs:
       - name: Verify runtime safety
         run: npm run verify:runtime-safety
 
+      # Exercise the existing Phase 2 source contracts on one fresh disposable
+      # database, including confirmation resume, reviewed memory, scheduled
+      # review, and narrow-screen Workboard/Knowledge visibility.
+      - name: Verify Phase 2 source goal-to-review journey
+        run: npm run verify:phase2-goal-to-review:built
+
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
 
