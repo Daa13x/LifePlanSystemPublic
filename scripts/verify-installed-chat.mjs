@@ -10,6 +10,11 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
+import {
+  removeInstalledChatFixture,
+  runWithFinalizers,
+  stopInstalledChatServer
+} from './installed-chat-lifecycle.mjs';
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const portableRoot = process.argv[2] ? path.resolve(process.argv[2]) : null;
@@ -47,30 +52,39 @@ async function startServer(port) {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
   });
+  let spawnError = null;
+  child.once('error', (error) => { spawnError = error; });
   child.stdout.on('data', (chunk) => output.push(String(chunk)));
   child.stderr.on('data', (chunk) => output.push(String(chunk)));
   const base = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + 20000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Server exited early (${child.exitCode}): ${output.join('')}`);
-    try { if ((await fetch(`${base}/api/health`)).ok) return { child, base }; } catch { /* starting */ }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+  try {
+    while (Date.now() < deadline) {
+      if (spawnError) throw new Error(`Unable to start installed Chat server: ${spawnError.message}`, { cause: spawnError });
+      if (child.exitCode !== null) throw new Error(`Server exited early (${child.exitCode}): ${output.join('')}`);
+      try { if ((await fetch(`${base}/api/health`)).ok) return { child, base }; } catch { /* starting */ }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error('Server did not become healthy.');
+  } catch (error) {
+    try {
+      await stopInstalledChatServer(child);
+    } catch (shutdownError) {
+      error.message += `\nAdditional startup shutdown failure: ${shutdownError.message}`;
+    }
+    throw error;
   }
-  throw new Error('Server did not become healthy.');
 }
 
-async function stop(child) {
-  if (child?.exitCode === null) child.kill();
-  for (let i = 0; child?.exitCode === null && i < 40; i += 1) await new Promise((resolve) => setTimeout(resolve, 50));
-}
-
-try {
+let child = null;
+let browser = null;
+await runWithFinalizers(async () => {
   assert.ok(fs.existsSync(path.join(appRoot, 'dist', 'index.html')), `Missing built frontend: ${path.join(appRoot, 'dist', 'index.html')}`);
   assert.ok(fs.existsSync(nodeCommand), `Missing runtime: ${nodeCommand}`);
   const port = await freePort();
-  const { child, base } = await startServer(port);
-  let browser;
-  try {
+  const started = await startServer(port);
+  child = started.child;
+  const { base } = started;
     const csrf = (await (await fetch(`${base}/api/csrf-token`)).json()).data.token;
     const mutate = async (route, body) => {
       const response = await fetch(`${base}${route}`, { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json', 'X-LPS-CSRF': csrf }, body: JSON.stringify(body) });
@@ -197,10 +211,8 @@ try {
       persisted: evidence.persisted?.map((message) => ({ id: message.id, role: message.role, metadataPresent: Boolean(message.metadata) })) || []
     };
     console.log(JSON.stringify(privacySafeEvidence, null, 2));
-  } finally {
-    await browser?.close();
-    await stop(child);
-  }
-} finally {
-  fs.rmSync(probeRoot, { recursive: true, force: true });
-}
+}, [
+  { name: 'browser close', run: async () => { await browser?.close(); } },
+  { name: 'server shutdown', run: async () => { await stopInstalledChatServer(child); } },
+  { name: 'fixture cleanup', run: async () => { await removeInstalledChatFixture(probeRoot); } }
+]);
