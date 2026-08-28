@@ -269,6 +269,25 @@ function startRendererBridge(chatSessionId) {
   });
 }
 
+async function invokeNeutralAction(name, args = {}, chatSessionId = null) {
+  // Every visible surface uses the same neutral gateway. Navigation actions add
+  // this window's authenticated renderer binding as trusted request context;
+  // neither the action arguments nor an agent can choose that binding.
+  const body = { args, session_id: chatSessionId };
+  if (name.startsWith('navigation.')) {
+    let binding = getRendererBinding();
+    if (!binding) await registerRenderer(chatSessionId);
+    else await rendererReadyPromise;
+    binding = getRendererBinding();
+    if (binding) body.renderer = binding;
+  }
+  const result = await api(`/api/actions/${encodeURIComponent(name)}/invoke`, { method: 'POST', body: JSON.stringify(body) });
+  if (!['success', 'needs_confirmation', 'needs_approval'].includes(result.status)) {
+    throw new Error(result.error?.message || `Action ${name} did not complete.`);
+  }
+  return result;
+}
+
 function cx(...parts) {
   return parts.filter(Boolean).join(' ');
 }
@@ -621,7 +640,7 @@ function App() {
           />
         )}
         {route.section === 'knowledge' && <Knowledge route={route} navigate={navigate} memory={memory} refresh={reloadPlanner} setNotice={setNotice} refreshSignal={refreshSignal} />}
-        {route.section === 'system' && <System route={route} navigate={navigate} boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refresh={reloadPlanner} refreshSignal={refreshSignal} />}
+        {route.section === 'system' && <System route={route} selectedSession={selectedSession} boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refresh={reloadPlanner} refreshSignal={refreshSignal} />}
         {route.section === 'settings' && (
           <SettingsView
             settings={settings}
@@ -1302,11 +1321,11 @@ function Knowledge({ route, navigate, memory, refresh, setNotice, refreshSignal 
   );
 }
 
-function System({ route, navigate, boot, planner, sessions, models, setNotice, refresh, refreshSignal }) {
+function System({ route, selectedSession, boot, planner, sessions, models, setNotice, refresh, refreshSignal }) {
   return (
     <section className="section-shell">
       {route.tab === 'status' && <SystemStatus boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refreshSignal={refreshSignal} />}
-      {route.tab === 'setup' && <SetupRecovery boot={boot} navigate={navigate} setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'setup' && <SetupRecovery boot={boot} selectedSession={selectedSession} setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'repository' && <RepositoryExplorer setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'browser' && <BrowserConsult setNotice={setNotice} refresh={refresh} refreshSignal={refreshSignal} />}
       {route.tab === 'tools' && <Tooling setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -1620,7 +1639,7 @@ function SystemStatus({ boot, planner, sessions, models, setNotice, refreshSigna
   );
 }
 
-function SetupRecovery({ boot, navigate, setNotice, refreshSignal }) {
+function SetupRecovery({ boot, selectedSession, setNotice, refreshSignal }) {
   const [state, setState] = useState({ setup: null, recovery: null });
   const [busy, setBusy] = useState('');
   const [proposal, setProposal] = useState(null);
@@ -1644,6 +1663,19 @@ function SetupRecovery({ boot, navigate, setNotice, refreshSignal }) {
       return null;
     } finally { setBusy(''); }
   }
+  async function openModelSettings() {
+    if (busy) return;
+    setBusy('navigation-settings');
+    try {
+      const result = await invokeNeutralAction('navigation.settings', {}, selectedSession);
+      if (result.data?.applied) setNotice('Opened Local Model settings.');
+      else setNotice(`Settings navigation did not apply (${result.data?.status || 'unknown'}).`);
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setBusy('');
+    }
+  }
   const environment = state.recovery?.environment || state.setup;
   const backups = state.recovery?.backups || [];
   const overall = environment?.pendingRestore ? 'Recovery pending' : environment?.ready ? 'Healthy' : environment ? 'Attention needed' : 'Checking';
@@ -1666,7 +1698,7 @@ function SetupRecovery({ boot, navigate, setNotice, refreshSignal }) {
         <div className="table-list">
           {(environment?.checks || []).map((check) => {
             const setupTarget = check.id === 'local-model' || check.id === 'local-runtime' ? 'settings' : null;
-            return <div className="item-row compact-row" key={check.id}><div className="item-main"><div className="item-title">{check.id.replace(/-/g, ' ')}</div><div className="item-meta"><span>{check.detail}</span></div></div>{!check.ok && setupTarget ? <button className="pill warn diagnostic-action" onClick={() => navigate(setupTarget)} title="Open Local Model settings">Not configured</button> : <Pill tone={check.ok ? 'good' : check.required ? 'bad' : 'warn'}>{check.ok ? 'Healthy' : check.required ? 'Attention needed' : 'Not configured'}</Pill>}</div>;
+            return <div className="item-row compact-row" key={check.id}><div className="item-main"><div className="item-title">{check.id.replace(/-/g, ' ')}</div><div className="item-meta"><span>{check.detail}</span></div></div>{!check.ok && setupTarget ? <button className="pill warn diagnostic-action" data-action-id="navigation.settings" data-control-id="setup-recovery.diagnostics.open-model-settings" disabled={Boolean(busy)} onClick={openModelSettings} title="Open Local Model settings">{busy === 'navigation-settings' ? 'Opening…' : 'Not configured'}</button> : <Pill tone={check.ok ? 'good' : check.required ? 'bad' : 'warn'}>{check.ok ? 'Healthy' : check.required ? 'Attention needed' : 'Not configured'}</Pill>}</div>;
           })}
         </div>
       </div>
@@ -2173,22 +2205,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   async function invokeAction(name, args) {
-    // Navigation actions carry this window's authenticated renderer binding so the
-    // server can target the command back to exactly this window. The binding is
-    // trusted request context, never a model-supplied argument.
-    const body = { args, session_id: selectedSession };
-    if (name.startsWith('navigation.')) {
-      let binding = getRendererBinding();
-      if (!binding) await registerRenderer(selectedSession);
-      else await rendererReadyPromise;
-      binding = getRendererBinding();
-      if (binding) body.renderer = binding;
-    }
-    const result = await api(`/api/actions/${encodeURIComponent(name)}/invoke`, { method: 'POST', body: JSON.stringify(body) });
-    if (!['success', 'needs_confirmation', 'needs_approval'].includes(result.status)) {
-      throw new Error(result.error?.message || `Action ${name} did not complete.`);
-    }
-    return result;
+    return invokeNeutralAction(name, args, selectedSession);
   }
 
   async function openWorkboardViaAction() {

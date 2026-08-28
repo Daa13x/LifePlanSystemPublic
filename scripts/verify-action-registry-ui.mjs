@@ -15,6 +15,8 @@ assert.match(ui, /function invokeAction\(name, args\)/, 'UI has one action invoc
 assert.match(ui, /\/api\/actions\/\$\{encodeURIComponent\(name\)\}\/invoke/, 'UI adapter uses the neutral action gateway');
 assert.match(ui, /\['success', 'needs_confirmation', 'needs_approval'\]\.includes\(result\.status\)/, 'UI handles structured non-success outcomes before reading action data');
 assert.match(ui, /result\.error\?\.message \|\| `Action \$\{name\} did not complete/, 'UI surfaces the registry error instead of an undefined-data failure');
+assert.match(ui, /function SetupRecovery\(\{ boot, selectedSession, setNotice, refreshSignal \}\)/, 'Setup & Recovery receives only the trusted session context needed by the neutral gateway');
+assert.match(ui, /invokeNeutralAction\('navigation\.settings', \{\}, selectedSession\)/, 'Setup diagnostics uses the shared neutral navigation adapter');
 const neutralCalls = [...ui.matchAll(/invokeAction\('([^']+)'/g)].map((match) => match[1]);
 assert.deepEqual([...new Set(neutralCalls)].sort(), [...NEUTRAL_ACTION_NAMES].sort(), 'only the bounded Context Picker and durable Workboard proposal actions use the neutral gateway');
 assert.match(ui, /invokeAction\('knowledge\.read',\s*\{\s*id: rec\.ref_id,\s*kind: rec\.kind === 'knowledge-candidate' \? 'candidate' : 'item'\s*\}\)/s, 'Knowledge preview sends the exact typed item/candidate identity');
@@ -94,7 +96,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 32, 'the bounded slice has exactly thirty-two mapped trigger/search/preview/proposal/system/history/planner/project/navigation controls');
+assert.equal(mappedControls.length, 33, 'the bounded slice has exactly thirty-three mapped trigger/search/preview/proposal/system/history/planner/project/navigation controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -130,7 +132,7 @@ assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'conve
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'planner.today').map((mapping) => mapping.controlId), ['chat.connection.planner-today-check'], 'the visible today control maps to planner.today');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.workboard').map((mapping) => mapping.controlId), ['chat.navigation.open-workboard'], 'the visible Open Workboard control maps to the navigation.workboard action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.system').map((mapping) => mapping.controlId), ['chat.navigation.open-system'], 'the visible Open System control maps to the navigation.system action');
-assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.settings').map((mapping) => mapping.controlId), ['chat.navigation.open-settings'], 'the visible Assign / change control maps to the navigation.settings action');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.settings').map((mapping) => mapping.controlId).sort(), ['chat.navigation.open-settings', 'setup-recovery.diagnostics.open-model-settings'], 'Chat and Setup diagnostics map their Settings navigation controls to one action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.planner').map((mapping) => mapping.controlId), ['chat.navigation.open-planner'], 'the visible Open Today control maps to the navigation.planner action');
 assert.deepEqual(
   controlMappings.filter((mapping) => mapping.actionId === 'planner.propose_create').map((mapping) => mapping.controlId).sort(),
@@ -200,7 +202,7 @@ assert.match(ui, /invokeAction\('navigation\.system', \{\}\)/, 'the Open full Sy
 assert.match(ui, /invokeAction\('navigation\.settings', \{\}\)/, 'the Assign / change control invokes the navigation action through the neutral gateway');
 assert.match(ui, /invokeAction\('navigation\.planner', \{\}\)/, 'the Open Today control invokes the navigation action through the neutral gateway');
 assert.match(ui, /body\.renderer = binding/, 'navigation invocations carry this window\'s authenticated renderer binding');
-assert.match(ui, /if \(!binding\) await registerRenderer\(selectedSession\)/, 'a navigation invoked during startup establishes its renderer binding on demand');
+assert.match(ui, /if \(!binding\) await registerRenderer\(chatSessionId\)/, 'a navigation invoked during startup establishes its renderer binding on demand');
 assert.match(ui, /else await rendererReadyPromise/, 'navigation waits for the authenticated command stream before invoking the server action');
 assert.match(server, /bindWorkboardConfirmation\(sessionId, result\)/, 'the gateway binds Workboard create and update previews to the durable confirmation owner');
 assert.match(server, /requireSessionScopedAction\(req\.params\.id, sessionId\)/, 'neutral sensitive reads require a real active Chat session before the handler runs');

@@ -496,7 +496,7 @@ const ACTION_METADATA = Object.freeze({
     label: 'Open Settings', feature: 'Chat navigation', permission: 'navigation.control', risk: ACTION_RISKS.VIEW_NAVIGATION,
     confirmation: ACTION_CONFIRMATIONS.NONE,
     sideEffects: ['Changes the active view of the requesting window to Settings; no stored data is modified and it is immediately reversible.'],
-    sourceControls: ['chat.navigation.open-settings'], testId: 'action.navigation.settings',
+    sourceControls: ['chat.navigation.open-settings', 'setup-recovery.diagnostics.open-model-settings'], testId: 'action.navigation.settings',
     resultSchema: resultObject(
       ['destination', 'requested', 'applied', 'status'],
       { destination: { type: 'string' }, requested: { type: 'boolean' }, applied: { type: 'boolean' }, status: { type: 'string' }, route: { type: ['string', 'null'] }, failure_category: { type: ['string', 'null'] } }
