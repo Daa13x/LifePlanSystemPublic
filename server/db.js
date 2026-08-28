@@ -397,6 +397,23 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_planner_tasks_status ON planner_tasks(status);
 
+    -- Append-only Planner lifecycle history. A completion event proves only
+    -- that LPS recorded a state transition; it is not independent evidence
+    -- that the underlying real-world task was completed.
+    CREATE TABLE IF NOT EXISTS planner_task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL REFERENCES planner_tasks(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL CHECK (event_type IN ('completed','deferred','reopened','reactivated','parked')),
+      from_status TEXT NOT NULL CHECK (from_status IN ('active','completed','deferred','parked')),
+      to_status TEXT NOT NULL CHECK (to_status IN ('active','completed','deferred','parked')),
+      actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 32),
+      source TEXT NOT NULL CHECK (length(source) BETWEEN 1 AND 64),
+      reference TEXT CHECK (reference IS NULL OR length(reference) <= 200),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(task_id, source, reference)
+    );
+    CREATE INDEX IF NOT EXISTS idx_planner_task_events_task ON planner_task_events(task_id, id);
+
     -- Append-only canonical event stream for a Workboard card (project). It is
     -- the single source for the layered card's History layer and any recorded
     -- Proof evidence — never a display-only copy of the current project row.

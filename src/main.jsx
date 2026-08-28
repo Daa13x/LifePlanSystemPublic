@@ -847,6 +847,12 @@ function PlannerTaskCard({ task, section, busy, editing, editForm, setEditForm, 
 // user can override anything — pin a task to keep it, defer it as a choice, or
 // edit its guidance. The frontend renders the server's order verbatim; it never
 // re-ranks or re-scores tasks itself.
+function formatPlannerCompletionTime(value) {
+  if (!value) return '';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? '' : ` · ${parsed.toLocaleString()}`;
+}
+
 function DailyPlanner({ refreshSignal }) {
   const [day, setDay] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -903,7 +909,7 @@ function DailyPlanner({ refreshSignal }) {
     );
   }
 
-  const { mode, modes, visible, deferred, visibleLimit, pinnedCount } = day;
+  const { mode, modes, visible, deferred, visibleLimit, pinnedCount, recentlyCompleted = [] } = day;
   // Split the server's tasks into sections WITHOUT reordering: blocked work is
   // pulled out so it is never silently mixed into (or hidden from) the day.
   const blocked = [...visible, ...deferred].filter((task) => task.blocker);
@@ -968,6 +974,24 @@ function DailyPlanner({ refreshSignal }) {
           <div className="panel-heading"><div><h2>Later</h2><p>Held for another day — a choice, not a failure.</p></div><Pill tone="default">{laterTasks.length}</Pill></div>
           <div className="table-list">
             {laterTasks.map((task) => <PlannerTaskCard key={task.id} {...cardProps(task, 'later')} />)}
+          </div>
+        </div>
+      )}
+
+      {recentlyCompleted.length > 0 && (
+        <div className="panel">
+          <div className="panel-heading"><div><h2>Recently completed</h2><p>Recorded Planner status and lifecycle history. Completion is not independent verification.</p></div><Pill tone="good">{recentlyCompleted.length}</Pill></div>
+          <div className="table-list">
+            {recentlyCompleted.map((task) => (
+              <div className="item-row" key={task.id}>
+                <div className="item-main">
+                  <div className="item-title">{task.title}</div>
+                  <div className="item-meta"><span>Completed{formatPlannerCompletionTime(task.completedAt)}</span></div>
+                  <div className="item-meta"><span>{task.completionHistoryAvailable ? `History available (${task.completionEventCount} completion event${task.completionEventCount === 1 ? '' : 's'}) · Unverified` : 'Legacy history unavailable · Verification unknown'}</span></div>
+                  <details><summary>What this means</summary><small>{task.completionHistoryAvailable ? 'LPS recorded the status transition. No independent completion evidence is attached.' : 'This task predates Planner lifecycle history. LPS will not invent a past event or verification result.'}</small></details>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

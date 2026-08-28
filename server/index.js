@@ -2804,7 +2804,10 @@ function plannerTaskToEngine(taskRow) {
     pausePoint: taskRow.pause_point || null, recoveryStep: taskRow.recovery_step || null,
     definitionOfDone: taskRow.definition_of_done || null, why: taskRow.why || null,
     estimatedMinutes: taskRow.estimated_minutes ?? null, consequenceOfDelay: taskRow.consequence_of_delay || null,
-    pinned: Boolean(taskRow.pinned), status: taskRow.status
+    pinned: Boolean(taskRow.pinned), status: taskRow.status,
+    completedAt: taskRow.completed_at || null,
+    completionHistoryAvailable: Boolean(taskRow.completion_history_available),
+    completionEventCount: Number(taskRow.completion_event_count || 0)
   };
 }
 
@@ -2836,10 +2839,82 @@ function readPlannerTaskFields(body) {
   return fields;
 }
 
+function plannerStatusEventType(fromStatus, toStatus) {
+  if (toStatus === 'completed') return 'completed';
+  if (toStatus === 'deferred') return 'deferred';
+  if (toStatus === 'parked') return 'parked';
+  if (toStatus === 'active' && fromStatus === 'completed') return 'reopened';
+  if (toStatus === 'active') return 'reactivated';
+  return null;
+}
+
+function appendPlannerStatusEvent(taskId, fromStatus, toStatus, { actor, source, reference = null } = {}) {
+  if (fromStatus === toStatus) return null;
+  const eventType = plannerStatusEventType(fromStatus, toStatus);
+  if (!eventType) throw new Error(`Unsupported Planner status transition: ${fromStatus} -> ${toStatus}.`);
+  const result = db.prepare(`INSERT INTO planner_task_events
+    (task_id, event_type, from_status, to_status, actor, source, reference)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .run(taskId, eventType, fromStatus, toStatus, actor, source, reference);
+  return row('SELECT * FROM planner_task_events WHERE id = ?', [result.lastInsertRowid]);
+}
+
+function publicPlannerTaskEvent(event) {
+  return {
+    id: event.id,
+    eventType: event.event_type,
+    fromStatus: event.from_status,
+    toStatus: event.to_status,
+    actor: event.actor,
+    source: event.source,
+    createdAt: event.created_at,
+    verificationState: 'unverified',
+    evidenceAvailable: false
+  };
+}
+
+function applyPlannerTaskFields(existing, requestedFields, { actor = 'user', source = 'direct-api', reference = null } = {}) {
+  const fields = { ...requestedFields };
+  const nextStatus = fields.status || existing.status;
+  const statusChanged = nextStatus !== existing.status;
+  const updatedAt = new Date().toISOString();
+  fields.updated_at = updatedAt;
+  if (statusChanged) fields.completed_at = nextStatus === 'completed' ? updatedAt : null;
+  const sets = Object.keys(fields).map((key) => `${key} = ?`).join(', ');
+  const changed = db.prepare(`UPDATE planner_tasks SET ${sets} WHERE id = ?`).run(...Object.values(fields), existing.id);
+  if (changed.changes !== 1) throw new Error('The Planner task mutation did not apply exactly once.');
+  const event = statusChanged
+    ? appendPlannerStatusEvent(existing.id, existing.status, nextStatus, { actor, source, reference })
+    : null;
+  return { record: row('SELECT * FROM planner_tasks WHERE id = ?', [existing.id]), event };
+}
+
+function plannerMutationKey(req) {
+  const supplied = req.get('X-LPS-Idempotency-Key');
+  if (!supplied) return null;
+  const key = normalizeIdempotencyKey(supplied);
+  if (!key) throw new IdempotencyConflictError('X-LPS-Idempotency-Key must use 8-200 safe characters.');
+  return key;
+}
+
+function runPlannerMutation(req, route, request, execute) {
+  const key = plannerMutationKey(req);
+  return runIdempotent({ db, transaction, route, key, requestHash: hashRequest(request), execute });
+}
+
 function plannerDayData() {
   const mode = currentCapacityMode();
   const tasks = allRows("SELECT * FROM planner_tasks WHERE status = 'active' ORDER BY updated_at DESC").map(plannerTaskToEngine);
-  return { mode, modes: CAPACITY_MODES, ...planDay(tasks, mode) };
+  const recentlyCompleted = allRows(`
+    SELECT t.*,
+      EXISTS(SELECT 1 FROM planner_task_events e WHERE e.task_id = t.id AND e.event_type = 'completed') AS completion_history_available,
+      (SELECT COUNT(*) FROM planner_task_events e WHERE e.task_id = t.id AND e.event_type = 'completed') AS completion_event_count
+    FROM planner_tasks t
+    WHERE t.status = 'completed'
+    ORDER BY unixepoch(t.completed_at) DESC, unixepoch(t.updated_at) DESC, t.id DESC
+    LIMIT 5
+  `).map(plannerTaskToEngine);
+  return { mode, modes: CAPACITY_MODES, ...planDay(tasks, mode), recentlyCompleted };
 }
 
 app.get('/api/planner/day', (_req, res) => ok(res, plannerDayData()));
@@ -2868,18 +2943,38 @@ app.patch('/api/planner/tasks/:id', (req, res) => {
   if (!existing) return fail(res, 404, 'Task not found.');
   const fields = readPlannerTaskFields(req.body);
   if (typeof req.body?.pinned === 'boolean') fields.pinned = req.body.pinned ? 1 : 0;
-  if (req.body?.status && ['active', 'completed', 'deferred', 'parked'].includes(req.body.status)) fields.status = req.body.status;
+  if (Object.hasOwn(req.body || {}, 'status')) {
+    if (!['active', 'completed', 'deferred', 'parked'].includes(req.body.status)) return fail(res, 400, 'Planner task status is invalid.');
+    fields.status = req.body.status;
+  }
   if (!Object.keys(fields).length) return fail(res, 400, 'No recognised fields to update.');
-  fields.updated_at = new Date().toISOString();
-  const sets = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
-  db.prepare(`UPDATE planner_tasks SET ${sets} WHERE id = ?`).run(...Object.values(fields), req.params.id);
-  ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]));
+  try {
+    const result = runPlannerMutation(req, `/api/planner/tasks/${existing.id}`, { id: existing.id, fields }, () => {
+      const live = row('SELECT * FROM planner_tasks WHERE id = ?', [existing.id]);
+      const applied = applyPlannerTaskFields(live, fields, { actor: 'user', source: 'planner-patch' });
+      return { statusCode: 200, body: applied.record };
+    });
+    ok(res, { ...result.body, replayed: result.replayed });
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) return fail(res, error.statusCode || 400, error.message);
+    fail(res, 500, 'Planner task update failed safely.');
+  }
 });
 
 app.post('/api/planner/tasks/:id/complete', (req, res) => {
-  if (!row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.id])) return fail(res, 404, 'Task not found.');
-  db.prepare("UPDATE planner_tasks SET status = 'completed', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(req.params.id);
-  ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]));
+  const existing = row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]);
+  if (!existing) return fail(res, 404, 'Task not found.');
+  try {
+    const result = runPlannerMutation(req, `/api/planner/tasks/${existing.id}/complete`, { id: existing.id, status: 'completed' }, () => {
+      const live = row('SELECT * FROM planner_tasks WHERE id = ?', [existing.id]);
+      const applied = applyPlannerTaskFields(live, { status: 'completed' }, { actor: 'user', source: 'planner-complete' });
+      return { statusCode: 200, body: applied.record };
+    });
+    ok(res, { ...result.body, replayed: result.replayed });
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) return fail(res, error.statusCode || 400, error.message);
+    fail(res, 500, 'Planner completion failed safely.');
+  }
 });
 
 app.post('/api/planner/tasks/:id/pin', (req, res) => {
@@ -2890,9 +2985,26 @@ app.post('/api/planner/tasks/:id/pin', (req, res) => {
 });
 
 app.post('/api/planner/tasks/:id/defer', (req, res) => {
+  const existing = row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]);
+  if (!existing) return fail(res, 404, 'Task not found.');
+  try {
+    const result = runPlannerMutation(req, `/api/planner/tasks/${existing.id}/defer`, { id: existing.id, status: 'deferred' }, () => {
+      const live = row('SELECT * FROM planner_tasks WHERE id = ?', [existing.id]);
+      const applied = applyPlannerTaskFields(live, { status: 'deferred' }, { actor: 'user', source: 'planner-defer' });
+      return { statusCode: 200, body: { ...applied.record, note: 'Deferred by choice — not a failure. Reactivate it any time.' } };
+    });
+    ok(res, { ...result.body, replayed: result.replayed });
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) return fail(res, error.statusCode || 400, error.message);
+    fail(res, 500, 'Planner deferral failed safely.');
+  }
+});
+
+app.get('/api/planner/tasks/:id/events', (req, res) => {
   if (!row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.id])) return fail(res, 404, 'Task not found.');
-  db.prepare("UPDATE planner_tasks SET status = 'deferred', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(req.params.id);
-  ok(res, { ...row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]), note: 'Deferred by choice — not a failure. Reactivate it any time.' });
+  const latest = allRows(`SELECT id, event_type, from_status, to_status, actor, source, created_at
+    FROM planner_task_events WHERE task_id = ? ORDER BY id DESC LIMIT 50`, [req.params.id]);
+  ok(res, latest.reverse().map(publicPlannerTaskEvent));
 });
 
 app.get('/api/chat/sessions', (_req, res) => ok(res, allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC')));
@@ -4216,13 +4328,12 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
         error.confirmationCode = 'stale';
         throw error;
       }
-      const fields = { ...proposal.changes, updated_at: new Date().toISOString() };
-      if (proposal.changes.status === 'completed') fields.completed_at = fields.updated_at;
-      else if (proposal.changes.status) fields.completed_at = null;
-      const sets = Object.keys(fields).map((key) => `${key} = ?`).join(', ');
-      const changed = db.prepare(`UPDATE planner_tasks SET ${sets} WHERE id = ?`).run(...Object.values(fields), proposal.identity.id);
-      if (changed.changes !== 1) throw new Error('The Planner task update did not apply exactly once.');
-      return { operation: CHAT_PLANNER_UPDATE_OPERATION, success: true, record: row('SELECT * FROM planner_tasks WHERE id = ?', [proposal.identity.id]) };
+      const applied = applyPlannerTaskFields(live, proposal.changes, {
+        actor: 'user',
+        source: 'chat-confirmation',
+        reference: confirmationId
+      });
+      return { operation: CHAT_PLANNER_UPDATE_OPERATION, success: true, record: applied.record };
     };
     const revalidateUpdate = (confirmation) => {
       const proposal = canonicalPlannerUpdateConfirmationState(confirmation.afterState);

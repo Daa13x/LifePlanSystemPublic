@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { chromium } from 'playwright';
 import {
   removeInstalledChatFixture,
@@ -217,6 +218,11 @@ await runWithFinalizers(async () => {
   const completedTask = completionApplied.body?.data?.record;
   assert.equal(completedTask?.status, 'completed');
   assert.ok(completedTask?.completed_at, 'reviewed completion records a durable timestamp');
+  const completionEvents = (await api(`/api/planner/tasks/${actionTask.id}/events`)).body?.data || [];
+  assert.equal(completionEvents.length, 1, 'reviewed completion records one durable Planner lifecycle event');
+  assert.equal(completionEvents[0].eventType, 'completed');
+  assert.equal(completionEvents[0].verificationState, 'unverified', 'a completion event is not mislabelled as independent verification');
+  assert.equal(completionEvents[0].evidenceAvailable, false, 'the journey does not fabricate completion evidence');
 
   // Update evidence/memory only through explicit review and approval.
   const outcomeMessage = 'Remember that the first bounded Phase 2 action was recorded as completed after its checks passed.';
@@ -286,6 +292,12 @@ await runWithFinalizers(async () => {
     assert.ok(audit.some((entry) => entry.capability === operation), `audit trail contains ${operation}`);
   }
 
+  const uiProbe = new DatabaseSync(dbPath);
+  const legacyUiTitle = 'Phase 2 legacy completion UI probe';
+  uiProbe.prepare("INSERT INTO planner_tasks (title, status, completed_at, updated_at) VALUES (?, 'completed', ?, ?)")
+    .run(legacyUiTitle, '2099-12-31T23:59:59.000Z', '2099-12-31T23:59:59.000Z');
+  uiProbe.close();
+
   // Real narrow-screen UI: durable Workboard and Knowledge remain visible and
   // navigable after reload with semantic navigation names and no page overflow.
   browser = await chromium.launch({ headless: true });
@@ -293,7 +305,17 @@ await runWithFinalizers(async () => {
   const pageErrors = [];
   const consoleErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
-  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()); });
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(`${message.text()} @ ${message.location().url || 'unknown'}`);
+  });
+  await page.goto(`${base}/#workboard/today`, { waitUntil: 'domcontentloaded' });
+  await page.getByRole('heading', { name: 'Recently completed', exact: true }).waitFor({ timeout: 15000 });
+  const recordedCompletion = page.locator('.item-row').filter({ hasText: actionTitle });
+  const legacyCompletion = page.locator('.item-row').filter({ hasText: legacyUiTitle });
+  await recordedCompletion.getByText('History available (1 completion event) · Unverified', { exact: true }).waitFor();
+  await legacyCompletion.getByText('Legacy history unavailable · Verification unknown', { exact: true }).waitFor();
+  assert.equal(await recordedCompletion.locator('small').filter({ hasText: 'No independent completion evidence is attached.' }).count(), 1);
+  assert.equal(await legacyCompletion.locator('small').filter({ hasText: 'LPS will not invent a past event or verification result.' }).count(), 1);
   await page.goto(`${base}/#workboard/cards`, { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: 'Cards', exact: true }).waitFor({ timeout: 15000 });
   await page.getByText(projectTitle, { exact: true }).first().waitFor({ timeout: 15000 });
@@ -323,6 +345,7 @@ await runWithFinalizers(async () => {
     completedTaskId: actionTask.id,
     reviewTaskDeadline: reviewDate,
     approvedMemoryVisible: true,
+    plannerCompletionHistoryRecordedUnverified: true,
     preRestartConfirmationResumed: true,
     wrongTokenFailClosed: true,
     unconfirmedProposalWroteNothing: true,

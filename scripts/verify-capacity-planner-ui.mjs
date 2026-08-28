@@ -43,6 +43,10 @@ assert.match(planner, /\[\.\.\.visible, \.\.\.deferred\]\.filter\(\(task\) => ta
 for (const heading of ['>Now<', '>Blocked<', '>Later<']) {
   assert.ok(planner.includes(heading), `planner renders the ${heading.replace(/[<>]/g, '')} section`);
 }
+assert.ok(planner.includes('>Recently completed<'), 'planner renders recent completion history separately');
+assert.ok(planner.includes('Completion is not independent verification.'), 'planner distinguishes completion state from verification');
+assert.ok(planner.includes('Legacy history unavailable · Verification unknown'), 'legacy completed tasks receive no fabricated history or verification');
+assert.ok(planner.includes('History available (') && planner.includes(' · Unverified'), 'recorded lifecycle history is labelled unverified');
 
 // --- every populated guidance field is shown ---
 for (const field of ['activeStep', 'task.why', 'definitionOfDone', 'easierVersion', 'pausePoint', 'recoveryStep', 'task.blocker', 'task.deadline', 'task.effort', 'estimatedMinutes', 'task.reasons']) {
@@ -80,6 +84,7 @@ assert.match(server, /app\.get\('\/api\/planner\/capacity'/, 'the capacity read 
 assert.match(server, /app\.post\('\/api\/planner\/capacity'/, 'the capacity write endpoint exists');
 assert.match(server, /app\.post\('\/api\/planner\/tasks'/, 'the task create endpoint exists');
 assert.match(server, /app\.patch\('\/api\/planner\/tasks\/:id'/, 'the task edit endpoint exists');
+assert.match(server, /app\.get\('\/api\/planner\/tasks\/:id\/events'/, 'the append-only Planner history endpoint exists');
 for (const action of ['complete', 'pin', 'defer']) {
   assert.match(server, new RegExp(`app\\.post\\('/api/planner/tasks/:id/${action}'`), `the ${action} endpoint exists`);
 }
