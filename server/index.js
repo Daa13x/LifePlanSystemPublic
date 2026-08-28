@@ -2807,7 +2807,14 @@ function plannerTaskToEngine(taskRow) {
     pinned: Boolean(taskRow.pinned), status: taskRow.status,
     completedAt: taskRow.completed_at || null,
     completionHistoryAvailable: Boolean(taskRow.completion_history_available),
-    completionEventCount: Number(taskRow.completion_event_count || 0)
+    completionEventCount: Number(taskRow.completion_event_count || 0),
+    latestCompletionEventId: taskRow.latest_completion_event_id || null,
+    supportingEvidenceCount: Number(taskRow.supporting_evidence_count || 0),
+    evidenceState: taskRow.latest_completion_event_id
+      ? (Number(taskRow.supporting_evidence_count || 0) > 0 ? 'supporting-evidence-attached' : 'none-attached')
+      : 'history-unavailable',
+    verificationState: taskRow.latest_completion_event_id ? 'unverified' : 'unknown',
+    independentlyVerified: false
   };
 }
 
@@ -2869,8 +2876,101 @@ function publicPlannerTaskEvent(event) {
     source: event.source,
     createdAt: event.created_at,
     verificationState: 'unverified',
-    evidenceAvailable: false
+    evidenceAvailable: Number(event.supporting_evidence_count || 0) > 0,
+    supportingEvidenceCount: Number(event.supporting_evidence_count || 0),
+    independentlyVerified: false
   };
+}
+
+const PLANNER_EVIDENCE_KINDS = new Set(['user_assertion', 'artifact_reference', 'external_reference']);
+
+function normalizePlannerEvidenceClaim(value, label = 'Evidence statement') {
+  const claim = String(value || '').trim();
+  if (!claim || claim.length > 1000 || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(claim)) {
+    throw new TypeError(`${label} must contain 1-1000 printable characters.`);
+  }
+  return claim;
+}
+
+function normalizePlannerEvidenceReference(kind, value) {
+  const reference = String(value || '').trim();
+  if (kind === 'user_assertion') {
+    if (reference) throw new TypeError('User assertions cannot include a reference.');
+    return null;
+  }
+  if (!reference || reference.length > 500 || /[\x00-\x1f\x7f]/.test(reference)) {
+    throw new TypeError('A printable reference of at most 500 characters is required.');
+  }
+  if (kind === 'external_reference') {
+    let parsed;
+    try { parsed = new URL(reference); } catch { throw new TypeError('External evidence must be an http or https URL.'); }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+      throw new TypeError('External evidence must be an http or https URL without embedded credentials.');
+    }
+    const normalizedUrl = parsed.toString();
+    if (normalizedUrl.length > 500) throw new TypeError('The normalized external evidence URL must be at most 500 characters.');
+    return normalizedUrl;
+  }
+  const normalized = reference.replaceAll('\\', '/');
+  if (normalized.startsWith('/') || /^[a-z]:\//i.test(normalized) || normalized.split('/').includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(normalized)) {
+    throw new TypeError('Artifact evidence must use a relative path without traversal or a URI scheme.');
+  }
+  return normalized;
+}
+
+function latestPlannerCompletionEvent(taskId) {
+  return row("SELECT * FROM planner_task_events WHERE task_id = ? AND event_type = 'completed' ORDER BY id DESC LIMIT 1", [taskId]);
+}
+
+function plannerEvidenceStatus(evidence) {
+  if (evidence.revocation_id) return 'revoked';
+  if (evidence.replacement_id) return 'replaced';
+  return 'active';
+}
+
+function publicPlannerEvidence(evidence) {
+  return {
+    id: evidence.id,
+    completionEventId: evidence.completion_event_id,
+    evidenceKind: evidence.evidence_kind,
+    claim: evidence.claim,
+    reference: evidence.public_reference || null,
+    status: plannerEvidenceStatus(evidence),
+    supersedesEvidenceId: evidence.supersedes_evidence_id || null,
+    replacedByEvidenceId: evidence.replacement_id || null,
+    revokedAt: evidence.revoked_at || null,
+    revocationReason: evidence.revocation_reason || null,
+    revokedBy: evidence.revoked_by || null,
+    actor: evidence.actor,
+    source: evidence.source,
+    createdAt: evidence.created_at,
+    verificationState: 'unverified',
+    independentlyVerified: false
+  };
+}
+
+function plannerEvidenceRows(taskId, { beforeId = null, limit = 50 } = {}) {
+  return allRows(`SELECT e.*,
+      (SELECT r.id FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = e.id ORDER BY r.id DESC LIMIT 1) AS revocation_id,
+      (SELECT r.created_at FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = e.id ORDER BY r.id DESC LIMIT 1) AS revoked_at,
+      (SELECT r.claim FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = e.id ORDER BY r.id DESC LIMIT 1) AS revocation_reason,
+      (SELECT r.actor FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = e.id ORDER BY r.id DESC LIMIT 1) AS revoked_by,
+      (SELECT n.id FROM planner_task_evidence n WHERE n.record_type = 'attached' AND n.supersedes_evidence_id = e.id ORDER BY n.id DESC LIMIT 1) AS replacement_id
+    FROM planner_task_evidence e
+    WHERE e.task_id = ? AND e.record_type = 'attached'
+      AND (? IS NULL OR e.id < ?)
+    ORDER BY e.id DESC LIMIT ?`, [taskId, beforeId, beforeId, limit]);
+}
+
+function plannerEvidenceById(taskId, evidenceId) {
+  return row(`SELECT e.*,
+      (SELECT r.id FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = e.id ORDER BY r.id DESC LIMIT 1) AS revocation_id,
+      (SELECT r.created_at FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = e.id ORDER BY r.id DESC LIMIT 1) AS revoked_at,
+      (SELECT r.claim FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = e.id ORDER BY r.id DESC LIMIT 1) AS revocation_reason,
+      (SELECT r.actor FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = e.id ORDER BY r.id DESC LIMIT 1) AS revoked_by,
+      (SELECT n.id FROM planner_task_evidence n WHERE n.record_type = 'attached' AND n.supersedes_evidence_id = e.id ORDER BY n.id DESC LIMIT 1) AS replacement_id
+    FROM planner_task_evidence e
+    WHERE e.task_id = ? AND e.id = ? AND e.record_type = 'attached'`, [taskId, evidenceId]);
 }
 
 function applyPlannerTaskFields(existing, requestedFields, { actor = 'user', source = 'direct-api', reference = null } = {}) {
@@ -2908,7 +3008,14 @@ function plannerDayData() {
   const recentlyCompleted = allRows(`
     SELECT t.*,
       EXISTS(SELECT 1 FROM planner_task_events e WHERE e.task_id = t.id AND e.event_type = 'completed') AS completion_history_available,
-      (SELECT COUNT(*) FROM planner_task_events e WHERE e.task_id = t.id AND e.event_type = 'completed') AS completion_event_count
+      (SELECT COUNT(*) FROM planner_task_events e WHERE e.task_id = t.id AND e.event_type = 'completed') AS completion_event_count,
+      (SELECT e.id FROM planner_task_events e WHERE e.task_id = t.id AND e.event_type = 'completed' ORDER BY e.id DESC LIMIT 1) AS latest_completion_event_id,
+      (SELECT COUNT(*) FROM planner_task_evidence pe
+        WHERE pe.completion_event_id = (SELECT e.id FROM planner_task_events e WHERE e.task_id = t.id AND e.event_type = 'completed' ORDER BY e.id DESC LIMIT 1)
+          AND pe.record_type = 'attached'
+          AND NOT EXISTS (SELECT 1 FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = pe.id)
+          AND NOT EXISTS (SELECT 1 FROM planner_task_evidence n WHERE n.record_type = 'attached' AND n.supersedes_evidence_id = pe.id)
+      ) AS supporting_evidence_count
     FROM planner_tasks t
     WHERE t.status = 'completed'
     ORDER BY unixepoch(t.completed_at) DESC, unixepoch(t.updated_at) DESC, t.id DESC
@@ -3002,9 +3109,99 @@ app.post('/api/planner/tasks/:id/defer', (req, res) => {
 
 app.get('/api/planner/tasks/:id/events', (req, res) => {
   if (!row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.id])) return fail(res, 404, 'Task not found.');
-  const latest = allRows(`SELECT id, event_type, from_status, to_status, actor, source, created_at
-    FROM planner_task_events WHERE task_id = ? ORDER BY id DESC LIMIT 50`, [req.params.id]);
+  const latest = allRows(`SELECT e.id, e.event_type, e.from_status, e.to_status, e.actor, e.source, e.created_at,
+      (SELECT COUNT(*) FROM planner_task_evidence pe
+        WHERE pe.completion_event_id = e.id AND pe.record_type = 'attached'
+          AND NOT EXISTS (SELECT 1 FROM planner_task_evidence r WHERE r.record_type = 'revoked' AND r.target_evidence_id = pe.id)
+          AND NOT EXISTS (SELECT 1 FROM planner_task_evidence n WHERE n.record_type = 'attached' AND n.supersedes_evidence_id = pe.id)
+      ) AS supporting_evidence_count
+    FROM planner_task_events e WHERE e.task_id = ? ORDER BY e.id DESC LIMIT 50`, [req.params.id]);
   ok(res, latest.reverse().map(publicPlannerTaskEvent));
+});
+
+app.get('/api/planner/tasks/:id/evidence', (req, res) => {
+  if (!row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.id])) return fail(res, 404, 'Task not found.');
+  const beforeId = req.query.beforeId === undefined ? null : Number(req.query.beforeId);
+  if (beforeId !== null && (!Number.isInteger(beforeId) || beforeId <= 0)) return fail(res, 400, 'Evidence cursor is invalid.');
+  const rows = plannerEvidenceRows(req.params.id, { beforeId, limit: 51 });
+  const hasMore = rows.length > 50;
+  const page = rows.slice(0, 50).reverse();
+  ok(res, { items: page.map(publicPlannerEvidence), nextBeforeId: hasMore ? page[0].id : null });
+});
+
+app.post('/api/planner/tasks/:id/evidence', (req, res) => {
+  const task = row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]);
+  if (!task) return fail(res, 404, 'Task not found.');
+  const kind = String(req.body?.evidenceKind || '');
+  if (!PLANNER_EVIDENCE_KINDS.has(kind)) return fail(res, 400, 'Evidence kind is invalid.');
+  let claim;
+  let publicReference;
+  try {
+    claim = normalizePlannerEvidenceClaim(req.body?.claim);
+    publicReference = normalizePlannerEvidenceReference(kind, req.body?.reference);
+    if (!plannerMutationKey(req)) return fail(res, 400, 'A valid X-LPS-Idempotency-Key is required.');
+  } catch (error) {
+    return fail(res, error instanceof IdempotencyConflictError ? (error.statusCode || 400) : 400, error.message);
+  }
+  const requestedCompletionId = req.body?.completionEventId === undefined ? null : Number(req.body.completionEventId);
+  const supersedesId = req.body?.supersedesEvidenceId === undefined || req.body.supersedesEvidenceId === null
+    ? null : Number(req.body.supersedesEvidenceId);
+  try {
+    const request = { taskId: task.id, completionEventId: requestedCompletionId, kind, claim, publicReference, supersedesId };
+    const result = runPlannerMutation(req, `/api/planner/tasks/${task.id}/evidence`, request, () => {
+      const completion = requestedCompletionId === null
+        ? latestPlannerCompletionEvent(task.id)
+        : row("SELECT * FROM planner_task_events WHERE id = ? AND task_id = ? AND event_type = 'completed'", [requestedCompletionId, task.id]);
+      if (!completion) throw new IdempotencyConflictError(requestedCompletionId === null
+        ? 'This task has no recorded completion event. Reopen and complete it before attaching evidence.'
+        : 'The selected completion event does not exist for this task.');
+      if (supersedesId !== null) {
+        const prior = plannerEvidenceById(task.id, supersedesId);
+        if (!prior || prior.completion_event_id !== completion.id || plannerEvidenceStatus(prior) !== 'active') {
+          throw new IdempotencyConflictError('Only active evidence for this completion can be replaced.');
+        }
+      }
+      const inserted = db.prepare(`INSERT INTO planner_task_evidence
+        (task_id, completion_event_id, record_type, evidence_kind, claim, public_reference, supersedes_evidence_id, actor, source, internal_reference)
+        VALUES (?, ?, 'attached', ?, ?, ?, ?, 'user', 'planner-evidence-attach', ?)`)
+        .run(task.id, completion.id, kind, claim, publicReference, supersedesId, plannerMutationKey(req));
+      const evidence = plannerEvidenceById(task.id, Number(inserted.lastInsertRowid));
+      return { statusCode: 200, body: publicPlannerEvidence(evidence) };
+    });
+    ok(res, { ...result.body, replayed: result.replayed });
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) return fail(res, error.statusCode || 400, error.message);
+    fail(res, 500, 'Planner evidence attachment failed safely.');
+  }
+});
+
+app.post('/api/planner/tasks/:taskId/evidence/:evidenceId/revoke', (req, res) => {
+  const task = row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.taskId]);
+  if (!task) return fail(res, 404, 'Task not found.');
+  let reason;
+  try {
+    reason = normalizePlannerEvidenceClaim(req.body?.reason, 'Revocation reason');
+    if (!plannerMutationKey(req)) return fail(res, 400, 'A valid X-LPS-Idempotency-Key is required.');
+  } catch (error) {
+    return fail(res, error instanceof IdempotencyConflictError ? (error.statusCode || 400) : 400, error.message);
+  }
+  const evidenceId = Number(req.params.evidenceId);
+  try {
+    const request = { taskId: task.id, evidenceId, reason };
+    const result = runPlannerMutation(req, `/api/planner/tasks/${task.id}/evidence/${evidenceId}/revoke`, request, () => {
+      const target = plannerEvidenceById(task.id, evidenceId);
+      if (!target || plannerEvidenceStatus(target) !== 'active') throw new IdempotencyConflictError('Only active supporting evidence can be revoked.');
+      db.prepare(`INSERT INTO planner_task_evidence
+        (task_id, completion_event_id, record_type, evidence_kind, claim, target_evidence_id, actor, source, internal_reference)
+        VALUES (?, ?, 'revoked', NULL, ?, ?, 'user', 'planner-evidence-revoke', ?)`)
+        .run(task.id, target.completion_event_id, reason, target.id, plannerMutationKey(req));
+      return { statusCode: 200, body: publicPlannerEvidence(plannerEvidenceById(task.id, evidenceId)) };
+    });
+    ok(res, { ...result.body, replayed: result.replayed });
+  } catch (error) {
+    if (error instanceof IdempotencyConflictError) return fail(res, error.statusCode || 400, error.message);
+    fail(res, 500, 'Planner evidence revocation failed safely.');
+  }
 });
 
 app.get('/api/chat/sessions', (_req, res) => ok(res, allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC')));

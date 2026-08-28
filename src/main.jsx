@@ -853,6 +853,143 @@ function formatPlannerCompletionTime(value) {
   return Number.isNaN(parsed.getTime()) ? '' : ` · ${parsed.toLocaleString()}`;
 }
 
+const EMPTY_PLANNER_EVIDENCE_FORM = { evidenceKind: 'user_assertion', claim: '', reference: '', completionEventId: null, supersedesEvidenceId: null };
+
+function plannerEvidenceKindLabel(kind) {
+  return ({ user_assertion: 'User statement', artifact_reference: 'Artifact reference', external_reference: 'External reference' })[kind] || kind;
+}
+
+function PlannerEvidencePanel({ task, onChanged }) {
+  const [evidence, setEvidence] = useState([]);
+  const [form, setForm] = useState(EMPTY_PLANNER_EVIDENCE_FORM);
+  const [revokeId, setRevokeId] = useState(null);
+  const [revokeReason, setRevokeReason] = useState('');
+  const [attachKey, setAttachKey] = useState(null);
+  const [revokeKey, setRevokeKey] = useState(null);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState(null);
+  const [nextBeforeId, setNextBeforeId] = useState(null);
+
+  const loadEvidence = async ({ beforeId = null } = {}) => {
+    try {
+      const page = await api(`/api/planner/tasks/${task.id}/evidence${beforeId ? `?beforeId=${beforeId}` : ''}`);
+      setEvidence((current) => beforeId ? [...page.items, ...current] : page.items);
+      setNextBeforeId(page.nextBeforeId);
+      setError(null);
+    }
+    catch (err) { setError(err.message); }
+  };
+  useEffect(() => { loadEvidence(); }, [task.id]);
+
+  async function attach(event) {
+    event.preventDefault();
+    if (!form.claim.trim()) return;
+    setWorking(true);
+    setError(null);
+    const requestKey = attachKey || crypto.randomUUID().replaceAll('-', '');
+    setAttachKey(requestKey);
+    try {
+      await api(`/api/planner/tasks/${task.id}/evidence`, {
+        method: 'POST',
+        headers: { 'X-LPS-Idempotency-Key': requestKey },
+        body: JSON.stringify({ ...form, completionEventId: form.completionEventId || task.latestCompletionEventId })
+      });
+      setForm(EMPTY_PLANNER_EVIDENCE_FORM);
+      setAttachKey(null);
+      await loadEvidence();
+      await onChanged();
+    } catch (err) { setError(err.message); }
+    finally { setWorking(false); }
+  }
+
+  async function revoke() {
+    if (!revokeId || !revokeReason.trim()) return;
+    setWorking(true);
+    setError(null);
+    const requestKey = revokeKey || crypto.randomUUID().replaceAll('-', '');
+    setRevokeKey(requestKey);
+    try {
+      await api(`/api/planner/tasks/${task.id}/evidence/${revokeId}/revoke`, {
+        method: 'POST',
+        headers: { 'X-LPS-Idempotency-Key': requestKey },
+        body: JSON.stringify({ reason: revokeReason })
+      });
+      setRevokeId(null);
+      setRevokeReason('');
+      setRevokeKey(null);
+      await loadEvidence();
+      await onChanged();
+    } catch (err) { setError(err.message); }
+    finally { setWorking(false); }
+  }
+
+  const activeForLatest = evidence.filter((item) => item.status === 'active' && item.completionEventId === task.latestCompletionEventId);
+  return (
+    <details>
+      <summary>Supporting evidence ({task.supportingEvidenceCount}) · Unverified</summary>
+      <small>Evidence is attached to this recorded completion only. It supports your record but is not independent verification.</small>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {evidence.length > 0 && (
+        <div className="table-list">
+          {evidence.map((item) => (
+            <div className="item-row" key={item.id}>
+              <div className="item-main">
+                <div className="item-meta"><span><strong>{plannerEvidenceKindLabel(item.evidenceKind)}</strong> · {item.status} · unverified</span></div>
+                <div>{item.claim}</div>
+                {item.reference && <div className="item-meta"><span>{item.reference}</span></div>}
+                <div className="item-meta"><span>Completion event #{item.completionEventId}{item.supersedesEvidenceId ? ` · replaces evidence #${item.supersedesEvidenceId}` : ''}</span></div>
+                {item.replacedByEvidenceId && <div className="item-meta"><span>Replaced by evidence #{item.replacedByEvidenceId}</span></div>}
+                {item.revocationReason && <div className="item-meta"><span>Revoked: {item.revocationReason}</span></div>}
+              </div>
+              {item.status === 'active' && (
+                <div className="button-row">
+                  <button type="button" className="secondary" disabled={working} onClick={() => { setForm((current) => ({ ...current, completionEventId: item.completionEventId, supersedesEvidenceId: item.id })); setAttachKey(null); }}>Replace</button>
+                  <button type="button" className="secondary" disabled={working} onClick={() => { setRevokeId(item.id); setRevokeReason(''); setRevokeKey(null); }}>Revoke</button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {nextBeforeId && <button type="button" className="secondary" disabled={working} onClick={() => loadEvidence({ beforeId: nextBeforeId })}>Load older evidence</button>}
+      {revokeId && (
+        <div className="propose-form">
+          <label className="field">Why evidence #{revokeId} is being revoked
+            <input value={revokeReason} disabled={working} onChange={(event) => { setRevokeReason(event.target.value); setRevokeKey(null); }} maxLength="1000" />
+          </label>
+          <div className="button-row">
+            <button type="button" className="secondary" disabled={working || !revokeReason.trim()} onClick={revoke}>Confirm revocation</button>
+            <button type="button" className="secondary" disabled={working} onClick={() => { setRevokeId(null); setRevokeKey(null); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <form className="propose-form" onSubmit={attach}>
+        {form.supersedesEvidenceId && <p><small>Replacement for evidence #{form.supersedesEvidenceId}. The earlier record will remain visible as replaced.</small></p>}
+        <label className="field">Evidence kind
+          <select value={form.evidenceKind} disabled={working} onChange={(event) => { setForm((current) => ({ ...current, evidenceKind: event.target.value, reference: '' })); setAttachKey(null); }}>
+            <option value="user_assertion">User statement</option>
+            <option value="artifact_reference">Artifact reference</option>
+            <option value="external_reference">External reference</option>
+          </select>
+        </label>
+        <label className="field">What supports this completion
+          <textarea value={form.claim} disabled={working} maxLength="1000" onChange={(event) => { setForm((current) => ({ ...current, claim: event.target.value })); setAttachKey(null); }} required />
+        </label>
+        {form.evidenceKind !== 'user_assertion' && (
+          <label className="field">{form.evidenceKind === 'artifact_reference' ? 'Relative artifact path' : 'http(s) URL'}
+            <input value={form.reference} disabled={working} maxLength="500" onChange={(event) => { setForm((current) => ({ ...current, reference: event.target.value })); setAttachKey(null); }} required />
+          </label>
+        )}
+        <div className="button-row">
+          <button type="submit" className="secondary" disabled={working || !form.claim.trim()}>{working ? 'Saving…' : (form.supersedesEvidenceId ? 'Save replacement' : 'Attach supporting evidence')}</button>
+          {form.supersedesEvidenceId && <button type="button" className="secondary" disabled={working} onClick={() => { setForm((current) => ({ ...current, completionEventId: null, supersedesEvidenceId: null })); setAttachKey(null); }}>Cancel replacement</button>}
+        </div>
+        {activeForLatest.length === 0 && <small>No active supporting evidence is attached to this completion.</small>}
+      </form>
+    </details>
+  );
+}
+
 function DailyPlanner({ refreshSignal }) {
   const [day, setDay] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -987,8 +1124,10 @@ function DailyPlanner({ refreshSignal }) {
                 <div className="item-main">
                   <div className="item-title">{task.title}</div>
                   <div className="item-meta"><span>Completed{formatPlannerCompletionTime(task.completedAt)}</span></div>
-                  <div className="item-meta"><span>{task.completionHistoryAvailable ? `History available (${task.completionEventCount} completion event${task.completionEventCount === 1 ? '' : 's'}) · Unverified` : 'Legacy history unavailable · Verification unknown'}</span></div>
-                  <details><summary>What this means</summary><small>{task.completionHistoryAvailable ? 'LPS recorded the status transition. No independent completion evidence is attached.' : 'This task predates Planner lifecycle history. LPS will not invent a past event or verification result.'}</small></details>
+                  <div className="item-meta"><span>{task.completionHistoryAvailable ? `History available (${task.completionEventCount} completion event${task.completionEventCount === 1 ? '' : 's'}) · ${task.supportingEvidenceCount} active supporting evidence record${task.supportingEvidenceCount === 1 ? '' : 's'} · Unverified` : 'Legacy history unavailable · Verification unknown'}</span></div>
+                  {task.completionHistoryAvailable
+                    ? <PlannerEvidencePanel task={task} onChanged={load} />
+                    : <details><summary>What this means</summary><small>This task predates Planner lifecycle history. LPS will not invent a past event, supporting evidence binding, or verification result. Reopen and complete it to create a truthful completion event.</small></details>}
                 </div>
               </div>
             ))}

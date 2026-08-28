@@ -47,6 +47,10 @@ assert.ok(planner.includes('>Recently completed<'), 'planner renders recent comp
 assert.ok(planner.includes('Completion is not independent verification.'), 'planner distinguishes completion state from verification');
 assert.ok(planner.includes('Legacy history unavailable · Verification unknown'), 'legacy completed tasks receive no fabricated history or verification');
 assert.ok(planner.includes('History available (') && planner.includes(' · Unverified'), 'recorded lifecycle history is labelled unverified');
+assert.ok(planner.includes('Supporting evidence (') && planner.includes('not independent verification'), 'supporting evidence remains distinct from independent verification');
+assert.match(planner, /const requestKey = attachKey \|\| crypto\.randomUUID\(\)\.replaceAll\('-', ''\);[\s\S]*?'X-LPS-Idempotency-Key': requestKey/, 'attachment retries retain one durable key until success or an explicit edit');
+assert.match(planner, /const requestKey = revokeKey \|\| crypto\.randomUUID\(\)\.replaceAll\('-', ''\);[\s\S]*?'X-LPS-Idempotency-Key': requestKey/, 'revocation retries retain one durable key until success or an explicit edit');
+assert.match(planner, /nextBeforeId && <button[^>]*onClick=\{\(\) => loadEvidence\(\{ beforeId: nextBeforeId \}\)\}>Load older evidence<\/button>/, 'bounded evidence history remains retrievable through cursor pagination');
 
 // --- every populated guidance field is shown ---
 for (const field of ['activeStep', 'task.why', 'definitionOfDone', 'easierVersion', 'pausePoint', 'recoveryStep', 'task.blocker', 'task.deadline', 'task.effort', 'estimatedMinutes', 'task.reasons']) {

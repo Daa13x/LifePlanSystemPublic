@@ -414,6 +414,34 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_planner_task_events_task ON planner_task_events(task_id, id);
 
+    -- Append-only supporting evidence for one concrete Planner completion
+    -- event. Evidence records are user-provided context, never independent
+    -- verification. Replacement and revocation are later ledger records so
+    -- the original claim is retained rather than silently edited or deleted.
+    CREATE TABLE IF NOT EXISTS planner_task_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL REFERENCES planner_tasks(id) ON DELETE CASCADE,
+      completion_event_id INTEGER NOT NULL REFERENCES planner_task_events(id) ON DELETE CASCADE,
+      record_type TEXT NOT NULL CHECK (record_type IN ('attached','revoked')),
+      evidence_kind TEXT CHECK (evidence_kind IS NULL OR evidence_kind IN ('user_assertion','artifact_reference','external_reference')),
+      claim TEXT NOT NULL CHECK (length(claim) BETWEEN 1 AND 1000),
+      public_reference TEXT CHECK (public_reference IS NULL OR length(public_reference) <= 500),
+      target_evidence_id INTEGER REFERENCES planner_task_evidence(id),
+      supersedes_evidence_id INTEGER REFERENCES planner_task_evidence(id),
+      actor TEXT NOT NULL CHECK (length(actor) BETWEEN 1 AND 32),
+      source TEXT NOT NULL CHECK (length(source) BETWEEN 1 AND 64),
+      internal_reference TEXT CHECK (internal_reference IS NULL OR length(internal_reference) <= 200),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CHECK (
+        (record_type = 'attached' AND evidence_kind IS NOT NULL AND target_evidence_id IS NULL)
+        OR
+        (record_type = 'revoked' AND evidence_kind IS NULL AND public_reference IS NULL AND target_evidence_id IS NOT NULL AND supersedes_evidence_id IS NULL)
+      ),
+      UNIQUE(task_id, source, internal_reference)
+    );
+    CREATE INDEX IF NOT EXISTS idx_planner_task_evidence_completion ON planner_task_evidence(completion_event_id, id);
+    CREATE INDEX IF NOT EXISTS idx_planner_task_evidence_target ON planner_task_evidence(target_evidence_id, id);
+
     -- Append-only canonical event stream for a Workboard card (project). It is
     -- the single source for the layered card's History layer and any recorded
     -- Proof evidence — never a display-only copy of the current project row.

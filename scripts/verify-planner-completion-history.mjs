@@ -91,6 +91,12 @@ async function events(id) {
   return response.body.data;
 }
 
+async function evidence(id, beforeId = null) {
+  const response = await api(`/api/planner/tasks/${id}/evidence${beforeId ? `?beforeId=${beforeId}` : ''}`);
+  assert.equal(response.status, 200);
+  return response.body.data;
+}
+
 try {
   await connect();
 
@@ -106,8 +112,10 @@ try {
     ['completed', 'active', 'completed', 'unverified']
   );
   assert.equal(directEvents[0].evidenceAvailable, false, 'status history does not fabricate verification evidence');
+  assert.equal(directEvents[0].independentlyVerified, false);
+  assert.equal(directEvents[0].supportingEvidenceCount, 0);
   assert.deepEqual(Object.keys(directEvents[0]).sort(), [
-    'actor', 'createdAt', 'eventType', 'evidenceAvailable', 'fromStatus', 'id', 'source', 'toStatus', 'verificationState'
+    'actor', 'createdAt', 'eventType', 'evidenceAvailable', 'fromStatus', 'id', 'independentlyVerified', 'source', 'supportingEvidenceCount', 'toStatus', 'verificationState'
   ], 'public history exposes only the bounded lifecycle DTO');
 
   const replay = await api(`/api/planner/tasks/${direct.id}/complete`, { method: 'POST', json: {}, key: 'planner-history-direct-0001' });
@@ -116,6 +124,56 @@ try {
   assert.equal((await events(direct.id)).length, 1, 'lost-response retry appends no duplicate event');
   await api(`/api/planner/tasks/${direct.id}/complete`, { method: 'POST', json: {}, key: 'planner-history-direct-0002' });
   assert.equal((await events(direct.id)).length, 1, 'already-completed request appends no false second completion');
+
+  const missingKey = await api(`/api/planner/tasks/${direct.id}/evidence`, { method: 'POST', json: { evidenceKind: 'user_assertion', claim: 'I completed the recorded task.' } });
+  assert.equal(missingKey.status, 400, 'evidence writes require a durable idempotency key');
+  const traversal = await api(`/api/planner/tasks/${direct.id}/evidence`, { method: 'POST', key: 'planner-evidence-invalid-path', json: { evidenceKind: 'artifact_reference', claim: 'A local artifact supports this.', reference: '../private.txt' } });
+  assert.equal(traversal.status, 400, 'artifact evidence rejects path traversal');
+  const credentialUrl = await api(`/api/planner/tasks/${direct.id}/evidence`, { method: 'POST', key: 'planner-evidence-invalid-url0', json: { evidenceKind: 'external_reference', claim: 'An external record supports this.', reference: 'https://user:secret@example.com/result' } });
+  assert.equal(credentialUrl.status, 400, 'external evidence rejects embedded credentials');
+  const expandingUrl = 'https://example.com/' + ' '.repeat(499 - 'https://example.com/'.length) + 'x';
+  const normalizedOverflow = await api(`/api/planner/tasks/${direct.id}/evidence`, { method: 'POST', key: 'planner-evidence-invalid-url1', json: { evidenceKind: 'external_reference', claim: 'An oversized normalized URL must fail safely.', reference: expandingUrl } });
+  assert.equal(normalizedOverflow.status, 400, 'URL canonicalization cannot turn accepted input into a database-length 500');
+
+  const firstEvidence = await api(`/api/planner/tasks/${direct.id}/evidence`, {
+    method: 'POST', key: 'planner-evidence-attach-0001',
+    json: { completionEventId: directEvents[0].id, evidenceKind: 'user_assertion', claim: 'I completed the recorded task.' }
+  });
+  assert.equal(firstEvidence.status, 200);
+  assert.equal(firstEvidence.body.data.status, 'active');
+  assert.equal(firstEvidence.body.data.verificationState, 'unverified');
+  assert.equal(firstEvidence.body.data.independentlyVerified, false);
+  assert.equal(firstEvidence.body.data.reference, null);
+  const boundedEvidence = (await evidence(direct.id)).items[0];
+  assert.deepEqual(Object.keys(boundedEvidence).sort(), [
+    'actor', 'claim', 'completionEventId', 'createdAt', 'evidenceKind', 'id', 'independentlyVerified', 'reference', 'replacedByEvidenceId', 'revocationReason', 'revokedAt', 'revokedBy', 'source', 'status', 'supersedesEvidenceId', 'verificationState'
+  ], 'supporting evidence exposes only the bounded public DTO');
+  const evidenceReplay = await api(`/api/planner/tasks/${direct.id}/evidence`, {
+    method: 'POST', key: 'planner-evidence-attach-0001',
+    json: { completionEventId: directEvents[0].id, evidenceKind: 'user_assertion', claim: 'I completed the recorded task.' }
+  });
+  assert.equal(evidenceReplay.body.data.replayed, true);
+  assert.equal((await evidence(direct.id)).items.length, 1, 'attachment replay does not duplicate evidence');
+  const evidenceConflict = await api(`/api/planner/tasks/${direct.id}/evidence`, {
+    method: 'POST', key: 'planner-evidence-attach-0001',
+    json: { completionEventId: directEvents[0].id, evidenceKind: 'user_assertion', claim: 'A conflicting retry.' }
+  });
+  assert.equal(evidenceConflict.status, 409, 'same evidence key with a different claim fails closed');
+
+  const replacement = await api(`/api/planner/tasks/${direct.id}/evidence`, {
+    method: 'POST', key: 'planner-evidence-replace-001',
+    json: { completionEventId: directEvents[0].id, evidenceKind: 'artifact_reference', claim: 'The saved checklist supports completion.', reference: 'records/checklist.md', supersedesEvidenceId: firstEvidence.body.data.id }
+  });
+  assert.equal(replacement.status, 200);
+  let directEvidence = (await evidence(direct.id)).items;
+  assert.deepEqual(directEvidence.map((item) => item.status), ['replaced', 'active'], 'replacement preserves and marks the prior evidence');
+  directEvents = await events(direct.id);
+  assert.equal(directEvents[0].supportingEvidenceCount, 1);
+  assert.equal(directEvents[0].evidenceAvailable, true, 'event truthfully reports active supporting evidence without claiming verification');
+  let directDay = (await api('/api/planner/day')).body.data.recentlyCompleted.find((task) => task.id === direct.id);
+  assert.equal(directDay.supportingEvidenceCount, 1);
+  assert.equal(directDay.verificationState, 'unverified');
+  assert.equal(directDay.independentlyVerified, false);
 
   const patchTask = await createTask('PATCH completion history');
   const patched = await api(`/api/planner/tasks/${patchTask.id}`, { method: 'PATCH', json: { status: 'completed' }, key: 'planner-history-patch-0001' });
@@ -129,6 +187,39 @@ try {
   directEvents = await events(direct.id);
   assert.deepEqual(directEvents.map((event) => event.eventType), ['completed', 'reopened', 'completed']);
   assert.equal(directEvents.filter((event) => event.eventType === 'completed').length, 2, 're-completion is a separate retained completion');
+  directDay = (await api('/api/planner/day')).body.data.recentlyCompleted.find((task) => task.id === direct.id);
+  assert.equal(directDay.supportingEvidenceCount, 0, 'evidence for an older completion is not carried into re-completion');
+  assert.equal(directDay.evidenceState, 'none-attached');
+  const historicalBinding = await api(`/api/planner/tasks/${direct.id}/evidence`, {
+    method: 'POST', key: 'planner-evidence-stale-bind1',
+    json: { completionEventId: directEvents[0].id, evidenceKind: 'user_assertion', claim: 'This explicitly supports the earlier completion only.' }
+  });
+  assert.equal(historicalBinding.status, 200, 'evidence may be attached later to an explicit historical completion');
+  directDay = (await api('/api/planner/day')).body.data.recentlyCompleted.find((task) => task.id === direct.id);
+  assert.equal(directDay.supportingEvidenceCount, 0, 'late historical evidence never leaks into the current completion count');
+  const currentCompletion = directEvents.at(-1);
+  const currentEvidence = await api(`/api/planner/tasks/${direct.id}/evidence`, {
+    method: 'POST', key: 'planner-evidence-current-001',
+    json: { completionEventId: currentCompletion.id, evidenceKind: 'external_reference', claim: 'A public result page supports this completion.', reference: 'https://example.com/result' }
+  });
+  assert.equal(currentEvidence.status, 200);
+  const revoked = await api(`/api/planner/tasks/${direct.id}/evidence/${currentEvidence.body.data.id}/revoke`, {
+    method: 'POST', key: 'planner-evidence-current-001', json: { reason: 'The linked result is no longer applicable.' }
+  });
+  assert.equal(revoked.status, 200);
+  assert.equal(revoked.body.data.status, 'revoked');
+  assert.equal(revoked.body.data.independentlyVerified, false);
+  assert.equal(revoked.body.data.revocationReason, 'The linked result is no longer applicable.');
+  assert.equal(revoked.body.data.revokedBy, 'user');
+  assert.ok(revoked.body.data.revokedAt);
+  const revokeReplay = await api(`/api/planner/tasks/${direct.id}/evidence/${currentEvidence.body.data.id}/revoke`, {
+    method: 'POST', key: 'planner-evidence-current-001', json: { reason: 'The linked result is no longer applicable.' }
+  });
+  assert.equal(revokeReplay.status, 200, 'a lost-response revocation retry replays after the state becomes visible');
+  assert.equal(revokeReplay.body.data.replayed, true);
+  assert.equal((await evidence(direct.id)).items.filter((item) => item.id === currentEvidence.body.data.id).length, 1, 'revocation replay appends no second ledger record');
+  directDay = (await api('/api/planner/day')).body.data.recentlyCompleted.find((task) => task.id === direct.id);
+  assert.equal(directDay.supportingEvidenceCount, 0, 'revoked evidence is not counted as active support');
 
   const deferred = await createTask('Defer then complete');
   await api(`/api/planner/tasks/${deferred.id}/defer`, { method: 'POST', json: {}, key: 'planner-history-defer-0001' });
@@ -190,6 +281,11 @@ try {
     const completed = index % 2 === 0;
     addEvent.run(boundedTaskId, completed ? 'completed' : 'reopened', completed ? 'active' : 'completed', completed ? 'completed' : 'active', `bounded-${index}`);
   }
+  const boundedCompletionId = database.prepare("SELECT id FROM planner_task_events WHERE task_id = ? AND event_type = 'completed' ORDER BY id DESC LIMIT 1").get(boundedTaskId).id;
+  const addEvidence = database.prepare(`INSERT INTO planner_task_evidence
+    (task_id, completion_event_id, record_type, evidence_kind, claim, actor, source, internal_reference)
+    VALUES (?, ?, 'attached', 'user_assertion', ?, 'user', 'acceptance-probe', ?)`);
+  for (let index = 0; index < 55; index += 1) addEvidence.run(boundedTaskId, boundedCompletionId, `Evidence ${index}`, `evidence-${index}`);
   database.close();
   await connect();
   assert.equal((await events(legacyId)).length, 0, 'migration does not fabricate history for legacy completed tasks');
@@ -197,13 +293,25 @@ try {
   const legacy = day.recentlyCompleted.find((task) => task.id === Number(legacyId));
   assert.equal(legacy?.completionHistoryAvailable, false);
   assert.equal(legacy?.completionEventCount, 0);
+  assert.equal(legacy?.evidenceState, 'history-unavailable');
+  assert.equal(legacy?.verificationState, 'unknown');
+  assert.equal((await api(`/api/planner/tasks/${legacyId}/evidence`, { method: 'POST', key: 'planner-evidence-legacy-0001', json: { evidenceKind: 'user_assertion', claim: 'Do not fabricate a completion binding.' } })).status, 409, 'legacy completion cannot receive evidence without a real completion event');
   assert.ok(day.recentlyCompleted.findIndex((task) => task.id === Number(mixedNewerId)) < day.recentlyCompleted.findIndex((task) => task.id === Number(mixedOlderId)), 'mixed SQLite/ISO timestamps retain chronological ordering');
   const boundedEvents = await events(boundedTaskId);
   assert.equal(boundedEvents.length, 50, 'public lifecycle history is capped to the latest 50 events');
   assert.equal(boundedEvents[0].id < boundedEvents.at(-1).id, true, 'bounded response remains chronological');
+  const firstEvidencePage = await evidence(boundedTaskId);
+  assert.equal(firstEvidencePage.items.length, 50, 'each evidence page is capped to 50 records');
+  assert.ok(firstEvidencePage.nextBeforeId, 'a full page exposes a cursor for retained older evidence');
+  const secondEvidencePage = await evidence(boundedTaskId, firstEvidencePage.nextBeforeId);
+  assert.equal(secondEvidencePage.items.length, 5, 'the cursor retrieves every retained older evidence record');
+  assert.equal(secondEvidencePage.nextBeforeId, null);
+  assert.equal((await api(`/api/planner/tasks/${boundedTaskId}/evidence?beforeId=invalid`)).status, 400, 'malformed evidence cursors fail closed');
 
   await restart();
   assert.deepEqual((await events(direct.id)).map((event) => event.eventType), ['completed', 'reopened', 'completed'], 'ordered lifecycle history survives restart');
+  directEvidence = (await evidence(direct.id)).items;
+  assert.deepEqual(directEvidence.map((item) => item.status), ['replaced', 'active', 'active', 'revoked'], 'historical attachment, replacement, and revocation survive restart');
 
   // Real legacy-schema migration: start from the pre-history planner_tasks
   // table, then let current migration add only the event owner. No fabricated
@@ -238,7 +346,7 @@ try {
   const atomicAfter = (await api('/api/planner/tasks')).body.data.find((task) => task.id === atomicTask.id);
   assert.equal(atomicAfter.status, 'active', 'event failure rolls back the task state mutation');
   assert.equal(atomicAfter.completed_at, null, 'event failure rolls back completed_at');
-  console.log('Planner completion history acceptance passed: direct/PATCH/Chat transitions, retry, concurrency, reopen/re-complete, legacy truth, and restart persistence.');
+  console.log('Planner completion history and supporting-evidence acceptance passed: bounded unverified DTOs, attachment/replay/replacement/revocation, completion binding, legacy truth, and restart persistence.');
 } finally {
   if (server?.child) await stopInstalledChatServer(server.child);
   await removeInstalledChatFixture(probeRoot);
