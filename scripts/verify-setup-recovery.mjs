@@ -127,6 +127,55 @@ try {
   const resumed = applyPendingRestore({ dbPath, now: now() });
   line(resumed.applied === true && readValue(dbPath) === 'ORIGINAL', 'an interrupted live-moved-aside restore resumes safely on the next startup');
 
+  // Crash window A: rollbackDir has been decided and persisted to the marker
+  // (still 'validated') but the live database has NOT yet been renamed aside.
+  // A resume must reuse the pre-recorded rollbackDir rather than picking a
+  // new one or losing track of where the original database is going.
+  writeValue(dbPath, 'PRE-CRASH-A');
+  stageRestore({ dbPath, backupDir: backup.dir, confirmationId: 'c3', idempotencyKey: 'restore-crash-a', now: now() });
+  const crashRollbackDirA = path.join(dataDir, 'crash-a-rollback');
+  fs.mkdirSync(crashRollbackDirA, { recursive: true });
+  const markerA = JSON.parse(fs.readFileSync(path.join(dataDir, 'pending-restore.json'), 'utf8'));
+  fs.writeFileSync(path.join(dataDir, 'pending-restore.json'), JSON.stringify({ ...markerA, state: 'validated', rollbackDir: crashRollbackDirA }));
+  const resumedA = applyPendingRestore({ dbPath, now: now() });
+  line(resumedA.applied === true && readValue(dbPath) === 'ORIGINAL', 'resuming after a crash before the rename completes the restore using the pre-recorded rollbackDir');
+  line(readValue(path.join(crashRollbackDirA, 'life-planner.sqlite')) === 'PRE-CRASH-A', 'the pre-recorded rollbackDir receives the original live database on resume');
+
+  // Crash window B (the original bug's exact point): the rename to
+  // rollbackDir already happened, but the marker never advanced past
+  // 'validated' before the crash, so the live database is gone from dbPath
+  // while rollbackDir is still correctly recorded. A resume must find the
+  // already-moved original there instead of treating it as orphaned.
+  writeValue(dbPath, 'PRE-CRASH-B');
+  stageRestore({ dbPath, backupDir: backup.dir, confirmationId: 'c4', idempotencyKey: 'restore-crash-b', now: now() });
+  const crashRollbackDirB = path.join(dataDir, 'crash-b-rollback');
+  fs.mkdirSync(crashRollbackDirB, { recursive: true });
+  const rollbackDbB = path.join(crashRollbackDirB, 'life-planner.sqlite');
+  fs.renameSync(dbPath, rollbackDbB);
+  const markerB = JSON.parse(fs.readFileSync(path.join(dataDir, 'pending-restore.json'), 'utf8'));
+  fs.writeFileSync(path.join(dataDir, 'pending-restore.json'), JSON.stringify({ ...markerB, state: 'validated', rollbackDir: crashRollbackDirB }));
+  const resumedB = applyPendingRestore({ dbPath, now: now() });
+  line(resumedB.applied === true && readValue(dbPath) === 'ORIGINAL', 'resuming after a crash right after the rename finds the orphaned rollback copy instead of losing it');
+  line(readValue(rollbackDbB) === 'PRE-CRASH-B', 'the already-moved original database is preserved as the recorded rollback, not orphaned');
+
+  // A stray file already occupying the chosen rollback path must never be
+  // mistaken for "the rename already happened" -- the live database at
+  // dbPath must be left completely untouched, and the failure must be
+  // reported rather than silently losing the collision context.
+  writeValue(dbPath, 'MUST-SURVIVE-COLLISION');
+  stageRestore({ dbPath, backupDir: backup.dir, confirmationId: 'c5', idempotencyKey: 'restore-collision', now: now() });
+  const collisionMarker = JSON.parse(fs.readFileSync(path.join(dataDir, 'pending-restore.json'), 'utf8'));
+  const collisionRollbackDir = path.join(dataDir, 'collision-rollback');
+  fs.mkdirSync(collisionRollbackDir, { recursive: true });
+  fs.writeFileSync(path.join(collisionRollbackDir, 'life-planner.sqlite'), 'unrelated stray file, not a real rollback copy');
+  fs.writeFileSync(path.join(dataDir, 'pending-restore.json'), JSON.stringify({ ...collisionMarker, rollbackDir: collisionRollbackDir }));
+  const collisionResult = applyPendingRestore({ dbPath, now: now() });
+  line(collisionResult.applied === false, 'a rollback-path collision refuses to apply rather than proceeding');
+  line(readValue(dbPath) === 'MUST-SURVIVE-COLLISION', 'a rollback-path collision never deletes or replaces the still-live original database');
+  fs.rmSync(path.join(dataDir, 'pending-restore.json'), { force: true });
+  fs.rmSync(path.join(dataDir, 'pending-restore.json.failed'), { force: true });
+  fs.rmSync(collisionRollbackDir, { recursive: true, force: true });
+
   // An invalid staged backup must never overwrite live data.
   writeValue(dbPath, 'KEEP');
   fs.writeFileSync(path.join(dataDir, 'pending-restore.json'), JSON.stringify({ backupDir: path.join(dataDir, 'does-not-exist'), databaseFile: 'life-planner.sqlite', requestedAt: '2026-01-01T00:00:00.000Z' }));

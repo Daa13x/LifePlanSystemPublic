@@ -275,33 +275,88 @@ export function applyPendingRestore({ dbPath, now = Date.now() }) {
     return { applied: false, reason: 'invalid-backup', errors: validation.errors || ['Restore marker is invalid.'], failedMarker: retireMarker(dbPath, 'failed', { ...marker, state: 'failed', errors: validation.errors || [] }) };
   }
   const sourceDb = path.join(marker.backupDir, marker.databaseFile);
+  // Tracks whether the ORIGINAL live database is known for certain to no
+  // longer be sitting at dbPath -- either because this run just moved it, or
+  // because a prior run already did so before crashing (liveDbPresent is
+  // false but marker.rollbackDir is already recorded). The catch handler
+  // below must never delete/overwrite dbPath while this is false: doing so
+  // would risk destroying a still-live, never-moved original database.
+  let liveMovedAside = false;
   try {
     if (marker.state === 'prepared' || marker.state === 'validated') {
       marker = updateMarker(dbPath, marker, 'validated');
-      if (fs.existsSync(dbPath)) {
-        assertExistingRegularWithin(root, dbPath, 'Live database');
-        const rollbackDir = path.join(backupsDir(dbPath), `pre-restore-rollback-${stamp(now)}`);
-        fs.mkdirSync(rollbackDir, { recursive: true });
+      const liveDbPresent = fs.existsSync(dbPath);
+      if (liveDbPresent || marker.rollbackDir) {
+        // The rollback location is decided and PERSISTED to the marker
+        // BEFORE the live database is renamed, not after. Recording it only
+        // after the rename left a real crash window: if the process died
+        // between the rename and the marker update, the marker still said
+        // 'validated' with no rollbackDir, the live database was already
+        // gone from dbPath, and a resume would silently treat this as "no
+        // live database to preserve" (rollbackDir: null) -- orphaning the
+        // user's original database with no recorded path back to it. Persist
+        // first, so a crash at any point after this leaves a marker that
+        // still knows exactly where the original database is (or is about
+        // to go), and `liveDbPresent` on resume tells us whether the rename
+        // itself still needs to happen or already happened before the crash.
+        if (liveDbPresent) assertExistingRegularWithin(root, dbPath, 'Live database');
+        const rollbackDir = marker.rollbackDir || path.join(backupsDir(dbPath), `pre-restore-rollback-${stamp(now)}`);
+        if (!marker.rollbackDir) {
+          fs.mkdirSync(rollbackDir, { recursive: true });
+          marker = updateMarker(dbPath, marker, 'validated', { rollbackDir });
+        }
         const rollbackDb = path.join(rollbackDir, path.basename(dbPath));
-        fs.renameSync(dbPath, rollbackDb);
-        for (const suffix of ['-wal', '-shm']) moveIfPresent(`${dbPath}${suffix}`, `${rollbackDb}${suffix}`);
+        if (liveDbPresent) {
+          if (fs.existsSync(rollbackDb)) throw new Error(`Rollback path is already occupied: ${rollbackDb}`);
+          // Checkpoint the live database's own WAL into its main file before
+          // moving it, so the rename below carries a self-contained database
+          // rather than leaving committed data behind in a sidecar that a
+          // crash between the two separate renames (main file, then -wal/
+          // -shm) could otherwise strand at the old path.
+          let liveDbHandle;
+          try {
+            liveDbHandle = new DatabaseSync(dbPath);
+            liveDbHandle.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+          } finally { try { liveDbHandle?.close(); } catch { /* the rename below still captures whatever is on disk */ } }
+          fs.renameSync(dbPath, rollbackDb);
+          liveMovedAside = true;
+          for (const suffix of ['-wal', '-shm']) moveIfPresent(`${dbPath}${suffix}`, `${rollbackDb}${suffix}`);
+        } else {
+          liveMovedAside = true; // a prior run already completed the rename before crashing
+        }
         marker = updateMarker(dbPath, marker, 'live-moved-aside', { rollbackDir });
+      } else marker = updateMarker(dbPath, marker, 'live-moved-aside', { rollbackDir: null });
+    } else if (marker.state === 'live-moved-aside' || marker.state === 'replacement-installed') {
+      // Resuming past the rename step also means the original is already
+      // moved aside -- otherwise the marker could not have reached this
+      // state (see the transitions above, both of which set it beforehand).
+      liveMovedAside = true;
+    }
+    if (marker.state === 'live-moved-aside' || marker.state === 'replacement-installed') {
+      if (marker.state === 'live-moved-aside' && marker.rollbackDir) {
         // The old database is closed at this point. Consolidate its WAL before
         // manifesting it, so the rollback artifact is a standalone database
         // rather than a main file whose latest data still lives in a sidecar.
-        let rollbackDbHandle;
-        try {
-          rollbackDbHandle = new DatabaseSync(rollbackDb);
-          rollbackDbHandle.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-        } finally { try { rollbackDbHandle?.close(); } catch { /* preserve rollback for recovery */ } }
-        removeIfPresent(`${rollbackDb}-wal`);
-        removeIfPresent(`${rollbackDb}-shm`);
-        const rollbackCheck = sqliteDetails(rollbackDb);
-        if (!rollbackCheck.ok) throw new Error(`Rollback copy could not be validated: ${rollbackCheck.error}`);
-        atomicJson(path.join(rollbackDir, 'manifest.json'), { formatVersion: BACKUP_FORMAT_VERSION, application: APPLICATION_ID, createdAt: iso(now), label: 'pre-restore-rollback', databaseFile: path.basename(dbPath), schemaVersion: rollbackCheck.schemaVersion, recoveryScope: databaseSnapshotScope(rollbackDb), provenance: { restoreBackup: path.basename(marker.backupDir) }, files: [{ name: path.basename(dbPath), sha256: sha256File(rollbackDb), size: fs.statSync(rollbackDb).size }] });
-      } else marker = updateMarker(dbPath, marker, 'live-moved-aside', { rollbackDir: null });
-    }
-    if (marker.state === 'live-moved-aside' || marker.state === 'replacement-installed') {
+        // This must run on every resume that reaches this state -- not only
+        // the run that performed the rename -- otherwise a crash right after
+        // the marker advances to 'live-moved-aside' (before this completes)
+        // would permanently skip it, since the branch above that used to
+        // guard it only runs once per marker state.
+        const rollbackDb = path.join(marker.rollbackDir, path.basename(dbPath));
+        if (!fs.existsSync(rollbackDb)) throw new Error(`Rollback copy is missing at ${rollbackDb}; refusing to continue without a verified original-database backup.`);
+        if (!fs.existsSync(path.join(marker.rollbackDir, 'manifest.json'))) {
+          let rollbackDbHandle;
+          try {
+            rollbackDbHandle = new DatabaseSync(rollbackDb);
+            rollbackDbHandle.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+          } finally { try { rollbackDbHandle?.close(); } catch { /* preserve rollback for recovery */ } }
+          removeIfPresent(`${rollbackDb}-wal`);
+          removeIfPresent(`${rollbackDb}-shm`);
+          const rollbackCheck = sqliteDetails(rollbackDb);
+          if (!rollbackCheck.ok) throw new Error(`Rollback copy could not be validated: ${rollbackCheck.error}`);
+          atomicJson(path.join(marker.rollbackDir, 'manifest.json'), { formatVersion: BACKUP_FORMAT_VERSION, application: APPLICATION_ID, createdAt: iso(now), label: 'pre-restore-rollback', databaseFile: path.basename(dbPath), schemaVersion: rollbackCheck.schemaVersion, recoveryScope: databaseSnapshotScope(rollbackDb), provenance: { restoreBackup: path.basename(marker.backupDir) }, files: [{ name: path.basename(dbPath), sha256: sha256File(rollbackDb), size: fs.statSync(rollbackDb).size }] });
+        }
+      }
       if (marker.state === 'live-moved-aside') {
         const replacement = `${dbPath}.restore-${crypto.randomBytes(6).toString('hex')}.tmp`;
         fs.copyFileSync(sourceDb, replacement, fs.constants.COPYFILE_EXCL);
@@ -322,13 +377,20 @@ export function applyPendingRestore({ dbPath, now = Date.now() }) {
     return { applied: true, backupDir: marker.backupDir, rollbackDir: marker.rollbackDir || null };
   } catch (error) {
     let rolledBack = false;
-    const rollbackDb = marker.rollbackDir ? path.join(marker.rollbackDir, path.basename(dbPath)) : null;
+    // Only ever restore from rollbackDb into dbPath once liveMovedAside is
+    // known true. Persisting rollbackDir to the marker before the rename (the
+    // fix above) means a rename that itself throws (e.g. a stray file/dir
+    // already occupying rollbackDb) would otherwise be indistinguishable here
+    // from a rename that succeeded -- and blindly restoring in that case
+    // would delete the still-untouched, still-live original database.
+    const rollbackDb = liveMovedAside && marker.rollbackDir ? path.join(marker.rollbackDir, path.basename(dbPath)) : null;
     try {
       if (rollbackDb && fs.existsSync(rollbackDb)) {
         removeIfPresent(dbPath);
         removeIfPresent(`${dbPath}-wal`);
         removeIfPresent(`${dbPath}-shm`);
         fs.renameSync(rollbackDb, dbPath);
+        for (const suffix of ['-wal', '-shm']) moveIfPresent(`${rollbackDb}${suffix}`, `${dbPath}${suffix}`);
         rolledBack = true;
       }
     } catch { /* preserve the marker for manual recovery */ }
