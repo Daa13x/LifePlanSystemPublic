@@ -180,6 +180,82 @@ try {
   assert.equal(store5.cancel('code-1', 'x').state, 'cancelled');
   assert.equal(TERMINAL_STATES.includes('answered') && PENDING_STATES.includes('queued'), true);
 
+  // Regression: dispatchOnce used to read-check-then-await-dispatchFn-then-write,
+  // a real check-then-act race -- two concurrent calls for the same (task, phase)
+  // could both observe no/inactive record and both call dispatchFn, a real
+  // duplicate external dispatch. Fixed by synchronously claiming the slot
+  // before calling dispatchFn. Prove exactly one of two concurrent calls
+  // actually dispatches.
+  const store6 = new BrowserConsultationStore({ baseDir: path.join(temp, 'consult6') });
+  let concurrentDispatchCount = 0;
+  let releaseDispatch;
+  const slowDispatch = async () => {
+    concurrentDispatchCount += 1;
+    await new Promise((resolve) => { releaseDispatch = resolve; });
+    return 'job-slow';
+  };
+  const firstCall = store6.dispatchOnce('code-1', 'advice', 'fp-race', slowDispatch);
+  // Give the first call's synchronous read-check-claim a turn to run and
+  // persist its claim before the second call starts its own read.
+  await new Promise((resolve) => setImmediate(resolve));
+  const secondCall = store6.dispatchOnce('code-1', 'advice', 'fp-race', slowDispatch);
+  releaseDispatch();
+  const [firstResult, secondResult] = await Promise.all([firstCall, secondCall]);
+  assert.equal(concurrentDispatchCount, 1, 'exactly one concurrent dispatchOnce call actually invokes dispatchFn');
+  assert.equal(firstResult.dispatched, true);
+  assert.equal(secondResult.dispatched, false);
+  assert.equal(secondResult.reason, 'already-active');
+
+  // Regression: dispatchFn throwing used to propagate uncaught with no record
+  // ever written. It must now settle to a real, structured 'error' terminal
+  // state instead, matching every other dispatch-failure path in this module.
+  const store7 = new BrowserConsultationStore({ baseDir: path.join(temp, 'consult7') });
+  const throwingDispatch = async () => { throw new Error('provider unreachable'); };
+  const threw = await store7.dispatchOnce('code-1', 'advice', 'fp-throw', throwingDispatch);
+  assert.equal(threw.dispatched, false);
+  assert.equal(threw.reason, 'dispatch-failed');
+  assert.equal(threw.record.state, 'error');
+  assert.equal(threw.record.error, 'provider unreachable');
+  assert.ok(TERMINAL_STATES.includes(store7.read('code-1', 'advice').state), 'a thrown dispatch settles to a real terminal state, not an uncaught rejection');
+
+  // Regression: dispatchOnce's synchronous pre-dispatch claim (state:
+  // 'dispatched', browserJobId: null) is exactly what a process crash/exit
+  // leaves behind if it happens between the claim write and dispatchFn
+  // resolving. Before the fix, recover() returned this as a pollable pending
+  // record with no job id -- permanently stuck (dispatchOnce's own
+  // already-active check blocks a fresh dispatch, and nothing can poll a
+  // null job id). recover() must instead settle it to a real error.
+  const store8 = new BrowserConsultationStore({ baseDir: path.join(temp, 'consult8') });
+  store8.write({
+    taskId: 'code-1', phase: 'advice', requestFingerprint: 'fp-orphan', browserJobId: null,
+    state: 'dispatched', dispatchTime: Date.now(), claimTime: null, lastPollTime: null,
+    terminalTime: null, result: null, error: '', consumed: false
+  });
+  const recovered = store8.recover();
+  assert.equal(recovered.length, 0, 'an orphaned null-job-id claim is never returned as pollable');
+  const settledOrphan = store8.read('code-1', 'advice');
+  assert.equal(settledOrphan.state, 'error');
+  assert.ok(settledOrphan.error.includes('orphaned'), 'the orphaned claim records a distinguishable error reason');
+  const freshAfterOrphan = await store8.dispatchOnce('code-1', 'advice', 'fp-orphan-2', dispatch);
+  assert.equal(freshAfterOrphan.dispatched, true, 'settling the orphaned claim frees the (task, phase) for a fresh dispatch');
+
+  // Regression: if a concurrent poll()/cancel() terminalizes the claim while
+  // dispatchFn is still resolving, the eventual post-await write must not
+  // blindly overwrite that outcome with a stale pre-await snapshot --
+  // resurrecting an already-terminal record, which this module's own
+  // terminal-state guarantee forbids.
+  const store9 = new BrowserConsultationStore({ baseDir: path.join(temp, 'consult9') });
+  let releaseSlowDispatch2;
+  const slowDispatch2 = async () => new Promise((resolve) => { releaseSlowDispatch2 = () => resolve('job-late'); });
+  const inFlight = store9.dispatchOnce('code-1', 'advice', 'fp-cancel-race', slowDispatch2);
+  await new Promise((resolve) => setImmediate(resolve));
+  const cancelled = store9.cancel('code-1', 'advice');
+  assert.equal(cancelled.state, 'cancelled');
+  releaseSlowDispatch2();
+  const raced = await inFlight;
+  assert.equal(raced.record.state, 'cancelled', 'a concurrent cancel is never resurrected by the dispatch that was already in flight');
+  assert.equal(store9.read('code-1', 'advice').state, 'cancelled');
+
   // ---------------- Safeguard 4: infra probes ----------------
   const okId = async (v) => (String(v).includes('good') ? { service: 'lps', value: v } : null);
   const exp = await selectInfrastructure({ explicit: 'good-explicit', envValue: 'good-env', documentedDefault: 'good-default', validateIdentity: okId });

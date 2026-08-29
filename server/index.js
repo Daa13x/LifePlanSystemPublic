@@ -8899,6 +8899,22 @@ app.post('/api/source/coding/tasks/:id/advice/send', async (req, res) => {
       browserAgentJobs.set(job.id, job);
       return job.id;
     });
+    // A failed dispatch (reason 'dispatch-failed') already settled to a real
+    // terminal 'error' record in dispatchOnce -- it must not be reported as
+    // "awaiting" (this route would return ok() claiming a request was sent
+    // or is pending, when the consultation actually already ended). Any
+    // other outcome (dispatched, or an existing active/terminal consultation
+    // being retained) is genuinely awaiting/tracked, same as before.
+    if (dispatch.reason === 'dispatch-failed') {
+      advice.status = 'incomplete';
+      advice.error = dispatch.record.error || 'Dispatch failed.';
+      advice.disposition = normalizeAdviceDisposition(advice);
+      task.status = 'prepared';
+      task.phase = 'browser_advice_unavailable';
+      nativeCodingWorker.record(task, 'browser_advice_dispatch', 'deny', `Dispatch failed: ${advice.error}`);
+      nativeCodingWorker.save(task);
+      return ok(res, { task, note: 'Browser advice could not be sent. The prepared local task remains runnable without it.' });
+    }
     advice.status = 'awaiting';
     advice.jobId = dispatch.record.browserJobId;
     advice.sentAt = new Date().toISOString();
