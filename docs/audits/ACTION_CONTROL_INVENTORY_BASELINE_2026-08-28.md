@@ -12,9 +12,9 @@ an explicit test failure until its effect on the registry migration is reviewed.
 Current source truth:
 
 - 474 intrinsic interactive controls;
-- 33 controls in the accepted neutral action-registry slice;
-- 441 controls not yet migrated;
-- 18 neutral actions in the live manifest.
+- 34 controls in the accepted neutral action-registry slice;
+- 440 controls not yet migrated;
+- 19 neutral actions in the live manifest.
 
 The total includes form fields and disclosure controls as required by the
 app-wide todo. It is not a percentage-complete score: one text field is not the

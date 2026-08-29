@@ -24,7 +24,16 @@ export const ACTION_RISKS = Object.freeze({
   REPOSITORY_CHANGE: 'REPOSITORY_CHANGE',
   SETTINGS_CHANGE: 'SETTINGS_CHANGE',
   SENSITIVE_DATA: 'SENSITIVE_DATA',
-  DESTRUCTIVE_OR_IRREVERSIBLE: 'DESTRUCTIVE_OR_IRREVERSIBLE'
+  DESTRUCTIVE_OR_IRREVERSIBLE: 'DESTRUCTIVE_OR_IRREVERSIBLE',
+  // A narrow, non-parameterized write that can only ever stage one hardcoded,
+  // system-detected proposal into an existing, independently governed approval
+  // queue -- it never executes the sensitive action the proposal represents,
+  // and it takes no caller-supplied arguments that could redirect what gets
+  // staged. Distinct from REVERSIBLE_WRITE (a caller-directed write that must
+  // be confirmed) and from SENSITIVE_DATA (a pure read): this both writes and
+  // is safe to leave unconfirmed, because the only thing it can ever write is
+  // an inert row a human must separately approve before anything changes.
+  GOVERNED_STAGING: 'GOVERNED_STAGING'
 });
 
 export const ACTION_CONFIRMATIONS = Object.freeze({
@@ -159,6 +168,17 @@ function validateDefinition(action) {
   // must never be gated as though it changed stored data.
   if (action.risk === ACTION_RISKS.VIEW_NAVIGATION && action.confirmation !== ACTION_CONFIRMATIONS.NONE) {
     contractError(action.id, 'view-navigation actions must not require confirmation.');
+  }
+  // GOVERNED_STAGING is exempt from the REVERSIBLE_WRITE confirmation rule above
+  // only because it structurally cannot be steered: it must be a hardcoded,
+  // caller-unparameterized write (no inputSchema fields at all), so no caller
+  // can ever choose what gets staged, and it must state what it stages so that
+  // is reviewable in this contract rather than only in prose elsewhere.
+  if (action.risk === ACTION_RISKS.GOVERNED_STAGING && action.confirmation !== ACTION_CONFIRMATIONS.NONE) {
+    contractError(action.id, 'governed-staging actions must not require confirmation; they may only stage state a human approves separately.');
+  }
+  if (action.risk === ACTION_RISKS.GOVERNED_STAGING && Object.keys(action.inputSchema || {}).length) {
+    contractError(action.id, 'governed-staging actions must take no caller-supplied arguments.');
   }
   if (![ACTION_RISKS.READ_ONLY, ACTION_RISKS.SENSITIVE_DATA].includes(action.risk) && !action.sideEffects.length) {
     contractError(action.id, `${action.risk} actions must describe their proposal or side effects.`);

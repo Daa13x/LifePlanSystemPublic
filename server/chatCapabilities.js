@@ -457,6 +457,24 @@ const ACTION_METADATA = Object.freeze({
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-models-check'], testId: 'action.system.models',
     resultSchema: resultObject(['models', 'count', 'truncated'], { models: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
   },
+  // Classified GOVERNED_STAGING, not REVERSIBLE_WRITE: the registry's own contract
+  // (server/actionRegistry.js) requires every REVERSIBLE_WRITE action to gate on
+  // a real two-step confirmation_required handshake, matching the propose_create
+  // family -- forcing that handshake here would change the button's existing
+  // one-click behaviour. This scan is not a user-directed proposal: it takes no
+  // arguments and can only ever stage one hardcoded, system-detected row into the
+  // pre-existing, separately governed approvals queue; nothing takes effect until
+  // a human approves that queue entry through its own unrelated confirm step.
+  // GOVERNED_STAGING encodes exactly this (see its definition in
+  // actionRegistry.js): the contract mechanically enforces confirmation:NONE and
+  // zero caller-supplied arguments, so it is not merely a description choice.
+  'planner.refresh': {
+    label: 'Refresh Workboard', feature: 'Daily Planner', permission: 'planner.refresh', risk: ACTION_RISKS.GOVERNED_STAGING,
+    confirmation: ACTION_CONFIRMATIONS.NONE,
+    sideEffects: ['May stage one governed approval to retire a resolved browser-connector blocker; never executes that or any other sensitive change directly. Returns a freshly aggregated Planner.'],
+    sourceControls: ['planner.refresh-workboard'], testId: 'action.planner.refresh',
+    resultSchema: resultObject(['changes', 'message', 'planner'], { changes: { type: 'array' }, message: { type: 'string' }, planner: { type: 'object' } })
+  },
   'system.runs': {
     label: 'List local runs', feature: 'System runs', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-runs-check'], testId: 'action.system.runs',
@@ -518,7 +536,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'planner.propose_update', 'project.propose_create', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'planner.propose_update', 'project.propose_create', 'planner.refresh', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -769,6 +787,15 @@ export function createCapabilityRegistry(deps) {
       }
     },
 
+    'planner.refresh': {
+      description: 'Run the governed Planner refresh scan. May conditionally stage one approval; never applies it directly. Returns the freshly aggregated Planner.',
+      readOnly: false,
+      schema: {},
+      async handler() {
+        return dep('refreshPlanner')();
+      }
+    },
+
     'system.models': {
       description: 'List the local model registry and the assigned Planner Assistant. Read-only.',
       readOnly: true,
@@ -971,7 +998,7 @@ export function createCapabilityRegistry(deps) {
 export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
-  'planner.propose_create', 'planner.propose_update',
+  'planner.propose_create', 'planner.propose_update', 'planner.refresh',
   'project.propose_create',
   'system.status', 'system.models', 'system.runs',
   'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner'

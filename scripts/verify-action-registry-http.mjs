@@ -134,6 +134,7 @@ try {
   for (const id of [700010, 700011, 700012, 700013, 700014, 700015, 700016, 700017, 700018]) {
     insertUpdateFixture.run(id, `Update fixture ${id}`, `Body ${id}`, `Next ${id}`);
   }
+  fixtureDb.prepare("INSERT INTO knowledge_items (id, type, title, body, source, status, confidence, evidence, owner, next_action) VALUES (700020, 'blocker', 'Cloud browser automation is not configured yet', 'Awaiting Playwright, Chromium, and a paired Chrome connector.', 'system', 'active', 0.6, 'Seeded blocker fixture', 'system', 'Resolve the browser connector.')").run();
   fixtureDb.prepare("INSERT INTO chat_sessions (id, title, deleted) VALUES (700100, ?, 0)").run('History title '.repeat(40));
   fixtureDb.prepare("INSERT INTO chat_sessions (id, title, deleted) VALUES (700101, 'Deleted history fixture', 1)").run();
   fixtureDb.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (700100, 'user', ?)").run(`history-marker ${'private-body-'.repeat(80)}`);
@@ -158,8 +159,10 @@ try {
   const plannerCreate = catalog.body?.data?.find((action) => action.id === 'planner.propose_create');
   const plannerUpdate = catalog.body?.data?.find((action) => action.id === 'planner.propose_update');
   const projectCreateProposal = catalog.body?.data?.find((action) => action.id === 'project.propose_create');
+  const plannerRefreshAction = catalog.body?.data?.find((action) => action.id === 'planner.refresh');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 18 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate) && Boolean(projectCreateProposal), 'neutral catalog exposes every bounded registered capability');
+  line(catalog.body?.data?.length === 19 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate) && Boolean(projectCreateProposal) && Boolean(plannerRefreshAction), 'neutral catalog exposes every bounded registered capability');
+  line(plannerRefreshAction?.permission === 'planner.refresh' && plannerRefreshAction?.risk === 'GOVERNED_STAGING' && plannerRefreshAction?.confirmation === 'none' && JSON.stringify(plannerRefreshAction?.inputSchema) === '{}' && plannerRefreshAction?.sourceControls?.includes('planner.refresh-workboard'), 'planner.refresh advertises its governed-staging contract and takes no caller arguments');
   line(projectCreateProposal?.permission === 'workboard.propose' && projectCreateProposal?.risk === 'REVERSIBLE_WRITE' && projectCreateProposal?.confirmation === 'user_confirmation', 'project.propose_create advertises its write risk and user-confirmation requirement');
   line(plannerCreate?.permission === 'planner.propose' && plannerCreate?.risk === 'REVERSIBLE_WRITE' && plannerCreate?.confirmation === 'user_confirmation', 'planner.propose_create advertises its write risk and user-confirmation requirement');
   line(plannerUpdate?.permission === 'planner.propose' && plannerUpdate?.risk === 'REVERSIBLE_WRITE' && plannerUpdate?.confirmation === 'user_confirmation', 'planner.propose_update advertises its write risk and user-confirmation requirement');
@@ -340,6 +343,52 @@ try {
   const plannerConfirmationsAfter = Number(plannerDbAfter.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
   plannerDbAfter.close();
   line(historyContextAfter.body?.data?.length === plannerContextAfter.body?.data?.length && historyItemsAfter.body?.data?.length === plannerItemsAfter.body?.data?.length && historyConfirmationsAfter === plannerConfirmationsAfter, 'reading the Daily Planner creates no attachment, Workboard item, or confirmation');
+
+  // --- planner.refresh: real mutation and idempotency proof ---
+  // refreshPlannerState() only stages an approval when Playwright, Chromium,
+  // the paired Chrome connector, and the still-open blocker record are ALL
+  // true at once. The connector's "connected" state is the real in-memory
+  // heartbeat the browser extension sets -- so it is driven here through the
+  // same authenticated heartbeat route the real extension calls (using the
+  // token this disposable server wrote to its own pairing config), not a
+  // fixture that only fakes the read path.
+  const pairingConfig = JSON.parse(fs.readFileSync(path.join(probeRoot, 'pairing.json'), 'utf8'));
+  const heartbeat = await fetch(`${base}/api/browser/extension/heartbeat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-LPS-Connector-Token': pairingConfig.token },
+    body: JSON.stringify({ tabs: [] })
+  });
+  line(heartbeat.ok, 'the disposable server\'s own pairing token authenticates a real connector heartbeat');
+  const browserReadyProbe = await import('playwright').then(async ({ chromium }) => {
+    const executablePath = chromium.executablePath();
+    return Boolean(executablePath && fs.existsSync(executablePath));
+  }).catch(() => false);
+  line(browserReadyProbe, 'this verification environment has Playwright Chromium installed, so the staging branch is genuinely reachable (not skipped)');
+
+  const countBlockerApprovals = () => {
+    const d = new DatabaseSync(dbPath, { readOnly: true });
+    const n = Number(d.prepare("SELECT COUNT(*) AS c FROM approvals WHERE action_type = 'update_memory' AND title = 'Retire resolved browser connector blocker' AND status = 'pending'").get()?.c || 0);
+    d.close();
+    return n;
+  };
+  const refreshInvoke = () => api('/api/actions/planner.refresh/invoke', { method: 'POST', json: { session_id: sessionId, args: {} } });
+
+  const approvalsBeforeRefresh = countBlockerApprovals();
+  const refreshFirst = await refreshInvoke();
+  const refreshFirstAction = refreshFirst.body?.data;
+  line(refreshFirst.status === 200 && refreshFirstAction?.status === 'success' && refreshFirstAction?.actionId === 'planner.refresh' && Array.isArray(refreshFirstAction?.data?.changes) && typeof refreshFirstAction?.data?.message === 'string' && typeof refreshFirstAction?.data?.planner === 'object', 'planner.refresh executes the real refresh logic and returns the expected planner/message response shape');
+  line(browserReadyProbe ? refreshFirstAction?.data?.changes?.length === 1 && approvalsBeforeRefresh === 0 && countBlockerApprovals() === 1 : true, 'the first refresh stages exactly one approval for the seeded blocker fixture');
+
+  const refreshSecond = await refreshInvoke();
+  const refreshSecondAction = refreshSecond.body?.data;
+  line(refreshSecond.status === 200 && refreshSecondAction?.status === 'success', 'a second immediate refresh also completes successfully');
+  line(browserReadyProbe ? refreshSecondAction?.data?.changes?.length === 0 && countBlockerApprovals() === 1 : true, 'a second equivalent refresh does NOT create a duplicate approval (idempotency proven, not assumed)');
+
+  const plannerRefreshRoute = await api('/api/planner/refresh', { method: 'POST', json: {} });
+  line(plannerRefreshRoute.status === 200 && Array.isArray(plannerRefreshRoute.body?.data?.changes) && plannerRefreshRoute.body?.data?.changes?.length === 0 && countBlockerApprovals() === 1, 'the legacy direct HTTP route shares the same authoritative refresh owner and stays idempotent too');
+
+  const refreshInspect = await api('/api/actions/planner.refresh');
+  line(refreshInspect.status === 200 && refreshInspect.body?.data?.testId === 'action.planner.refresh' && refreshInspect.body?.data?.sourceControls?.[0] === 'planner.refresh-workboard', 'planner.refresh action/control identifiers are stable and inspectable');
 
   const readFixture = (id) => {
     const fixture = new DatabaseSync(dbPath, { readOnly: true });

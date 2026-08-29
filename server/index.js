@@ -4038,6 +4038,15 @@ const capabilityRegistry = createCapabilityRegistry({
   readPlannerTask({ id }) {
     return readPlannerTaskRecord(id);
   },
+  // Same authoritative refresh owner the direct HTTP route uses -- no
+  // duplicated business logic. refreshPlannerState() conditionally stages one
+  // governed approval (never executes the sensitive action itself); this
+  // capability only exposes that existing, already-safe operation through the
+  // neutral gateway instead of the button's own direct fetch.
+  async refreshPlanner() {
+    const result = await refreshPlannerState();
+    return { ...result, planner: await plannerData() };
+  },
   // View-navigation transport for navigation.* actions. Authenticates the target
   // renderer, issues one correlated single-use command over the bridge, and waits
   // for the renderer's acknowledgement (or timeout/cancellation). The bridge (its

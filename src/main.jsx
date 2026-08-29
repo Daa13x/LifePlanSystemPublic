@@ -565,7 +565,7 @@ function App() {
   }
 
   async function runPlannerRefresh() {
-    const result = await api('/api/planner/refresh', { method: 'POST' });
+    const result = (await invokeNeutralAction('planner.refresh', {}, selectedSession)).data;
     setPlanner(result.planner);
     setMemory(await api('/api/memory'));
     setApprovals(await api('/api/approvals').catch(() => result.planner.approvals || []));
@@ -1857,7 +1857,7 @@ function Planner({ planner, refresh, runRefresh, setNotice, navigate }) {
         )}
         <QuickAddItem refresh={refresh} setNotice={setNotice} />
         <CodingWorkQueue navigate={navigate} setNotice={setNotice} />
-        <button className="primary subtle" onClick={runRefresh}>Refresh Workboard</button>
+        <button className="primary subtle" data-action-id="planner.refresh" data-control-id="planner.refresh-workboard" onClick={runRefresh}>Refresh Workboard</button>
       </div>
 
       <div className="bucket-grid">
