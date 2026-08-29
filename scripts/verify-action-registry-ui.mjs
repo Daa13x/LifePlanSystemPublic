@@ -18,18 +18,27 @@ assert.match(ui, /result\.error\?\.message \|\| `Action \$\{name\} did not compl
 assert.match(ui, /function SetupRecovery\(\{ boot, selectedSession, setNotice, refreshSignal \}\)/, 'Setup & Recovery receives only the trusted session context needed by the neutral gateway');
 assert.match(ui, /invokeNeutralAction\('navigation\.settings', \{\}, selectedSession\)/, 'Setup diagnostics uses the shared neutral navigation adapter');
 const neutralCalls = [...ui.matchAll(/invokeAction\('([^']+)'/g)].map((match) => match[1]);
-// planner.refresh has no Chat surface (it is the Planner page's own button, not
-// a Chat-driven capability), so it is invoked directly through the module-level
-// invokeNeutralAction adapter -- the same established pattern SetupRecovery uses
-// for navigation.settings above -- rather than through Chat's local invokeAction.
-const CHAT_ADAPTER_EXEMPT_ACTIONS = ['planner.refresh'];
+// planner.refresh and coding.propose_task have no Chat surface (both are the
+// Planner page's own controls, not Chat-driven capabilities), so they are
+// invoked directly through App-owned functions closing over the module-level
+// invokeNeutralAction adapter -- the same established pattern SetupRecovery
+// uses for navigation.settings above -- rather than through Chat's local
+// invokeAction.
+const CHAT_ADAPTER_EXEMPT_ACTIONS = ['planner.refresh', 'coding.propose_task'];
 assert.deepEqual([...new Set(neutralCalls)].sort(), NEUTRAL_ACTION_NAMES.filter((name) => !CHAT_ADAPTER_EXEMPT_ACTIONS.includes(name)).sort(), 'every Chat-reachable neutral action uses the bounded Context Picker / Workboard proposal / system / navigation adapter');
 assert.match(ui, /invokeNeutralAction\('planner\.refresh', \{\}, selectedSession\)/, 'the Planner page Refresh Workboard control uses the shared neutral action adapter directly, matching the SetupRecovery navigation pattern');
+assert.match(ui, /invokeNeutralAction\('coding\.propose_task', draft, selectedSession\)/, 'the Planner page coding-task propose control uses the shared neutral action adapter directly');
 const runPlannerRefreshStart = ui.indexOf('async function runPlannerRefresh(');
 const runPlannerRefreshEnd = ui.indexOf('\n  }', runPlannerRefreshStart) + '\n  }'.length;
 assert.ok(runPlannerRefreshStart >= 0 && runPlannerRefreshEnd > runPlannerRefreshStart, 'the Refresh Workboard adapter has a bounded source slice');
 const runPlannerRefreshFunction = ui.slice(runPlannerRefreshStart, runPlannerRefreshEnd);
 assert.doesNotMatch(runPlannerRefreshFunction, /\/api\/planner\/refresh/, 'the Refresh Workboard button no longer calls the direct HTTP route from the client');
+const codingWorkQueueStart = ui.indexOf('function CodingWorkQueue(');
+const codingWorkQueueEnd = ui.indexOf('function Planner(', codingWorkQueueStart);
+assert.ok(codingWorkQueueStart >= 0 && codingWorkQueueEnd > codingWorkQueueStart, 'CodingWorkQueue has a bounded source slice');
+const codingWorkQueueFunction = ui.slice(codingWorkQueueStart, codingWorkQueueEnd);
+assert.doesNotMatch(codingWorkQueueFunction, /\/api\/source\/coding\/tasks'/, 'the coding-task seal control no longer calls the direct one-shot HTTP route from the client');
+assert.match(codingWorkQueueFunction, /confirmCodingTask\(pending\)/, 'confirming a sealed coding task submits only the durable confirmation identifier and token, not a raw task payload');
 assert.match(ui, /invokeAction\('knowledge\.read',\s*\{\s*id: rec\.ref_id,\s*kind: rec\.kind === 'knowledge-candidate' \? 'candidate' : 'item'\s*\}\)/s, 'Knowledge preview sends the exact typed item/candidate identity');
 assert.match(ui, /invokeAction\('workboard\.read',\s*\{\s*id: rec\.ref_id,\s*type: rec\.entity_type\s*\}\)/s, 'Workboard preview sends the exact typed entity identity');
 assert.match(ui, /kind: `workboard-\$\{rec\.identity\.type\}`[\s\S]*entity_type: rec\.identity\.type[\s\S]*ref_id: rec\.identity\.id/, 'Workboard list results preserve the server-provided typed identity');
@@ -105,12 +114,14 @@ assert.equal(manifest['workboard.propose_update'].confirmation, 'user_confirmati
 assert.equal(manifest['planner.refresh'].risk, 'GOVERNED_STAGING', 'planner.refresh is classified as a governed-staging write, not a caller-directed proposal');
 assert.equal(manifest['planner.refresh'].confirmation, 'none', 'planner.refresh requires no confirmation because it can only stage a hardcoded, separately human-gated approval');
 assert.deepEqual(manifest['planner.refresh'].inputSchema, {}, 'planner.refresh takes no caller-supplied arguments');
+assert.equal(manifest['coding.propose_task'].risk, 'REVERSIBLE_WRITE', 'coding.propose_task is a caller-directed proposal write, not governed-staging');
+assert.equal(manifest['coding.propose_task'].confirmation, 'user_confirmation', 'coding.propose_task requires explicit user confirmation before any task file is sealed');
 for (const control of searchControls) {
   const actionId = control.match(/data-action-id="([^"]+)"/)[1];
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 34, 'the bounded slice has exactly thirty-four mapped trigger/search/preview/proposal/system/history/planner/project/navigation/refresh controls');
+assert.equal(mappedControls.length, 36, 'the bounded slice has exactly thirty-six mapped trigger/search/preview/proposal/system/history/planner/project/navigation/refresh/coding controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -149,6 +160,7 @@ assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navig
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.settings').map((mapping) => mapping.controlId).sort(), ['chat.navigation.open-settings', 'setup-recovery.diagnostics.open-model-settings'], 'Chat and Setup diagnostics map their Settings navigation controls to one action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.planner').map((mapping) => mapping.controlId), ['chat.navigation.open-planner'], 'the visible Open Today control maps to the navigation.planner action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'planner.refresh').map((mapping) => mapping.controlId), ['planner.refresh-workboard'], 'the visible Refresh Workboard control maps to the planner.refresh action');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'coding.propose_task').map((mapping) => mapping.controlId).sort(), ['planner.coding-queue.confirm', 'planner.coding-queue.seal-and-queue'], 'the complete visible coding-task seal/confirm control family has stable identifiers');
 assert.deepEqual(
   controlMappings.filter((mapping) => mapping.actionId === 'planner.propose_create').map((mapping) => mapping.controlId).sort(),
   ['chat.planner-proposal.confirm', 'chat.planner-proposal.open', 'chat.planner-proposal.preview'],

@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 474,
-  "mapped": 34,
+  "total": 476,
+  "mapped": 36,
   "unmapped": 440,
-  "fingerprint": "265687124dbf055566d359655df18de2d7c5752aca72b720883698c3de2bf00d",
+  "fingerprint": "538b6cc7bead9610ed0bc46f0382ab66f5bd84c6aed516c4f7c47c010df689fa",
   "byOwner": {
     "App": { "total": 6, "mapped": 0, "unmapped": 6 },
     "ApprovalQueue": { "total": 5, "mapped": 0, "unmapped": 5 },
@@ -14,7 +14,7 @@
     "Chat": { "total": 56, "mapped": 10, "unmapped": 46 },
     "ChatConnectionBar": { "total": 12, "mapped": 11, "unmapped": 1 },
     "CloudCheckCard": { "total": 9, "mapped": 0, "unmapped": 9 },
-    "CodingWorkQueue": { "total": 7, "mapped": 0, "unmapped": 7 },
+    "CodingWorkQueue": { "total": 9, "mapped": 2, "unmapped": 7 },
     "ContextPicker": { "total": 7, "mapped": 5, "unmapped": 2 },
     "DailyPlanner": { "total": 5, "mapped": 0, "unmapped": 5 },
     "DetailsPanel": { "total": 1, "mapped": 0, "unmapped": 1 },

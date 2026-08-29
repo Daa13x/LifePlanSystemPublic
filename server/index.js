@@ -3640,6 +3640,74 @@ function bindProjectCreateConfirmation(sessionValue, result) {
   };
 }
 
+const CHAT_CODING_TASK_ACTION = 'coding.propose_task';
+const CHAT_CODING_TASK_OPERATION = 'coding.create_task';
+
+// The canonical, bounded native-coding task-seal payload. Mirrors
+// canonicalProjectCreateState: allowlists exactly the fields the "Seal and
+// queue" form can set, rejects anything else, and is applied verbatim at
+// confirmation. baseCommit is deliberately NOT part of the stored proposal --
+// it is captured fresh at confirmation time (see the confirm route below),
+// not at proposal time, so a proposal cannot go stale against the workspace.
+function canonicalCodingTaskState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The stored coding-task proposal is invalid.');
+  const allowed = new Set(['title', 'objective', 'allowedPaths', 'maxFilesChanged', 'validation']);
+  if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error('The stored coding-task proposal contains unsupported fields.');
+  const title = String(value.title || '').trim();
+  const objective = String(value.objective || '').trim();
+  const allowedPaths = String(value.allowedPaths || '').trim();
+  if (!title || title.length > 160) throw new Error('The stored coding-task proposal has an invalid title.');
+  if (!objective || objective.length > 6000) throw new Error('The stored coding-task proposal has an invalid objective.');
+  if (!allowedPaths || allowedPaths.length > 2000) throw new Error('The stored coding-task proposal has an invalid allowed-paths list.');
+  const maxFilesChanged = Number(value.maxFilesChanged);
+  if (!Number.isInteger(maxFilesChanged) || maxFilesChanged < 1 || maxFilesChanged > 5) throw new Error('The stored coding-task proposal has an invalid maxFilesChanged.');
+  const validation = String(value.validation || '');
+  if (!Object.hasOwn(NATIVE_CODING_VALIDATIONS, validation)) throw new Error('The stored coding-task proposal has an invalid validation choice.');
+  return { title, objective, allowedPaths, maxFilesChanged, validation };
+}
+
+function codingTaskOrigin(correlationId) {
+  return JSON.stringify({ source: 'chat-action-gateway', actionId: CHAT_CODING_TASK_ACTION, correlationId });
+}
+
+function readCodingTaskOrigin(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    if (parsed?.source !== 'chat-action-gateway' || parsed?.actionId !== CHAT_CODING_TASK_ACTION || typeof parsed?.correlationId !== 'string' || !parsed.correlationId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bindCodingTaskConfirmation(sessionValue, result) {
+  if (result?.actionId !== CHAT_CODING_TASK_ACTION || result.status !== 'needs_confirmation') return result;
+  const sessionId = realChatSessionId(sessionValue);
+  if (!sessionId) {
+    const error = new Error('A valid active chat session is required to stage a coding-task proposal.');
+    error.code = 'INVALID_CHAT_SESSION';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const afterState = canonicalCodingTaskState(result.args);
+  const target = `${chatConfirmationSessionId(sessionId)}:coding:new`;
+  const confirmation = proposeConfirmation(db, {
+    operation: CHAT_CODING_TASK_OPERATION,
+    target,
+    afterState,
+    reason: 'User-reviewed native-coding task seal proposal.',
+    origin: codingTaskOrigin(result.correlationId),
+    sessionId: chatConfirmationSessionId(sessionId),
+    requiresRevalidation: false,
+    idempotencyKey: `chat-coding-task:${result.correlationId}`
+  });
+  return {
+    ...result,
+    confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt }
+  };
+}
+
 // The canonical, bounded Daily Planner create payload. This is the single
 // authoritative validator for a chat-proposed task: it allowlists exactly the
 // supported planner_tasks fields, rejects anything else, and is applied verbatim
@@ -4091,7 +4159,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
       return ok(res, sessionBlock);
     }
     result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui', renderer: extractRendererBinding(req.body) });
-    result = bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result))));
+    result = bindCodingTaskConfirmation(sessionId, bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result)))));
     const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
       sessionId,
@@ -4126,7 +4194,7 @@ app.post('/api/chat/capability', async (req, res) => {
       return ok(res, sessionBlock);
     }
     let result = await capabilityRegistry.invoke(name, req.body?.args || {}, { renderer: extractRendererBinding(req.body) });
-    result = bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result))));
+    result = bindCodingTaskConfirmation(sessionId, bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result)))));
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
@@ -4480,6 +4548,81 @@ app.post('/api/chat/sessions/:id/project/confirm', async (req, res) => {
   } catch {
     writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
     fail(res, 400, 'Workboard card confirmation failed safely.');
+  }
+});
+
+// Apply only an immutable, session-bound native-coding task-seal proposal
+// staged by the action gateway. Not transactional (nativeCodingWorker.create
+// writes a task JSON file, not a SQL row, so there is nothing to roll back
+// alongside the confirmation's own status transition). The base commit is
+// deliberately re-read from git HERE, at apply time, rather than reused from
+// whatever it was when the proposal was staged -- an approved seal should
+// always be based on the current workspace, not a possibly-stale snapshot.
+app.post('/api/chat/sessions/:id/coding/confirm', async (req, res) => {
+  const sessionId = Number(req.params.id);
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const keys = Object.keys(body).sort();
+  let auditOperation = 'coding.confirm';
+  try {
+    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
+      return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
+    }
+    const confirmationId = String(body.confirmationId || '');
+    const token = String(body.token || '');
+    if (!/^[a-f0-9]{32}$/.test(confirmationId) || !/^[a-f0-9]{64}$/.test(token)) return fail(res, 400, 'A valid confirmation identifier and token are required.');
+    const staged = getConfirmation(db, confirmationId);
+    const createConfirmation = staged?.operation === CHAT_CODING_TASK_OPERATION
+      && staged.target === `${chatConfirmationSessionId(sessionId)}:coding:new`;
+    if (!staged || !createConfirmation) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION');
+      return fail(res, 400, 'That coding-task confirmation is not available.');
+    }
+    auditOperation = staged.operation;
+    const origin = readCodingTaskOrigin(staged.origin);
+    if (!origin) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ORIGIN');
+      return fail(res, 400, 'That coding-task confirmation is not available.');
+    }
+    // sealedTaskId is captured in THIS route's own closure, independent of
+    // confirmAndApply's return value, because a task file (unlike a SQL row)
+    // cannot be rolled back if the confirmation's own settlement transition
+    // fails immediately afterward. If that happens, applied.ok is false but
+    // the file still exists on disk with no linked, settled confirmation --
+    // an orphan that would silently appear as a real pending task despite the
+    // user being told sealing failed. Deleting it here, once settlement has
+    // conclusively finished as failed (not merely reported), restores the
+    // invariant "a failed seal never leaves a visible task behind" without
+    // touching confirmAndApply's shared, generic settlement logic.
+    let sealedTaskId = null;
+    const applyCreate = async (claimed) => {
+      const t = canonicalCodingTaskState(claimed.afterState);
+      const head = await runCli('git', ['rev-parse', 'HEAD'], { timeout: 30000, maxBuffer: 1024 * 1024 });
+      if (!head.ok) throw new Error(head.stderr || 'Unable to seal the current base commit.');
+      const task = nativeCodingWorker.create({ title: t.title, objective: t.objective, allowedPaths: t.allowedPaths, maxFilesChanged: t.maxFilesChanged, validation: t.validation, baseCommit: head.stdout.trim() });
+      sealedTaskId = task.id;
+      return { operation: CHAT_CODING_TASK_OPERATION, success: true, task };
+    };
+    const applied = await confirmAndApply(
+      db,
+      { id: confirmationId, token, sessionId: chatConfirmationSessionId(sessionId) },
+      applyCreate,
+      { transactionalApply: false }
+    );
+    if (!applied.ok) {
+      if (sealedTaskId) {
+        try { fs.unlinkSync(nativeCodingWorker.taskFile(sealedTaskId)); }
+        catch { /* best-effort: if this itself fails, the orphan is at least a real, inert, unauthorized-looking pending task rather than a duplicate or an executed one */ }
+      }
+      writeChatAudit(sessionId, auditOperation, 'blocked', `CONFIRMATION_${String(applied.code || 'REJECTED').toUpperCase()}`, origin.correlationId);
+      return fail(res, 400, applied.error || 'The coding-task confirmation was rejected.');
+    }
+    writeChatAudit(sessionId, auditOperation, 'applied', `coding task ${applied.result?.task?.id || 'sealed'}`, origin.correlationId);
+    return ok(res, applied.result);
+  } catch {
+    writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
+    fail(res, 400, 'Coding-task confirmation failed safely.');
   }
 });
 
@@ -6176,6 +6319,7 @@ async function validateNativeCodingWorktree({ worktree, validation, changedFiles
 
 const nativeCodingWorker = new NativeCodingWorker({
   root,
+  storageRoot: process.env.LIFE_PLANNER_NATIVE_CODING_STORAGE_ROOT ? path.resolve(process.env.LIFE_PLANNER_NATIVE_CODING_STORAGE_ROOT) : root,
   runGit: (args) => runCli('git', args, { timeout: 2 * 60 * 1000, maxBuffer: 16 * 1024 * 1024, preserveOutput: true }),
   runValidation: validateNativeCodingWorktree,
   invokeModel: invokeNativeCodingModel,

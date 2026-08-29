@@ -438,6 +438,12 @@ const ACTION_METADATA = Object.freeze({
     sourceControls: ['chat.project-proposal.open', 'chat.project-proposal.preview', 'chat.project-proposal.confirm'], testId: 'action.project.propose_create',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
+  'coding.propose_task': {
+    label: 'Seal a coding task', feature: 'Native Coding', permission: 'coding.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
+    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Persists a time-limited review proposal; no coding-task file is sealed until the user confirms it. Sealing itself only queues bounded, scoped work -- nothing runs until a further, separate run approval elsewhere in Setup & Recovery.'],
+    sourceControls: ['planner.coding-queue.seal-and-queue', 'planner.coding-queue.confirm'], testId: 'action.coding.propose_task',
+    resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
+  },
   'planner.propose_update': {
     label: 'Update a Planner task', feature: 'Chat task proposal', permission: 'planner.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
     confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Reads the current task and produces a review-only before/after proposal; no Daily Planner data is changed until the user confirms it.'],
@@ -536,7 +542,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'planner.propose_update', 'project.propose_create', 'planner.refresh', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'planner.propose_update', 'project.propose_create', 'coding.propose_task', 'planner.refresh', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -739,6 +745,31 @@ export function createCapabilityRegistry(deps) {
           operation: 'project.create',
           affects: 'new Workboard card',
           preview: { title: args.title, body: args.body, next_action: args.next_action },
+          confirmation_required: true
+        };
+      }
+    },
+
+    'coding.propose_task': {
+      description: 'Propose sealing a native-coding task (title, objective, allowed paths, file/validation limits). Returns a bounded proposal for confirmation; never writes. Confirming only seals the task file -- it never starts a run.',
+      readOnly: false,
+      schema: {
+        title: { type: 'string', required: true, maxLength: 160 },
+        objective: { type: 'string', required: true, maxLength: 6000 },
+        allowedPaths: { type: 'string', required: true, maxLength: 2000 },
+        maxFilesChanged: { type: 'integer', default: 3, min: 1, max: 5 },
+        validation: { type: 'string', default: 'syntax', enum: ['syntax', 'frontend', 'runtime', 'project'] }
+      },
+      async handler(args) {
+        // No mutation here — only a structured proposal for explicit confirmation.
+        // The base commit is intentionally NOT part of the proposal: it is read
+        // fresh from git at confirmation time so a stale proposal can never seal
+        // against an out-of-date workspace snapshot.
+        return {
+          proposal: true,
+          operation: 'coding.create_task',
+          affects: 'new sealed coding task',
+          preview: { title: args.title, objective: args.objective, allowedPaths: args.allowedPaths, maxFilesChanged: args.maxFilesChanged, validation: args.validation },
           confirmation_required: true
         };
       }
@@ -999,7 +1030,7 @@ export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
   'planner.propose_create', 'planner.propose_update', 'planner.refresh',
-  'project.propose_create',
+  'project.propose_create', 'coding.propose_task',
   'system.status', 'system.models', 'system.runs',
   'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner'
 ];

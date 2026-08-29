@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -47,7 +47,8 @@ async function startServer(port) {
       ...process.env,
       LIFE_PLANNER_DB: dbPath,
       LIFE_PLANNER_PORT: String(port),
-      LIFE_PLANNER_CONNECTOR_CONFIG: path.join(probeRoot, 'pairing.json')
+      LIFE_PLANNER_CONNECTOR_CONFIG: path.join(probeRoot, 'pairing.json'),
+      LIFE_PLANNER_NATIVE_CODING_STORAGE_ROOT: probeRoot
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true
@@ -160,8 +161,10 @@ try {
   const plannerUpdate = catalog.body?.data?.find((action) => action.id === 'planner.propose_update');
   const projectCreateProposal = catalog.body?.data?.find((action) => action.id === 'project.propose_create');
   const plannerRefreshAction = catalog.body?.data?.find((action) => action.id === 'planner.refresh');
+  const codingProposeTaskAction = catalog.body?.data?.find((action) => action.id === 'coding.propose_task');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 19 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate) && Boolean(projectCreateProposal) && Boolean(plannerRefreshAction), 'neutral catalog exposes every bounded registered capability');
+  line(catalog.body?.data?.length === 20 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate) && Boolean(projectCreateProposal) && Boolean(plannerRefreshAction) && Boolean(codingProposeTaskAction), 'neutral catalog exposes every bounded registered capability');
+  line(codingProposeTaskAction?.permission === 'coding.propose' && codingProposeTaskAction?.risk === 'REVERSIBLE_WRITE' && codingProposeTaskAction?.confirmation === 'user_confirmation', 'coding.propose_task advertises its write risk and user-confirmation requirement');
   line(plannerRefreshAction?.permission === 'planner.refresh' && plannerRefreshAction?.risk === 'GOVERNED_STAGING' && plannerRefreshAction?.confirmation === 'none' && JSON.stringify(plannerRefreshAction?.inputSchema) === '{}' && plannerRefreshAction?.sourceControls?.includes('planner.refresh-workboard'), 'planner.refresh advertises its governed-staging contract and takes no caller arguments');
   line(projectCreateProposal?.permission === 'workboard.propose' && projectCreateProposal?.risk === 'REVERSIBLE_WRITE' && projectCreateProposal?.confirmation === 'user_confirmation', 'project.propose_create advertises its write risk and user-confirmation requirement');
   line(plannerCreate?.permission === 'planner.propose' && plannerCreate?.risk === 'REVERSIBLE_WRITE' && plannerCreate?.confirmation === 'user_confirmation', 'planner.propose_create advertises its write risk and user-confirmation requirement');
@@ -750,6 +753,125 @@ try {
     json: { confirmationId: restartConfirmation.confirmationId, token: restartConfirmation.token }
   });
   line(afterRestart.status === 200 && afterRestart.body?.data?.record?.title === 'Restart persistence target', 'a durable confirmation survives a server restart');
+
+  // --- coding.propose_task: proposal -> durable confirmation -> file-sealed task ---
+  // Unlike every other propose/confirm action tested above, the apply side
+  // effect here is a JSON file on disk (server/nativeCodingWorker.js), not a
+  // SQL row. The server was started with LIFE_PLANNER_NATIVE_CODING_STORAGE_ROOT
+  // pointed at this run's disposable probeRoot (see startServer above), so
+  // these task files land there, never inside the real checkout's own
+  // .lps/native-code/tasks/ operational directory -- git operations
+  // (rev-parse HEAD, worktrees) are unaffected and still run against the real
+  // repo, since NativeCodingWorker's storageRoot is deliberately independent
+  // of the root it runs git against (server/nativeCodingWorker.js).
+  const nativeCodingTaskDir = path.join(probeRoot, '.lps', 'native-code', 'tasks');
+  const codingTaskFilesNow = () => (fs.existsSync(nativeCodingTaskDir) ? new Set(fs.readdirSync(nativeCodingTaskDir)) : new Set());
+  const newCodingTaskFiles = (before) => [...codingTaskFilesNow()].filter((name) => !before.has(name));
+  const proposeCoding = (args, requestedSessionId = sessionId) => api('/api/actions/coding.propose_task/invoke', { method: 'POST', json: { session_id: requestedSessionId, args } });
+  const confirmCoding = (routeSessionId, confirmation) => api(`/api/chat/sessions/${routeSessionId}/coding/confirm`, { method: 'POST', json: { confirmationId: confirmation?.confirmationId, token: confirmation?.token } });
+  const codingDraft = { title: 'Fix a small display bug', objective: 'Repair a truncated label in the Planner Overview column header.', allowedPaths: 'src', maxFilesChanged: 2, validation: 'syntax' };
+  const actualHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: appRoot }).toString().trim();
+
+  const codingNoSession = await proposeCoding(codingDraft, 987654321);
+  line(codingNoSession.body?.data?.status === 'blocked' && codingNoSession.body?.data?.error?.code === 'INVALID_CHAT_SESSION' && !codingNoSession.body?.data?.confirmation, 'a coding-task proposal without a real chat session fails closed with a specific, actionable error rather than silently proceeding or crashing');
+
+  const codingFilesBeforePropose = codingTaskFilesNow();
+  const codingProposal = await proposeCoding(codingDraft);
+  const codingDurable = codingProposal.body?.data;
+  line(codingProposal.status === 200 && codingDurable?.status === 'needs_confirmation' && codingDurable?.data?.confirmation_required === true && /^[a-f0-9]{32}$/.test(codingDurable?.confirmation?.confirmationId || '') && /^[a-f0-9]{64}$/.test(codingDurable?.confirmation?.token || ''), 'a coding-task proposal returns a durable, session-bound confirmation');
+  line(codingDurable?.data?.preview?.title === codingDraft.title && codingDurable?.data?.preview?.maxFilesChanged === 2 && codingDurable?.data?.preview?.validation === 'syntax', 'the proposal preview echoes the exact bounded task fields, including schema-materialised defaults where applicable');
+  line(newCodingTaskFiles(codingFilesBeforePropose).length === 0, 'previewing a coding-task proposal seals no task file');
+
+  const codingSchemaDefaults = await api('/api/actions/coding.propose_task/invoke', { method: 'POST', json: { session_id: sessionId, args: { title: 'Defaults check task', objective: 'Prove maxFilesChanged/validation defaults are materialised by the registry, not silently undefined.', allowedPaths: 'src' } } });
+  line(codingSchemaDefaults.body?.data?.data?.preview?.maxFilesChanged === 3 && codingSchemaDefaults.body?.data?.data?.preview?.validation === 'syntax', 'omitted maxFilesChanged/validation are materialised to their declared schema defaults by the action registry before the handler runs, not left undefined');
+
+  const codingStoredDb = new DatabaseSync(dbPath, { readOnly: true });
+  const codingStored = codingStoredDb.prepare('SELECT token_hash, session_id, operation, target, after_state, origin FROM confirmations WHERE id = ?').get(codingDurable?.confirmation?.confirmationId);
+  codingStoredDb.close();
+  line(codingStored?.session_id === `chat:${sessionId}` && codingStored?.operation === 'coding.create_task' && codingStored?.target === `chat:${sessionId}:coding:new` && codingStored?.token_hash !== codingDurable?.confirmation?.token && !JSON.stringify(codingStored).includes(codingDurable?.confirmation?.token), 'the coding-task confirmation binds chat/operation/target and never stores the raw token');
+  line(!String(codingStored?.origin || '').includes(codingDraft.objective) && JSON.parse(codingStored?.origin || '{}').correlationId === codingDurable?.correlationId, 'coding-task origin stores correlation provenance without task content');
+  line(!Object.hasOwn(JSON.parse(codingStored?.after_state || '{}'), 'baseCommit'), 'the stored proposal deliberately does not capture a base commit at propose time -- only canonicalCodingTaskState\'s allowlisted fields are stored');
+
+  const codingWrongToken = await confirmCoding(sessionId, { confirmationId: codingDurable?.confirmation?.confirmationId, token: '0'.repeat(64) });
+  line(codingWrongToken.status === 400 && newCodingTaskFiles(codingFilesBeforePropose).length === 0, 'the wrong coding-task token cannot seal a task');
+  const codingOtherSession = await api('/api/chat/sessions', { method: 'POST', json: { title: 'Other coding session' } });
+  const codingOtherSessionId = Number(codingOtherSession.body?.data?.id);
+  const codingWrongSession = await confirmCoding(codingOtherSessionId, codingDurable?.confirmation);
+  line(codingWrongSession.status === 400 && newCodingTaskFiles(codingFilesBeforePropose).length === 0, 'a different chat session cannot seal the coding task');
+
+  const codingApplied = await confirmCoding(sessionId, codingDurable?.confirmation);
+  const codingResultTask = codingApplied.body?.data?.task;
+  const codingNewFiles = newCodingTaskFiles(codingFilesBeforePropose);
+  line(codingApplied.status === 200 && codingApplied.body?.data?.operation === 'coding.create_task' && codingResultTask?.title === codingDraft.title && codingResultTask?.objective === codingDraft.objective && codingResultTask?.status === 'pending' && codingResultTask?.phase === 'awaiting_run_approval', 'confirming a coding-task proposal seals exactly the staged fields with the correct initial lifecycle state, and nothing runs automatically');
+  line(/^[a-f0-9]{40}$/.test(codingResultTask?.baseCommit || '') && codingResultTask?.baseCommit === actualHead, 'the sealed task binds to the REAL current git HEAD read fresh at confirmation time -- proves the async git-HEAD fetch inside applyCreate is genuinely awaited to completion before settlement (not skipped, raced, or a stale propose-time value)');
+  line(codingNewFiles.length === 1, 'confirming a coding-task proposal seals exactly one task file');
+
+  const codingReplay = await confirmCoding(sessionId, codingDurable?.confirmation);
+  line(codingReplay.status === 400 && newCodingTaskFiles(codingFilesBeforePropose).length === codingNewFiles.length, 'a coding-task confirmation replay is rejected without sealing a second task file');
+
+  const codingTamperProposal = await proposeCoding({ ...codingDraft, title: 'Tamper target task' });
+  const codingTamperConfirmation = codingTamperProposal.body?.data?.confirmation;
+  const codingTamperDb = new DatabaseSync(dbPath);
+  codingTamperDb.prepare('UPDATE confirmations SET after_state = ? WHERE id = ?').run(JSON.stringify({ title: 'Injected replacement task', objective: 'Injected objective', allowedPaths: 'src', maxFilesChanged: 1, validation: 'syntax' }), codingTamperConfirmation.confirmationId);
+  codingTamperDb.close();
+  const codingTamperFilesBefore = codingTaskFilesNow();
+  const codingTamperApply = await confirmCoding(sessionId, codingTamperConfirmation);
+  line(codingTamperApply.status === 400 && newCodingTaskFiles(codingTamperFilesBefore).length === 0, 'a tampered stored coding-task payload fails integrity validation before any file is sealed');
+
+  const codingExpiryProposal = await proposeCoding({ ...codingDraft, title: 'Expiry target task' });
+  const codingExpiryConfirmation = codingExpiryProposal.body?.data?.confirmation;
+  const codingExpiryDb = new DatabaseSync(dbPath);
+  codingExpiryDb.prepare('UPDATE confirmations SET expires_at = ? WHERE id = ?').run('2000-01-01T00:00:00.000Z', codingExpiryConfirmation.confirmationId);
+  codingExpiryDb.close();
+  const codingExpiryFilesBefore = codingTaskFilesNow();
+  const codingExpiryApply = await confirmCoding(sessionId, codingExpiryConfirmation);
+  line(codingExpiryApply.status === 400 && newCodingTaskFiles(codingExpiryFilesBefore).length === 0, 'an expired coding-task confirmation is rejected without sealing a file');
+
+  const codingConcurrentProposal = await proposeCoding({ ...codingDraft, title: 'Concurrent target task' });
+  const codingConcurrentConfirmation = codingConcurrentProposal.body?.data?.confirmation;
+  const codingConcurrentFilesBefore = codingTaskFilesNow();
+  const codingConcurrentResults = await Promise.all([1, 2].map(() => confirmCoding(sessionId, codingConcurrentConfirmation)));
+  const codingConcurrentNewFiles = newCodingTaskFiles(codingConcurrentFilesBefore);
+  line(codingConcurrentResults.filter((r) => r.status === 200).length === 1 && codingConcurrentResults.filter((r) => r.status === 400).length === 1, 'concurrent coding-task confirmation has exactly one winner');
+  line(codingConcurrentNewFiles.length === 1, 'concurrent coding-task confirmation seals exactly one task file');
+
+  // Settlement-failure boundary: nativeCodingWorker.create() writes its file
+  // BEFORE confirmAndApply's own status transition to 'applied' -- unlike a
+  // SQL row, a written file is not covered by any DB rollback. Force the
+  // transition to fail (mirroring the existing reject_*_applied_settlement
+  // trigger pattern used for workboard/project). An earlier version of this
+  // route left the just-created file orphaned on disk in exactly this case
+  // (reproduced empirically before the fix below existed); the route now
+  // deletes it once settlement has conclusively failed, restoring "a failed
+  // seal never leaves a visible task behind" without touching confirmAndApply
+  // itself.
+  const codingSettlementProposal = await proposeCoding({ ...codingDraft, title: 'Settlement failure target task' });
+  const codingSettlementConfirmation = codingSettlementProposal.body?.data?.confirmation;
+  const codingSettlementFilesBefore = codingTaskFilesNow();
+  const codingSettlementDb = new DatabaseSync(dbPath);
+  codingSettlementDb.exec(`
+    CREATE TRIGGER reject_coding_applied_settlement
+    BEFORE UPDATE OF status ON confirmations
+    WHEN NEW.status = 'applied'
+    BEGIN
+      SELECT RAISE(ABORT, 'coding settlement rejected');
+    END;
+  `);
+  codingSettlementDb.close();
+  const codingSettlementFailure = await confirmCoding(sessionId, codingSettlementConfirmation);
+  const codingSettlementCleanupDb = new DatabaseSync(dbPath);
+  const codingSettlementStatus = codingSettlementCleanupDb.prepare('SELECT status FROM confirmations WHERE id = ?').get(codingSettlementConfirmation.confirmationId)?.status;
+  codingSettlementCleanupDb.exec('DROP TRIGGER reject_coding_applied_settlement');
+  codingSettlementCleanupDb.close();
+  const codingSettlementNewFiles = newCodingTaskFiles(codingSettlementFilesBefore);
+  line(codingSettlementFailure.status === 400 && codingSettlementStatus === 'failed', 'a failed coding-task settlement returns a truthful failed confirmation rather than a false success');
+  line(codingSettlementNewFiles.length === 0, 'a failed coding-task settlement leaves no orphaned task file on disk, even though the file write itself happens before the confirmation is finally marked failed');
+  // A retry of the SAME confirmation after a failed settlement must not be
+  // possible at all (status is 'failed', not 'awaiting') -- this is the
+  // duplicate-prevention guarantee available here: the confirmation can never
+  // be re-applied to create a second file.
+  const codingSettlementRetry = await confirmCoding(sessionId, codingSettlementConfirmation);
+  line(codingSettlementRetry.status === 400, 'a confirmation already settled as failed cannot be retried into sealing a task, preventing a duplicate on retry');
 
   // --- Daily Planner task creation: proposal -> durable confirmation -> atomic create ---
   const plannerCount = () => { const d = new DatabaseSync(dbPath, { readOnly: true }); const n = Number(d.prepare('SELECT COUNT(*) AS c FROM planner_tasks').get()?.c || 0); d.close(); return n; };

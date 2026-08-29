@@ -572,6 +572,17 @@ function App() {
     setNotice(result.message);
   }
 
+  async function proposeCodingTask(draft) {
+    return invokeNeutralAction('coding.propose_task', draft, selectedSession);
+  }
+
+  async function confirmCodingTask(confirmation) {
+    return api(`/api/chat/sessions/${selectedSession}/coding/confirm`, {
+      method: 'POST',
+      body: JSON.stringify({ confirmationId: confirmation.confirmationId, token: confirmation.token })
+    });
+  }
+
   const candidateCount = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status)).length;
   const operationalApprovalCount = approvals.filter((approval) => !isMemoryApproval(approval)).length;
   const completedWorkboardCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
@@ -623,7 +634,7 @@ function App() {
           </div>
         )}
 
-        {route.section === 'workboard' && <Workboard route={route} navigate={navigate} planner={planner} projects={projects} setProjects={setProjects} refresh={reloadPlanner} refreshAll={refreshAll} runRefresh={runPlannerRefresh} setNotice={setNotice} refreshSignal={refreshSignal} />}
+        {route.section === 'workboard' && <Workboard route={route} navigate={navigate} planner={planner} projects={projects} setProjects={setProjects} refresh={reloadPlanner} refreshAll={refreshAll} runRefresh={runPlannerRefresh} proposeCodingTask={proposeCodingTask} confirmCodingTask={confirmCodingTask} setNotice={setNotice} refreshSignal={refreshSignal} />}
         {route.section === 'chat' && (
           <Chat
             sessions={sessions}
@@ -699,11 +710,11 @@ function NavigationMenu({ route, navigate, candidateCount, operationalApprovalCo
   );
 }
 
-function Workboard({ route, navigate, planner, projects, setProjects, refresh, refreshAll, runRefresh, setNotice, refreshSignal }) {
+function Workboard({ route, navigate, planner, projects, setProjects, refresh, refreshAll, runRefresh, proposeCodingTask, confirmCodingTask, setNotice, refreshSignal }) {
   const completedCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
   return (
     <section className="section-shell">
-      {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} setNotice={setNotice} navigate={navigate} />}
+      {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} proposeCodingTask={proposeCodingTask} confirmCodingTask={confirmCodingTask} setNotice={setNotice} navigate={navigate} />}
       {route.tab === 'today' && <DailyPlanner setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
       {route.tab === 'cards' && <LayeredWorkboard setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -1776,16 +1787,26 @@ function PlannerItemActions({ item, refresh }) {
   );
 }
 
-function CodingWorkQueue({ navigate, setNotice }) {
+function CodingWorkQueue({ navigate, proposeCodingTask, confirmCodingTask, setNotice }) {
   const [coding, setCoding] = useState({ tasks: [] });
   const [draft, setDraft] = useState({ title: '', objective: '', allowedPaths: 'src', maxFilesChanged: 3, validation: 'frontend' });
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(null);
   const load = () => api('/api/source/coding/status').then(setCoding).catch((error) => setNotice(error.message));
   useEffect(() => { load(); }, []);
-  async function create() {
+  async function propose() {
     setBusy(true);
     try {
-      await api('/api/source/coding/tasks', { method: 'POST', body: JSON.stringify(draft) });
+      const result = await proposeCodingTask(draft);
+      setPending({ ...result.confirmation, preview: result.data?.preview || draft });
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  }
+  async function confirm() {
+    setBusy(true);
+    try {
+      await confirmCodingTask(pending);
+      setPending(null);
       setDraft((current) => ({ ...current, title: '', objective: '' }));
       await load();
       setNotice('Coding work queued with a sealed scope. Prepare it in System > Runs.');
@@ -1794,18 +1815,29 @@ function CodingWorkQueue({ navigate, setNotice }) {
   }
   return <div className="coding-workboard-card">
     <div className="panel-heading"><div><h3>Local coding queue</h3><p>Narrow development work for the supervised local model.</p></div><Pill tone="info">{coding.tasks?.filter((task) => !['applied', 'rejected'].includes(task.status)).length || 0}</Pill></div>
-    <details><summary>Queue a coding task</summary>
-      <label>Title<input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Small code outcome" /></label>
-      <label>Objective<textarea value={draft.objective} onChange={(event) => setDraft({ ...draft, objective: event.target.value })} placeholder="Defect, constraints, and acceptance result" /></label>
-      <label>Allowed paths<textarea value={draft.allowedPaths} onChange={(event) => setDraft({ ...draft, allowedPaths: event.target.value })} /></label>
-      <button className="primary" onClick={create} disabled={busy || !draft.title.trim() || !draft.objective.trim() || !draft.allowedPaths.trim()}>Seal and queue</button>
-    </details>
+    {pending ? (
+      <div className="coding-task-confirm">
+        <p>Review before sealing: <strong>{pending.preview.title}</strong></p>
+        <p>{pending.preview.objective}</p>
+        <div className="button-row">
+          <button className="primary" data-action-id="coding.propose_task" data-control-id="planner.coding-queue.confirm" disabled={busy} onClick={confirm}>{busy ? 'Sealing…' : 'Confirm seal'}</button>
+          <button className="secondary" disabled={busy} onClick={() => setPending(null)}>Cancel</button>
+        </div>
+      </div>
+    ) : (
+      <details><summary>Queue a coding task</summary>
+        <label>Title<input value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="Small code outcome" /></label>
+        <label>Objective<textarea value={draft.objective} onChange={(event) => setDraft({ ...draft, objective: event.target.value })} placeholder="Defect, constraints, and acceptance result" /></label>
+        <label>Allowed paths<textarea value={draft.allowedPaths} onChange={(event) => setDraft({ ...draft, allowedPaths: event.target.value })} /></label>
+        <button className="primary" data-action-id="coding.propose_task" data-control-id="planner.coding-queue.seal-and-queue" onClick={propose} disabled={busy || !draft.title.trim() || !draft.objective.trim() || !draft.allowedPaths.trim()}>Seal and queue</button>
+      </details>
+    )}
     <div className="coding-workboard-list">{(coding.tasks || []).slice(0, 4).map((task) => <button key={task.id} onClick={() => navigate('system', 'runs')}><span>{task.title}</span><small>{CODING_STATUS_LABELS[task.status] || task.status}</small></button>)}</div>
     <button className="secondary" onClick={() => navigate('system', 'runs')}>Open coding workspace</button>
   </div>;
 }
 
-function Planner({ planner, refresh, runRefresh, setNotice, navigate }) {
+function Planner({ planner, refresh, runRefresh, proposeCodingTask, confirmCodingTask, setNotice, navigate }) {
   if (!planner) return <div className="loading">Loading Workboard context...</div>;
   const nextBestBody = planner.nextBest?.body
     || (planner.nextBest?.action_type ? 'Review and approve, deny, or defer this proposed change.' : 'Add goals, projects, or memory candidates to feed the Workboard.');
@@ -1856,7 +1888,7 @@ function Planner({ planner, refresh, runRefresh, setNotice, navigate }) {
           </>
         )}
         <QuickAddItem refresh={refresh} setNotice={setNotice} />
-        <CodingWorkQueue navigate={navigate} setNotice={setNotice} />
+        <CodingWorkQueue navigate={navigate} proposeCodingTask={proposeCodingTask} confirmCodingTask={confirmCodingTask} setNotice={setNotice} />
         <button className="primary subtle" data-action-id="planner.refresh" data-control-id="planner.refresh-workboard" onClick={runRefresh}>Refresh Workboard</button>
       </div>
 

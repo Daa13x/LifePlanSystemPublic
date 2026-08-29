@@ -182,7 +182,7 @@ export function buildNativeCodingSystemPrompt({ allowedPaths, maxFilesChanged, v
 }
 
 export class NativeCodingWorker {
-  constructor({ root, runGit, runValidation, invokeModel, forbiddenPath, getExecutionContext }) {
+  constructor({ root, storageRoot, runGit, runValidation, invokeModel, forbiddenPath, getExecutionContext }) {
     this.root = path.resolve(root);
     this.runGit = runGit;
     this.runValidation = runValidation;
@@ -191,7 +191,13 @@ export class NativeCodingWorker {
     this.getExecutionContext = typeof getExecutionContext === 'function'
       ? getExecutionContext
       : async () => ({ executionType: 'unknown' });
-    this.baseDir = path.join(this.root, '.lps', 'native-code');
+    // storageRoot is deliberately separate from root: root is the actual git
+    // checkout worktrees/rev-parse operate against (must stay the real repo),
+    // while storageRoot only decides where task/worktree/lease bookkeeping
+    // files live. Defaults to root, preserving existing behaviour exactly;
+    // a disposable override lets tests isolate their task files from a real
+    // checkout's own .lps/native-code/tasks/ operational directory.
+    this.baseDir = path.join(path.resolve(storageRoot || root), '.lps', 'native-code');
     this.taskDir = path.join(this.baseDir, 'tasks');
     this.worktreeDir = path.join(this.baseDir, 'worktrees');
     this.leaseDir = path.join(this.baseDir, 'leases');
