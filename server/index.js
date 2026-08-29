@@ -3855,7 +3855,10 @@ function canonicalWorkboardUpdateConfirmationState(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The stored Workboard update is invalid.');
   if (Object.keys(value).sort().join(',') !== 'changes,identity') throw new Error('The stored Workboard update contains unsupported fields.');
   if (!value.identity || value.identity.type !== 'item' || !Number.isInteger(value.identity.id) || value.identity.id <= 0) throw new Error('The stored Workboard update has an invalid identity.');
-  return { identity: { type: 'item', id: value.identity.id }, changes: normalizeWorkboardItemChanges(value.changes) };
+  // allowResolvedLastReviewed: true -- this re-normalizes already-stored
+  // confirmation state (the propose handler's own resolved output), not raw
+  // caller input, so the concrete date it already resolved must survive.
+  return { identity: { type: 'item', id: value.identity.id }, changes: normalizeWorkboardItemChanges(value.changes, { allowResolvedLastReviewed: true }) };
 }
 
 function workboardUpdateOrigin(correlationId) {

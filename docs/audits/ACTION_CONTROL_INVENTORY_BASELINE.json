@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 476,
-  "mapped": 36,
-  "unmapped": 440,
-  "fingerprint": "538b6cc7bead9610ed0bc46f0382ab66f5bd84c6aed516c4f7c47c010df689fa",
+  "total": 478,
+  "mapped": 40,
+  "unmapped": 438,
+  "fingerprint": "263854c6ffd61ad85f7b3e1ca30c140274d123f85a59ba936149e354c2cf3469",
   "byOwner": {
     "App": { "total": 6, "mapped": 0, "unmapped": 6 },
     "ApprovalQueue": { "total": 5, "mapped": 0, "unmapped": 5 },
@@ -31,7 +31,7 @@
     "PdfImport": { "total": 2, "mapped": 0, "unmapped": 2 },
     "Planner": { "total": 1, "mapped": 1, "unmapped": 0 },
     "PlannerEvidencePanel": { "total": 12, "mapped": 0, "unmapped": 12 },
-    "PlannerItemActions": { "total": 3, "mapped": 0, "unmapped": 3 },
+    "PlannerItemActions": { "total": 5, "mapped": 4, "unmapped": 1 },
     "PlannerProposalCard": { "total": 3, "mapped": 2, "unmapped": 1 },
     "PlannerTaskCard": { "total": 6, "mapped": 0, "unmapped": 6 },
     "PlannerTaskFields": { "total": 15, "mapped": 0, "unmapped": 15 },

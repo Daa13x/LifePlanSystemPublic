@@ -11,10 +11,17 @@ an explicit test failure until its effect on the registry migration is reviewed.
 
 Current source truth:
 
-- 476 intrinsic interactive controls;
-- 36 controls in the accepted neutral action-registry slice;
-- 440 controls not yet migrated;
+- 478 intrinsic interactive controls;
+- 40 controls in the accepted neutral action-registry slice;
+- 438 controls not yet migrated;
 - 20 neutral actions in the live manifest.
+
+Updated 2026-08-29: `PlannerItemActions`'s Done/Seen/Drop buttons and their new
+inline Confirm control (0→4 of 5 mapped) now route through the existing
+`workboard.propose_update` action instead of a raw `PATCH /api/items/:id`
+fetch. No new action was added; the pre-existing action's field allowlist
+gained one new field (`last_reviewed`, sentinel `"today"` only) to support the
+"Seen" button's stale-clearing behaviour.
 
 The total includes form fields and disclosure controls as required by the
 app-wide todo. It is not a percentage-complete score: one text field is not the

@@ -93,12 +93,28 @@ export function workboardItemStateToken(record) {
   return crypto.createHash('sha256').update(JSON.stringify(canonicalWorkboardItemState(record))).digest('hex');
 }
 
-export function normalizeWorkboardItemChanges(value) {
+export function normalizeWorkboardItemChanges(value, { allowResolvedLastReviewed = false } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Workboard item changes must be a plain object.');
-  const allowed = new Set(['status', 'title', 'body', 'next_action', 'confidence', 'due_at']);
+  const allowed = new Set(['status', 'title', 'body', 'next_action', 'confidence', 'due_at', 'last_reviewed']);
   const changes = {};
   for (const [key, raw] of Object.entries(value)) {
     if (!allowed.has(key)) throw new Error(`workboard.propose_update: field "${key}" cannot be changed from Chat.`);
+    if (key === 'last_reviewed') {
+      // The only value a proposing caller may ever supply is the literal
+      // sentinel "today", resolved to the concrete date right here -- the
+      // same "mark reviewed clears staleness" semantics the pre-existing raw
+      // PATCH /api/items/:id `reviewed: true` flag had. Callers can never
+      // backdate or postdate this field. `allowResolvedLastReviewed` exists
+      // solely for the confirmation/apply pipeline's own re-normalization of
+      // its already-resolved stored state (canonicalWorkboardUpdateConfirmationState),
+      // which must accept the concrete date it stored, not the sentinel.
+      if (raw === 'today') { changes.last_reviewed = new Date().toISOString().slice(0, 10); continue; }
+      if (allowResolvedLastReviewed && typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw) && !Number.isNaN(Date.parse(`${raw}T00:00:00.000Z`))) {
+        changes.last_reviewed = raw;
+        continue;
+      }
+      throw new Error('Workboard item last_reviewed can only be set to "today".');
+    }
     if (key === 'status') {
       if (typeof raw !== 'string' || !WORKBOARD_ITEM_STATUSES.includes(raw)) throw new Error('Workboard item status is invalid.');
       changes.status = raw;
@@ -423,7 +439,7 @@ const ACTION_METADATA = Object.freeze({
   'workboard.propose_update': {
     label: 'Preview Workboard update', feature: 'Chat task proposal', permission: 'workboard.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
     confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Reads the current item and produces a review-only proposal; no Workboard data is changed.'],
-    sourceControls: ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm'], testId: 'action.workboard.propose_update',
+    sourceControls: ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm', 'planner.item-actions.confirm', 'planner.item-actions.done', 'planner.item-actions.drop', 'planner.item-actions.seen'], testId: 'action.workboard.propose_update',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'target', 'state_token', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target: { type: 'object' }, state_token: { type: 'string' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
   'planner.propose_create': {

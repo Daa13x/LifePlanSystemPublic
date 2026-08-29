@@ -121,7 +121,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 36, 'the bounded slice has exactly thirty-six mapped trigger/search/preview/proposal/system/history/planner/project/navigation/refresh/coding controls');
+assert.equal(mappedControls.length, 40, 'the bounded slice has exactly forty mapped trigger/search/preview/proposal/system/history/planner/project/navigation/refresh/coding/item-action controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -143,8 +143,8 @@ assert.deepEqual(
 );
 assert.deepEqual(
   controlMappings.filter((mapping) => mapping.actionId === 'workboard.propose_update').map((mapping) => mapping.controlId).sort(),
-  ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm'],
-  'the complete visible Workboard-update preview/confirm family has stable identifiers'
+  ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm', 'planner.item-actions.confirm', 'planner.item-actions.done', 'planner.item-actions.drop', 'planner.item-actions.seen'],
+  'the complete visible Workboard-update preview/confirm family, including the Planner grid item-action buttons, has stable identifiers'
 );
 assert.deepEqual(
   controlMappings.filter((mapping) => mapping.actionId === 'system.status').map((mapping) => mapping.controlId),

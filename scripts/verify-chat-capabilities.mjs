@@ -362,6 +362,16 @@ await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', i
 await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { confidence: '0.5' } }), /Action failed safely\. Reference/, 'propose_update rejects confidence coercion');
 await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { confidence: -0.1 } }), /Action failed safely\. Reference/, 'propose_update rejects confidence outside the canonical range');
 await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { due_at: '2026-02-31' } }), /Action failed safely\. Reference/, 'propose_update rejects impossible calendar dates');
+// Regression: an earlier version accepted any format-valid YYYY-MM-DD string for
+// last_reviewed, letting a direct caller backdate/postdate it arbitrarily instead
+// of only ever setting it to "today". The propose entry point must reject a
+// concrete date and accept only the literal sentinel.
+await checkAsync('propose_update resolves last_reviewed "today" to the concrete current date', async () => {
+  const r = await reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { last_reviewed: 'today' } });
+  assert.equal(r.data.after.last_reviewed, new Date().toISOString().slice(0, 10));
+});
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { last_reviewed: '2099-01-01' } }), /Action failed safely\. Reference/, 'propose_update rejects an arbitrary concrete last_reviewed date from a caller');
+await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { last_reviewed: '2020-01-01' } }), /Action failed safely\. Reference/, 'propose_update rejects an arbitrary backdated last_reviewed date from a caller');
 
 // Structural safety: the capability module must not contain SQL, shell, or fs access.
 await checkAsync('capability module contains no SQL / shell / filesystem access', async () => {

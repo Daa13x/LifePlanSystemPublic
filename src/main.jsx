@@ -583,6 +583,17 @@ function App() {
     });
   }
 
+  async function proposeWorkboardItemUpdate(itemId, changes) {
+    return invokeNeutralAction('workboard.propose_update', { type: 'item', id: itemId, changes }, selectedSession);
+  }
+
+  async function confirmWorkboardItemUpdate(confirmation) {
+    return api(`/api/chat/sessions/${selectedSession}/workboard/confirm`, {
+      method: 'POST',
+      body: JSON.stringify({ confirmationId: confirmation.confirmationId, token: confirmation.token })
+    });
+  }
+
   const candidateCount = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status)).length;
   const operationalApprovalCount = approvals.filter((approval) => !isMemoryApproval(approval)).length;
   const completedWorkboardCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
@@ -634,7 +645,7 @@ function App() {
           </div>
         )}
 
-        {route.section === 'workboard' && <Workboard route={route} navigate={navigate} planner={planner} projects={projects} setProjects={setProjects} refresh={reloadPlanner} refreshAll={refreshAll} runRefresh={runPlannerRefresh} proposeCodingTask={proposeCodingTask} confirmCodingTask={confirmCodingTask} setNotice={setNotice} refreshSignal={refreshSignal} />}
+        {route.section === 'workboard' && <Workboard route={route} navigate={navigate} planner={planner} projects={projects} setProjects={setProjects} refresh={reloadPlanner} refreshAll={refreshAll} runRefresh={runPlannerRefresh} proposeCodingTask={proposeCodingTask} confirmCodingTask={confirmCodingTask} proposeWorkboardItemUpdate={proposeWorkboardItemUpdate} confirmWorkboardItemUpdate={confirmWorkboardItemUpdate} setNotice={setNotice} refreshSignal={refreshSignal} />}
         {route.section === 'chat' && (
           <Chat
             sessions={sessions}
@@ -710,11 +721,11 @@ function NavigationMenu({ route, navigate, candidateCount, operationalApprovalCo
   );
 }
 
-function Workboard({ route, navigate, planner, projects, setProjects, refresh, refreshAll, runRefresh, proposeCodingTask, confirmCodingTask, setNotice, refreshSignal }) {
+function Workboard({ route, navigate, planner, projects, setProjects, refresh, refreshAll, runRefresh, proposeCodingTask, confirmCodingTask, proposeWorkboardItemUpdate, confirmWorkboardItemUpdate, setNotice, refreshSignal }) {
   const completedCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
   return (
     <section className="section-shell">
-      {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} proposeCodingTask={proposeCodingTask} confirmCodingTask={confirmCodingTask} setNotice={setNotice} navigate={navigate} />}
+      {route.tab === 'overview' && <Planner planner={planner} refresh={refresh} runRefresh={runRefresh} proposeCodingTask={proposeCodingTask} confirmCodingTask={confirmCodingTask} proposeWorkboardItemUpdate={proposeWorkboardItemUpdate} confirmWorkboardItemUpdate={confirmWorkboardItemUpdate} setNotice={setNotice} navigate={navigate} />}
       {route.tab === 'today' && <DailyPlanner setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'projects' && <Projects projects={projects} setProjects={setProjects} setNotice={setNotice} refreshAll={refreshAll} />}
       {route.tab === 'cards' && <LayeredWorkboard setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -1769,20 +1780,42 @@ function QuickAddItem({ refresh, setNotice }) {
   );
 }
 
-function PlannerItemActions({ item, refresh }) {
+function PlannerItemActions({ item, refresh, proposeWorkboardItemUpdate, confirmWorkboardItemUpdate, setNotice }) {
   const [busy, setBusy] = useState(false);
-  async function patch(body) {
+  const [pending, setPending] = useState(null);
+  async function propose(changes, label) {
     setBusy(true);
-    try { await api(`/api/items/${item.id}`, { method: 'PATCH', body: JSON.stringify(body) }); refresh(); }
+    try {
+      const result = await proposeWorkboardItemUpdate(item.id, changes);
+      setPending({ ...result.confirmation, label });
+    } catch (error) { setNotice(error.message); }
     finally { setBusy(false); }
+  }
+  async function confirm() {
+    setBusy(true);
+    try {
+      await confirmWorkboardItemUpdate(pending);
+      setPending(null);
+      refresh();
+    } catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  }
+  if (pending) {
+    return (
+      <div className="item-actions item-actions-confirm">
+        <span>{pending.label}?</span>
+        <button className="primary" data-action-id="workboard.propose_update" data-control-id="planner.item-actions.confirm" disabled={busy} onClick={confirm}>{busy ? 'Applying…' : 'Confirm'}</button>
+        <button className="secondary" disabled={busy} onClick={() => setPending(null)}>Cancel</button>
+      </div>
+    );
   }
   return (
     <div className="item-actions">
       {item.status !== 'done' && (
-        <button title="Mark done" disabled={busy} onClick={() => patch({ status: 'done', reviewed: true })}>Done</button>
+        <button title="Mark done" data-action-id="workboard.propose_update" data-control-id="planner.item-actions.done" disabled={busy} onClick={() => propose({ status: 'done', last_reviewed: 'today' }, 'Mark done')}>Done</button>
       )}
-      <button title="Mark reviewed (clears stale)" disabled={busy} onClick={() => patch({ reviewed: true, status: item.status === 'stale' ? 'active' : item.status })}>Seen</button>
-      <button title="Archive" disabled={busy} onClick={() => patch({ status: 'archived' })}>Drop</button>
+      <button title="Mark reviewed (clears stale)" data-action-id="workboard.propose_update" data-control-id="planner.item-actions.seen" disabled={busy} onClick={() => propose(item.status === 'stale' ? { status: 'active', last_reviewed: 'today' } : { last_reviewed: 'today' }, 'Mark reviewed')}>Seen</button>
+      <button title="Archive" data-action-id="workboard.propose_update" data-control-id="planner.item-actions.drop" disabled={busy} onClick={() => propose({ status: 'archived' }, 'Archive')}>Drop</button>
     </div>
   );
 }
@@ -1901,7 +1934,7 @@ function Planner({ planner, refresh, runRefresh, proposeCodingTask, confirmCodin
             </div>
             {items.length ? items.map((item) => (
               <ItemRow key={`${title}-${item.id}`} item={item}>
-                <PlannerItemActions item={item} refresh={refresh} />
+                <PlannerItemActions item={item} refresh={refresh} proposeWorkboardItemUpdate={proposeWorkboardItemUpdate} confirmWorkboardItemUpdate={confirmWorkboardItemUpdate} setNotice={setNotice} />
               </ItemRow>
             )) : <Empty title="Nothing here" body="The database has no matching active items. Use “+ Add Workboard item” to put real life in here." />}
           </div>
