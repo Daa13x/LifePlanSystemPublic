@@ -7281,6 +7281,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
           <div className="decision-row">
             <button onClick={previewPublicExport} disabled={publicExportBusy}><SearchCheck size={16} /> {publicExportBusy ? 'Working…' : 'Preview public export'}</button>
             <button className="primary" onClick={confirmPublicExport} disabled={publicExportBusy || !publicExportPreview}><Download size={16} /> Confirm and download public JSON</button>
+          </div>
         </div>
         <h3>Cloud accounts</h3>
         <p>Choose the providers you use. Each enabled provider appears as a small button in Chat. “Sign in” opens that provider in your normal browser; finish sign-in there, then keep the LPS Chrome connector enabled.</p>
@@ -7288,7 +7289,6 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
           {(cloudAccounts.length ? cloudAccounts : CLOUD_AGENTS.map((agent) => ({ provider: agent.name, url: agent.url, enabled: cloudEnabledProviders.includes(agent.name), connected: false, model: `${agent.name} (browser-assisted)`, transport: 'browser session connector', actionable: 'Checking connection…' }))).map((account) => <div key={account.provider} className="provider-setting"><div><label className="temporary-chat-option"><input type="checkbox" checked={account.enabled} onChange={(event) => setCloudProviderEnabled(account.provider, event.target.checked)} />{account.provider}</label><small>{account.transport} · {account.connected ? 'Connected' : 'Disconnected'} · {account.model}<br />{account.actionable}</small></div><button onClick={async () => { try { await api('/api/browser/open-external', { method: 'POST', body: JSON.stringify({ url: account.url }) }); setNotice(`Opened ${account.provider} sign-in in your normal browser. Then install/reload the LPS Browser Agent and open a signed-in tab.`); } catch (err) { setNotice(err.message); } }}>{account.connected ? 'Reconnect' : 'Connect browser session'}</button></div>)}
         </div>
         <small>Saving provider choices does not share a prompt or credentials with any provider. Chat sends only after the visible exact-prompt review and an active connector.</small>
-      </div>
         <PdfImport setNotice={setNotice} />
         <JsonImport setNotice={setNotice} />
         <MarkdownImport setNotice={setNotice} />
