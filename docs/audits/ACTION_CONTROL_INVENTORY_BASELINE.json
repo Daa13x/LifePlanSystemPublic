@@ -1,52 +1,220 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 478,
-  "mapped": 40,
-  "unmapped": 438,
-  "fingerprint": "263854c6ffd61ad85f7b3e1ca30c140274d123f85a59ba936149e354c2cf3469",
+  "total": 480,
+  "mapped": 43,
+  "unmapped": 437,
+  "fingerprint": "be366d2321e4f66c2249a0d05a80622f62094b03a12fc0e3bfcf6a4a243f8432",
   "byOwner": {
-    "App": { "total": 6, "mapped": 0, "unmapped": 6 },
-    "ApprovalQueue": { "total": 5, "mapped": 0, "unmapped": 5 },
-    "ApprovalRow": { "total": 3, "mapped": 0, "unmapped": 3 },
-    "BrowserConsult": { "total": 32, "mapped": 0, "unmapped": 32 },
-    "CandidateReviewCard": { "total": 10, "mapped": 0, "unmapped": 10 },
-    "Chat": { "total": 56, "mapped": 10, "unmapped": 46 },
-    "ChatConnectionBar": { "total": 12, "mapped": 11, "unmapped": 1 },
-    "CloudCheckCard": { "total": 9, "mapped": 0, "unmapped": 9 },
-    "CodingWorkQueue": { "total": 9, "mapped": 2, "unmapped": 7 },
-    "ContextPicker": { "total": 7, "mapped": 5, "unmapped": 2 },
-    "DailyPlanner": { "total": 5, "mapped": 0, "unmapped": 5 },
-    "DetailsPanel": { "total": 1, "mapped": 0, "unmapped": 1 },
-    "DevRoadmap": { "total": 23, "mapped": 0, "unmapped": 23 },
-    "FeedbackControl": { "total": 5, "mapped": 0, "unmapped": 5 },
-    "FeedbackReview": { "total": 2, "mapped": 0, "unmapped": 2 },
-    "JsonImport": { "total": 4, "mapped": 0, "unmapped": 4 },
-    "LayeredCard": { "total": 1, "mapped": 0, "unmapped": 1 },
-    "MarkdownImport": { "total": 2, "mapped": 0, "unmapped": 2 },
-    "Memory": { "total": 4, "mapped": 0, "unmapped": 4 },
-    "MessageVoice": { "total": 1, "mapped": 0, "unmapped": 1 },
-    "NavigationMenu": { "total": 4, "mapped": 0, "unmapped": 4 },
-    "OpenHandsPanel": { "total": 25, "mapped": 0, "unmapped": 25 },
-    "PdfImport": { "total": 2, "mapped": 0, "unmapped": 2 },
-    "Planner": { "total": 1, "mapped": 1, "unmapped": 0 },
-    "PlannerEvidencePanel": { "total": 12, "mapped": 0, "unmapped": 12 },
-    "PlannerItemActions": { "total": 5, "mapped": 4, "unmapped": 1 },
-    "PlannerProposalCard": { "total": 3, "mapped": 2, "unmapped": 1 },
-    "PlannerTaskCard": { "total": 6, "mapped": 0, "unmapped": 6 },
-    "PlannerTaskFields": { "total": 15, "mapped": 0, "unmapped": 15 },
-    "ProjectProposalCard": { "total": 2, "mapped": 1, "unmapped": 1 },
-    "Projects": { "total": 11, "mapped": 0, "unmapped": 11 },
-    "ProposalCard": { "total": 3, "mapped": 2, "unmapped": 1 },
-    "QualityReview": { "total": 8, "mapped": 0, "unmapped": 8 },
-    "QuickAddItem": { "total": 8, "mapped": 0, "unmapped": 8 },
-    "RepositoryExplorer": { "total": 12, "mapped": 0, "unmapped": 12 },
-    "SettingsView": { "total": 48, "mapped": 0, "unmapped": 48 },
-    "SetupRecovery": { "total": 7, "mapped": 1, "unmapped": 6 },
-    "SourceCards": { "total": 1, "mapped": 0, "unmapped": 1 },
-    "SourceControl": { "total": 97, "mapped": 0, "unmapped": 97 },
-    "ThemeToggle": { "total": 2, "mapped": 0, "unmapped": 2 },
-    "Tooling": { "total": 5, "mapped": 0, "unmapped": 5 },
-    "WorkboardUpdateControls": { "total": 4, "mapped": 1, "unmapped": 3 }
+    "App": {
+      "total": 6,
+      "mapped": 0,
+      "unmapped": 6
+    },
+    "ApprovalQueue": {
+      "total": 5,
+      "mapped": 0,
+      "unmapped": 5
+    },
+    "ApprovalRow": {
+      "total": 3,
+      "mapped": 0,
+      "unmapped": 3
+    },
+    "BrowserConsult": {
+      "total": 32,
+      "mapped": 0,
+      "unmapped": 32
+    },
+    "CandidateReviewCard": {
+      "total": 10,
+      "mapped": 0,
+      "unmapped": 10
+    },
+    "Chat": {
+      "total": 56,
+      "mapped": 10,
+      "unmapped": 46
+    },
+    "ChatConnectionBar": {
+      "total": 12,
+      "mapped": 11,
+      "unmapped": 1
+    },
+    "CloudCheckCard": {
+      "total": 9,
+      "mapped": 0,
+      "unmapped": 9
+    },
+    "CodingWorkQueue": {
+      "total": 9,
+      "mapped": 2,
+      "unmapped": 7
+    },
+    "ContextPicker": {
+      "total": 7,
+      "mapped": 5,
+      "unmapped": 2
+    },
+    "DailyPlanner": {
+      "total": 5,
+      "mapped": 0,
+      "unmapped": 5
+    },
+    "DetailsPanel": {
+      "total": 1,
+      "mapped": 0,
+      "unmapped": 1
+    },
+    "DevRoadmap": {
+      "total": 23,
+      "mapped": 0,
+      "unmapped": 23
+    },
+    "FeedbackControl": {
+      "total": 5,
+      "mapped": 0,
+      "unmapped": 5
+    },
+    "FeedbackReview": {
+      "total": 4,
+      "mapped": 3,
+      "unmapped": 1
+    },
+    "JsonImport": {
+      "total": 4,
+      "mapped": 0,
+      "unmapped": 4
+    },
+    "LayeredCard": {
+      "total": 1,
+      "mapped": 0,
+      "unmapped": 1
+    },
+    "MarkdownImport": {
+      "total": 2,
+      "mapped": 0,
+      "unmapped": 2
+    },
+    "Memory": {
+      "total": 4,
+      "mapped": 0,
+      "unmapped": 4
+    },
+    "MessageVoice": {
+      "total": 1,
+      "mapped": 0,
+      "unmapped": 1
+    },
+    "NavigationMenu": {
+      "total": 4,
+      "mapped": 0,
+      "unmapped": 4
+    },
+    "OpenHandsPanel": {
+      "total": 25,
+      "mapped": 0,
+      "unmapped": 25
+    },
+    "PdfImport": {
+      "total": 2,
+      "mapped": 0,
+      "unmapped": 2
+    },
+    "Planner": {
+      "total": 1,
+      "mapped": 1,
+      "unmapped": 0
+    },
+    "PlannerEvidencePanel": {
+      "total": 12,
+      "mapped": 0,
+      "unmapped": 12
+    },
+    "PlannerItemActions": {
+      "total": 5,
+      "mapped": 4,
+      "unmapped": 1
+    },
+    "PlannerProposalCard": {
+      "total": 3,
+      "mapped": 2,
+      "unmapped": 1
+    },
+    "PlannerTaskCard": {
+      "total": 6,
+      "mapped": 0,
+      "unmapped": 6
+    },
+    "PlannerTaskFields": {
+      "total": 15,
+      "mapped": 0,
+      "unmapped": 15
+    },
+    "ProjectProposalCard": {
+      "total": 2,
+      "mapped": 1,
+      "unmapped": 1
+    },
+    "Projects": {
+      "total": 11,
+      "mapped": 0,
+      "unmapped": 11
+    },
+    "ProposalCard": {
+      "total": 3,
+      "mapped": 2,
+      "unmapped": 1
+    },
+    "QualityReview": {
+      "total": 8,
+      "mapped": 0,
+      "unmapped": 8
+    },
+    "QuickAddItem": {
+      "total": 8,
+      "mapped": 0,
+      "unmapped": 8
+    },
+    "RepositoryExplorer": {
+      "total": 12,
+      "mapped": 0,
+      "unmapped": 12
+    },
+    "SettingsView": {
+      "total": 48,
+      "mapped": 0,
+      "unmapped": 48
+    },
+    "SetupRecovery": {
+      "total": 7,
+      "mapped": 1,
+      "unmapped": 6
+    },
+    "SourceCards": {
+      "total": 1,
+      "mapped": 0,
+      "unmapped": 1
+    },
+    "SourceControl": {
+      "total": 97,
+      "mapped": 0,
+      "unmapped": 97
+    },
+    "ThemeToggle": {
+      "total": 2,
+      "mapped": 0,
+      "unmapped": 2
+    },
+    "Tooling": {
+      "total": 5,
+      "mapped": 0,
+      "unmapped": 5
+    },
+    "WorkboardUpdateControls": {
+      "total": 4,
+      "mapped": 1,
+      "unmapped": 3
+    }
   }
 }

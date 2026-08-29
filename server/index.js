@@ -24,10 +24,13 @@ import {
   importLegacyAsBackup
 } from './setupRecovery.js';
 import {
+  canonicalFeedbackState,
   canonicalPlannerTaskState,
   canonicalWorkboardItemState,
   createCapabilityRegistry,
   CAPABILITY_NAMES,
+  feedbackStateToken,
+  normalizeFeedbackTriageStatus,
   normalizePlannerDeadline,
   normalizePlannerTaskChanges,
   normalizeWorkboardItemChanges,
@@ -3501,6 +3504,8 @@ const CHAT_PLANNER_UPDATE_ACTION = 'planner.propose_update';
 const CHAT_PLANNER_UPDATE_OPERATION = 'planner.update';
 const CHAT_PROJECT_CREATE_ACTION = 'project.propose_create';
 const CHAT_PROJECT_CREATE_OPERATION = 'project.create';
+const CHAT_FEEDBACK_TRIAGE_ACTION = 'feedback.propose_triage';
+const CHAT_FEEDBACK_TRIAGE_OPERATION = 'feedback.triage';
 
 function realChatSessionId(value) {
   const sessionId = Number(value);
@@ -3923,6 +3928,72 @@ function bindWorkboardConfirmation(sessionValue, result) {
   return bindWorkboardUpdateConfirmation(sessionValue, bindWorkboardCreateConfirmation(sessionValue, result));
 }
 
+function canonicalFeedbackTriageConfirmationState(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('The stored feedback triage is invalid.');
+  if (Object.keys(value).sort().join(',') !== 'changes,identity') throw new Error('The stored feedback triage contains unsupported fields.');
+  if (!value.identity || value.identity.type !== 'feedback' || !Number.isInteger(value.identity.id) || value.identity.id <= 0) throw new Error('The stored feedback triage has an invalid identity.');
+  if (!value.changes || typeof value.changes !== 'object' || Object.keys(value.changes).sort().join(',') !== 'status') throw new Error('The stored feedback triage must contain only a status change.');
+  return { identity: { type: 'feedback', id: value.identity.id }, changes: { status: normalizeFeedbackTriageStatus(value.changes.status) } };
+}
+
+function feedbackTriageOrigin(correlationId) {
+  return JSON.stringify({ source: 'chat-action-gateway', actionId: CHAT_FEEDBACK_TRIAGE_ACTION, correlationId });
+}
+
+function readFeedbackTriageOrigin(value) {
+  try {
+    const parsed = JSON.parse(String(value || ''));
+    if (parsed?.source !== 'chat-action-gateway' || parsed?.actionId !== CHAT_FEEDBACK_TRIAGE_ACTION || typeof parsed?.correlationId !== 'string' || !parsed.correlationId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function bindFeedbackTriageConfirmation(sessionValue, result) {
+  if (result?.actionId !== CHAT_FEEDBACK_TRIAGE_ACTION || result.status !== 'needs_confirmation') return result;
+  const sessionId = realChatSessionId(sessionValue);
+  if (!sessionId) {
+    const error = new Error('A valid active chat session is required to stage a feedback triage.');
+    error.code = 'INVALID_CHAT_SESSION';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const identity = result.data?.target;
+  if (!identity || identity.type !== 'feedback' || !Number.isInteger(identity.id) || identity.id <= 0) throw new Error('The feedback triage returned an invalid target.');
+  const current = row('SELECT * FROM feedback WHERE id = ?', [identity.id]);
+  if (!current) {
+    const error = new Error('The feedback record is no longer available.');
+    error.code = 'FEEDBACK_TARGET_UNAVAILABLE';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  if (feedbackStateToken(current) !== result.data?.state_token) {
+    const error = new Error('The feedback record changed while the proposal was being prepared. Review it again.');
+    error.code = 'STALE_FEEDBACK_STATE';
+    error.actionStatus = 'blocked';
+    error.correlationId = result.correlationId;
+    throw error;
+  }
+  const beforeState = canonicalFeedbackState(current);
+  const afterState = canonicalFeedbackTriageConfirmationState({ identity, changes: result.data.after });
+  const target = `feedback:${identity.id}`;
+  const confirmation = proposeConfirmation(db, {
+    operation: CHAT_FEEDBACK_TRIAGE_OPERATION,
+    target,
+    beforeState,
+    afterState,
+    reason: 'User-reviewed feedback triage proposal.',
+    origin: feedbackTriageOrigin(result.correlationId),
+    sessionId: chatConfirmationSessionId(sessionId),
+    requiresRevalidation: true,
+    idempotencyKey: `chat-feedback-triage:${result.correlationId}`
+  });
+  return { ...result, confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt } };
+}
+
 function likeParam(query) {
   return `%${String(query).replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
 }
@@ -4020,6 +4091,9 @@ const capabilityRegistry = createCapabilityRegistry({
     const asItems = (records) => records.map((item) => ({ ...item, category: item.type, entity_type: 'item' }));
     if (view === 'blocked') return { summary: planner.summary, records: asItems(planner.blockers) };
     return { summary: planner.summary, records: asItems([...planner.focus, ...planner.blockers, ...planner.waiting].slice(0, limit)) };
+  },
+  readFeedback({ id }) {
+    return row('SELECT * FROM feedback WHERE id = ?', [id]);
   },
   async readWorkboard({ id, type }) {
     if (type === 'project') {
@@ -4162,7 +4236,7 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
       return ok(res, sessionBlock);
     }
     result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui', renderer: extractRendererBinding(req.body) });
-    result = bindCodingTaskConfirmation(sessionId, bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result)))));
+    result = bindFeedbackTriageConfirmation(sessionId, bindCodingTaskConfirmation(sessionId, bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result))))));
     const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
       sessionId,
@@ -4197,7 +4271,7 @@ app.post('/api/chat/capability', async (req, res) => {
       return ok(res, sessionBlock);
     }
     let result = await capabilityRegistry.invoke(name, req.body?.args || {}, { renderer: extractRendererBinding(req.body) });
-    result = bindCodingTaskConfirmation(sessionId, bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result)))));
+    result = bindFeedbackTriageConfirmation(sessionId, bindCodingTaskConfirmation(sessionId, bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result))))));
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
@@ -4492,6 +4566,75 @@ app.post('/api/chat/sessions/:id/workboard/confirm', async (req, res) => {
   } catch {
     writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
     fail(res, 400, 'Workboard confirmation failed safely.');
+  }
+});
+
+// Apply a session-bound feedback triage (route to Quality review, or dismiss)
+// staged by the action gateway. Mirrors the pre-existing raw
+// PATCH /api/feedback/:id side effect exactly: routing to Quality review
+// conditionally creates one failure_events row (only if the feedback record
+// does not already have one), inside the same transactional apply that
+// confirmAndApply already provides -- a concurrent duplicate confirm cannot
+// create two failure_events rows for the same feedback record.
+app.post('/api/chat/sessions/:id/feedback/confirm', async (req, res) => {
+  const sessionId = Number(req.params.id);
+  const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const keys = Object.keys(body).sort();
+  let auditOperation = 'feedback.confirm';
+  try {
+    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
+      return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
+    }
+    const confirmationId = String(body.confirmationId || '');
+    const token = String(body.token || '');
+    if (!/^[a-f0-9]{32}$/.test(confirmationId) || !/^[a-f0-9]{64}$/.test(token)) return fail(res, 400, 'A valid confirmation identifier and token are required.');
+    const staged = getConfirmation(db, confirmationId);
+    const target = staged?.operation === CHAT_FEEDBACK_TRIAGE_OPERATION ? /^feedback:([1-9]\d*)$/.exec(staged.target) : null;
+    if (!staged || !target) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION');
+      return fail(res, 400, 'That feedback confirmation is not available.');
+    }
+    auditOperation = staged.operation;
+    const origin = readFeedbackTriageOrigin(staged.origin);
+    if (!origin) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ORIGIN');
+      return fail(res, 400, 'That feedback confirmation is not available.');
+    }
+    const applyTriage = (claimed) => {
+      const proposal = canonicalFeedbackTriageConfirmationState(claimed.afterState);
+      const live = row('SELECT * FROM feedback WHERE id = ?', [proposal.identity.id]);
+      const liveState = live ? canonicalFeedbackState(live) : null;
+      if (!liveState || JSON.stringify(liveState) !== JSON.stringify(claimed.beforeState)) {
+        const error = new Error('The feedback record changed after this confirmation was created. Review it again.');
+        error.confirmationCode = 'stale';
+        throw error;
+      }
+      const { record, failureEventId, changes } = applyFeedbackTriage(live, proposal.changes.status);
+      if (changes !== 1) throw new Error('The feedback triage did not apply exactly once.');
+      return { operation: CHAT_FEEDBACK_TRIAGE_OPERATION, success: true, record, failureEventId };
+    };
+    const revalidateTriage = (confirmation) => {
+      const proposal = canonicalFeedbackTriageConfirmationState(confirmation.afterState);
+      const current = row('SELECT * FROM feedback WHERE id = ?', [proposal.identity.id]);
+      return current ? canonicalFeedbackState(current) : null;
+    };
+    const applied = await confirmAndApply(
+      db,
+      { id: confirmationId, token, sessionId: chatConfirmationSessionId(sessionId) },
+      applyTriage,
+      { transactionalApply: true, revalidate: revalidateTriage }
+    );
+    if (!applied.ok) {
+      writeChatAudit(sessionId, auditOperation, 'blocked', `CONFIRMATION_${String(applied.code || 'REJECTED').toUpperCase()}`, origin.correlationId);
+      return fail(res, 400, applied.error || 'The feedback confirmation was rejected.');
+    }
+    writeChatAudit(sessionId, auditOperation, 'applied', `feedback ${applied.result?.record?.id || 'changed'}`, origin.correlationId);
+    return ok(res, applied.result);
+  } catch {
+    writeChatAudit(sessionId, auditOperation, 'error', 'CONFIRMATION_FAILED');
+    fail(res, 400, 'Feedback confirmation failed safely.');
   }
 });
 
@@ -5351,6 +5494,54 @@ app.get('/api/feedback', (req, res) => {
   ok(res, { feedback: rows, themes: summarizeThemes(rows) });
 });
 
+// The single authoritative mutation for a feedback triage decision, shared by
+// both the legacy direct PATCH route below and the governed
+// feedback.propose_triage confirm route (server/index.js's applyTriage) --
+// exactly the same pattern already established for planner.refresh (one
+// shared function behind both a legacy HTTP route and a registry action).
+// This does not itself decide whether confirmation is required; it only
+// performs the actual state transition once a caller has already decided to.
+function applyFeedbackTriage(current, status) {
+  if (status === 'routed' && !current.actionable) {
+    const error = new Error('Only actionable feedback can be routed to Quality review.');
+    error.httpStatus = 400;
+    throw error;
+  }
+  let failureEventId = current.failure_event_id || null;
+  if (status === 'routed' && !failureEventId) {
+    failureEventId = db.prepare(`
+      INSERT INTO failure_events (category, status, source, task_ref, run_id, evidence, correction, outcome)
+      VALUES ('user-correction', 'observed', 'user-feedback', ?, ?, ?, ?, ?)
+    `).run(
+      current.work_item || current.surface || `feedback:${current.id}`,
+      current.run_id,
+      current.evidence,
+      current.note,
+      `Routed from feedback ${current.id} for human review; no behaviour changed automatically.`
+    ).lastInsertRowid;
+  }
+  const changed = db.prepare('UPDATE feedback SET status = ?, failure_event_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+    .run(status, failureEventId, current.id);
+  return { record: row('SELECT * FROM feedback WHERE id = ?', [current.id]), failureEventId, changes: changed.changes };
+}
+
+// CLASSIFICATION: COMPATIBILITY ENDPOINT -- INTENTIONAL ACTION-REGISTRY
+// CONFIRMATION EXEMPTION. This route mutates immediately, with no
+// propose/confirm step and no chat-session binding, unlike
+// feedback.propose_triage. That is deliberate, not an unexplained bypass:
+// FeedbackReview (the only UI caller) was migrated to feedback.propose_triage
+// and no longer calls this route (verified: no remaining `/api/feedback/`
+// PATCH caller in src/main.jsx); this route is kept as a direct HTTP path
+// with its own dedicated behavioural contract (concurrency-safe,
+// idempotent -- see scripts/verify-feedback-http.mjs) for any caller that is
+// not chat-session-scoped, exactly mirroring the already-accepted
+// planner.refresh precedent of one shared authoritative function
+// (applyFeedbackTriage, above) behind both a legacy direct route and a
+// governed registry action. It accepts the full FEEDBACK_STATUSES set
+// (including 'triaged', which the UI/registry action never requests) because
+// narrowing it was not independently justified by any evidence gathered this
+// pass -- narrowing later needs its own reproduced justification, not a
+// registry-count tidy-up.
 app.patch('/api/feedback/:id', (req, res) => {
   const status = String(req.body?.status || '').toLowerCase();
   if (!FEEDBACK_STATUSES.has(status)) return fail(res, 400, `Status must be one of: ${[...FEEDBACK_STATUSES].join(', ')}.`);
@@ -5365,29 +5556,9 @@ app.patch('/api/feedback/:id', (req, res) => {
         error.httpStatus = 404;
         throw error;
       }
-      if (status === 'routed' && !current.actionable) {
-        const error = new Error('Only actionable feedback can be routed to Quality review.');
-        error.httpStatus = 400;
-        throw error;
-      }
-      let failureEventId = current.failure_event_id || null;
-      if (status === 'routed' && !failureEventId) {
-        failureEventId = db.prepare(`
-          INSERT INTO failure_events (category, status, source, task_ref, run_id, evidence, correction, outcome)
-          VALUES ('user-correction', 'observed', 'user-feedback', ?, ?, ?, ?, ?)
-        `).run(
-          current.work_item || current.surface || `feedback:${current.id}`,
-          current.run_id,
-          current.evidence,
-          current.note,
-          `Routed from feedback ${current.id} for human review; no behaviour changed automatically.`
-        ).lastInsertRowid;
-      }
-      db.prepare('UPDATE feedback SET status = ?, failure_event_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-        .run(status, failureEventId, current.id);
-      const feedback = row('SELECT * FROM feedback WHERE id = ?', [current.id]);
+      const { record, failureEventId } = applyFeedbackTriage(current, status);
       return {
-        ...feedback,
+        ...record,
         destination: failureEventId ? { kind: 'quality-failure-review', failureEventId } : null
       };
     });

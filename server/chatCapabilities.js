@@ -93,6 +93,44 @@ export function workboardItemStateToken(record) {
   return crypto.createHash('sha256').update(JSON.stringify(canonicalWorkboardItemState(record))).digest('hex');
 }
 
+// Narrower than the raw PATCH /api/feedback/:id endpoint's full FEEDBACK_STATUSES
+// set (open/triaged/routed/dismissed) -- the two visible FeedbackReview buttons
+// only ever request 'routed' or 'dismissed', so the registry action does not
+// expose a wider surface than the UI it replaces.
+export const FEEDBACK_TRIAGE_STATUSES = Object.freeze(['routed', 'dismissed']);
+
+export function normalizeFeedbackTriageStatus(value) {
+  if (typeof value !== 'string' || !FEEDBACK_TRIAGE_STATUSES.includes(value)) {
+    throw new Error(`Feedback triage status must be one of: ${FEEDBACK_TRIAGE_STATUSES.join(', ')}.`);
+  }
+  return value;
+}
+
+export function canonicalFeedbackState(record) {
+  if (!record || !Number.isInteger(record.id) || record.id <= 0) throw new Error('A canonical feedback record requires a positive id.');
+  return {
+    identity: { type: 'feedback', id: record.id },
+    status: asString(record.status),
+    actionable: Boolean(record.actionable),
+    failure_event_id: Number.isInteger(record.failure_event_id) ? record.failure_event_id : null,
+    // These fields are never mutated by applyFeedbackTriage itself, but a
+    // 'routed' apply reads them live to build the failure_events row (see
+    // server/index.js). Included here so the stale-state check catches any
+    // future edit path to them, not only to status/actionable -- otherwise a
+    // proposal reviewed against one evidence/note/work_item could be applied
+    // against different values without the confirmation being invalidated.
+    work_item: record.work_item == null ? null : asString(record.work_item),
+    surface: asString(record.surface),
+    run_id: record.run_id == null ? null : asString(record.run_id),
+    evidence: record.evidence == null ? null : asString(record.evidence),
+    note: record.note == null ? null : asString(record.note)
+  };
+}
+
+export function feedbackStateToken(record) {
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalFeedbackState(record))).digest('hex');
+}
+
 export function normalizeWorkboardItemChanges(value, { allowResolvedLastReviewed = false } = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Workboard item changes must be a plain object.');
   const allowed = new Set(['status', 'title', 'body', 'next_action', 'confidence', 'due_at', 'last_reviewed']);
@@ -442,6 +480,12 @@ const ACTION_METADATA = Object.freeze({
     sourceControls: ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm', 'planner.item-actions.confirm', 'planner.item-actions.done', 'planner.item-actions.drop', 'planner.item-actions.seen'], testId: 'action.workboard.propose_update',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'target', 'state_token', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target: { type: 'object' }, state_token: { type: 'string' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
+  'feedback.propose_triage': {
+    label: 'Preview feedback triage', feature: 'Feedback review', permission: 'feedback.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
+    confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Reads the current feedback record and produces a review-only proposal; no feedback data is changed.'],
+    sourceControls: ['feedback-review.triage.route', 'feedback-review.triage.dismiss', 'feedback-review.triage.confirm'], testId: 'action.feedback.propose_triage',
+    resultSchema: resultObject(['proposal', 'operation', 'affects', 'target', 'state_token', 'before', 'after', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, target: { type: 'object' }, state_token: { type: 'string' }, before: { type: 'object' }, after: { type: 'object' }, confirmation_required: { type: 'boolean' } })
+  },
   'planner.propose_create': {
     label: 'Propose a Planner task', feature: 'Chat task proposal', permission: 'planner.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
     confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Persists a time-limited review proposal; no Daily Planner task is created until the user confirms it.'],
@@ -558,7 +602,7 @@ const ALL_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_MET
 const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTION_METADATA)
   .filter((item) => item.risk === ACTION_RISKS.READ_ONLY)
   .map((item) => item.permission))]);
-export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'planner.propose_update', 'project.propose_create', 'coding.propose_task', 'planner.refresh', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
+export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'planner.propose_update', 'project.propose_create', 'coding.propose_task', 'feedback.propose_triage', 'planner.refresh', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
@@ -708,6 +752,32 @@ export function createCapabilityRegistry(deps) {
           state_token: workboardItemStateToken(current),
           before,
           after,
+          confirmation_required: true
+        };
+      }
+    },
+
+    'feedback.propose_triage': {
+      description: 'Propose triaging a feedback record (route to Quality review or dismiss). Returns a before/after proposal for confirmation; never writes.',
+      readOnly: false,
+      schema: {
+        id: { type: 'id', required: true },
+        status: { type: 'string', required: true, enum: [...FEEDBACK_TRIAGE_STATUSES] }
+      },
+      async handler(args) {
+        const current = await dep('readFeedback')({ id: args.id });
+        if (!current) throw new Error(`Feedback ${args.id} was not found.`);
+        const status = normalizeFeedbackTriageStatus(args.status);
+        if (status === 'routed' && !current.actionable) throw new Error('Only actionable feedback can be routed to Quality review.');
+        if (current.status === status) throw new Error('feedback.propose_triage: the requested status is already present.');
+        return {
+          proposal: true,
+          operation: 'feedback.triage',
+          affects: `Feedback ${args.id}`,
+          target: { type: 'feedback', id: args.id },
+          state_token: feedbackStateToken(current),
+          before: { status: current.status },
+          after: { status },
           confirmation_required: true
         };
       }
@@ -1046,7 +1116,7 @@ export const CAPABILITY_NAMES = [
   'knowledge.search', 'knowledge.read',
   'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update',
   'planner.propose_create', 'planner.propose_update', 'planner.refresh',
-  'project.propose_create', 'coding.propose_task',
+  'project.propose_create', 'coding.propose_task', 'feedback.propose_triage',
   'system.status', 'system.models', 'system.runs',
   'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner'
 ];

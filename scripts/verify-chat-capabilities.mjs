@@ -92,6 +92,13 @@ const deps = {
   readPlannerTask: ({ id }) => {
     calls.push(['readPlannerTask', id]);
     return id === 5 ? { id: 5, title: 'Existing task', why: '', next_action: 'do it', importance: 3, effort: 2, estimated_minutes: null, deadline: null, status: 'active', updated_at: '2026-08-19T00:00:00.000Z' } : null;
+  },
+  readFeedback: ({ id }) => {
+    calls.push(['readFeedback', id]);
+    if (id === 1) return { id: 1, status: 'open', actionable: true, failure_event_id: null };
+    if (id === 2) return { id: 2, status: 'open', actionable: false, failure_event_id: null };
+    if (id === 3) return { id: 3, status: 'routed', actionable: true, failure_event_id: 9 };
+    return null;
   }
 };
 
@@ -362,6 +369,24 @@ await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', i
 await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { confidence: '0.5' } }), /Action failed safely\. Reference/, 'propose_update rejects confidence coercion');
 await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { confidence: -0.1 } }), /Action failed safely\. Reference/, 'propose_update rejects confidence outside the canonical range');
 await throwsAsync(() => reg.invoke('workboard.propose_update', { type: 'item', id: 1, changes: { due_at: '2026-02-31' } }), /Action failed safely\. Reference/, 'propose_update rejects impossible calendar dates');
+
+await checkAsync('feedback.propose_triage returns a before/after proposal and performs no write', async () => {
+  const before = calls.length;
+  const r = await reg.invoke('feedback.propose_triage', { id: 1, status: 'dismissed' });
+  assert.equal(r.status, 'needs_confirmation');
+  assert.equal(r.data.confirmation_required, true);
+  assert.equal(r.data.operation, 'feedback.triage');
+  assert.deepEqual(r.data.target, { type: 'feedback', id: 1 });
+  assert.match(r.data.state_token, /^[a-f0-9]{64}$/);
+  assert.deepEqual(r.data.before, { status: 'open' });
+  assert.deepEqual(r.data.after, { status: 'dismissed' });
+  assert.deepEqual(calls.slice(before).map((c) => c[0]), ['readFeedback'], 'feedback.propose_triage may only read, never write');
+});
+await throwsAsync(() => reg.invoke('feedback.propose_triage', { id: 999, status: 'dismissed' }), /Action failed safely\. Reference/, 'feedback.propose_triage fails closed on a nonexistent feedback record');
+await throwsAsync(() => reg.invoke('feedback.propose_triage', { id: 2, status: 'routed' }), /Action failed safely\. Reference/, 'feedback.propose_triage rejects routing non-actionable feedback');
+await throwsAsync(() => reg.invoke('feedback.propose_triage', { id: 3, status: 'routed' }), /Action failed safely\. Reference/, 'feedback.propose_triage rejects a no-op status');
+await throwsAsync(() => reg.invoke('feedback.propose_triage', { id: 1, status: 'triaged' }), /must be one of/, 'feedback.propose_triage rejects a status outside the narrow triage allowlist at the schema layer');
+await throwsAsync(() => reg.invoke('feedback.propose_triage', { id: 1, status: 'open' }), /must be one of/, 'feedback.propose_triage rejects reverting to open, which the UI never exposes');
 // Regression: an earlier version accepted any format-valid YYYY-MM-DD string for
 // last_reviewed, letting a direct caller backdate/postdate it arbitrarily instead
 // of only ever setting it to "today". The propose entry point must reject a

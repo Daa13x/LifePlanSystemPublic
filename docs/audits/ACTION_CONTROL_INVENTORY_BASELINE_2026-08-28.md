@@ -11,10 +11,10 @@ an explicit test failure until its effect on the registry migration is reviewed.
 
 Current source truth:
 
-- 478 intrinsic interactive controls;
-- 40 controls in the accepted neutral action-registry slice;
-- 438 controls not yet migrated;
-- 20 neutral actions in the live manifest.
+- 480 intrinsic interactive controls;
+- 43 controls in the accepted neutral action-registry slice;
+- 437 controls not yet migrated;
+- 21 neutral actions in the live manifest.
 
 Updated 2026-08-29: `PlannerItemActions`'s Done/Seen/Drop buttons and their new
 inline Confirm control (0→4 of 5 mapped) now route through the existing
@@ -22,6 +22,42 @@ inline Confirm control (0→4 of 5 mapped) now route through the existing
 fetch. No new action was added; the pre-existing action's field allowlist
 gained one new field (`last_reviewed`, sentinel `"today"` only) to support the
 "Seen" button's stale-clearing behaviour.
+
+Updated 2026-08-29 (second slice): `FeedbackReview`'s "Route to Quality
+review" / "Dismiss" buttons and their new inline Confirm control (0→3 of 4
+mapped) now route through a new `feedback.propose_triage` action (propose
+then confirm) instead of a raw `PATCH /api/feedback/:id` fetch.
+
+The raw route remains, explicitly classified as **COMPATIBILITY ENDPOINT —
+INTENTIONAL ACTION-REGISTRY CONFIRMATION EXEMPTION** (see the matching
+comment directly above `app.patch('/api/feedback/:id', ...)` in
+`server/index.js`), not a silent or unexplained bypass:
+
+1. Both paths (`feedback.propose_triage`'s confirm route and the raw PATCH
+   route) share exactly one core mutation implementation,
+   `applyFeedbackTriage()` — no second copy of the actionable-check /
+   conditional-`failure_events`-insert / status-update logic exists anywhere.
+2. `FeedbackReview` (the only UI caller) no longer calls the raw endpoint —
+   verified by inspection: no remaining `/api/feedback/` PATCH call exists in
+   `src/main.jsx`.
+3. The raw route's own pre-existing dedicated test suite
+   (`scripts/verify-feedback-http.mjs`, concurrency-safe and idempotent
+   triage) passes unchanged after the extraction.
+4. Its immediate, chat-session-free mutation behaviour is intentional: it is
+   the only path available to a caller that is not chat-session-scoped
+   (`feedback.propose_triage`'s confirm route hard-requires a real chat
+   session), mirroring the already-accepted `planner.refresh` precedent of
+   one legacy direct route plus one governed registry action sharing a
+   single authoritative function.
+5. This baseline document is that exemption's recorded owner — there is no
+   separate backend-endpoint inventory in this codebase's current governance
+   model (`verify-action-control-inventory.mjs` scans intrinsic frontend
+   controls in `src/main.jsx`, not backend routes), so this note is the
+   deliberate record rather than a gap.
+6. The route was NOT narrowed to the two triage-only statuses
+   (`feedback.propose_triage`'s own allowlist) merely to tidy the registry
+   count — no evidence this pass justified narrowing its existing accepted
+   `FEEDBACK_STATUSES` contract, so it was left as-is.
 
 The total includes form fields and disclosure controls as required by the
 app-wide todo. It is not a percentage-complete score: one text field is not the

@@ -594,6 +594,17 @@ function App() {
     });
   }
 
+  async function proposeFeedbackTriage(feedbackId, status) {
+    return invokeNeutralAction('feedback.propose_triage', { id: feedbackId, status }, selectedSession);
+  }
+
+  async function confirmFeedbackTriage(confirmation) {
+    return api(`/api/chat/sessions/${selectedSession}/feedback/confirm`, {
+      method: 'POST',
+      body: JSON.stringify({ confirmationId: confirmation.confirmationId, token: confirmation.token })
+    });
+  }
+
   const candidateCount = memory.candidates.filter((candidate) => ['candidate', 'deferred'].includes(candidate.status)).length;
   const operationalApprovalCount = approvals.filter((approval) => !isMemoryApproval(approval)).length;
   const completedWorkboardCount = projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status)).length;
@@ -662,7 +673,7 @@ function App() {
           />
         )}
         {route.section === 'knowledge' && <Knowledge route={route} navigate={navigate} memory={memory} refresh={reloadPlanner} setNotice={setNotice} refreshSignal={refreshSignal} />}
-        {route.section === 'system' && <System route={route} selectedSession={selectedSession} boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refresh={reloadPlanner} refreshSignal={refreshSignal} />}
+        {route.section === 'system' && <System route={route} selectedSession={selectedSession} boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refresh={reloadPlanner} refreshSignal={refreshSignal} proposeFeedbackTriage={proposeFeedbackTriage} confirmFeedbackTriage={confirmFeedbackTriage} />}
         {route.section === 'settings' && (
           <SettingsView
             settings={settings}
@@ -1343,7 +1354,7 @@ function Knowledge({ route, navigate, memory, refresh, setNotice, refreshSignal 
   );
 }
 
-function System({ route, selectedSession, boot, planner, sessions, models, setNotice, refresh, refreshSignal }) {
+function System({ route, selectedSession, boot, planner, sessions, models, setNotice, refresh, refreshSignal, proposeFeedbackTriage, confirmFeedbackTriage }) {
   return (
     <section className="section-shell">
       {route.tab === 'status' && <SystemStatus boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refreshSignal={refreshSignal} />}
@@ -1352,7 +1363,7 @@ function System({ route, selectedSession, boot, planner, sessions, models, setNo
       {route.tab === 'browser' && <BrowserConsult setNotice={setNotice} refresh={refresh} refreshSignal={refreshSignal} />}
       {route.tab === 'tools' && <Tooling setNotice={setNotice} refreshSignal={refreshSignal} />}
       {route.tab === 'runs' && <SourceControl setNotice={setNotice} refreshSignal={refreshSignal} initialTab="coding" availableTabs={['coding']} />}
-      {route.tab === 'feedback' && <FeedbackReview setNotice={setNotice} refreshSignal={refreshSignal} />}
+      {route.tab === 'feedback' && <FeedbackReview setNotice={setNotice} refreshSignal={refreshSignal} proposeFeedbackTriage={proposeFeedbackTriage} confirmFeedbackTriage={confirmFeedbackTriage} />}
       {route.tab === 'quality' && <QualityReview setNotice={setNotice} refreshSignal={refreshSignal} />}
     </section>
   );
@@ -1525,18 +1536,27 @@ function FeedbackControl({ message }) {
   );
 }
 
-function FeedbackReview({ setNotice, refreshSignal }) {
+function FeedbackReview({ setNotice, refreshSignal, proposeFeedbackTriage, confirmFeedbackTriage }) {
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState(null);
   const load = async () => { try { setData(await api('/api/feedback')); } catch (err) { setNotice(err.message); } };
   useEffect(() => { load(); }, [refreshSignal]);
-  const triage = async (item, status) => {
+  const propose = async (item, status, label) => {
     setBusy(true);
     try {
-      const result = await api(`/api/feedback/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
-      if (status === 'routed' && result.destination?.failureEventId) {
-        setNotice(`Routed to Quality review as observed failure #${result.destination.failureEventId}. No behaviour changed automatically.`);
+      const result = await proposeFeedbackTriage(item.id, status);
+      setPending({ ...result.confirmation, itemId: item.id, status, label });
+    } catch (err) { setNotice(err.message); } finally { setBusy(false); }
+  };
+  const confirm = async () => {
+    setBusy(true);
+    try {
+      const applied = await confirmFeedbackTriage(pending);
+      if (pending.status === 'routed' && applied.failureEventId) {
+        setNotice(`Routed to Quality review as observed failure #${applied.failureEventId}. No behaviour changed automatically.`);
       }
+      setPending(null);
       await load();
     } catch (err) { setNotice(err.message); } finally { setBusy(false); }
   };
@@ -1562,10 +1582,18 @@ function FeedbackReview({ setNotice, refreshSignal }) {
                   {item.note && <div className="item-meta"><span>{item.note}</span></div>}
                   <div className="item-meta"><span>{item.provider ? `${item.provider} · ` : ''}{item.run_id ? `run ${item.run_id} · ` : ''}{item.created_at}</span></div>
                 </div>
-                <div className="button-row">
-                  {Boolean(item.actionable) && <button className="secondary" disabled={busy} onClick={() => triage(item, 'routed')}>Route to Quality review</button>}
-                  <button className="secondary" disabled={busy} onClick={() => triage(item, 'dismissed')}>Dismiss</button>
-                </div>
+                {pending?.itemId === item.id ? (
+                  <div className="button-row">
+                    <span>{pending.label}?</span>
+                    <button className="primary" data-action-id="feedback.propose_triage" data-control-id="feedback-review.triage.confirm" disabled={busy} onClick={confirm}>{busy ? 'Applying…' : 'Confirm'}</button>
+                    <button className="secondary" disabled={busy} onClick={() => setPending(null)}>Cancel</button>
+                  </div>
+                ) : (
+                  <div className="button-row">
+                    {Boolean(item.actionable) && <button className="secondary" data-action-id="feedback.propose_triage" data-control-id="feedback-review.triage.route" disabled={busy} onClick={() => propose(item, 'routed', 'Route to Quality review')}>Route to Quality review</button>}
+                    <button className="secondary" data-action-id="feedback.propose_triage" data-control-id="feedback-review.triage.dismiss" disabled={busy} onClick={() => propose(item, 'dismissed', 'Dismiss')}>Dismiss</button>
+                  </div>
+                )}
               </div>
             ))}
           </div>

@@ -28,7 +28,8 @@ assert.match(control, /catch \{ \/\* feedback capture must never disrupt the con
 // Review queue: reads the queue, shows consolidation proposals, and triages.
 assert.match(ui, /function FeedbackReview\(/, 'FeedbackReview component exists');
 assert.match(ui, /api\('\/api\/feedback'\)/, 'the review view reads the feedback queue');
-assert.match(ui, /api\(`\/api\/feedback\/\$\{item\.id\}`, \{ method: 'PATCH', body: JSON\.stringify\(\{ status \}\) \}\)/, 'review triages feedback via the status endpoint');
+assert.match(ui, /await proposeFeedbackTriage\(item\.id, status\)/, 'review proposes feedback triage through the governed feedback.propose_triage action, not a raw PATCH');
+assert.match(ui, /await confirmFeedbackTriage\(pending\)/, 'review applies feedback triage only after an explicit confirm step');
 const reviewStart = ui.indexOf('function FeedbackReview');
 const reviewEnd = ui.indexOf('\nfunction CompletedWorkboard', reviewStart);
 assert.ok(reviewStart >= 0 && reviewEnd > reviewStart, 'FeedbackReview has a bounded source slice');
@@ -37,7 +38,7 @@ assert.match(review, /proposeConsolidation/, 'the review surfaces recurring-them
 assert.match(review, /never changes prompts, rules, memory, or behaviour automatically/, 'the review states feedback never changes behaviour on its own');
 assert.match(review, /local only/, 'sensitive feedback is marked local-only in the queue');
 assert.match(review, /Boolean\(item\.actionable\).*Route to Quality review/s, 'only actionable feedback exposes the Quality routing control');
-assert.match(review, /result\.destination\?\.failureEventId/, 'routing reports the exact observed Quality destination');
+assert.match(review, /applied\.failureEventId/, 'routing reports the exact observed Quality destination');
 
 // The server endpoints the UI depends on exist.
 assert.match(server, /app\.post\('\/api\/feedback'/, 'the feedback capture endpoint exists');

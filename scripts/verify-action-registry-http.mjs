@@ -162,8 +162,9 @@ try {
   const projectCreateProposal = catalog.body?.data?.find((action) => action.id === 'project.propose_create');
   const plannerRefreshAction = catalog.body?.data?.find((action) => action.id === 'planner.refresh');
   const codingProposeTaskAction = catalog.body?.data?.find((action) => action.id === 'coding.propose_task');
+  const feedbackTriageAction = catalog.body?.data?.find((action) => action.id === 'feedback.propose_triage');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
-  line(catalog.body?.data?.length === 20 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate) && Boolean(projectCreateProposal) && Boolean(plannerRefreshAction) && Boolean(codingProposeTaskAction), 'neutral catalog exposes every bounded registered capability');
+  line(catalog.body?.data?.length === 21 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate) && Boolean(projectCreateProposal) && Boolean(plannerRefreshAction) && Boolean(codingProposeTaskAction) && Boolean(feedbackTriageAction), 'neutral catalog exposes every bounded registered capability');
   line(codingProposeTaskAction?.permission === 'coding.propose' && codingProposeTaskAction?.risk === 'REVERSIBLE_WRITE' && codingProposeTaskAction?.confirmation === 'user_confirmation', 'coding.propose_task advertises its write risk and user-confirmation requirement');
   line(plannerRefreshAction?.permission === 'planner.refresh' && plannerRefreshAction?.risk === 'GOVERNED_STAGING' && plannerRefreshAction?.confirmation === 'none' && JSON.stringify(plannerRefreshAction?.inputSchema) === '{}' && plannerRefreshAction?.sourceControls?.includes('planner.refresh-workboard'), 'planner.refresh advertises its governed-staging contract and takes no caller arguments');
   line(projectCreateProposal?.permission === 'workboard.propose' && projectCreateProposal?.risk === 'REVERSIBLE_WRITE' && projectCreateProposal?.confirmation === 'user_confirmation', 'project.propose_create advertises its write risk and user-confirmation requirement');
@@ -668,6 +669,87 @@ try {
     json: { confirmationId: projectConfirmationId, token: projectConfirmationToken }
   });
   line(projectReplay.status === 400 && (await api('/api/workboard/cards')).body?.data?.length === projectsBefore + 1, 'a project confirmation replay is rejected without a second card or event');
+
+  // feedback.propose_triage: PlannerItemActions-style propose/confirm for the
+  // FeedbackReview "Route to Quality review" / "Dismiss" buttons, which
+  // previously called PATCH /api/feedback/:id directly. Proves the full
+  // round trip including the exact side effect the raw endpoint had: routing
+  // conditionally creates one failure_events row.
+  const feedbackDb = new DatabaseSync(dbPath);
+  const actionableFeedbackId = Number(feedbackDb.prepare(
+    "INSERT INTO feedback (sentiment, surface, work_item, run_id, evidence, note, actionable, status) VALUES ('broken', 'chat', 'wi-1', 'run-1', 'evidence text', 'note text', 1, 'open')"
+  ).run().lastInsertRowid);
+  const nonActionableFeedbackId = Number(feedbackDb.prepare(
+    "INSERT INTO feedback (sentiment, surface, actionable, status) VALUES ('useful', 'chat', 0, 'open')"
+  ).run().lastInsertRowid);
+  feedbackDb.close();
+
+  const feedbackProposal = await api(`/api/actions/feedback.propose_triage/invoke`, {
+    method: 'POST',
+    json: { session_id: sessionId, args: { id: actionableFeedbackId, status: 'routed' } }
+  });
+  const feedbackDurable = feedbackProposal.body?.data;
+  line(feedbackDurable?.status === 'needs_confirmation' && feedbackDurable?.data?.operation === 'feedback.triage' && feedbackDurable?.data?.before?.status === 'open' && feedbackDurable?.data?.after?.status === 'routed' && feedbackDurable?.confirmation?.confirmationId, 'feedback triage proposal returns a state-bound durable confirmation');
+
+  const nonActionableProposal = await api(`/api/actions/feedback.propose_triage/invoke`, {
+    method: 'POST',
+    json: { session_id: sessionId, args: { id: nonActionableFeedbackId, status: 'routed' } }
+  });
+  line(nonActionableProposal.body?.data?.status !== 'needs_confirmation', 'routing non-actionable feedback is rejected before any confirmation is staged');
+
+  const feedbackConfirmationId = feedbackDurable?.confirmation?.confirmationId;
+  const feedbackConfirmationToken = feedbackDurable?.confirmation?.token;
+  const feedbackConfirmed = await api(`/api/chat/sessions/${sessionId}/feedback/confirm`, {
+    method: 'POST',
+    json: { confirmationId: feedbackConfirmationId, token: feedbackConfirmationToken }
+  });
+  line(feedbackConfirmed.status === 200 && feedbackConfirmed.body?.data?.record?.status === 'routed' && Number.isInteger(feedbackConfirmed.body?.data?.failureEventId), 'confirming a routed feedback triage applies the status and creates exactly one failure_events row');
+
+  const failureEventsDb = new DatabaseSync(dbPath, { readOnly: true });
+  const failureEventRows = failureEventsDb.prepare('SELECT id FROM failure_events WHERE task_ref = ?').all('wi-1');
+  failureEventsDb.close();
+  line(failureEventRows.length === 1, 'routing creates exactly one failure_events row, not zero or two');
+
+  const feedbackReplay = await api(`/api/chat/sessions/${sessionId}/feedback/confirm`, {
+    method: 'POST',
+    json: { confirmationId: feedbackConfirmationId, token: feedbackConfirmationToken }
+  });
+  line(feedbackReplay.status === 400, 'a feedback confirmation replay is rejected');
+
+  const dismissFeedbackId = nonActionableFeedbackId;
+  const dismissProposal = await api(`/api/actions/feedback.propose_triage/invoke`, {
+    method: 'POST',
+    json: { session_id: sessionId, args: { id: dismissFeedbackId, status: 'dismissed' } }
+  });
+  const dismissConfirmed = await api(`/api/chat/sessions/${sessionId}/feedback/confirm`, {
+    method: 'POST',
+    json: { confirmationId: dismissProposal.body?.data?.confirmation?.confirmationId, token: dismissProposal.body?.data?.confirmation?.token }
+  });
+  line(dismissConfirmed.status === 200 && dismissConfirmed.body?.data?.record?.status === 'dismissed' && dismissConfirmed.body?.data?.record?.failure_event_id === null, 'dismissing feedback applies the status and creates no failure_events row');
+
+  // Regression: canonicalFeedbackState originally hashed only status/actionable/
+  // failure_event_id, not the fields a 'routed' apply actually reads to build the
+  // failure_events row (evidence/note/work_item/surface/run_id). A change to
+  // those fields between propose and confirm must still be caught as stale,
+  // even though no current UI path can make that edit -- the check exists so a
+  // future edit path can never silently apply against reviewed-then-changed data.
+  const evidenceDriftDb = new DatabaseSync(dbPath);
+  const evidenceDriftFeedbackId = Number(evidenceDriftDb.prepare(
+    "INSERT INTO feedback (sentiment, surface, work_item, run_id, evidence, note, actionable, status) VALUES ('broken', 'chat', 'wi-2', 'run-2', 'original evidence', 'original note', 1, 'open')"
+  ).run().lastInsertRowid);
+  evidenceDriftDb.close();
+  const evidenceDriftProposal = await api('/api/actions/feedback.propose_triage/invoke', {
+    method: 'POST',
+    json: { session_id: sessionId, args: { id: evidenceDriftFeedbackId, status: 'routed' } }
+  });
+  const evidenceDriftDb2 = new DatabaseSync(dbPath);
+  evidenceDriftDb2.prepare('UPDATE feedback SET evidence = ? WHERE id = ?').run('drifted evidence, not reviewed in the proposal', evidenceDriftFeedbackId);
+  evidenceDriftDb2.close();
+  const evidenceDriftConfirmed = await api(`/api/chat/sessions/${sessionId}/feedback/confirm`, {
+    method: 'POST',
+    json: { confirmationId: evidenceDriftProposal.body?.data?.confirmation?.confirmationId, token: evidenceDriftProposal.body?.data?.confirmation?.token }
+  });
+  line(evidenceDriftConfirmed.status === 400, 'a feedback record whose evidence changed after the proposal is rejected as stale, not silently applied against drifted evidence');
 
   const tamperProposal = await api('/api/actions/workboard.propose_create/invoke', {
     method: 'POST',

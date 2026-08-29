@@ -24,7 +24,7 @@ const neutralCalls = [...ui.matchAll(/invokeAction\('([^']+)'/g)].map((match) =>
 // invokeNeutralAction adapter -- the same established pattern SetupRecovery
 // uses for navigation.settings above -- rather than through Chat's local
 // invokeAction.
-const CHAT_ADAPTER_EXEMPT_ACTIONS = ['planner.refresh', 'coding.propose_task'];
+const CHAT_ADAPTER_EXEMPT_ACTIONS = ['planner.refresh', 'coding.propose_task', 'feedback.propose_triage'];
 assert.deepEqual([...new Set(neutralCalls)].sort(), NEUTRAL_ACTION_NAMES.filter((name) => !CHAT_ADAPTER_EXEMPT_ACTIONS.includes(name)).sort(), 'every Chat-reachable neutral action uses the bounded Context Picker / Workboard proposal / system / navigation adapter');
 assert.match(ui, /invokeNeutralAction\('planner\.refresh', \{\}, selectedSession\)/, 'the Planner page Refresh Workboard control uses the shared neutral action adapter directly, matching the SetupRecovery navigation pattern');
 assert.match(ui, /invokeNeutralAction\('coding\.propose_task', draft, selectedSession\)/, 'the Planner page coding-task propose control uses the shared neutral action adapter directly');
@@ -111,6 +111,8 @@ assert.equal(manifest['workboard.propose_create'].risk, 'REVERSIBLE_WRITE', 'Wor
 assert.equal(manifest['workboard.propose_create'].confirmation, 'user_confirmation', 'Workboard create requires explicit user confirmation');
 assert.equal(manifest['workboard.propose_update'].risk, 'REVERSIBLE_WRITE', 'Workboard update remains a proposal write risk');
 assert.equal(manifest['workboard.propose_update'].confirmation, 'user_confirmation', 'Workboard update requires explicit user confirmation');
+assert.equal(manifest['feedback.propose_triage'].risk, 'REVERSIBLE_WRITE', 'feedback.propose_triage is a caller-directed proposal write, not governed-staging');
+assert.equal(manifest['feedback.propose_triage'].confirmation, 'user_confirmation', 'feedback.propose_triage requires explicit user confirmation before any feedback status changes');
 assert.equal(manifest['planner.refresh'].risk, 'GOVERNED_STAGING', 'planner.refresh is classified as a governed-staging write, not a caller-directed proposal');
 assert.equal(manifest['planner.refresh'].confirmation, 'none', 'planner.refresh requires no confirmation because it can only stage a hardcoded, separately human-gated approval');
 assert.deepEqual(manifest['planner.refresh'].inputSchema, {}, 'planner.refresh takes no caller-supplied arguments');
@@ -121,7 +123,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 40, 'the bounded slice has exactly forty mapped trigger/search/preview/proposal/system/history/planner/project/navigation/refresh/coding/item-action controls');
+assert.equal(mappedControls.length, 43, 'the bounded slice has exactly forty-three mapped trigger/search/preview/proposal/system/history/planner/project/navigation/refresh/coding/item-action/feedback-triage controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -161,6 +163,11 @@ assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navig
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.planner').map((mapping) => mapping.controlId), ['chat.navigation.open-planner'], 'the visible Open Today control maps to the navigation.planner action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'planner.refresh').map((mapping) => mapping.controlId), ['planner.refresh-workboard'], 'the visible Refresh Workboard control maps to the planner.refresh action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'coding.propose_task').map((mapping) => mapping.controlId).sort(), ['planner.coding-queue.confirm', 'planner.coding-queue.seal-and-queue'], 'the complete visible coding-task seal/confirm control family has stable identifiers');
+assert.deepEqual(
+  controlMappings.filter((mapping) => mapping.actionId === 'feedback.propose_triage').map((mapping) => mapping.controlId).sort(),
+  ['feedback-review.triage.confirm', 'feedback-review.triage.dismiss', 'feedback-review.triage.route'],
+  'the complete visible feedback-triage route/dismiss/confirm control family has stable identifiers'
+);
 assert.deepEqual(
   controlMappings.filter((mapping) => mapping.actionId === 'planner.propose_create').map((mapping) => mapping.controlId).sort(),
   ['chat.planner-proposal.confirm', 'chat.planner-proposal.open', 'chat.planner-proposal.preview'],
