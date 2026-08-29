@@ -42,6 +42,12 @@ jobs:
     timeout-minutes: 45
     env:
       RELEASE_TAG: ${{ github.event.inputs.release_tag || github.event.release.tag_name || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
+      # Let npm retry package transport failures internally without retrying tests,
+      # builds, lifecycle scripts, or other deterministic commands.
+      NPM_CONFIG_FETCH_RETRIES: '3'
+      NPM_CONFIG_FETCH_RETRY_FACTOR: '2'
+      NPM_CONFIG_FETCH_RETRY_MINTIMEOUT: '10000'
+      NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: '60000'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -70,6 +76,8 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '24.15.0'
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       # The native host targets net9.0-windows. Runners now ship .NET 10, so
       # install the net9.0 SDK explicitly; setup-dotnet sets DOTNET_ROOT, which
@@ -98,11 +106,33 @@ jobs:
       # via Playwright Chromium. Install the matching browser (and its headless
       # shell) before the safety suite runs, otherwise browserType.launch fails
       # with "Executable doesn't exist" and the whole installer build aborts.
+      # Browser download is an external transport operation, so retry it in a
+      # bounded way without ever retrying the verification suite itself.
       - name: Install Playwright Chromium
-        run: npx playwright install chromium
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "Playwright Chromium install attempt $attempt/3"
+            npx playwright install chromium
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (10 * $attempt) }
+          }
+          throw 'Playwright Chromium installation failed after 3 attempts.'
 
+      # Keep the complete safety output as a failure artifact. This is Windows-
+      # native and explicitly checks the external process exit code, avoiding the
+      # fragile Bash/tee diagnostic experiment that was reverted on 2026-08-20.
       - name: Verify runtime safety
-        run: npm run verify:runtime-safety
+        shell: pwsh
+        run: |
+          $diagnostics = Join-Path $env:RUNNER_TEMP 'lps-ci-diagnostics'
+          New-Item -ItemType Directory -Force -Path $diagnostics | Out-Null
+          $log = Join-Path $diagnostics 'runtime-safety.log'
+          npm run verify:runtime-safety 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) {
+            throw "Runtime safety verification failed with exit code $LASTEXITCODE."
+          }
 
       # Exercise the existing Phase 2 source contracts on one fresh disposable
       # database, including confirmation resume, reviewed memory, scheduled
@@ -111,7 +141,16 @@ jobs:
         run: npm run verify:phase2-goal-to-review:built
 
       - name: Install Inno Setup
-        run: choco install innosetup --yes --no-progress
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Write-Host "Inno Setup install attempt $attempt/3"
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (10 * $attempt) }
+          }
+          throw 'Inno Setup installation failed after 3 attempts.'
 
       # The shared installer build script reuses the workflow's npm ci + build,
       # installs Playwright Chromium into the packaged app, and compiles the
@@ -232,6 +271,67 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: release/LifePlannerPortableSetup.exe
+
+      # Always capture enough evidence to diagnose the next failure without
+      # weakening the failing step or changing the original job result.
+      - name: Capture CI failure diagnostics
+        if: failure()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $diagnostics = Join-Path $env:RUNNER_TEMP 'lps-ci-diagnostics'
+          New-Item -ItemType Directory -Force -Path $diagnostics | Out-Null
+          $summary = Join-Path $diagnostics 'environment.txt'
+          @(
+            "repository=$env:GITHUB_REPOSITORY"
+            "run_id=$env:GITHUB_RUN_ID"
+            "run_attempt=$env:GITHUB_RUN_ATTEMPT"
+            "sha=$env:GITHUB_SHA"
+            "ref=$env:GITHUB_REF"
+            "runner_os=$env:RUNNER_OS"
+            "runner_arch=$env:RUNNER_ARCH"
+            "node=$(node --version 2>$null)"
+            "npm=$(npm --version 2>$null)"
+            "dotnet=$(dotnet --version 2>$null)"
+            "pwsh=$($PSVersionTable.PSVersion)"
+          ) | Set-Content -LiteralPath $summary
+
+          Add-Content -LiteralPath $summary -Value "`nrelease directory:"
+          if (Test-Path -LiteralPath 'release') {
+            Get-ChildItem -LiteralPath 'release' -Force -Recurse -ErrorAction SilentlyContinue |
+              Select-Object FullName,Length,LastWriteTime |
+              Format-Table -AutoSize | Out-String | Add-Content -LiteralPath $summary
+          } else {
+            Add-Content -LiteralPath $summary -Value '(release directory not created)'
+          }
+
+          $npmLogs = Join-Path $env:LOCALAPPDATA 'npm-cache\_logs'
+          if (Test-Path -LiteralPath $npmLogs) {
+            $dest = Join-Path $diagnostics 'npm-logs'
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+            Get-ChildItem -LiteralPath $npmLogs -File -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 5 |
+              Copy-Item -Destination $dest -Force -ErrorAction SilentlyContinue
+          }
+
+          "### Build Installer failure diagnostics" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          '```text' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          Get-Content -LiteralPath $summary | Select-Object -First 120 | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          '```' | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          if (Test-Path -LiteralPath (Join-Path $diagnostics 'runtime-safety.log')) {
+            "Runtime-safety output is attached in the diagnostic artifact." | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload CI failure diagnostics
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lps-ci-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
 
       # A failed build must leave an explicit warning on the rolling release.
       # The older binary remains available for recovery but cannot masquerade as
