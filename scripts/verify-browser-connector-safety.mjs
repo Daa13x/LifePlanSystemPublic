@@ -191,6 +191,23 @@ try {
   assert.match(serverSource, /claimToken/);
   assert.match(extensionSource, /claimToken: job\.claimToken/);
 
+  // Regression (2026-08-29): a 3-second text-stability window alone falsely
+  // finalized a longer, multi-sentence real ChatGPT reply after it happened to
+  // pause mid-stream, capturing it truncated. runContentSend must not return
+  // an answered result straight off the stability check -- it must take one
+  // longer confirmation read first and only finalize if the text held.
+  const stableTicksBlockMatch = extensionSource.match(/if \(stableTicks >= 3\) \{[\s\S]*?\n  \}/);
+  assert.ok(stableTicksBlockMatch, 'runContentSend must retain its stableTicks >= 3 completion branch');
+  const stableTicksBlock = stableTicksBlockMatch[0];
+  assert.match(stableTicksBlock, /await sleep\(\d+\)/, 'reaching the stability window must wait for one more confirmation read before finalizing');
+  assert.match(stableTicksBlock, /const confirmed = readLatestResponse\(beforeTurnCount\)/, 'the confirmation read must re-derive the answer the same way the polling loop does');
+  assert.match(stableTicksBlock, /if \(confirmed === text\)/, "a result may only be returned as 'answered' if the confirmation read matches the already-stable text");
+  assert.doesNotMatch(
+    stableTicksBlock.slice(0, stableTicksBlock.indexOf('if (confirmed === text)')),
+    /status: 'answered'/,
+    'runContentSend must not return answered before the post-stability confirmation read'
+  );
+
   console.log('Browser connector authentication and privacy verification passed.');
 } finally {
   if (child.exitCode === null) child.kill();

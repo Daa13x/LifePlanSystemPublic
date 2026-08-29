@@ -201,14 +201,27 @@ async function runContentSend(targetAgent, prompt) {
       lastText = text;
       stableTicks = 1;
     }
+    // A 3-second stability window still passes if the provider's own streaming
+    // rendering happens to pause for a few seconds mid-generation (observed
+    // 2026-08-29: a longer multi-sentence ChatGPT reply was captured truncated
+    // to its first 7 characters after a mid-stream pause satisfied this exact
+    // window). One extra, longer confirmation read after reaching the window
+    // guards against exactly that without slowing down the normal case, where
+    // the text is already genuinely finished and this confirmation is a no-op.
     if (stableTicks >= 3) {
-      return {
-        status: 'answered',
-        url: location.href,
-        title: document.title,
-        answer: text,
-        message: 'Prompt sent and response captured from the Life Planner Chrome connector.'
-      };
+      await sleep(2500);
+      const confirmed = readLatestResponse(beforeTurnCount);
+      if (confirmed === text) {
+        return {
+          status: 'answered',
+          url: location.href,
+          title: document.title,
+          answer: text,
+          message: 'Prompt sent and response captured from the Life Planner Chrome connector.'
+        };
+      }
+      lastText = confirmed;
+      stableTicks = confirmed ? 1 : 0;
     }
   }
 
