@@ -2,4 +2,12 @@ include ':app'
 include ':capacitor-cordova-android-plugins'
 project(':capacitor-cordova-android-plugins').projectDir = new File('./capacitor-cordova-android-plugins/')
 
+// Wear OS companion (Phase 5). A separate installable app, not a Capacitor
+// module -- Wear OS UI is plain native Android, and the phone<->watch
+// message bridge (Wearable Data Layer API) is native-only regardless. Built
+// standalone (com.google.android.wearable.standalone = true in its
+// manifest) so it installs and launches on its own for this first slice;
+// it does not yet talk to the phone app at all (see android/wear/README.md).
+include ':wear'
+
 apply from: 'capacitor.settings.gradle'

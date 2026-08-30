@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Life Planner</string>
+    <string name="watch_not_paired_yet">Life Planner Watch\n\nPhone pairing and Today/reminders are not wired up yet.</string>
+</resources>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.hardware.type.watch" />
+
+    <!-- Uses a built-in system icon rather than custom launcher art -- this
+         module has no designed icon assets yet; a placeholder from the
+         platform itself is honest about that instead of a copy-pasted
+         mipmap that would look like real, finished branding. -->
+    <application
+        android:allowBackup="true"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.DeviceDefault">
+
+        <!-- Standalone for this slice: it has no companion phone app link
+             yet, so Play/the watch's app manager must not treat an absent
+             phone-side pairing as a reason to hide or disable it. This
+             becomes false once the real phone<->watch bridge exists and a
+             paired phone app is genuinely required. -->
+        <meta-data
+            android:name="com.google.android.wearable.standalone"
+            android:value="true" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
