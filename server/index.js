@@ -10,7 +10,7 @@ import { execFileWithTreeAbort } from './processTree.js';
 // Imported before ./db.js so any staged database restore is applied before the
 // SQLite connection is opened.
 import './restoreBootstrap.js';
-import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
+import { db, dbPath, getSetting, migrate, recordSyncOutboxEntry, SECRET_SETTING_KEYS, setSetting } from './db.js';
 import { authRateLimit, LOCAL_USER_ID, loginUser, MULTI_USER, registerUser, requireAuth } from './auth.js';
 import { evaluateMutationGuard, isMutation, originAllowed } from './mutationGuard.js';
 import { proposeConfirmation, confirmAndApply, getConfirmation, recoverInterruptedConfirmations } from './confirmations.js';
@@ -2965,10 +2965,11 @@ function appendPlannerStatusEvent(taskId, fromStatus, toStatus, { actor, source,
   if (fromStatus === toStatus) return null;
   const eventType = plannerStatusEventType(fromStatus, toStatus);
   if (!eventType) throw new Error(`Unsupported Planner status transition: ${fromStatus} -> ${toStatus}.`);
+  const eventSyncId = crypto.randomUUID();
   const result = db.prepare(`INSERT INTO planner_task_events
-    (task_id, event_type, from_status, to_status, actor, source, reference)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(taskId, eventType, fromStatus, toStatus, actor, source, reference);
+    (task_id, event_type, from_status, to_status, actor, source, reference, sync_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(taskId, eventType, fromStatus, toStatus, actor, source, reference, eventSyncId);
   return row('SELECT * FROM planner_task_events WHERE id = ?', [result.lastInsertRowid]);
 }
 
@@ -3085,6 +3086,8 @@ function applyPlannerTaskFields(existing, requestedFields, { actor = 'user', sou
   const statusChanged = nextStatus !== existing.status;
   const updatedAt = new Date().toISOString();
   fields.updated_at = updatedAt;
+  fields.revision = (existing.revision || 1) + 1;
+  fields.device_id = 'desktop';
   if (statusChanged) fields.completed_at = nextStatus === 'completed' ? updatedAt : null;
   const sets = Object.keys(fields).map((key) => `${key} = ?`).join(', ');
   const changed = db.prepare(`UPDATE planner_tasks SET ${sets} WHERE id = ?`).run(...Object.values(fields), existing.id);
@@ -3092,7 +3095,14 @@ function applyPlannerTaskFields(existing, requestedFields, { actor = 'user', sou
   const event = statusChanged
     ? appendPlannerStatusEvent(existing.id, existing.status, nextStatus, { actor, source, reference })
     : null;
-  return { record: row('SELECT * FROM planner_tasks WHERE id = ?', [existing.id]), event };
+  const record = row('SELECT * FROM planner_tasks WHERE id = ?', [existing.id]);
+  // Phase 4 change journal: one outbox entry per real mutation, keyed by
+  // this record's own sync_id (never the internal integer id) and its new
+  // revision, so a future sync engine can apply this exact change or
+  // detect that it conflicts with an edit made on the other device.
+  recordSyncOutboxEntry({ entityType: 'planner_task', entitySyncId: record.sync_id, op: 'upsert', payload: record, revision: record.revision, userId: existing.user_id });
+  if (event) recordSyncOutboxEntry({ entityType: 'planner_task_event', entitySyncId: event.sync_id, op: 'upsert', payload: event, revision: 1, userId: existing.user_id });
+  return { record, event };
 }
 
 function plannerMutationKey(req) {
@@ -3156,9 +3166,19 @@ app.post('/api/planner/tasks', (req, res) => {
   const fields = readPlannerTaskFields(req.body);
   if (!fields.title) return fail(res, 400, 'A task title is required.');
   fields.user_id = req.userId;
+  fields.sync_id = crypto.randomUUID();
+  fields.device_id = 'desktop';
   const columns = Object.keys(fields);
-  const id = db.prepare(`INSERT INTO planner_tasks (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).run(...Object.values(fields)).lastInsertRowid;
-  ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [id]));
+  // The row and its journal entry must commit together -- a crash between
+  // the two would otherwise persist a task with no matching outbox entry,
+  // which a future sync engine has no way to detect or repair after the fact.
+  const record = transaction(() => {
+    const id = db.prepare(`INSERT INTO planner_tasks (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).run(...Object.values(fields)).lastInsertRowid;
+    const created = row('SELECT * FROM planner_tasks WHERE id = ?', [id]);
+    recordSyncOutboxEntry({ entityType: 'planner_task', entitySyncId: created.sync_id, op: 'upsert', payload: created, revision: created.revision, deviceId: 'desktop', userId: req.userId });
+    return created;
+  });
+  ok(res, record);
 });
 
 app.patch('/api/planner/tasks/:id', (req, res) => {
@@ -3201,10 +3221,15 @@ app.post('/api/planner/tasks/:id/complete', (req, res) => {
 });
 
 app.post('/api/planner/tasks/:id/pin', (req, res) => {
-  const existing = row('SELECT pinned FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
+  const existing = row('SELECT * FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
   if (!existing) return fail(res, 404, 'Task not found.');
-  db.prepare('UPDATE planner_tasks SET pinned = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(existing.pinned ? 0 : 1, req.params.id);
-  ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]));
+  // Routed through the same shared mutation path as every other change so
+  // pinning is not a silent exception to revision-bumping and the change
+  // journal -- a future sync engine must see this edit too. Wrapped the
+  // same way PATCH/complete/defer are: the row update and its outbox entry
+  // commit together.
+  const applied = transaction(() => applyPlannerTaskFields(existing, { pinned: existing.pinned ? 0 : 1 }, { actor: 'user', source: 'planner-pin' }));
+  ok(res, applied.record);
 });
 
 app.post('/api/planner/tasks/:id/defer', (req, res) => {
@@ -4940,10 +4965,13 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
     }
     const applyCreate = (claimed) => {
       const p = canonicalPlannerCreateState(claimed.afterState);
-      const id = db.prepare(`INSERT INTO planner_tasks (title, why, next_action, importance, effort, estimated_minutes, deadline, user_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(p.title, p.why, p.next_action, p.importance, p.effort, p.estimated_minutes, p.deadline, req.userId).lastInsertRowid;
-      return { operation: CHAT_PLANNER_CREATE_OPERATION, success: true, record: row('SELECT * FROM planner_tasks WHERE id = ?', [id]) };
+      const syncId = crypto.randomUUID();
+      const id = db.prepare(`INSERT INTO planner_tasks (title, why, next_action, importance, effort, estimated_minutes, deadline, user_id, sync_id, device_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(p.title, p.why, p.next_action, p.importance, p.effort, p.estimated_minutes, p.deadline, req.userId, syncId, 'desktop').lastInsertRowid;
+      const record = row('SELECT * FROM planner_tasks WHERE id = ?', [id]);
+      recordSyncOutboxEntry({ entityType: 'planner_task', entitySyncId: record.sync_id, op: 'upsert', payload: record, revision: record.revision, deviceId: 'desktop', userId: req.userId });
+      return { operation: CHAT_PLANNER_CREATE_OPERATION, success: true, record };
     };
     const applyUpdate = (claimed) => {
       const proposal = canonicalPlannerUpdateConfirmationState(claimed.afterState);

@@ -127,6 +127,40 @@ CREATE TABLE IF NOT EXISTS local_chat_messages (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_local_chat_messages_session ON local_chat_messages(session_id, created_at);
+`,
+  // Phase 4 groundwork (bidirectional phone<->desktop sync; first slice is
+  // tasks/lifecycle-events only, NOT chat). Mirrors server/db.js's
+  // sync_outbox/sync_applied_changes/sync_conflicts exactly, so the same
+  // apply/conflict logic works on either side once a transport exists.
+  `
+CREATE TABLE IF NOT EXISTS sync_outbox (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  change_id TEXT NOT NULL UNIQUE,
+  entity_type TEXT NOT NULL CHECK (entity_type IN ('planner_task', 'planner_task_event')),
+  entity_sync_id TEXT NOT NULL,
+  op TEXT NOT NULL CHECK (op IN ('upsert', 'tombstone')),
+  payload TEXT,
+  revision INTEGER NOT NULL,
+  device_id TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_entity ON sync_outbox(entity_type, entity_sync_id);
+
+CREATE TABLE IF NOT EXISTS sync_applied_changes (
+  change_id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sync_conflicts (
+  id TEXT PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  entity_sync_id TEXT NOT NULL,
+  local_payload TEXT NOT NULL,
+  incoming_payload TEXT NOT NULL,
+  detected_at TEXT NOT NULL,
+  resolved_at TEXT,
+  resolution TEXT
+);
 `
 ];
 
@@ -287,16 +321,38 @@ export async function localListTasks() {
   return (await listTaskRows(db)).map(rowToEngine);
 }
 
+// Change journal (see server/db.js's sync_outbox for the desktop mirror of
+// this exact table/reasoning): one entry per real mutation, keyed by the
+// entity's own permanent sync_id (== this row's own `id`, per the whole
+// point of using a UUID primary key -- there is no separate id to
+// translate). change_id is generated fresh per call and is the future
+// sync engine's replay/dedup key.
+function outboxStatement(entityType, entitySyncId, op, payload, revision, deviceIdValue) {
+  return {
+    statement: 'INSERT INTO sync_outbox (change_id, entity_type, entity_sync_id, op, payload, revision, device_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    values: [uuid(), entityType, entitySyncId, op, payload === undefined ? null : JSON.stringify(payload), revision, deviceIdValue, nowIso()]
+  };
+}
+
 export async function localCreateTask(body) {
   const db = await getDb();
   const fields = readTaskFields(body);
   if (!fields.title) throw new Error('A task title is required.');
   const id = uuid();
   const ts = nowIso();
+  const device = await deviceId(db);
   const columns = ['id', 'created_at', 'updated_at', 'device_id', ...Object.keys(fields)];
-  const values = [id, ts, ts, await deviceId(db), ...Object.values(fields)];
-  await db.run(`INSERT INTO local_tasks (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`, values);
+  const values = [id, ts, ts, device, ...Object.values(fields)];
+  await db.executeSet([
+    { statement: `INSERT INTO local_tasks (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`, values }
+  ], true);
+  // Read the real row back rather than hand-building the outbox payload from
+  // `fields` -- a hand-built object silently omits every column the schema
+  // itself defaults (status, pinned, deleted, sync_status, revision), so a
+  // remote peer replaying this entry would reconstruct an incomplete task.
   const row = (await db.query('SELECT * FROM local_tasks WHERE id = ?', [id])).values[0];
+  const stmt = outboxStatement('planner_task', id, 'upsert', row, row.revision, device);
+  await db.run(stmt.statement, stmt.values);
   return rowToEngine(row);
 }
 
@@ -328,20 +384,43 @@ async function writeTaskFields(db, id, fields) {
   const set = [];
   const columns = Object.keys(fields);
   const ts = nowIso();
+  const device = await deviceId(db);
   if (columns.length) {
     const sets = columns.map((c) => `${c} = ?`).join(', ');
+    // revision = revision + 1 is computed BY SQLite, not read-then-written
+    // in JS -- two calls racing on the same row (a rapid double-tap slipping
+    // past the UI's own busy guard, for example) still serialize correctly
+    // through SQLite's own single-writer semantics instead of both reading
+    // the same starting revision and silently colliding.
     set.push({ statement: `UPDATE local_tasks SET ${sets}, updated_at = ?, revision = revision + 1 WHERE id = ?`, values: [...Object.values(fields), ts, id] });
   }
+  let eventId = null;
+  let eventType = null;
   if (fields.status && fields.status !== existing.status) {
-    const eventType = taskEventType(existing.status, fields.status);
+    eventType = taskEventType(existing.status, fields.status);
     if (!eventType) throw new Error(`Unsupported Planner status transition: ${existing.status} -> ${fields.status}.`);
-    set.push({ statement: 'INSERT INTO local_task_events (id, task_id, event_type, from_status, to_status, created_at) VALUES (?, ?, ?, ?, ?, ?)', values: [uuid(), id, eventType, existing.status, fields.status, ts] });
+    eventId = uuid();
+    set.push({ statement: 'INSERT INTO local_task_events (id, task_id, event_type, from_status, to_status, created_at) VALUES (?, ?, ?, ?, ?, ?)', values: [eventId, id, eventType, existing.status, fields.status, ts] });
     if (fields.status === 'completed') set.push({ statement: 'UPDATE local_tasks SET completed_at = ? WHERE id = ?', values: [ts, id] });
     if (existing.status === 'completed' && fields.status !== 'completed') set.push({ statement: 'UPDATE local_tasks SET completed_at = NULL WHERE id = ?', values: [id] });
   }
   if (set.length) await db.executeSet(set, true);
-  const row = (await db.query('SELECT * FROM local_tasks WHERE id = ?', [id])).values[0];
-  return rowToEngine(row, await taskEventSummary(db, id));
+  // The outbox payload is built from the row AFTER the update commits, not
+  // from `{...existing, ...fields}` -- that would miss SQL-computed values
+  // (the real revision) and side effects this function itself applies
+  // (completed_at), and would silently omit database-defaulted columns
+  // fields never touched. This costs a second read, not full atomicity with
+  // the row write above, but a real, complete snapshot is worth that cost.
+  const freshRow = (await db.query('SELECT * FROM local_tasks WHERE id = ?', [id])).values[0];
+  if (columns.length) {
+    const stmt = outboxStatement('planner_task', id, 'upsert', freshRow, freshRow.revision, device);
+    await db.run(stmt.statement, stmt.values);
+  }
+  if (eventId) {
+    const stmt = outboxStatement('planner_task_event', eventId, 'upsert', { id: eventId, taskId: id, eventType, fromStatus: existing.status, toStatus: fields.status, createdAt: ts }, 1, device);
+    await db.run(stmt.statement, stmt.values);
+  }
+  return rowToEngine(freshRow, await taskEventSummary(db, id));
 }
 
 async function taskEventSummary(db, taskId) {

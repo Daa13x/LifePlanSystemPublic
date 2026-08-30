@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -739,7 +740,103 @@ export function migrate() {
     }
   }
 
+  // Phase 4 groundwork (bidirectional phone<->desktop sync; first slice is
+  // tasks/Planner/lifecycle-events only, NOT chat). Positioned at the very
+  // end of migrate(), after every CREATE TABLE above has definitely run --
+  // an earlier attempt at this same column placed a backfill loop before
+  // planner_tasks existed yet on a fresh install and crashed startup with
+  // "no such table: planner_tasks". The pre-existing user_id backfill loop
+  // above has the identical hazard but never surfaced it, because
+  // planner_tasks' own CREATE TABLE separately bakes user_id in directly;
+  // this comment is the record of that near-repeat so it doesn't happen a
+  // third time.
+  //
+  // The canonical cross-device identity for a record is `sync_id`, a UUID
+  // -- the SAME kind of id the standalone Android app already generates for
+  // its own local rows (src/localData.js). The desktop's integer
+  // AUTOINCREMENT `id` stays exactly what it always was: an internal
+  // implementation detail every foreign key here still uses, never
+  // replaced. `revision` and `device_id` mirror the phone schema so a
+  // future sync engine can detect a genuine conflict (both sides advanced
+  // the same entity's revision since the last common sync point) instead of
+  // ever blindly overwriting one side's edit with the other's.
+  for (const [column, ddl] of [['sync_id', 'TEXT'], ['revision', 'INTEGER NOT NULL DEFAULT 1'], ['device_id', 'TEXT']]) {
+    try { db.exec(`ALTER TABLE planner_tasks ADD COLUMN ${column} ${ddl}`); } catch { /* already present */ }
+  }
+  try { db.exec('ALTER TABLE planner_task_events ADD COLUMN sync_id TEXT'); } catch { /* already present */ }
+  for (const [table, idColumn] of [['planner_tasks', 'id'], ['planner_task_events', 'id']]) {
+    const unbackfilled = db.prepare(`SELECT ${idColumn} AS rowId FROM ${table} WHERE sync_id IS NULL`).all();
+    if (unbackfilled.length) {
+      const stamp = db.prepare(`UPDATE ${table} SET sync_id = ? WHERE ${idColumn} = ?`);
+      for (const row of unbackfilled) stamp.run(crypto.randomUUID(), row.rowId);
+    }
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_sync_id ON ${table}(sync_id)`);
+  }
+
+  // The change journal ("outbox"): every task/event mutation appends one
+  // row here (see recordSyncOutboxEntry below), rather than a future sync
+  // engine diffing full tables. change_id is the replay/dedup key -- the
+  // SAME mutation retried (a dropped response, a re-run migration) must
+  // never append a second entry, so callers generate it once and this
+  // table's own UNIQUE constraint makes a duplicate insert a no-op via
+  // INSERT OR IGNORE, not a second real change. Deletion is deliberately
+  // NOT a separate mechanism: a 'tombstone' op is just another revisioned
+  // outbox entry, so a device offline when a record was deleted applies
+  // that deletion on its next sync instead of resurrecting the row.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_outbox (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      change_id TEXT NOT NULL UNIQUE,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('planner_task', 'planner_task_event')),
+      entity_sync_id TEXT NOT NULL,
+      op TEXT NOT NULL CHECK (op IN ('upsert', 'tombstone')),
+      payload TEXT,
+      revision INTEGER NOT NULL,
+      device_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_sync_outbox_user ON sync_outbox(user_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_sync_outbox_entity ON sync_outbox(entity_type, entity_sync_id);
+
+    -- Dedup ledger for INCOMING changes applied FROM a peer -- makes
+    -- applying a batch idempotent if the same batch is ever replayed
+    -- (a retried sync request after a dropped response, for example).
+    CREATE TABLE IF NOT EXISTS sync_applied_changes (
+      change_id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- A genuine conflict (both sides advanced the same entity's revision
+    -- since the last common sync point) is never resolved by picking a
+    -- winner automatically -- both versions are preserved here for the
+    -- user to resolve, and the local row is left exactly as it was.
+    CREATE TABLE IF NOT EXISTS sync_conflicts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type TEXT NOT NULL,
+      entity_sync_id TEXT NOT NULL,
+      local_payload TEXT NOT NULL,
+      incoming_payload TEXT NOT NULL,
+      detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      resolved_at TEXT,
+      resolution TEXT CHECK (resolution IS NULL OR resolution IN ('kept_local', 'kept_incoming', 'merged'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(entity_sync_id) WHERE resolved_at IS NULL;
+  `);
+
   migratePlaintextSecretSettings();
+}
+
+// Appends one durable change-journal entry. Called from every real
+// planner_task/planner_task_event mutation path (see applyPlannerTaskFields
+// and the two creation routes in server/index.js) -- never invoked twice for
+// the same logical change, since change_id is generated once by the caller
+// and this insert is idempotent (OR IGNORE) against a retry.
+export function recordSyncOutboxEntry({ entityType, entitySyncId, op, payload, revision, deviceId, userId, changeId = crypto.randomUUID() }) {
+  db.prepare(`
+    INSERT OR IGNORE INTO sync_outbox (change_id, entity_type, entity_sync_id, op, payload, revision, device_id, user_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(changeId, entityType, entitySyncId, op, payload === undefined ? null : JSON.stringify(payload), revision, deviceId || 'desktop', userId);
 }
 
 export function getSetting(key, fallback = null) {
