@@ -342,7 +342,13 @@ function asksAboutPastConversation(message) {
   return /\b(?:what did i say|what have i (?:said|told)|previously|earlier|last time|a moment ago|we (?:discuss|talked|spoke|said)|i (?:mentioned|already (?:said|told)|said earlier))\b/i.test(String(message || ''));
 }
 
-export function sourceRegistry(db, { includeHistory = false, includeCandidates = false, repoRoot = '' } = {}) {
+// userId defaults to the fixed local user (1): every real per-request caller
+// (Chat's buildConversationPrompt, /api/chat/answerability) always passes
+// the actual authenticated req.userId explicitly, so this default is only
+// ever exercised by desktop-only diagnostics and tests that have no per-
+// request identity of their own -- for those, it reproduces the exact
+// pre-multi-user behavior rather than silently going empty.
+export function sourceRegistry(db, { includeHistory = false, includeCandidates = false, repoRoot = '', userId = 1 } = {}) {
   const records = [];
   const active = includeHistory ? '' : "AND status NOT IN ('archived','deprecated','superseded')";
   for (const item of db.prepare(`SELECT * FROM knowledge_items WHERE 1=1 ${active}`).all()) {
@@ -369,11 +375,17 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
     records.push({ canonicalId: `project:${project.id}`, category: 'project', title: project.name, text: `${project.name}\n${project.next_action || ''}\n${project.evidence || ''}`,
       timestamp: project.created_at, updatedAt: project.updated_at || project.created_at, sensitivity: 'personal', chatReadable: true, chatProposable: false, state: 'approved', source: project.source || 'Workboard', provenance: project.evidence || '', record: project, sourceType: SOURCE_TYPES.WORKBOARD });
   }
+  // Scoped to userId so a hosted multi-user deployment never pulls another
+  // tester's saved Chat turns into this user's retrieval context. Every real
+  // per-request caller passes the actual authenticated req.userId; the
+  // default above (1) only ever applies to desktop-only diagnostics/tests
+  // that have no per-request identity, reproducing prior single-user
+  // behavior rather than a cross-tester leak.
   for (const message of db.prepare(`SELECT m.*, s.title AS session_title,
     EXISTS(SELECT 1 FROM chat_cloud_checks cc
       WHERE cc.status = 'blocked' AND (cc.user_message_id = m.id OR cc.assistant_message_id = m.id)) AS cloud_egress_blocked
     FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id
-    WHERE s.deleted = 0 AND m.role='user' ORDER BY m.created_at DESC LIMIT 200`).all()) {
+    WHERE s.deleted = 0 AND m.role='user' AND s.user_id = ? ORDER BY m.created_at DESC LIMIT 200`).all(userId)) {
     if (message.cloud_egress_blocked || SENSITIVE_CHAT_HISTORY.test(String(message.content || ''))) continue;
     const evidenceEligible = !isUserQuestionOrRequestTurn(message.content);
     records.push({ canonicalId: `chat:${message.id}`, category: 'conversation history', title: message.session_title || 'Chat', text: message.content,
@@ -405,9 +417,9 @@ export function sourceRegistry(db, { includeHistory = false, includeCandidates =
   return records;
 }
 
-export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', repoRoot = '' } = {}) {
+export function personalKnowledgeCoverage(db, { dbPath = '', userDataPath = '', repoRoot = '', userId = 1 } = {}) {
   const count = (sql, params = []) => Number(db.prepare(sql).get(...params)?.count || 0);
-  const registry = sourceRegistry(db, { repoRoot });
+  const registry = sourceRegistry(db, { repoRoot, userId });
   const retrievableRegistry = registry.filter((record) => record.chatReadable && record.evidenceEligible !== false);
   const retrievableByCategory = Object.fromEntries([...new Set(retrievableRegistry.map((record) => record.category))]
     .sort()

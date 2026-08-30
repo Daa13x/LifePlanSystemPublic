@@ -11,6 +11,7 @@ import { execFileWithTreeAbort } from './processTree.js';
 // SQLite connection is opened.
 import './restoreBootstrap.js';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
+import { LOCAL_USER_ID, loginUser, MULTI_USER, registerUser, requireAuth } from './auth.js';
 import { evaluateMutationGuard, isMutation, originAllowed } from './mutationGuard.js';
 import { proposeConfirmation, confirmAndApply, getConfirmation, recoverInterruptedConfirmations } from './confirmations.js';
 import {
@@ -661,11 +662,17 @@ function mutationTokenMatches(supplied) {
 // free CORS grant is the narrowest correct scope here.
 app.use((req, res, next) => {
   const origin = req.get('Origin');
-  if (origin && originAllowed(origin)) {
+  // Hosted (LIFE_PLANNER_MULTI_USER) mode has no loopback origin to check
+  // against -- the real client is a Capacitor app talking to a remote host.
+  // This is still safe to open widely because the app never uses cookies:
+  // the bearer token in requireAuth() below is the actual credential, and a
+  // browser never attaches an Authorization header to a cross-origin request
+  // on another site's behalf the way it would a cookie.
+  if (origin && (MULTI_USER || originAllowed(origin))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-LPS-CSRF, X-LPS-Idempotency-Key');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-LPS-CSRF, X-LPS-Idempotency-Key, Authorization');
     if (req.method === 'OPTIONS') return res.status(204).end();
   }
   return next();
@@ -679,6 +686,10 @@ app.use((req, res, next) => {
 // they never echo the expected token, the supplied value, or internal details.
 app.use((req, res, next) => {
   if (!isMutation(req.method)) return next();
+  // Hosted mode has no loopback host/origin to validate, and no cookies to
+  // forge a request with -- requireAuth() below (a real bearer token) is the
+  // actual mutation credential there, not this loopback-only CSRF guard.
+  if (MULTI_USER) return next();
 
   // Extension connector routes are protected by their own timing-safe token. A
   // valid token exempts the request from the CSRF check; a missing/invalid one
@@ -707,6 +718,31 @@ app.use((req, res, next) => {
   }
   return next();
 });
+
+// Per-user identity for the hosted Closed Beta deployment. On desktop
+// (LIFE_PLANNER_MULTI_USER unset) this is a no-op: every request is silently
+// attributed to the same fixed local user, exactly as before this existed.
+app.use(requireAuth(db));
+
+app.post('/api/auth/register', (req, res) => {
+  try {
+    const { token, userId } = registerUser(db, req.body?.username, req.body?.password);
+    ok(res, { token, userId });
+  } catch (error) {
+    fail(res, error.status || 400, error.message);
+  }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const { token, userId } = loginUser(db, req.body?.username, req.body?.password);
+    ok(res, { token, userId });
+  } catch (error) {
+    fail(res, error.status || 400, error.message);
+  }
+});
+
+app.get('/api/auth/me', (req, res) => ok(res, { userId: req.userId, multiUser: MULTI_USER }));
 
 function chromeExecutablePath() {
   if (process.platform !== 'win32') return '';
@@ -1717,7 +1753,7 @@ async function buildConversationPrompt(sessionId, userMessage) {
   const hasFiles = files.length > 0;
   const grounded = shouldGroundConversationInLocalKnowledge(userMessage);
   const retrieved = grounded
-    ? retrieveLocalKnowledge(db, userMessage, { repoRoot: root, limit: 6, budget: 3600 })
+    ? retrieveLocalKnowledge(db, userMessage, { repoRoot: root, limit: 6, budget: 3600, userId: row('SELECT user_id FROM chat_sessions WHERE id = ?', [sessionId])?.user_id })
     : { items: [] };
   // Local-first: this decides only AFTER local retrieval whether local knowledge
   // sufficed and, when it did not and policy permits, whether a reviewed cloud
@@ -2411,13 +2447,13 @@ app.get('/api/runtime-diagnostics', (_req, res) => ok(res, runtimeDiagnostics())
 // the X-LPS-CSRF header on every state-changing request.
 app.get('/api/csrf-token', (_req, res) => ok(res, { token: MUTATION_TOKEN }));
 
-app.get('/api/bootstrap', async (_req, res) => {
+app.get('/api/bootstrap', async (req, res) => {
   ok(res, {
     settings: readSettingsRedacted(),
     build: readBuildInfo(),
     runtimeDiagnostics: runtimeDiagnostics(),
     planner: await plannerData(),
-    sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC'),
+    sessions: allRows('SELECT * FROM chat_sessions WHERE deleted = 0 AND user_id = ? ORDER BY pinned DESC, updated_at DESC', [req.userId]),
     projects: allRows('SELECT * FROM projects ORDER BY updated_at DESC'),
     models: modelsWithExists()
   });
@@ -3031,9 +3067,18 @@ function runPlannerMutation(req, route, request, execute) {
   return runIdempotent({ db, transaction, route, key, requestHash: hashRequest(request), execute });
 }
 
-function plannerDayData() {
+// The chat-capability gateway (chatCapabilities.js's `planner.today`) has no
+// per-request user identity of its own yet -- unlike the direct HTTP routes
+// above, which always pass req.userId. Defaulting to LOCAL_USER_ID here keeps
+// that capability's existing single-user behavior exactly as it was before
+// multi-user support existed, rather than silently returning nothing; it is
+// only reachable from the desktop's own capability gateway today (hidden
+// from the mobile nav), so this is an accepted, narrower residual gap, not a
+// cross-tester disclosure of the mobile Today view (which always passes a
+// real, authenticated req.userId).
+function plannerDayData(userId = LOCAL_USER_ID) {
   const mode = currentCapacityMode();
-  const tasks = allRows("SELECT * FROM planner_tasks WHERE status = 'active' ORDER BY updated_at DESC").map(plannerTaskToEngine);
+  const tasks = allRows("SELECT * FROM planner_tasks WHERE status = 'active' AND user_id = ? ORDER BY updated_at DESC", [userId]).map(plannerTaskToEngine);
   const recentlyCompleted = allRows(`
     SELECT t.*,
       EXISTS(SELECT 1 FROM planner_task_events e WHERE e.task_id = t.id AND e.event_type = 'completed') AS completion_history_available,
@@ -3046,14 +3091,14 @@ function plannerDayData() {
           AND NOT EXISTS (SELECT 1 FROM planner_task_evidence n WHERE n.record_type = 'attached' AND n.supersedes_evidence_id = pe.id)
       ) AS supporting_evidence_count
     FROM planner_tasks t
-    WHERE t.status = 'completed'
+    WHERE t.status = 'completed' AND t.user_id = ?
     ORDER BY unixepoch(t.completed_at) DESC, unixepoch(t.updated_at) DESC, t.id DESC
     LIMIT 5
-  `).map(plannerTaskToEngine);
+  `, [userId]).map(plannerTaskToEngine);
   return { mode, modes: CAPACITY_MODES, ...planDay(tasks, mode), recentlyCompleted };
 }
 
-app.get('/api/planner/day', (_req, res) => ok(res, plannerDayData()));
+app.get('/api/planner/day', (req, res) => ok(res, plannerDayData(req.userId)));
 
 app.get('/api/planner/capacity', (_req, res) => ok(res, { mode: currentCapacityMode(), modes: CAPACITY_MODES }));
 
@@ -3064,18 +3109,19 @@ app.post('/api/planner/capacity', (req, res) => {
   ok(res, { mode: requested, modes: CAPACITY_MODES });
 });
 
-app.get('/api/planner/tasks', (_req, res) => ok(res, allRows('SELECT * FROM planner_tasks ORDER BY status, updated_at DESC')));
+app.get('/api/planner/tasks', (req, res) => ok(res, allRows('SELECT * FROM planner_tasks WHERE user_id = ? ORDER BY status, updated_at DESC', [req.userId])));
 
 app.post('/api/planner/tasks', (req, res) => {
   const fields = readPlannerTaskFields(req.body);
   if (!fields.title) return fail(res, 400, 'A task title is required.');
+  fields.user_id = req.userId;
   const columns = Object.keys(fields);
   const id = db.prepare(`INSERT INTO planner_tasks (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).run(...Object.values(fields)).lastInsertRowid;
   ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [id]));
 });
 
 app.patch('/api/planner/tasks/:id', (req, res) => {
-  const existing = row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]);
+  const existing = row('SELECT * FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
   if (!existing) return fail(res, 404, 'Task not found.');
   const fields = readPlannerTaskFields(req.body);
   if (typeof req.body?.pinned === 'boolean') fields.pinned = req.body.pinned ? 1 : 0;
@@ -3098,7 +3144,7 @@ app.patch('/api/planner/tasks/:id', (req, res) => {
 });
 
 app.post('/api/planner/tasks/:id/complete', (req, res) => {
-  const existing = row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]);
+  const existing = row('SELECT * FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
   if (!existing) return fail(res, 404, 'Task not found.');
   try {
     const result = runPlannerMutation(req, `/api/planner/tasks/${existing.id}/complete`, { id: existing.id, status: 'completed' }, () => {
@@ -3114,14 +3160,14 @@ app.post('/api/planner/tasks/:id/complete', (req, res) => {
 });
 
 app.post('/api/planner/tasks/:id/pin', (req, res) => {
-  const existing = row('SELECT pinned FROM planner_tasks WHERE id = ?', [req.params.id]);
+  const existing = row('SELECT pinned FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
   if (!existing) return fail(res, 404, 'Task not found.');
   db.prepare('UPDATE planner_tasks SET pinned = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(existing.pinned ? 0 : 1, req.params.id);
   ok(res, row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]));
 });
 
 app.post('/api/planner/tasks/:id/defer', (req, res) => {
-  const existing = row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]);
+  const existing = row('SELECT * FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
   if (!existing) return fail(res, 404, 'Task not found.');
   try {
     const result = runPlannerMutation(req, `/api/planner/tasks/${existing.id}/defer`, { id: existing.id, status: 'deferred' }, () => {
@@ -3137,7 +3183,7 @@ app.post('/api/planner/tasks/:id/defer', (req, res) => {
 });
 
 app.get('/api/planner/tasks/:id/events', (req, res) => {
-  if (!row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.id])) return fail(res, 404, 'Task not found.');
+  if (!row('SELECT id FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Task not found.');
   const latest = allRows(`SELECT e.id, e.event_type, e.from_status, e.to_status, e.actor, e.source, e.created_at,
       (SELECT COUNT(*) FROM planner_task_evidence pe
         WHERE pe.completion_event_id = e.id AND pe.record_type = 'attached'
@@ -3149,7 +3195,7 @@ app.get('/api/planner/tasks/:id/events', (req, res) => {
 });
 
 app.get('/api/planner/tasks/:id/evidence', (req, res) => {
-  if (!row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.id])) return fail(res, 404, 'Task not found.');
+  if (!row('SELECT id FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Task not found.');
   const beforeId = req.query.beforeId === undefined ? null : Number(req.query.beforeId);
   if (beforeId !== null && (!Number.isInteger(beforeId) || beforeId <= 0)) return fail(res, 400, 'Evidence cursor is invalid.');
   const rows = plannerEvidenceRows(req.params.id, { beforeId, limit: 51 });
@@ -3159,7 +3205,7 @@ app.get('/api/planner/tasks/:id/evidence', (req, res) => {
 });
 
 app.post('/api/planner/tasks/:id/evidence', (req, res) => {
-  const task = row('SELECT * FROM planner_tasks WHERE id = ?', [req.params.id]);
+  const task = row('SELECT * FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.id, req.userId]);
   if (!task) return fail(res, 404, 'Task not found.');
   const kind = String(req.body?.evidenceKind || '');
   if (!PLANNER_EVIDENCE_KINDS.has(kind)) return fail(res, 400, 'Evidence kind is invalid.');
@@ -3205,7 +3251,7 @@ app.post('/api/planner/tasks/:id/evidence', (req, res) => {
 });
 
 app.post('/api/planner/tasks/:taskId/evidence/:evidenceId/revoke', (req, res) => {
-  const task = row('SELECT id FROM planner_tasks WHERE id = ?', [req.params.taskId]);
+  const task = row('SELECT id FROM planner_tasks WHERE id = ? AND user_id = ?', [req.params.taskId, req.userId]);
   if (!task) return fail(res, 404, 'Task not found.');
   let reason;
   try {
@@ -3233,15 +3279,16 @@ app.post('/api/planner/tasks/:taskId/evidence/:evidenceId/revoke', (req, res) =>
   }
 });
 
-app.get('/api/chat/sessions', (_req, res) => ok(res, allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY pinned DESC, updated_at DESC')));
+app.get('/api/chat/sessions', (req, res) => ok(res, allRows('SELECT * FROM chat_sessions WHERE deleted = 0 AND user_id = ? ORDER BY pinned DESC, updated_at DESC', [req.userId])));
 
 app.post('/api/chat/sessions', (req, res) => {
   const title = req.body.title?.trim() || 'New session';
-  const id = db.prepare('INSERT INTO chat_sessions (title) VALUES (?)').run(title).lastInsertRowid;
+  const id = db.prepare('INSERT INTO chat_sessions (title, user_id) VALUES (?, ?)').run(title, req.userId).lastInsertRowid;
   ok(res, row('SELECT * FROM chat_sessions WHERE id = ?', [id]));
 });
 
 app.patch('/api/chat/sessions/:id', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Chat session not found.');
   const allowed = ['title', 'pinned', 'deleted'];
   const updates = Object.entries(req.body).filter(([key]) => allowed.includes(key));
   if (!updates.length) return fail(res, 400, 'No supported fields provided.');
@@ -3252,6 +3299,7 @@ app.patch('/api/chat/sessions/:id', (req, res) => {
 });
 
 app.get('/api/chat/sessions/:id/messages', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Chat session not found.');
   ok(res, allRows('SELECT * FROM chat_messages WHERE session_id = ? ORDER BY created_at ASC, id ASC', [req.params.id]));
 });
 
@@ -3260,7 +3308,7 @@ app.get('/api/chat/sessions/:id/messages', (req, res) => {
 // them, and does not create another pending candidate on a repeated click.
 app.post('/api/chat/sessions/:id/memory-candidate', (req, res) => {
   const sessionId = Number(req.params.id);
-  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [sessionId]);
+  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [sessionId, req.userId]);
   if (!session) return fail(res, 404, 'Chat session not found.');
   const existing = row(`SELECT * FROM memory_candidates
     WHERE session_id = ? AND source = 'chat session sync' AND status IN ('candidate', 'deferred', 'processing')
@@ -3283,11 +3331,12 @@ app.post('/api/chat/sessions/:id/memory-candidate', (req, res) => {
 });
 
 app.get('/api/chat/sessions/:id/context', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Session not found.');
   ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
 });
 
 app.post('/api/chat/sessions/:id/context', (req, res) => {
-  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
+  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [req.params.id, req.userId]);
   if (!session) return fail(res, 404, 'Session not found.');
   try {
     const target = safeExistingWorkspaceFile(req.body.path);
@@ -3305,6 +3354,7 @@ app.post('/api/chat/sessions/:id/context', (req, res) => {
 });
 
 app.delete('/api/chat/sessions/:id/context/:contextId', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Session not found.');
   db.prepare('DELETE FROM chat_context_files WHERE id = ? AND session_id = ?').run(req.params.contextId, req.params.id);
   ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
 });
@@ -3382,7 +3432,7 @@ function replayedChatResult(claim) {
 app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   const content = req.body.content?.trim();
   if (!content) return fail(res, 400, 'Message content is required.');
-  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
+  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [req.params.id, req.userId]);
   if (!session) return fail(res, 404, 'Session not found.');
   const sessionId = Number(req.params.id);
   let claim;
@@ -3422,7 +3472,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
 app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   const content = req.body.content?.trim();
   if (!content) return fail(res, 400, 'Message content is required.');
-  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0', [req.params.id]);
+  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [req.params.id, req.userId]);
   if (!session) return fail(res, 404, 'Session not found.');
   const sessionId = Number(req.params.id);
   let claim;
@@ -3483,6 +3533,7 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
 });
 
 app.post('/api/chat/sessions/:id/cancel', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Session not found.');
   const sessionId = Number(req.params.id);
   const durable = chatSendCoordinator.requestCancel(sessionId);
   const active = activeChatGenerations.get(String(req.params.id));
@@ -3533,14 +3584,14 @@ const CHAT_PROJECT_CREATE_OPERATION = 'project.create';
 const CHAT_FEEDBACK_TRIAGE_ACTION = 'feedback.propose_triage';
 const CHAT_FEEDBACK_TRIAGE_OPERATION = 'feedback.triage';
 
-function realChatSessionId(value) {
+function realChatSessionId(value, userId) {
   const sessionId = Number(value);
   if (!Number.isInteger(sessionId) || sessionId <= 0) return null;
-  return db.prepare('SELECT 1 FROM chat_sessions WHERE id = ? AND deleted = 0').get(sessionId) ? sessionId : null;
+  return db.prepare('SELECT 1 FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?').get(sessionId, userId) ? sessionId : null;
 }
 
-function requireSessionScopedAction(actionId, sessionValue) {
-  if (!['workboard.read', 'conversation.search', 'planner.today'].includes(actionId) || realChatSessionId(sessionValue)) return null;
+function requireSessionScopedAction(actionId, sessionValue, userId) {
+  if (!['workboard.read', 'conversation.search', 'planner.today'].includes(actionId) || realChatSessionId(sessionValue, userId)) return null;
   const correlationId = crypto.randomUUID();
   const historySearch = actionId === 'conversation.search';
   const plannerToday = actionId === 'planner.today';
@@ -3584,9 +3635,9 @@ function readWorkboardCreateOrigin(value) {
   }
 }
 
-function bindWorkboardCreateConfirmation(sessionValue, result) {
+function bindWorkboardCreateConfirmation(sessionValue, result, userId) {
   if (result?.actionId !== CHAT_WORKBOARD_CREATE_ACTION || result.status !== 'needs_confirmation') return result;
-  const sessionId = realChatSessionId(sessionValue);
+  const sessionId = realChatSessionId(sessionValue, userId);
   if (!sessionId) {
     const error = new Error('A valid active chat session is required to stage a Workboard proposal.');
     error.code = 'INVALID_CHAT_SESSION';
@@ -3643,9 +3694,9 @@ function readProjectCreateOrigin(value) {
   }
 }
 
-function bindProjectCreateConfirmation(sessionValue, result) {
+function bindProjectCreateConfirmation(sessionValue, result, userId) {
   if (result?.actionId !== CHAT_PROJECT_CREATE_ACTION || result.status !== 'needs_confirmation') return result;
-  const sessionId = realChatSessionId(sessionValue);
+  const sessionId = realChatSessionId(sessionValue, userId);
   if (!sessionId) {
     const error = new Error('A valid active chat session is required to stage a Workboard card proposal.');
     error.code = 'INVALID_CHAT_SESSION';
@@ -3711,9 +3762,9 @@ function readCodingTaskOrigin(value) {
   }
 }
 
-function bindCodingTaskConfirmation(sessionValue, result) {
+function bindCodingTaskConfirmation(sessionValue, result, userId) {
   if (result?.actionId !== CHAT_CODING_TASK_ACTION || result.status !== 'needs_confirmation') return result;
-  const sessionId = realChatSessionId(sessionValue);
+  const sessionId = realChatSessionId(sessionValue, userId);
   if (!sessionId) {
     const error = new Error('A valid active chat session is required to stage a coding-task proposal.');
     error.code = 'INVALID_CHAT_SESSION';
@@ -3778,9 +3829,9 @@ function readPlannerCreateOrigin(value) {
   }
 }
 
-function bindPlannerCreateConfirmation(sessionValue, result) {
+function bindPlannerCreateConfirmation(sessionValue, result, userId) {
   if (result?.actionId !== CHAT_PLANNER_CREATE_ACTION || result.status !== 'needs_confirmation') return result;
-  const sessionId = realChatSessionId(sessionValue);
+  const sessionId = realChatSessionId(sessionValue, userId);
   if (!sessionId) {
     const error = new Error('A valid active chat session is required to stage a Planner proposal.');
     error.code = 'INVALID_CHAT_SESSION';
@@ -3806,8 +3857,8 @@ function bindPlannerCreateConfirmation(sessionValue, result) {
   };
 }
 
-function readPlannerTaskRecord(id) {
-  return row('SELECT * FROM planner_tasks WHERE id = ?', [id]);
+function readPlannerTaskRecord(id, userId = LOCAL_USER_ID) {
+  return row('SELECT * FROM planner_tasks WHERE id = ? AND user_id = ?', [id, userId]);
 }
 
 // Validate the immutable stored update payload: exactly an {identity, changes} pair
@@ -3834,9 +3885,9 @@ function readPlannerUpdateOrigin(value) {
   }
 }
 
-function bindPlannerUpdateConfirmation(sessionValue, result) {
+function bindPlannerUpdateConfirmation(sessionValue, result, userId) {
   if (result?.actionId !== CHAT_PLANNER_UPDATE_ACTION || result.status !== 'needs_confirmation') return result;
-  const sessionId = realChatSessionId(sessionValue);
+  const sessionId = realChatSessionId(sessionValue, userId);
   if (!sessionId) {
     const error = new Error('A valid active chat session is required to stage a Planner update.');
     error.code = 'INVALID_CHAT_SESSION';
@@ -3846,7 +3897,7 @@ function bindPlannerUpdateConfirmation(sessionValue, result) {
   }
   const identity = result.data?.target;
   if (!identity || identity.type !== 'planner_task' || !Number.isInteger(identity.id) || identity.id <= 0) throw new Error('The Planner update returned an invalid target.');
-  const current = readPlannerTaskRecord(identity.id);
+  const current = readPlannerTaskRecord(identity.id, userId);
   if (!current) {
     const error = new Error('The Planner task is no longer available.');
     error.code = 'PLANNER_TARGET_UNAVAILABLE';
@@ -3906,9 +3957,9 @@ function readWorkboardUpdateOrigin(value) {
   }
 }
 
-function bindWorkboardUpdateConfirmation(sessionValue, result) {
+function bindWorkboardUpdateConfirmation(sessionValue, result, userId) {
   if (result?.actionId !== CHAT_WORKBOARD_UPDATE_ACTION || result.status !== 'needs_confirmation') return result;
-  const sessionId = realChatSessionId(sessionValue);
+  const sessionId = realChatSessionId(sessionValue, userId);
   if (!sessionId) {
     const error = new Error('A valid active chat session is required to stage a Workboard update.');
     error.code = 'INVALID_CHAT_SESSION';
@@ -3950,8 +4001,8 @@ function bindWorkboardUpdateConfirmation(sessionValue, result) {
   return { ...result, confirmation: { confirmationId: confirmation.id, token: confirmation.token, expiresAt: confirmation.expiresAt } };
 }
 
-function bindWorkboardConfirmation(sessionValue, result) {
-  return bindWorkboardUpdateConfirmation(sessionValue, bindWorkboardCreateConfirmation(sessionValue, result));
+function bindWorkboardConfirmation(sessionValue, result, userId) {
+  return bindWorkboardUpdateConfirmation(sessionValue, bindWorkboardCreateConfirmation(sessionValue, result, userId), userId);
 }
 
 function canonicalFeedbackTriageConfirmationState(value) {
@@ -3976,9 +4027,9 @@ function readFeedbackTriageOrigin(value) {
   }
 }
 
-function bindFeedbackTriageConfirmation(sessionValue, result) {
+function bindFeedbackTriageConfirmation(sessionValue, result, userId) {
   if (result?.actionId !== CHAT_FEEDBACK_TRIAGE_ACTION || result.status !== 'needs_confirmation') return result;
-  const sessionId = realChatSessionId(sessionValue);
+  const sessionId = realChatSessionId(sessionValue, userId);
   if (!sessionId) {
     const error = new Error('A valid active chat session is required to stage a feedback triage.');
     error.code = 'INVALID_CHAT_SESSION';
@@ -4199,15 +4250,15 @@ const capabilityRegistry = createCapabilityRegistry({
     runs.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     return runs.slice(0, limit);
   },
-  searchConversations({ query, limit }) {
+  searchConversations({ query, limit, userId }) {
     const like = likeParam(query);
-    return allRows("SELECT m.session_id, s.title AS session_title, m.role, m.content, m.created_at FROM chat_messages m JOIN chat_sessions s ON s.id = m.session_id AND s.deleted = 0 WHERE m.content LIKE ? ESCAPE '\\' ORDER BY m.id DESC LIMIT ?", [like, Math.min(limit * 2, 40)]);
+    return allRows("SELECT m.session_id, s.title AS session_title, m.role, m.content, m.created_at FROM chat_messages m JOIN chat_sessions s ON s.id = m.session_id AND s.deleted = 0 WHERE m.content LIKE ? ESCAPE '\\' AND s.user_id = ? ORDER BY m.id DESC LIMIT ?", [like, userId, Math.min(limit * 2, 40)]);
   },
-  plannerToday() {
-    return plannerDayData();
+  plannerToday(userId) {
+    return plannerDayData(userId);
   },
-  readPlannerTask({ id }) {
-    return readPlannerTaskRecord(id);
+  readPlannerTask({ id, userId }) {
+    return readPlannerTaskRecord(id, userId);
   },
   // Same authoritative refresh owner the direct HTTP route uses -- no
   // duplicated business logic. refreshPlannerState() conditionally stages one
@@ -4256,13 +4307,18 @@ app.post('/api/actions/:id/invoke', async (req, res) => {
   const sessionId = Number(req.body?.session_id) || null;
   let result = null;
   try {
-    const sessionBlock = requireSessionScopedAction(req.params.id, sessionId);
+    const sessionBlock = requireSessionScopedAction(req.params.id, sessionId, req.userId);
     if (sessionBlock) {
       writeChatAudit(sessionId, sessionBlock.actionId, sessionBlock.status, sessionBlock.error.code, sessionBlock.correlationId);
       return ok(res, sessionBlock);
     }
-    result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui', renderer: extractRendererBinding(req.body) });
-    result = bindFeedbackTriageConfirmation(sessionId, bindCodingTaskConfirmation(sessionId, bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result))))));
+    result = await capabilityRegistry.execute(req.params.id, req.body?.args, { caller: 'human-ui', renderer: extractRendererBinding(req.body), userId: req.userId });
+    result = bindWorkboardConfirmation(sessionId, result, req.userId);
+    result = bindPlannerCreateConfirmation(sessionId, result, req.userId);
+    result = bindPlannerUpdateConfirmation(sessionId, result, req.userId);
+    result = bindProjectCreateConfirmation(sessionId, result, req.userId);
+    result = bindCodingTaskConfirmation(sessionId, result, req.userId);
+    result = bindFeedbackTriageConfirmation(sessionId, result, req.userId);
     const confirmationCreated = Boolean(result.confirmation);
     writeChatAudit(
       sessionId,
@@ -4291,13 +4347,18 @@ app.post('/api/chat/capability', async (req, res) => {
   const name = String(req.body?.name || '');
   const sessionId = Number(req.body?.session_id) || null;
   try {
-    const sessionBlock = requireSessionScopedAction(name, sessionId);
+    const sessionBlock = requireSessionScopedAction(name, sessionId, req.userId);
     if (sessionBlock) {
       writeChatAudit(sessionId, sessionBlock.actionId, sessionBlock.status, sessionBlock.error.code, sessionBlock.correlationId);
       return ok(res, sessionBlock);
     }
-    let result = await capabilityRegistry.invoke(name, req.body?.args || {}, { renderer: extractRendererBinding(req.body) });
-    result = bindFeedbackTriageConfirmation(sessionId, bindCodingTaskConfirmation(sessionId, bindProjectCreateConfirmation(sessionId, bindPlannerUpdateConfirmation(sessionId, bindPlannerCreateConfirmation(sessionId, bindWorkboardConfirmation(sessionId, result))))));
+    let result = await capabilityRegistry.invoke(name, req.body?.args || {}, { renderer: extractRendererBinding(req.body), userId: req.userId });
+    result = bindWorkboardConfirmation(sessionId, result, req.userId);
+    result = bindPlannerCreateConfirmation(sessionId, result, req.userId);
+    result = bindPlannerUpdateConfirmation(sessionId, result, req.userId);
+    result = bindProjectCreateConfirmation(sessionId, result, req.userId);
+    result = bindCodingTaskConfirmation(sessionId, result, req.userId);
+    result = bindFeedbackTriageConfirmation(sessionId, result, req.userId);
     writeChatAudit(sessionId, name, result.confirmation ? 'proposed' : result.status, result.confirmation ? 'confirmation_created' : result.readOnly ? 'read' : 'proposal', result.correlationId);
     ok(res, result);
   } catch (error) {
@@ -4490,10 +4551,12 @@ app.post('/api/renderer/:rendererId/unregister', (req, res) => {
 });
 
 app.get('/api/chat/sessions/:id/context-records', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Session not found.');
   ok(res, allRows('SELECT * FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
 });
 
 app.post('/api/chat/sessions/:id/context-records', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Session not found.');
   const kind = String(req.body?.kind || '');
   const refId = Number(req.body?.ref_id);
   if (!['knowledge-item', 'knowledge-candidate', 'workboard-project', 'workboard-item', 'workboard-roadmap', 'workboard-approval', 'workboard-candidate'].includes(kind)) return fail(res, 400, 'Unsupported context kind.');
@@ -4507,6 +4570,7 @@ app.post('/api/chat/sessions/:id/context-records', (req, res) => {
 });
 
 app.delete('/api/chat/sessions/:id/context-records/:recordId', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Session not found.');
   db.prepare('DELETE FROM chat_context_records WHERE id = ? AND session_id = ?').run(req.params.recordId, req.params.id);
   writeChatAudit(Number(req.params.id), 'context.remove', 'ok', String(req.params.recordId));
   ok(res, allRows('SELECT * FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
@@ -4521,7 +4585,7 @@ app.post('/api/chat/sessions/:id/workboard/confirm', async (req, res) => {
   const keys = Object.keys(body).sort();
   let auditOperation = 'workboard.confirm';
   try {
-    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (!realChatSessionId(sessionId, req.userId)) return fail(res, 404, 'Chat session not found.');
     if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
       writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
       return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
@@ -4608,7 +4672,7 @@ app.post('/api/chat/sessions/:id/feedback/confirm', async (req, res) => {
   const keys = Object.keys(body).sort();
   let auditOperation = 'feedback.confirm';
   try {
-    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (!realChatSessionId(sessionId, req.userId)) return fail(res, 404, 'Chat session not found.');
     if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
       writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
       return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
@@ -4676,7 +4740,7 @@ app.post('/api/chat/sessions/:id/project/confirm', async (req, res) => {
   const keys = Object.keys(body).sort();
   let auditOperation = 'project.confirm';
   try {
-    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (!realChatSessionId(sessionId, req.userId)) return fail(res, 404, 'Chat session not found.');
     if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
       writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
       return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
@@ -4736,7 +4800,7 @@ app.post('/api/chat/sessions/:id/coding/confirm', async (req, res) => {
   const keys = Object.keys(body).sort();
   let auditOperation = 'coding.confirm';
   try {
-    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (!realChatSessionId(sessionId, req.userId)) return fail(res, 404, 'Chat session not found.');
     if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
       writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
       return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
@@ -4809,7 +4873,7 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
   const keys = Object.keys(body).sort();
   let auditOperation = 'planner.confirm';
   try {
-    if (!realChatSessionId(sessionId)) return fail(res, 404, 'Chat session not found.');
+    if (!realChatSessionId(sessionId, req.userId)) return fail(res, 404, 'Chat session not found.');
     if (keys.length !== 2 || keys[0] !== 'confirmationId' || keys[1] !== 'token') {
       writeChatAudit(sessionId, auditOperation, 'blocked', 'INVALID_CONFIRMATION_ENVELOPE');
       return fail(res, 400, 'Only a confirmation identifier and token are accepted.');
@@ -4835,14 +4899,14 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
     }
     const applyCreate = (claimed) => {
       const p = canonicalPlannerCreateState(claimed.afterState);
-      const id = db.prepare(`INSERT INTO planner_tasks (title, why, next_action, importance, effort, estimated_minutes, deadline)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .run(p.title, p.why, p.next_action, p.importance, p.effort, p.estimated_minutes, p.deadline).lastInsertRowid;
+      const id = db.prepare(`INSERT INTO planner_tasks (title, why, next_action, importance, effort, estimated_minutes, deadline, user_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(p.title, p.why, p.next_action, p.importance, p.effort, p.estimated_minutes, p.deadline, req.userId).lastInsertRowid;
       return { operation: CHAT_PLANNER_CREATE_OPERATION, success: true, record: row('SELECT * FROM planner_tasks WHERE id = ?', [id]) };
     };
     const applyUpdate = (claimed) => {
       const proposal = canonicalPlannerUpdateConfirmationState(claimed.afterState);
-      const live = readPlannerTaskRecord(proposal.identity.id);
+      const live = readPlannerTaskRecord(proposal.identity.id, req.userId);
       const liveState = live ? canonicalPlannerTaskState(live) : null;
       if (!liveState || JSON.stringify(liveState) !== JSON.stringify(claimed.beforeState)) {
         const error = new Error('The task changed after this confirmation was created. Review it again.');
@@ -4858,7 +4922,7 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
     };
     const revalidateUpdate = (confirmation) => {
       const proposal = canonicalPlannerUpdateConfirmationState(confirmation.afterState);
-      const current = readPlannerTaskRecord(proposal.identity.id);
+      const current = readPlannerTaskRecord(proposal.identity.id, req.userId);
       return current ? canonicalPlannerTaskState(current) : null;
     };
     const applied = await confirmAndApply(
@@ -4881,11 +4945,12 @@ app.post('/api/chat/sessions/:id/planner/confirm', async (req, res) => {
 
 app.get('/api/chat/sessions/:id/connection', async (req, res) => {
   const sessionId = Number(req.params.id);
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [sessionId, req.userId])) return fail(res, 404, 'Session not found.');
   const activeChatSend = chatSendCoordinator.active(sessionId);
   const model = await localModelStatus();
   const contextRecords = allRows('SELECT id, kind, ref_id, label FROM chat_context_records WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
   const files = allRows('SELECT id, path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
-  const available = sourceRegistry(db, { repoRoot: root }).filter((record) => record.chatReadable && record.evidenceEligible !== false);
+  const available = sourceRegistry(db, { repoRoot: root, userId: req.userId }).filter((record) => record.chatReadable && record.evidenceEligible !== false);
   const availableByCategory = Object.fromEntries([...new Set(available.map((record) => record.category))].map((category) => [category, available.filter((record) => record.category === category).length]));
   ok(res, {
     conversationId: sessionId,
@@ -4912,6 +4977,7 @@ app.get('/api/chat/sessions/:id/connection', async (req, res) => {
 });
 
 app.get('/api/chat/sessions/:id/audit', (req, res) => {
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Session not found.');
   ok(res, allRows('SELECT * FROM chat_audit WHERE session_id = ? ORDER BY id DESC LIMIT 40', [req.params.id]));
 });
 
@@ -4982,6 +5048,7 @@ app.patch('/api/memory/candidates/:id', async (req, res) => {
 app.get('/api/chat/sessions/:id/cloud-checks', (req, res) => {
   const sessionId = Number(req.params.id);
   if (!Number.isSafeInteger(sessionId) || sessionId <= 0) return fail(res, 400, 'A valid chat session is required.');
+  if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [sessionId, req.userId])) return fail(res, 404, 'Session not found.');
   ok(res, allRows(`SELECT cc.*, c.prompt, c.external_response, c.target_agent, c.status AS consultation_status, c.created_at AS consultation_created_at
     FROM chat_cloud_checks cc JOIN consultations c ON c.id = cc.consultation_id
     WHERE cc.session_id = ? ORDER BY cc.created_at ASC, cc.id ASC`, [sessionId]));
@@ -5013,7 +5080,7 @@ app.get('/api/chat/answerability', (req, res) => {
   if (!question) return fail(res, 400, 'A question (q) is required.');
   const grounded = shouldGroundConversationInLocalKnowledge(question);
   const retrieved = grounded
-    ? retrieveLocalKnowledge(db, question, { repoRoot: root, limit: 6, budget: 3600 })
+    ? retrieveLocalKnowledge(db, question, { repoRoot: root, limit: 6, budget: 3600, userId: req.userId })
     : { items: [] };
   const assessment = assessLocalAnswerability(retrieved, { question, cloudPolicy: chatCloudPolicy() });
   ok(res, { grounded, question, localSourceCount: retrieved.items.length, ...assessment });
@@ -5039,7 +5106,7 @@ app.get('/api/cloud/accounts', (_req, res) => {
 app.post('/api/chat/sessions/:id/cloud-checks/preview', (req, res) => {
   try {
     const sessionId = Number(req.params.id);
-    const session = row('SELECT id FROM chat_sessions WHERE id = ? AND deleted = 0', [sessionId]);
+    const session = row('SELECT id FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [sessionId, req.userId]);
     if (!session) return fail(res, 404, 'Chat session not found.');
     const scope = req.body?.scope === 'full-conversation' ? 'full-conversation' : req.body?.scope === 'latest-turn' ? 'latest-turn' : null;
     if (!scope) return fail(res, 400, 'Cloud check scope must be latest-turn or full-conversation.');
@@ -5063,13 +5130,13 @@ app.post('/api/chat/sessions/:id/cloud-checks/preview', (req, res) => {
 app.post('/api/chat/sessions/:id/cloud-checks', (req, res) => {
   try {
     const sessionId = Number(req.params.id);
-    const session = row('SELECT id FROM chat_sessions WHERE id = ? AND deleted = 0', [sessionId]);
+    const session = row('SELECT id FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [sessionId, req.userId]);
     if (!session) return fail(res, 404, 'Chat session not found.');
     const scope = req.body?.scope === 'full-conversation' ? 'full-conversation' : req.body?.scope === 'latest-turn' ? 'latest-turn' : null;
     const provider = String(req.body?.provider || 'ChatGPT').trim();
     const idempotencyKey = String(req.body?.idempotency_key || '').trim();
     if (!scope || !Object.hasOwn(cloudAgentHosts, provider) || !/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey)) return fail(res, 400, 'Valid scope, provider, and idempotency key are required.');
-    const prior = row('SELECT * FROM chat_cloud_checks WHERE idempotency_key = ?', [idempotencyKey]);
+    const prior = row('SELECT cc.* FROM chat_cloud_checks cc JOIN chat_sessions s ON s.id = cc.session_id WHERE cc.idempotency_key = ? AND s.user_id = ?', [idempotencyKey, req.userId]);
     if (prior) return ok(res, { check: prior, reused: true });
     const model = cloudModelFor(provider, String(req.body?.model || '').trim());
     const instruction = String(req.body?.instruction || '').trim();
@@ -5094,7 +5161,7 @@ app.post('/api/chat/sessions/:id/cloud-checks', (req, res) => {
 });
 
 app.post('/api/chat/cloud-checks/:id/send', (req, res) => {
-  const check = row(`SELECT cc.*, c.prompt, c.target_agent FROM chat_cloud_checks cc JOIN consultations c ON c.id = cc.consultation_id WHERE cc.id = ?`, [req.params.id]);
+  const check = row(`SELECT cc.*, c.prompt, c.target_agent FROM chat_cloud_checks cc JOIN consultations c ON c.id = cc.consultation_id JOIN chat_sessions s ON s.id = cc.session_id WHERE cc.id = ? AND s.user_id = ?`, [req.params.id, req.userId]);
   if (!check) return fail(res, 404, 'Cloud check not found.');
   if (check.status === 'blocked') return fail(res, 409, 'This cloud check is blocked by the server privacy policy.');
   if (['sent', 'active', 'completed'].includes(check.status)) return ok(res, { check, reused: true });
@@ -5114,7 +5181,7 @@ app.post('/api/chat/cloud-checks/:id/send', (req, res) => {
 });
 
 app.post('/api/chat/cloud-checks/:id/cancel', (req, res) => {
-  const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [req.params.id]);
+  const check = row('SELECT cc.* FROM chat_cloud_checks cc JOIN chat_sessions s ON s.id = cc.session_id WHERE cc.id = ? AND s.user_id = ?', [req.params.id, req.userId]);
   if (!check) return fail(res, 404, 'Cloud check not found.');
   for (const job of browserAgentJobs.values()) if (job.chatCheckId === check.id && !['answered', 'blocked', 'error', 'cancelled'].includes(job.status)) {
     // Invalidate the connector lease so a late browser result is rejected at
@@ -5130,7 +5197,7 @@ app.post('/api/chat/cloud-checks/:id/cancel', (req, res) => {
 });
 
 app.post('/api/chat/cloud-checks/:id/retry', (req, res) => {
-  const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [req.params.id]);
+  const check = row('SELECT cc.* FROM chat_cloud_checks cc JOIN chat_sessions s ON s.id = cc.session_id WHERE cc.id = ? AND s.user_id = ?', [req.params.id, req.userId]);
   if (!check) return fail(res, 404, 'Cloud check not found.');
   if (!['failed', 'cancelled'].includes(check.status)) return fail(res, 409, 'Only failed or cancelled cloud checks can be retried.');
   db.prepare("UPDATE chat_cloud_checks SET status = 'prepared', error_detail = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(check.id);
@@ -5139,7 +5206,7 @@ app.post('/api/chat/cloud-checks/:id/retry', (req, res) => {
 });
 
 app.post('/api/chat/cloud-checks/:id/memory-candidate', (req, res) => {
-  const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [req.params.id]);
+  const check = row('SELECT cc.* FROM chat_cloud_checks cc JOIN chat_sessions s ON s.id = cc.session_id WHERE cc.id = ? AND s.user_id = ?', [req.params.id, req.userId]);
   if (!check) return fail(res, 404, 'Cloud check not found.');
   if (check.status !== 'completed' || !check.response) return fail(res, 409, 'Only a completed cloud response can be saved for review.');
   if (check.memory_candidate_id) return ok(res, { candidate: row('SELECT * FROM memory_candidates WHERE id = ?', [check.memory_candidate_id]), reused: true });
@@ -5155,7 +5222,7 @@ app.post('/api/chat/cloud-checks/:id/memory-candidate', (req, res) => {
 });
 
 app.post('/api/chat/cloud-checks/:id/guidance', (req, res) => {
-  const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [req.params.id]);
+  const check = row('SELECT cc.* FROM chat_cloud_checks cc JOIN chat_sessions s ON s.id = cc.session_id WHERE cc.id = ? AND s.user_id = ?', [req.params.id, req.userId]);
   if (!check) return fail(res, 404, 'Cloud check not found.');
   if (check.status !== 'completed' || !check.response) return fail(res, 409, 'Only completed cloud feedback can guide the next reply.');
   transaction(() => {
@@ -5166,14 +5233,14 @@ app.post('/api/chat/cloud-checks/:id/guidance', (req, res) => {
 });
 
 app.delete('/api/chat/cloud-checks/:id/guidance', (req, res) => {
-  const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [req.params.id]);
+  const check = row('SELECT cc.* FROM chat_cloud_checks cc JOIN chat_sessions s ON s.id = cc.session_id WHERE cc.id = ? AND s.user_id = ?', [req.params.id, req.userId]);
   if (!check) return fail(res, 404, 'Cloud check not found.');
   db.prepare('UPDATE chat_cloud_checks SET guidance_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(check.id);
   ok(res, { check: row('SELECT * FROM chat_cloud_checks WHERE id = ?', [check.id]) });
 });
 
 app.post('/api/chat/cloud-checks/:id/dismiss', (req, res) => {
-  const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [req.params.id]);
+  const check = row('SELECT cc.* FROM chat_cloud_checks cc JOIN chat_sessions s ON s.id = cc.session_id WHERE cc.id = ? AND s.user_id = ?', [req.params.id, req.userId]);
   if (!check) return fail(res, 404, 'Cloud check not found.');
   if (check.status !== 'completed') return fail(res, 409, 'Only completed cloud feedback can be dismissed.');
   db.prepare('UPDATE chat_cloud_checks SET guidance_active = 0, feedback_dismissed_at = COALESCE(feedback_dismissed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(check.id);
@@ -9798,15 +9865,20 @@ function requestedExportScope(req) {
   return scope;
 }
 
-function buildLifePlannerExport(scope = 'all') {
+function buildLifePlannerExport(scope = 'all', userId) {
   const include = (name) => scope === 'all' || scope === name;
   const data = { format: 'life-planner-portable-context', version: 1, exported_at: new Date().toISOString(), scope };
   if (include('projects')) data.projects = allRows('SELECT * FROM projects ORDER BY name');
   if (include('knowledge')) data.knowledge_items = allRows('SELECT * FROM knowledge_items ORDER BY type, title');
   if (include('roadmap')) data.roadmap_items = allRows('SELECT * FROM roadmap_items ORDER BY sort_order, id');
   if (include('chat')) {
-    data.chat_sessions = allRows('SELECT * FROM chat_sessions WHERE deleted = 0 ORDER BY updated_at DESC');
-    data.chat_messages = allRows('SELECT * FROM chat_messages ORDER BY session_id, created_at, id');
+    // Scoped to the requesting user: an export is a personal data-portability
+    // feature, never a whole-database dump across every hosted tester.
+    data.chat_sessions = allRows('SELECT * FROM chat_sessions WHERE deleted = 0 AND user_id = ? ORDER BY updated_at DESC', [userId]);
+    const sessionIds = data.chat_sessions.map((s) => s.id);
+    data.chat_messages = sessionIds.length
+      ? allRows(`SELECT * FROM chat_messages WHERE session_id IN (${sessionIds.map(() => '?').join(',')}) ORDER BY session_id, created_at, id`, sessionIds)
+      : [];
   }
   return data;
 }
@@ -9862,7 +9934,7 @@ app.get('/api/export/context.:format', async (req, res) => {
   let scope;
   try { scope = requestedExportScope(req); } catch (error) { return fail(res, 400, error.message); }
   const format = String(req.params.format || '').toLowerCase();
-  const data = buildLifePlannerExport(scope);
+  const data = buildLifePlannerExport(scope, req.userId);
   const baseName = `life-planner-${scope}-context`;
   if (format === 'json') {
     res.setHeader('Content-Disposition', `attachment; filename="${baseName}.json"`);
@@ -9941,6 +10013,10 @@ app.get('/api/export/json', (req, res) => {
   if (mode === 'public') {
     return fail(res, 409, 'Public export requires POST /api/export/public/preview followed by POST /api/export/public/confirm. Local context exports remain private to this device.');
   }
+  // A "backup" is a dump of the WHOLE shared database (every tester's chat,
+  // every setting) -- a desktop-owner administrative action, never a
+  // per-tester self-service one on a hosted multi-user deployment.
+  if (mode === 'backup' && MULTI_USER) return fail(res, 403, 'Full backup export is not available on a hosted multi-user deployment.');
   const data = {
     exported_at: new Date().toISOString(),
     mode,
@@ -10114,8 +10190,9 @@ async function warmManagedLlamaServerAtStartup() {
   }
 }
 
-app.listen(port, '127.0.0.1', () => {
-  console.log(`Life Planner running at http://127.0.0.1:${port}`);
+const listenHost = process.env.LIFE_PLANNER_HOST || '127.0.0.1';
+app.listen(port, listenHost, () => {
+  console.log(`Life Planner running at http://${listenHost}:${port}`);
   // Autonomous dev-task scan on startup, deferred so it never blocks boot, then
   // a light periodic re-scan. Dedupe keeps repeat runs from re-staging anything.
   setTimeout(() => runDevTaskScan('startup'), 1500);

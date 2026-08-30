@@ -868,8 +868,8 @@ export function createCapabilityRegistry(deps) {
         id: { type: 'id', required: true },
         changes: { type: 'object', required: true }
       },
-      async handler(args) {
-        const current = await dep('readPlannerTask')({ id: args.id });
+      async handler(args, context) {
+        const current = await dep('readPlannerTask')({ id: args.id, userId: context.userId });
         if (!current) throw new Error(`Planner task ${args.id} was not found.`);
         const state = canonicalPlannerTaskState(current);
         const changes = normalizePlannerTaskChanges(args.changes);
@@ -940,10 +940,10 @@ export function createCapabilityRegistry(deps) {
         query: { type: 'string', required: true, maxLength: LIMITS.queryMaxLength },
         limit: { type: 'integer', default: LIMITS.defaultLimit, min: LIMITS.minLimit, max: LIMITS.maxLimit }
       },
-      async handler(args) {
+      async handler(args, context) {
         const query = args.query.trim();
         if (!query) throw new Error('Conversation search query must not be blank.');
-        const rows = await dep('searchConversations')({ query, limit: args.limit });
+        const rows = await dep('searchConversations')({ query, limit: args.limit, userId: context.userId });
         return {
           matches: rows.slice(0, args.limit).map(boundedConversationMatch),
           count: Math.min(rows.length, args.limit),
@@ -956,8 +956,8 @@ export function createCapabilityRegistry(deps) {
       description: 'Read the current capacity-aware Daily Planner ordering and explanations. Read-only.',
       readOnly: true,
       schema: {},
-      async handler() {
-        return boundedPlannerToday(await dep('plannerToday')());
+      async handler(_args, context) {
+        return boundedPlannerToday(await dep('plannerToday')(context.userId));
       }
     },
 
@@ -1076,18 +1076,18 @@ export function createCapabilityRegistry(deps) {
     return actionRegistry.inspect(name, trustedContext(caller, signal));
   }
 
-  async function execute(name, rawArgs, { caller = 'unknown', signal, renderer } = {}) {
+  async function execute(name, rawArgs, { caller = 'unknown', signal, renderer, userId } = {}) {
     // `renderer` is a trusted per-request binding ({ rendererId, token }) supplied
     // only by server code, never by the model/client arguments. It reaches the
     // handler via context for view-navigation actions and is ignored by all others.
-    return actionRegistry.invoke(name, rawArgs, { ...trustedContext(caller, signal), allowedActionIds: NEUTRAL_ACTION_NAMES, renderer });
+    return actionRegistry.invoke(name, rawArgs, { ...trustedContext(caller, signal), allowedActionIds: NEUTRAL_ACTION_NAMES, renderer, userId });
   }
 
   // Backward-compatible adapter for the existing Chat UI and verifier. It uses
   // the same registry/handler as the neutral action gateway, while preserving
   // the historical thrown-error and {name, readOnly, args, data} contract.
-  async function invoke(name, rawArgs, { renderer } = {}) {
-    const result = await actionRegistry.invoke(name, rawArgs, { ...trustedContext('legacy-human-ui'), renderer });
+  async function invoke(name, rawArgs, { renderer, userId } = {}) {
+    const result = await actionRegistry.invoke(name, rawArgs, { ...trustedContext('legacy-human-ui'), renderer, userId });
     if (!['success', 'needs_confirmation', 'needs_approval'].includes(result.status)) {
       const message = result.error?.code === 'UNKNOWN_ACTION'
         ? `Unknown capability: ${asString(name).slice(0, 60)}`

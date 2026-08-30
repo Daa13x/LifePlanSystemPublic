@@ -67,7 +67,36 @@ import { Capacitor } from '@capacitor/core';
 // loopback server -- so the native base URL below still targets
 // 127.0.0.1, exactly like the desktop build, without ever exposing the
 // server to the wider LAN.
-const API = Capacitor.isNativePlatform() ? 'http://127.0.0.1:4177' : '';
+// A hosted Closed Beta deployment (a remote HTTPS server a tester's phone
+// reaches without adb reverse/the desktop being on) is a different origin
+// than 127.0.0.1 -- so on native this is user-configurable, not a constant.
+// Persisted with plain localStorage: it is per-installation configuration,
+// not a secret, and each Capacitor app has its own isolated WebView storage.
+function readNativeServerUrl() {
+  try { return localStorage.getItem('lps.serverUrl') || 'http://127.0.0.1:4177'; } catch { return 'http://127.0.0.1:4177'; }
+}
+let API = Capacitor.isNativePlatform() ? readNativeServerUrl() : '';
+function setNativeServerUrl(url) {
+  API = url;
+  try { localStorage.setItem('lps.serverUrl', url); } catch { /* private-browsing storage denial; API still updates in-memory */ }
+}
+
+// The bearer token issued by /api/auth/register or /api/auth/login on a
+// hosted (LIFE_PLANNER_MULTI_USER) deployment. Desktop and an adb-reverse-
+// connected phone talking to a plain single-user server never need this --
+// it stays null and every request is implicitly the one local user, exactly
+// as before multi-user support existed.
+function readAuthToken() {
+  try { return localStorage.getItem('lps.authToken') || ''; } catch { return ''; }
+}
+let authToken = Capacitor.isNativePlatform() ? readAuthToken() : '';
+function setAuthToken(token) {
+  authToken = token || '';
+  try {
+    if (token) localStorage.setItem('lps.authToken', token);
+    else localStorage.removeItem('lps.authToken');
+  } catch { /* private-browsing storage denial; authToken still updates in-memory */ }
+}
 
 function openNativeProviderWindow(provider) {
   const bridge = window.chrome?.webview;
@@ -122,11 +151,13 @@ async function api(path, options = {}) {
   const method = String(options.method || 'GET').toUpperCase();
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (MUTATION_METHODS.has(method)) headers['X-LPS-CSRF'] = await mutationToken();
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
   // headers spread last so the merged/token headers win over any options.headers.
   const response = await fetch(`${API}${path}`, { ...options, headers });
   const payload = await response.json();
   if (!payload.ok) {
     if (response.status === 403) csrfToken = '';
+    if (response.status === 401 && authToken) setAuthToken('');
     throw new Error(payload.error || 'Request failed');
   }
   return payload.data;
@@ -7416,6 +7447,87 @@ function MarkdownImport({ setNotice }) {
   );
 }
 
+// Gate the app behind sign-in only when it's actually needed: a plain
+// single-user server (desktop, or a phone reaching it via adb reverse) has
+// no concept of accounts at all, so this checks /api/auth/me once and, for
+// that ordinary case, renders the app immediately with no login screen ever
+// shown -- exactly the pre-existing experience. Only a real hosted
+// (LIFE_PLANNER_MULTI_USER) deployment with no/expired token shows the form.
+function NativeAuthGate({ children }) {
+  const [state, setState] = useState('checking');
+  const [error, setError] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [serverUrl, setServerUrl] = useState(API);
+  const [busy, setBusy] = useState(false);
+
+  async function checkAuth() {
+    setState('checking');
+    try {
+      const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+      const response = await fetch(`${API}/api/auth/me`, { headers });
+      if (response.status === 401) { setState('needs-auth'); return; }
+      const payload = await response.json();
+      setState(payload.ok && (!payload.data.multiUser || authToken) ? 'ready' : 'needs-auth');
+    } catch {
+      // Server unreachable -- let the app itself render and explain that
+      // (the existing runtimeUnreachable messaging), rather than blocking
+      // everything behind this gate on a network failure.
+      setState('ready');
+    }
+  }
+
+  useEffect(() => { checkAuth(); }, []);
+
+  async function submit(action) {
+    setBusy(true);
+    setError('');
+    try {
+      setNativeServerUrl(serverUrl.trim().replace(/\/+$/, ''));
+      const response = await fetch(`${API}/api/auth/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const payload = await response.json();
+      if (!payload.ok) { setError(payload.error || 'Sign-in failed.'); return; }
+      setAuthToken(payload.data.token);
+      setState('ready');
+    } catch (err) {
+      setError(`Could not reach ${serverUrl}. Check the server address and try again.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (state === 'checking') return <div className="auth-gate"><p>Connecting…</p></div>;
+  if (state === 'ready') return children;
+
+  return (
+    <div className="auth-gate">
+      <h1>LifePlanSystem</h1>
+      <p>Sign in or create an account on this Closed Beta server.</p>
+      <label>
+        Server address
+        <input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} placeholder="https://your-beta-server.example.com" />
+      </label>
+      <label>
+        Username
+        <input value={username} onChange={(event) => setUsername(event.target.value)} autoCapitalize="none" autoCorrect="off" />
+      </label>
+      <label>
+        Password
+        <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+      </label>
+      {error && <p className="auth-gate-error" role="alert">{error}</p>}
+      <div className="auth-gate-actions">
+        <button disabled={busy || !username || !password} onClick={() => submit('login')}>Sign in</button>
+        <button disabled={busy || !username || !password} onClick={() => submit('register')}>Create account</button>
+      </div>
+    </div>
+  );
+}
+
 const rootElement = document.getElementById('root');
 window.__lifePlannerRoot ||= createRoot(rootElement);
-window.__lifePlannerRoot.render(<App />);
+window.__lifePlannerRoot.render(Capacitor.isNativePlatform() ? <NativeAuthGate><App /></NativeAuthGate> : <App />);

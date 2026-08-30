@@ -201,7 +201,7 @@ for (const [actionId, action] of Object.entries(manifest)) {
 assert.match(server, /app\.get\('\/api\/actions',[^\n]+capabilityRegistry\.listActions\(\)/, 'server lists only the neutral action slice');
 assert.match(server, /app\.get\('\/api\/actions\/:id'/, 'server inspects one neutral action');
 assert.match(server, /app\.post\('\/api\/actions\/:id\/invoke'/, 'server invokes one neutral action');
-assert.match(server, /capabilityRegistry\.execute\(req\.params\.id, req\.body\?\.args, \{ caller: 'human-ui', renderer: extractRendererBinding\(req\.body\) \}\)/, 'HTTP route assigns its trusted caller and the trusted renderer binding instead of accepting body scopes');
+assert.match(server, /capabilityRegistry\.execute\(req\.params\.id, req\.body\?\.args, \{ caller: 'human-ui', renderer: extractRendererBinding\(req\.body\), userId: req\.userId \}\)/, 'HTTP route assigns its trusted caller and the trusted renderer binding instead of accepting body scopes');
 assert.equal(manifest['navigation.workboard'].risk, 'VIEW_NAVIGATION', 'navigation.workboard is classified as a bounded view-navigation action');
 assert.equal(manifest['navigation.workboard'].confirmation, 'none', 'view navigation is a direct reversible effect and requires no confirmation');
 assert.equal(manifest['navigation.system'].risk, 'VIEW_NAVIGATION', 'navigation.system is classified as a bounded view-navigation action');
@@ -230,7 +230,7 @@ assert.match(plannerConfirm, /catch \{[\s\S]*setPlannerTodayPreview\(null\)/, 'a
 assert.match(ui, /invokeAction\('planner\.propose_create'/, 'the Add planner task control invokes planner.propose_create through the neutral gateway');
 assert.match(ui, /\/api\/chat\/sessions\/\$\{selectedSession\}\/planner\/confirm/, 'the planner confirm control submits only to the durable planner confirmation endpoint');
 assert.match(server, /app\.post\('\/api\/chat\/sessions\/:id\/planner\/confirm'/, 'the server exposes the durable Daily Planner confirmation endpoint');
-assert.match(server, /bindPlannerCreateConfirmation\(sessionId, bindWorkboardConfirmation\(sessionId, result\)\)/, 'the gateway binds the planner create proposal to the durable confirmation owner');
+assert.match(server, /result = bindPlannerCreateConfirmation\(sessionId, result, req\.userId\)/, 'the gateway binds the planner create proposal to the durable confirmation owner');
 assert.match(ui, /invokeAction\('navigation\.workboard', \{\}\)/, 'the Open Workboard control invokes the navigation action through the neutral gateway');
 assert.match(ui, /invokeAction\('navigation\.system', \{\}\)/, 'the Open full System control invokes the navigation action through the neutral gateway');
 assert.match(ui, /invokeAction\('navigation\.settings', \{\}\)/, 'the Assign / change control invokes the navigation action through the neutral gateway');
@@ -238,9 +238,9 @@ assert.match(ui, /invokeAction\('navigation\.planner', \{\}\)/, 'the Open Today 
 assert.match(ui, /body\.renderer = binding/, 'navigation invocations carry this window\'s authenticated renderer binding');
 assert.match(ui, /if \(!binding\) await registerRenderer\(chatSessionId\)/, 'a navigation invoked during startup establishes its renderer binding on demand');
 assert.match(ui, /else await rendererReadyPromise/, 'navigation waits for the authenticated command stream before invoking the server action');
-assert.match(server, /bindWorkboardConfirmation\(sessionId, result\)/, 'the gateway binds Workboard create and update previews to the durable confirmation owner');
-assert.match(server, /requireSessionScopedAction\(req\.params\.id, sessionId\)/, 'neutral sensitive reads require a real active Chat session before the handler runs');
-assert.match(server, /requireSessionScopedAction\(name, sessionId\)/, 'legacy sensitive reads require the same real-session boundary');
+assert.match(server, /result = bindWorkboardConfirmation\(sessionId, result, req\.userId\)/, 'the gateway binds Workboard create and update previews to the durable confirmation owner');
+assert.match(server, /requireSessionScopedAction\(req\.params\.id, sessionId, req\.userId\)/, 'neutral sensitive reads require a real active Chat session before the handler runs');
+assert.match(server, /requireSessionScopedAction\(name, sessionId, req\.userId\)/, 'legacy sensitive reads require the same real-session boundary');
 assert.match(server, /keys\.length !== 2 \|\| keys\[0\] !== 'confirmationId' \|\| keys\[1\] !== 'token'/, 'the confirmation endpoint rejects replacement payload fields');
 assert.match(server, /JSON\.stringify\(liveState\) !== JSON\.stringify\(claimed\.beforeState\)/, 'Workboard update confirmation performs a full-state stale check inside the apply transaction');
 assert.match(server, /error\.confirmationCode = 'stale'/, 'a transactional stale race produces a truthful stale receipt');
