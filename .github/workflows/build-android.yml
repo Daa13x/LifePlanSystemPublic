@@ -109,6 +109,30 @@ jobs:
           fi
           echo "path=$apk_path" >> "$GITHUB_OUTPUT"
 
+      # Static structural gate: prove the artifact is a real, correctly
+      # packaged Android package before it's ever handed to a tester --
+      # catches a wrong applicationId/version, a missing INTERNET
+      # permission, or a build that silently produced a debuggable-but-
+      # broken shell. aapt ships with the Android SDK build-tools already
+      # present on ubuntu-latest runners (found via `find`, not assumed at
+      # a hardcoded path, since the exact build-tools version varies).
+      - name: Verify APK structure and metadata
+        run: |
+          set -euo pipefail
+          apk_path="${{ steps.apk.outputs.path }}"
+          aapt_path=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -name aapt -print -quit)
+          if [ -z "$aapt_path" ]; then
+            echo "No aapt binary found under \$ANDROID_HOME/build-tools." >&2
+            exit 1
+          fi
+          echo "Using aapt: $aapt_path"
+          badging=$("$aapt_path" dump badging "$apk_path")
+          echo "$badging"
+          echo "$badging" | grep -q "package: name='com.lifeplansystem.app'" || { echo "Unexpected applicationId." >&2; exit 1; }
+          echo "$badging" | grep -q "uses-permission: name='android.permission.INTERNET'" || { echo "Missing INTERNET permission." >&2; exit 1; }
+          echo "$badging" | grep -q "launchable-activity: name='com.lifeplansystem.app.MainActivity'" || { echo "Missing launcher MainActivity." >&2; exit 1; }
+          unzip -l "$apk_path" | grep -q "assets/public/index.html" || { echo "Bundled web app (assets/public/index.html) is missing from the APK." >&2; exit 1; }
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v7
         with:
