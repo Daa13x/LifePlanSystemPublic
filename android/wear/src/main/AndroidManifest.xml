@@ -3,10 +3,10 @@
 
     <uses-feature android:name="android.hardware.type.watch" />
 
-    <!-- Uses a built-in system icon rather than custom launcher art -- this
-         module has no designed icon assets yet; a placeholder from the
-         platform itself is honest about that instead of a copy-pasted
-         mipmap that would look like real, finished branding. -->
+    <!-- Uses a built-in system icon rather than custom launcher art:
+         this module has no designed icon assets yet, and a placeholder
+         from the platform itself is honest about that instead of a
+         copy-pasted mipmap that would look like real, finished branding. -->
     <application
         android:allowBackup="true"
         android:icon="@android:drawable/sym_def_app_icon"
