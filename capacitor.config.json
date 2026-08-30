@@ -1,5 +1,8 @@
 {
   "appId": "com.lifeplansystem.app",
   "appName": "LifePlanSystem",
-  "webDir": "dist"
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http"
+  }
 }

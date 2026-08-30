@@ -11,7 +11,7 @@ import { execFileWithTreeAbort } from './processTree.js';
 // SQLite connection is opened.
 import './restoreBootstrap.js';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
-import { evaluateMutationGuard, isMutation } from './mutationGuard.js';
+import { evaluateMutationGuard, isMutation, originAllowed } from './mutationGuard.js';
 import { proposeConfirmation, confirmAndApply, getConfirmation, recoverInterruptedConfirmations } from './confirmations.js';
 import {
   assessEnvironment,
@@ -644,6 +644,32 @@ function mutationTokenMatches(supplied) {
     return false;
   }
 }
+
+// Minimal CORS for the loopback-only Android client: the desktop app is
+// same-origin (server serves its own frontend, per package.json's `build`
+// step) and never needed CORS at all. The Android build is a SEPARATE
+// origin by construction (a Capacitor WebView origin, e.g. http://localhost,
+// reaching this server on a different effective port via `adb reverse`), so
+// without this, every fetch would be blocked by the browser's own CORS
+// policy before ever reaching the Origin/Host guard below. Reuses
+// mutationGuard.js's own `originAllowed` (loopback hostname, any port) so
+// this shares the exact same "which origins are this machine" definition as
+// the CSRF guard — no separate, potentially-diverging allowlist. No
+// credentials/cookies are used anywhere in this app (auth is the
+// X-LPS-CSRF header token, never a cookie), so Access-Control-Allow-
+// Credentials is deliberately never set — a wildcard-free but credential-
+// free CORS grant is the narrowest correct scope here.
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  if (origin && originAllowed(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-LPS-CSRF, X-LPS-Idempotency-Key');
+    if (req.method === 'OPTIONS') return res.status(204).end();
+  }
+  return next();
+});
 
 // Local mutation protection: an Origin/Host-validated per-runtime CSRF token.
 // Every state-changing request must not be cross-site, must originate from this
