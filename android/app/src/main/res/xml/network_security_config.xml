@@ -1,14 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Allows plain-HTTP (cleartext) traffic ONLY to 127.0.0.1 -- the exact same
+  Allows plain-HTTP (cleartext) traffic ONLY to 127.0.0.1, the exact same
   loopback-only scope the desktop Express server itself enforces
   (server/index.js binds app.listen(port, '127.0.0.1', ...), a deliberate
   security choice, not an oversight). This does NOT open cleartext traffic
   to the wider internet or LAN; every other origin still requires HTTPS.
 
-  The supported closed-beta connection path is `adb reverse tcp:4177
-  tcp:4177` over a USB-connected/authorized device, which makes the
-  device's own 127.0.0.1:4177 forward to the desktop's loopback server --
+  The supported closed-beta connection path is adb reverse tcp:4177
+  tcp:4177 over a USB-connected/authorized device, which makes the
+  device's own 127.0.0.1:4177 forward to the desktop's loopback server,
   so this config exists to let that forwarded loopback call through,
   nothing more.
 -->
