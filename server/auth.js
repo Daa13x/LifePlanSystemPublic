@@ -62,7 +62,20 @@ function passwordMatches(password, salt, expectedHash) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-export function registerUser(db, username, password) {
+// A CLOSED beta must not accept open self-registration from the public
+// internet -- LIFE_PLANNER_BETA_INVITE_CODE, when set, is a shared secret
+// you hand only to the specific people you invite. Unset means "no code
+// required" (only sane for a private network, never a public IP), so an
+// operator forgetting to set it does not accidentally get open by default.
+const INVITE_CODE = process.env.LIFE_PLANNER_BETA_INVITE_CODE || '';
+
+export function registerUser(db, username, password, inviteCode) {
+  if (INVITE_CODE) {
+    const supplied = String(inviteCode || '');
+    if (supplied.length !== INVITE_CODE.length || !crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(INVITE_CODE))) {
+      throw Object.assign(new Error('Invalid or missing invite code.'), { status: 403 });
+    }
+  }
   const cleanUsername = String(username || '').trim().toLowerCase();
   if (!/^[a-z0-9_-]{3,32}$/.test(cleanUsername)) {
     throw Object.assign(new Error('Username must be 3-32 characters: letters, numbers, - or _.'), { status: 400 });
@@ -91,6 +104,29 @@ function issueToken(db, userId) {
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO auth_tokens (token, user_id) VALUES (?, ?)').run(token, userId);
   return { token, userId };
+}
+
+// scryptSync blocks the single Node event loop for the whole server -- for
+// EVERY tester, not just the caller -- so register/login (the only routes
+// that call it) need a rate limit independent of the per-user isolation
+// work above. A small in-memory sliding window is enough for a closed beta
+// with a handful of invited testers; it resets on restart, which is fine
+// for abuse-throttling (not a security boundary on its own -- the invite
+// code above is the real gate on who can create an account at all).
+const AUTH_ATTEMPT_WINDOW_MS = 60_000;
+const AUTH_ATTEMPT_MAX = 8;
+const authAttempts = new Map();
+
+export function authRateLimit(req, res, next) {
+  const key = req.ip || 'unknown';
+  const now = Date.now();
+  const attempts = (authAttempts.get(key) || []).filter((t) => now - t < AUTH_ATTEMPT_WINDOW_MS);
+  if (attempts.length >= AUTH_ATTEMPT_MAX) {
+    return res.status(429).json({ ok: false, error: 'Too many attempts. Wait a minute and try again.' });
+  }
+  attempts.push(now);
+  authAttempts.set(key, attempts);
+  next();
 }
 
 export function requireAuth(db) {

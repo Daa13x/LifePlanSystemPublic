@@ -1,0 +1,25 @@
+[Unit]
+Description=LifePlanSystem Closed Beta backend
+After=network.target
+
+[Service]
+Type=simple
+User=lps
+Group=lps
+WorkingDirectory=/opt/lps/app
+EnvironmentFile=/opt/lps/lps-beta.env
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+# The database contains bearer tokens and every tester's private data; it
+# must never be created world- or group-readable under the default 0022
+# process umask.
+UMask=0077
+
+# journald captures stdout/stderr automatically -- `journalctl -u lps-beta -f`
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

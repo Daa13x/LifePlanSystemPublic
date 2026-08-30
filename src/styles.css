@@ -209,6 +209,7 @@ p, .item-meta, .message span, .model-row span, label, .review-card span { color:
 .auth-gate-actions { display: flex; gap: 10px; margin-top: 6px; }
 .auth-gate-actions button { flex: 1; padding: 10px; border-radius: 8px; }
 .auth-gate-error { color: var(--amber); font-size: 13px; }
+.auth-gate-hint { font-weight: 400; color: var(--soft); }
 
 .notice-banner {
   margin: -10px 0 14px;

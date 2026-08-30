@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 485,
+  "total": 486,
   "mapped": 43,
-  "unmapped": 442,
-  "fingerprint": "75ad0fb2c50d91e129f02ac452eb5654df57a5175a3ee3e300ceab8e6ba7345e",
+  "unmapped": 443,
+  "fingerprint": "5c68ad15c60f250f0939bc92ba60477db059a46eec36228613d03f5d07ba5548",
   "byOwner": {
     "App": {
       "total": 6,
@@ -107,9 +107,9 @@
       "unmapped": 1
     },
     "NativeAuthGate": {
-      "total": 5,
+      "total": 6,
       "mapped": 0,
-      "unmapped": 5
+      "unmapped": 6
     },
     "NavigationMenu": {
       "total": 4,

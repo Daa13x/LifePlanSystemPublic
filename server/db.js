@@ -65,11 +65,24 @@ function migratePlaintextSecretSettings() {
   const emptyRows = rows.filter((row) => !String(parseStoredValue(row.value) || ''));
   if (!plaintextRows.length && !emptyRows.length) return;
 
+  // protectSecret() requires Windows DPAPI. A fresh hosted (Linux) database
+  // never reaches this branch (rows/plaintextRows/emptyRows are all empty on
+  // an empty settings table). The only way to reach it on Linux is restoring
+  // a legacy Windows-desktop database onto a hosted server -- an
+  // unsupported, unlikely operator mistake, but one that must not crash
+  // startup outright.
+  const canProtect = process.platform === 'win32';
+  if (plaintextRows.length && !canProtect) {
+    console.warn(`Skipping plaintext-secret migration for ${plaintextRows.map((r) => r.key).join(', ')}: secure secret storage requires Windows. These settings remain unprotected; clear or reconfigure them.`);
+  }
+
   db.exec('BEGIN IMMEDIATE');
   try {
-    const update = db.prepare('UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?');
-    for (const row of plaintextRows) {
-      update.run(JSON.stringify(protectSecret(String(parseStoredValue(row.value)))), row.key);
+    if (canProtect) {
+      const update = db.prepare('UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?');
+      for (const row of plaintextRows) {
+        update.run(JSON.stringify(protectSecret(String(parseStoredValue(row.value)))), row.key);
+      }
     }
     const remove = db.prepare('DELETE FROM settings WHERE key = ?');
     for (const row of emptyRows) remove.run(row.key);

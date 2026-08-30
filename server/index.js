@@ -11,7 +11,7 @@ import { execFileWithTreeAbort } from './processTree.js';
 // SQLite connection is opened.
 import './restoreBootstrap.js';
 import { db, dbPath, getSetting, migrate, SECRET_SETTING_KEYS, setSetting } from './db.js';
-import { LOCAL_USER_ID, loginUser, MULTI_USER, registerUser, requireAuth } from './auth.js';
+import { authRateLimit, LOCAL_USER_ID, loginUser, MULTI_USER, registerUser, requireAuth } from './auth.js';
 import { evaluateMutationGuard, isMutation, originAllowed } from './mutationGuard.js';
 import { proposeConfirmation, confirmAndApply, getConfirmation, recoverInterruptedConfirmations } from './confirmations.js';
 import {
@@ -175,6 +175,12 @@ function seedRoadmapIfEmpty() {
 }
 
 const app = express();
+// Only ever trust X-Forwarded-For from loopback: the only way this process
+// receives traffic is proxied by Caddy on 127.0.0.1 (see deploy/Caddyfile),
+// which sets that header for the real client. Anything reaching this
+// process from elsewhere is not a proxy and its header must be ignored --
+// 'loopback' (never `true`) is what enforces that.
+app.set('trust proxy', 'loopback');
 const port = Number(process.env.LIFE_PLANNER_PORT || 4177);
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
@@ -613,7 +619,17 @@ function ensureBrowserPairingConfig() {
   return { token, configPath };
 }
 
-const browserPairing = ensureBrowserPairingConfig();
+// Browser-extension pairing is a desktop-only feature (a Chrome extension
+// bridging Cloud Consultant to a signed-in browser tab on THIS machine) with
+// no meaning on a hosted server. Skipping it in MULTI_USER mode also avoids
+// a real Linux-incompatibility: ensureBrowserPairingConfig()'s token is a
+// SECRET_SETTING_KEYS value, and setSetting()'s DPAPI-based secret storage
+// (server/db.js) only exists on Windows -- calling it on a first-boot Linux
+// VPS would crash the server before it could ever accept a request. An empty
+// token here is safe: browserExtensionAuthorized() below rejects any
+// supplied token whose length doesn't match, so an empty expected token
+// simply means the connector can never authenticate, not that it's open.
+const browserPairing = MULTI_USER ? { token: '', configPath: '' } : ensureBrowserPairingConfig();
 
 function browserExtensionAuthorized(req) {
   const supplied = String(req.get('X-LPS-Connector-Token') || '');
@@ -724,16 +740,16 @@ app.use((req, res, next) => {
 // attributed to the same fixed local user, exactly as before this existed.
 app.use(requireAuth(db));
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', authRateLimit, (req, res) => {
   try {
-    const { token, userId } = registerUser(db, req.body?.username, req.body?.password);
+    const { token, userId } = registerUser(db, req.body?.username, req.body?.password, req.body?.inviteCode);
     ok(res, { token, userId });
   } catch (error) {
     fail(res, error.status || 400, error.message);
   }
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', authRateLimit, (req, res) => {
   try {
     const { token, userId } = loginUser(db, req.body?.username, req.body?.password);
     ok(res, { token, userId });
@@ -743,6 +759,31 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.get('/api/auth/me', (req, res) => ok(res, { userId: req.userId, multiUser: MULTI_USER }));
+
+// A CLOSED beta must not hand every self-registered tester the same desktop-
+// admin surface this app also exposes: settings (including secret tokens),
+// browser automation, git/source-control, tooling installers, hardware
+// scans, Hugging Face downloads, partner-relay, backup/restore, and the
+// unscoped whole-database "public export" flow are all single-shared-server
+// administrative actions, not per-tester features, and none of them are
+// reachable from the mobile app's own UI (see src/navigation.js's
+// MOBILE_PRIMARY_NAVIGATION/MOBILE_SECTION_TABS). Deny-by-default: only the
+// routes the mobile Chat/Workboard journey actually calls are allowed
+// through in hosted mode. Workboard's Projects and Cards tabs (projects,
+// knowledge_items) are intentionally still a SHARED workspace across every
+// tester on this deployment, not per-account -- real per-tester ownership
+// for those tables is documented, deliberate follow-up work, not silently
+// claimed as done here.
+const HOSTED_ALLOWED_PREFIXES = [
+  '/api/health', '/api/version', '/api/csrf-token', '/api/bootstrap',
+  '/api/chat/', '/api/planner', '/api/models/runtime',
+  '/api/workboard/cards', '/api/projects', '/api/actions'
+];
+app.use((req, res, next) => {
+  if (!MULTI_USER) return next();
+  if (HOSTED_ALLOWED_PREFIXES.some((prefix) => req.path === prefix || req.path.startsWith(prefix))) return next();
+  return fail(res, 404, 'Not found.');
+});
 
 function chromeExecutablePath() {
   if (process.platform !== 'win32') return '';

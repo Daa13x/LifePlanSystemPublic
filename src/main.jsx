@@ -7458,6 +7458,7 @@ function NativeAuthGate({ children }) {
   const [error, setError] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const [serverUrl, setServerUrl] = useState(API);
   const [busy, setBusy] = useState(false);
 
@@ -7487,7 +7488,7 @@ function NativeAuthGate({ children }) {
       const response = await fetch(`${API}/api/auth/${action}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify(action === 'register' ? { username, password, inviteCode } : { username, password })
       });
       const payload = await response.json();
       if (!payload.ok) { setError(payload.error || 'Sign-in failed.'); return; }
@@ -7518,6 +7519,10 @@ function NativeAuthGate({ children }) {
       <label>
         Password
         <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+      </label>
+      <label>
+        Invite code <span className="auth-gate-hint">(only needed to create a new account)</span>
+        <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} autoCapitalize="none" autoCorrect="off" />
       </label>
       {error && <p className="auth-gate-error" role="alert">{error}</p>}
       <div className="auth-gate-actions">

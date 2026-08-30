@@ -1,0 +1,17 @@
+# Caddy terminates TLS (automatic Let's Encrypt cert, auto-renewed) and
+# reverse-proxies everything to the LPS backend, which only ever listens on
+# 127.0.0.1 -- it is never directly reachable from the internet.
+#
+# Replace beta.yourdomain.example with the real subdomain before deploying.
+
+beta.yourdomain.example {
+	reverse_proxy 127.0.0.1:4177
+
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+}

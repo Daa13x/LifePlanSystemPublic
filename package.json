@@ -4,6 +4,9 @@
   "private": true,
   "description": "Local-first Life Planner personal assistant MVP.",
   "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "scripts": {
     "postinstall": "node scripts/install-git-hooks.mjs",
     "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
