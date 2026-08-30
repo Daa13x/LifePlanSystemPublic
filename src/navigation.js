@@ -5,6 +5,14 @@ export const PRIMARY_NAVIGATION = [
   { id: 'workboard', label: 'Workboard', defaultTab: 'overview' }
 ];
 
+// Closed Beta v0.1: a phone tester only needs the core LPS journey (Chat,
+// Today/Projects/Cards/Completed). Knowledge/System/Roadmap/Review are
+// desktop-oriented dev tooling (repository, browser automation, source
+// control, calibration) that a beta tester should never land on by
+// accident. Hidden from the mobile nav only -- nothing here is deleted or
+// removed from the desktop app.
+export const MOBILE_PRIMARY_NAVIGATION = PRIMARY_NAVIGATION.filter((entry) => entry.id === 'chat' || entry.id === 'workboard');
+
 export const SECTION_TABS = {
   workboard: [
     { id: 'overview', label: 'Overview' },
@@ -32,6 +40,10 @@ export const SECTION_TABS = {
     { id: 'feedback', label: 'Feedback' },
     { id: 'quality', label: 'Quality' }
   ]
+};
+
+export const MOBILE_SECTION_TABS = {
+  workboard: SECTION_TABS.workboard.filter((tab) => ['today', 'projects', 'cards', 'completed'].includes(tab.id))
 };
 
 const LEGACY_ROUTES = {

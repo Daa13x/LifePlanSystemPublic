@@ -40,7 +40,7 @@ import {
   X
 } from 'lucide-react';
 import './styles.css';
-import { PRIMARY_NAVIGATION, SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
+import { PRIMARY_NAVIGATION, MOBILE_PRIMARY_NAVIGATION, SECTION_TABS, MOBILE_SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
 import { renderMarkdown } from './markdown.js';
 import { awaitChatSendResult, isChatSendOriginActive, isLatestChatConnectionRequest } from './chatSendClient.js';
 import {
@@ -89,7 +89,9 @@ function ChatGptMark({ size = 18, ...props }) {
 }
 
 const navIcons = { workboard: ListChecks, chat: MessageSquareText, knowledge: Brain, system: Wrench, settings: Settings };
-const nav = PRIMARY_NAVIGATION.map((entry) => ({ ...entry, icon: navIcons[entry.id] }));
+const VISIBLE_NAVIGATION = Capacitor.isNativePlatform() ? MOBILE_PRIMARY_NAVIGATION : PRIMARY_NAVIGATION;
+const VISIBLE_SECTION_TABS = Capacitor.isNativePlatform() ? { ...SECTION_TABS, ...MOBILE_SECTION_TABS } : SECTION_TABS;
+const nav = VISIBLE_NAVIGATION.map((entry) => ({ ...entry, icon: navIcons[entry.id] }));
 
 const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 let csrfToken = '';
@@ -735,8 +737,8 @@ function NavigationMenu({ route, navigate, candidateCount, operationalApprovalCo
                 {entry.id === 'knowledge' && candidateCount > 0 && <span className="nav-badge" aria-label={`${candidateCount} memory candidates awaiting review`}>{candidateCount}</span>}
               </button>;
             })}
-            {SECTION_TABS[previewSection] && <div className="nav-subpages" onMouseEnter={() => setPreviewSection(previewSection)} style={{ '--active-index': menuEntries.findIndex((entry) => entry.id === previewSection) }} aria-label={`${preview?.label} pages`}>
-              {SECTION_TABS[previewSection].map((tab) => <button key={tab.id} className={cx('nav-subpage', route.section === previewSection && route.tab === tab.id && 'selected')} onClick={() => { setPreviewSection(previewSection); navigate(previewSection, tab.id); }}>
+            {VISIBLE_SECTION_TABS[previewSection] && <div className="nav-subpages" onMouseEnter={() => setPreviewSection(previewSection)} style={{ '--active-index': menuEntries.findIndex((entry) => entry.id === previewSection) }} aria-label={`${preview?.label} pages`}>
+              {VISIBLE_SECTION_TABS[previewSection].map((tab) => <button key={tab.id} className={cx('nav-subpage', route.section === previewSection && route.tab === tab.id && 'selected')} onClick={() => { setPreviewSection(previewSection); navigate(previewSection, tab.id); }}>
                 <span>{tab.label}</span>{tabBadges[tab.id] ? <span className="nav-badge">{tabBadges[tab.id]}</span> : null}
               </button>)}
             </div>}
