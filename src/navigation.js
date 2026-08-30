@@ -11,7 +11,9 @@ export const PRIMARY_NAVIGATION = [
 // control, calibration) that a beta tester should never land on by
 // accident. Hidden from the mobile nav only -- nothing here is deleted or
 // removed from the desktop app.
-export const MOBILE_PRIMARY_NAVIGATION = PRIMARY_NAVIGATION.filter((entry) => entry.id === 'chat' || entry.id === 'workboard');
+export const MOBILE_PRIMARY_NAVIGATION = PRIMARY_NAVIGATION
+  .filter((entry) => entry.id === 'chat' || entry.id === 'workboard')
+  .map((entry) => (entry.id === 'workboard' ? { ...entry, defaultTab: 'today' } : entry));
 
 export const SECTION_TABS = {
   workboard: [

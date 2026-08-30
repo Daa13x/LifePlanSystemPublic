@@ -89,8 +89,14 @@ function ChatGptMark({ size = 18, ...props }) {
 }
 
 const navIcons = { workboard: ListChecks, chat: MessageSquareText, knowledge: Brain, system: Wrench, settings: Settings };
-const VISIBLE_NAVIGATION = Capacitor.isNativePlatform() ? MOBILE_PRIMARY_NAVIGATION : PRIMARY_NAVIGATION;
-const VISIBLE_SECTION_TABS = Capacitor.isNativePlatform() ? { ...SECTION_TABS, ...MOBILE_SECTION_TABS } : SECTION_TABS;
+const IS_NATIVE = Capacitor.isNativePlatform();
+const VISIBLE_NAVIGATION = IS_NATIVE ? MOBILE_PRIMARY_NAVIGATION : PRIMARY_NAVIGATION;
+// On native, only expose the tab lists for sections a phone tester can
+// actually reach (Workboard) -- spreading the full desktop SECTION_TABS
+// here would let the menu's subpage preview render Knowledge/System tabs
+// (e.g. via the Chat screen's `selectedSection = 'knowledge'` default)
+// even though those sections are absent from MOBILE_PRIMARY_NAVIGATION.
+const VISIBLE_SECTION_TABS = IS_NATIVE ? MOBILE_SECTION_TABS : SECTION_TABS;
 const nav = VISIBLE_NAVIGATION.map((entry) => ({ ...entry, icon: navIcons[entry.id] }));
 
 const MUTATION_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -647,15 +653,15 @@ function App() {
             <p>{route.section === 'workboard' ? 'Plan, prioritise, review, and complete work from one operational space.' : route.section === 'knowledge' ? 'Review memory candidates, evidence, rules, and calibration without auto-promotion.' : route.section === 'system' ? 'Inspect real local status, repository, browser, tooling, and run state.' : route.section === 'settings' ? 'Configure local-only models, runtime paths, and application preferences.' : 'One source of truth, many views. Chat becomes candidate memory only after review.'}</p>
           </div>
           <div className="top-actions">
-            <button className="icon-button sync-service-button" onClick={openRepositorySyncFromShell} aria-label="Open private GitHub repository sync" title="Private GitHub repository sync"><Github size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
-            <button className="icon-button sync-service-button" onClick={openChatGptSyncFromShell} aria-label="Open ChatGPT provider window" title="Open ChatGPT provider window"><ChatGptMark size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>
+            {!IS_NATIVE && <button className="icon-button sync-service-button" onClick={openRepositorySyncFromShell} aria-label="Open private GitHub repository sync" title="Private GitHub repository sync"><Github size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>}
+            {!IS_NATIVE && <button className="icon-button sync-service-button" onClick={openChatGptSyncFromShell} aria-label="Open ChatGPT provider window" title="Open ChatGPT provider window"><ChatGptMark size={18} /><RefreshCcw className="sync-service-corner" size={10} aria-hidden="true" /></button>}
             <button className="icon-button" onClick={refreshCurrentView} disabled={refreshBusy} aria-label="Refresh" title={refreshBusy ? 'Refreshing current view...' : 'Refresh current view'}>
               <RefreshCcw size={18} />
             </button>
             <ThemeToggle theme={theme} setTheme={setTheme} />
-            <button className={cx('icon-button', route.section === 'settings' && 'active')} onClick={() => navigate('settings')} aria-label="Open Settings" aria-current={route.section === 'settings' ? 'page' : undefined} title="Open Settings">
+            {!IS_NATIVE && <button className={cx('icon-button', route.section === 'settings' && 'active')} onClick={() => navigate('settings')} aria-label="Open Settings" aria-current={route.section === 'settings' ? 'page' : undefined} title="Open Settings">
               <Settings size={18} />
-            </button>
+            </button>}
           </div>
         </header>
         {notice && (
@@ -2161,6 +2167,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   // first message, so a normal ~1 min warm-up is not mistaken for a hang.
   const [warmupNote, setWarmupNote] = useState('');
   const [runtime, setRuntime] = useState(null);
+  const [runtimeUnreachable, setRuntimeUnreachable] = useState(false);
   const [repoFiles, setRepoFiles] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
@@ -2961,7 +2968,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
 
   useEffect(() => {
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
-    api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
+    api('/api/models/runtime').then(setRuntime).catch((err) => { setRuntimeUnreachable(true); setNotice(err.message); });
     refreshCloudProviders();
   }, []);
   useEffect(() => {
@@ -3008,9 +3015,13 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }, [cloudChecks, selectedSession]);
 
   const modelReady = Boolean(runtime?.endpointConfigured || runtime?.assigned || runtime?.managedServerRunning);
-  const modelStatus = !runtime
-    ? 'Checking local Planner Assistant setup...'
-    : modelReady
+  const modelStatus = runtimeUnreachable
+    ? (IS_NATIVE
+      ? 'Cannot reach the desktop LifePlanSystem. Make sure it is running on your computer and the phone is connected (adb reverse tcp:4177 tcp:4177), then reopen the app.'
+      : 'Cannot reach the LifePlanSystem server. Make sure it is running, then reload.')
+    : !runtime
+      ? 'Checking local Planner Assistant setup...'
+      : modelReady
       ? runtime.managedServerRunning
         ? `Planner Assistant endpoint is running at ${runtime.managedEndpoint}.`
         : runtime.endpointConfigured
@@ -3070,20 +3081,20 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
         </div>
         <div className="context-bar">
-          <ChatConnectionBar connection={connection} connectionState={connectionState} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} proposalBusy={plannerProposalBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} onProposePlannerStatus={proposePlannerStatus} />
+          {!IS_NATIVE && <ChatConnectionBar connection={connection} connectionState={connectionState} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} proposalBusy={plannerProposalBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} onProposePlannerStatus={proposePlannerStatus} />}
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
             <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.open" onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
             <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.open" onClick={() => { setPlannerProposeOpen((v) => !v); setPlannerProposal(null); }}><Plus size={15} /> Add planner task</button>
             <button data-action-id="project.propose_create" data-control-id="chat.project-proposal.open" onClick={() => { setProjectProposeOpen((v) => !v); setProjectProposal(null); }}><Plus size={15} /> Propose card</button>
-            <div className="inline-form compact">
+            {!IS_NATIVE && <div className="inline-form compact">
               <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
                 <option value="">Attach repo file…</option>
                 {repoFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}
               </select>
               <button onClick={addContextFile} disabled={!selectedFile}><Plus size={15} /> Add file</button>
-            </div>
+            </div>}
           </div>
           {(contextRecords.length > 0 || contextFiles.length > 0) ? (
             <div className="context-chips">
