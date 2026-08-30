@@ -122,6 +122,9 @@
     "verify:build-provenance": "node scripts/verify-build-provenance.mjs"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
     "@vitejs/plugin-react": "^4.3.4",
     "express": "4.22.2",
     "lucide-react": "^0.468.0",

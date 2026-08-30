@@ -51,8 +51,23 @@ import {
   parseLegacyAssistantMessage,
   buildLegacyDetailRows
 } from './messageDetail.js';
+import { Capacitor } from '@capacitor/core';
 
-const API = '';
+// On desktop/web the frontend is always served BY the same Express server it
+// talks to, so a relative '' base is correct and every call is same-origin.
+// On a native Android build the WebView serves the bundled dist/ files from
+// their own origin (capacitor://localhost), so relative API calls would
+// silently 404 -- there is no server at that origin. The server itself
+// binds only to 127.0.0.1 (LOOPBACK ONLY, a deliberate security choice --
+// see server/index.js's own app.listen call and its "no public firewall
+// rule is needed for local use" documentation elsewhere in this file).
+// That is NOT changed here: the supported closed-beta connection path is
+// `adb reverse tcp:4177 tcp:4177` over a USB-connected/authorized device,
+// which makes the DEVICE's own 127.0.0.1:4177 forward to the desktop's
+// loopback server -- so the native base URL below still targets
+// 127.0.0.1, exactly like the desktop build, without ever exposing the
+// server to the wider LAN.
+const API = Capacitor.isNativePlatform() ? 'http://127.0.0.1:4177' : '';
 
 function openNativeProviderWindow(provider) {
   const bridge = window.chrome?.webview;
@@ -2756,7 +2771,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     setStreamingText('');
     let streamStarted = false;
     try {
-      const response = await fetch(`/api/chat/sessions/${originSessionId}/messages/stream`, {
+      const response = await fetch(`${API}/api/chat/sessions/${originSessionId}/messages/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-LPS-CSRF': await mutationToken(), 'X-LPS-Idempotency-Key': requestKey },
         body: JSON.stringify({ content: outgoing })
