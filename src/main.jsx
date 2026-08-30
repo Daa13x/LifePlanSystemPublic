@@ -31,6 +31,7 @@ import {
   SearchCheck,
   Settings,
   ShieldCheck,
+  Smartphone,
   Sparkles,
   Trash2,
   Upload,
@@ -41,7 +42,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import { PRIMARY_NAVIGATION, MOBILE_PRIMARY_NAVIGATION, SECTION_TABS, MOBILE_SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
-import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate, localCompleteTask, localDeferTask, localListTasks } from './localData.js';
+import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate, localCompleteTask, localDeferTask, localListTasks, localSyncSettings, localSetSyncPairing, localSyncNow } from './localData.js';
 import { matchLocalCommand, isLocalCommandPattern, LOCAL_COMMAND_EXAMPLES } from './localCommands.js';
 import { ensureNotificationPermission, registerReminderActions, reconcileAllReminders } from './localNotifications.js';
 import { renderMarkdown } from './markdown.js';
@@ -525,6 +526,7 @@ function App() {
   const [notice, setNotice] = useState('');
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const [syncPanelOpen, setSyncPanelOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -658,6 +660,19 @@ function App() {
           }
         }
       }).catch(() => {});
+      // "PC ON -> paired devices reconnect automatically" while the app is
+      // open, without a manual "Sync now" tap every time: one attempt at
+      // startup, then a background poll. localSyncNow() is itself a no-op
+      // (status 'not_paired') until the user has paired from NativeSyncPanel,
+      // so this is inert on a phone that never set one up. True background
+      // sync while the app is closed would need a native background task,
+      // which this slice does not add -- sync only runs while the app is
+      // open and foregrounded.
+      localSyncNow().then((result) => { if (result.status === 'ok' && (result.applied || result.conflicts)) setRefreshSignal((value) => value + 1); }).catch(() => {});
+      const syncTimer = window.setInterval(() => {
+        localSyncNow().then((result) => { if (result.status === 'ok' && (result.applied || result.conflicts)) setRefreshSignal((value) => value + 1); }).catch(() => {});
+      }, 45000);
+      return () => window.clearInterval(syncTimer);
     }
   }, []);
 
@@ -758,11 +773,15 @@ function App() {
               <RefreshCcw size={18} />
             </button>
             <ThemeToggle theme={theme} setTheme={setTheme} />
+            {IS_NATIVE && <button className="icon-button" onClick={() => setSyncPanelOpen(true)} aria-label="Pair with desktop" title="Pair with desktop">
+              <Smartphone size={18} />
+            </button>}
             {!IS_NATIVE && <button className={cx('icon-button', route.section === 'settings' && 'active')} onClick={() => navigate('settings')} aria-label="Open Settings" aria-current={route.section === 'settings' ? 'page' : undefined} title="Open Settings">
               <Settings size={18} />
             </button>}
           </div>
         </header>
+        {IS_NATIVE && syncPanelOpen && <NativeSyncPanel onClose={() => setSyncPanelOpen(false)} />}
         {notice && (
           <div className="notice-banner" role="status">
             <span>{notice}</span>
@@ -3536,6 +3555,88 @@ function ProjectProposalCard({ proposal, busy, onConfirm, onCancel }) {
         <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
       </div>
       <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. No Workboard card exists until you confirm.</small>
+    </div>
+  );
+}
+
+// Phase 4 transport, phone side. Pairing is manual by design (see the
+// module comment above localSyncSettings in src/localData.js) -- the
+// desktop's own Settings > Sync panel shows the address and token this form
+// expects; the phone never discovers the desktop on its own.
+function NativeSyncPanel({ onClose }) {
+  const [form, setForm] = useState({ baseUrl: '', pairingToken: '' });
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    localSyncSettings().then((settings) => {
+      if (cancelled) return;
+      setForm({ baseUrl: settings.baseUrl, pairingToken: settings.pairingToken });
+      setStatus(settings);
+      setLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function save() {
+    setBusy(true);
+    try {
+      const settings = await localSetSyncPairing(form);
+      setStatus(settings);
+    } catch (error) {
+      setStatus((s) => ({ ...s, lastError: error.message }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncNow() {
+    setBusy(true);
+    try {
+      const result = await localSyncNow();
+      const settings = await localSyncSettings();
+      setStatus(settings);
+      setStatus((s) => ({ ...s, lastResult: result }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="picker-overlay" onClick={onClose}>
+      <div className="picker" onClick={(e) => e.stopPropagation()}>
+        <div className="picker-head">
+          <strong>Pair with desktop</strong>
+          <button className="icon-button" onClick={onClose} aria-label="Close sync panel"><X size={16} /></button>
+        </div>
+        <div className="picker-controls" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+          <small>On the desktop app, open Settings and generate a pairing code, then copy the address and code shown there into the two fields below.</small>
+          <input
+            placeholder="Desktop address, e.g. http://192.168.1.20:4178"
+            value={form.baseUrl}
+            onChange={(e) => setForm((f) => ({ ...f, baseUrl: e.target.value }))}
+          />
+          <input
+            placeholder="Pairing code"
+            value={form.pairingToken}
+            onChange={(e) => setForm((f) => ({ ...f, pairingToken: e.target.value }))}
+          />
+          <div className="decision-row">
+            <button className="primary" onClick={save} disabled={busy || !form.baseUrl || !form.pairingToken}>{busy ? 'Saving…' : 'Save pairing'}</button>
+            <button onClick={syncNow} disabled={busy || !loaded || !status?.paired}>{busy ? 'Syncing…' : 'Sync now'}</button>
+          </div>
+          {loaded && (
+            <small>
+              {status?.paired ? 'Paired with a desktop.' : 'Not paired yet.'}
+              {status?.lastSyncAt ? ` Last synced ${new Date(status.lastSyncAt).toLocaleString()}.` : ''}
+              {status?.lastResult ? ` Last result: ${status.lastResult.status}${status.lastResult.status === 'ok' ? ` (pushed ${status.lastResult.pushed}, pulled ${status.lastResult.pulled}, conflicts ${status.lastResult.conflicts})` : status.lastResult.message ? ` — ${status.lastResult.message}` : ''}.` : ''}
+              {status?.lastError ? ` Last error: ${status.lastError}` : ''}
+            </small>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -6928,6 +7029,8 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
   const [partnerRelayEnabled, setPartnerRelayEnabled] = useState(true);
   const [partnerRelayHost, setPartnerRelayHost] = useState('https://relay.mostlyarmless.co.uk');
   const [partnerRelayPairingCode, setPartnerRelayPairingCode] = useState('');
+  const [syncPairing, setSyncPairing] = useState(null);
+  const [syncPairingBusy, setSyncPairingBusy] = useState(false);
   const [hfSearchResults, setHfSearchResults] = useState([]);
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
@@ -6948,7 +7051,19 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
       setPartnerRelayEnabled(Boolean(status.enabled));
       if (status.host) setPartnerRelayHost(status.host);
     }).catch((err) => setNotice(err.message));
+    api('/api/sync/pairing').then(setSyncPairing).catch((err) => setNotice(err.message));
   }, []);
+
+  async function regenerateSyncPairing() {
+    setSyncPairingBusy(true);
+    try {
+      setSyncPairing(await api('/api/sync/pairing/regenerate', { method: 'POST' }));
+    } catch (err) {
+      setNotice(err.message);
+    } finally {
+      setSyncPairingBusy(false);
+    }
+  }
 
   useEffect(() => {
     // One bounded pull on launch catches handoffs queued while LPS was off.
@@ -7210,6 +7325,27 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
           <button onClick={syncPartnerRelay} disabled={!partnerRelay?.enabled}>Sync approved handoffs</button>
         </div>
         {partnerRelay && <small>{partnerRelay.enabled ? `Enabled · ${partnerRelay.received || 0} received checkpoint(s) · cursor ${partnerRelay.cursor || 0}` : 'Disabled until explicitly paired.'}</small>}
+      </div>
+      <div className="panel service-sync-panel">
+        <h2>Phone sync</h2>
+        <p>Pair the standalone Android app to this desktop so tasks, goals, and Planner history sync both ways whenever your phone can reach this machine on the same network. Nothing is exposed until you generate a pairing code below.</p>
+        {syncPairing?.token ? (
+          <>
+            {syncPairing.addresses.length === 0 && <p className="source-warning warn">No LAN network address detected — connect this desktop to Wi-Fi or Ethernet first, then regenerate.</p>}
+            {syncPairing.addresses.map((addr) => (
+              <label key={addr}>Desktop address (enter this in the phone app){syncPairing.addresses.length > 1 ? ' — pick whichever network your phone shares' : ''}
+                <input readOnly value={`http://${addr}:${syncPairing.port}`} onFocus={(event) => event.target.select()} />
+              </label>
+            ))}
+            <label>Pairing code (enter this in the phone app)<input readOnly value={syncPairing.token} onFocus={(event) => event.target.select()} /></label>
+          </>
+        ) : (
+          <p className="source-warning info">No pairing code generated yet. Generate one, then enter the address and code shown here into the phone app's pairing screen (the phone icon in its top bar).</p>
+        )}
+        <div className="decision-row">
+          <button onClick={regenerateSyncPairing} disabled={syncPairingBusy}>{syncPairingBusy ? 'Generating…' : syncPairing?.token ? 'Regenerate pairing code' : 'Generate pairing code'}</button>
+        </div>
+        {syncPairing?.token && <small>Regenerating invalidates the old code — re-enter the new one on the phone too.</small>}
       </div>
       <div className="panel">
         <h2>Assistant response detail</h2>

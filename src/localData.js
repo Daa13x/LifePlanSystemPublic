@@ -417,7 +417,11 @@ async function writeTaskFields(db, id, fields) {
     await db.run(stmt.statement, stmt.values);
   }
   if (eventId) {
-    const stmt = outboxStatement('planner_task_event', eventId, 'upsert', { id: eventId, taskId: id, eventType, fromStatus: existing.status, toStatus: fields.status, createdAt: ts }, 1, device);
+    // taskSyncId matches the wire field name the desktop side uses (see
+    // applyPlannerTaskFields in server/index.js) -- on the phone the task's
+    // own id already IS its sync_id, so this is just that same value under
+    // the shared cross-device field name a receiving peer looks for.
+    const stmt = outboxStatement('planner_task_event', eventId, 'upsert', { id: eventId, taskSyncId: id, eventType, fromStatus: existing.status, toStatus: fields.status, createdAt: ts }, 1, device);
     await db.run(stmt.statement, stmt.values);
   }
   return rowToEngine(freshRow, await taskEventSummary(db, id));
@@ -593,4 +597,211 @@ export async function localPlannerApi(path, options = {}) {
   if (eventsMatch && method === 'GET') return localTaskEvents(eventsMatch[1]);
 
   throw new Error(`No local handler for ${method} ${path}.`);
+}
+
+// --- Phase 4 transport: phone side --------------------------------------
+// Talks to the small standalone sync bridge desktop runs alongside its main
+// server (see server/index.js's "Phone<->desktop sync bridge" section) --
+// never the main app's own port, which stays loopback-only. Pairing is
+// manual (the desktop Settings screen shows an address + token, the user
+// types them in here once) rather than automatic LAN discovery: that is the
+// smallest real transport that still needs no PC, adb, or VPS to work, at
+// the cost of one-time manual setup instead of zero-config pairing.
+
+export async function localSyncSettings() {
+  const db = await getDb();
+  const [baseUrl, pairingToken, cursor, lastPushedSeq, lastSyncAt, lastError] = await Promise.all(
+    ['sync_base_url', 'sync_pairing_token', 'sync_cursor', 'sync_last_pushed_seq', 'sync_last_sync_at', 'sync_last_error'].map((key) => getSetting(db, key))
+  );
+  return {
+    baseUrl: baseUrl || '',
+    pairingToken: pairingToken || '',
+    paired: Boolean(baseUrl && pairingToken),
+    cursor: Number(cursor || 0),
+    lastPushedSeq: Number(lastPushedSeq || 0),
+    lastSyncAt: lastSyncAt || null,
+    lastError: lastError || null
+  };
+}
+
+export async function localSetSyncPairing({ baseUrl, pairingToken }) {
+  const db = await getDb();
+  const cleanUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
+  const cleanToken = String(pairingToken || '').trim();
+  if (cleanUrl && !/^https?:\/\/[^/]+$/.test(cleanUrl)) throw new Error('Desktop address must look like http://<ip>:<port>.');
+  await setSetting(db, 'sync_base_url', cleanUrl);
+  await setSetting(db, 'sync_pairing_token', cleanToken);
+  // Re-pairing (a new/changed desktop) invalidates any cursor from a
+  // previous desktop's outbox -- seq numbers are only meaningful relative to
+  // the specific database that issued them, so starting over at 0 means the
+  // full current history is exchanged again rather than silently missing
+  // entries a stale cursor would skip past.
+  await setSetting(db, 'sync_cursor', '0');
+  await setSetting(db, 'sync_last_pushed_seq', '0');
+  await setSetting(db, 'sync_last_error', '');
+  return localSyncSettings();
+}
+
+function extractSyncableTaskFieldsPhone(payload) {
+  const fields = readTaskFields(payload || {});
+  if (typeof payload?.pinned !== 'undefined') fields.pinned = payload.pinned ? 1 : 0;
+  if (typeof payload?.status === 'string' && ['active', 'completed', 'deferred', 'parked'].includes(payload.status)) fields.status = payload.status;
+  if (Object.hasOwn(payload || {}, 'completed_at')) fields.completed_at = payload.completed_at ?? null;
+  return fields;
+}
+
+// Mirrors server/index.js's applyIncomingTaskChange/applyIncomingEventChange
+// exactly (same fast-forward-or-conflict rule, same append-only event
+// handling) -- the phone's own id column already IS its sync_id, so unlike
+// the desktop there is no separate integer-PK lookup for tasks, only for
+// resolving an event's taskSyncId to a local row (which on phone is the
+// same value, since local_tasks.id IS that sync_id).
+async function applyIncomingTaskChangeOnPhone(db, change) {
+  const payload = change.payload || {};
+  if (change.op === 'tombstone') return { status: 'unsupported' };
+  const existing = (await db.query('SELECT * FROM local_tasks WHERE id = ?', [change.entitySyncId])).values?.[0];
+  if (!existing) {
+    const fields = extractSyncableTaskFieldsPhone(payload);
+    fields.title = fields.title || String(payload.title || '').trim();
+    if (!fields.title) return { status: 'rejected', reason: 'missing title' };
+    fields.device_id = change.deviceId;
+    fields.revision = change.revision;
+    const ts = payload.created_at || nowIso();
+    const columns = ['id', 'created_at', 'updated_at', ...Object.keys(fields)];
+    const values = [change.entitySyncId, ts, payload.updated_at || ts, ...Object.values(fields)];
+    await db.run(`INSERT INTO local_tasks (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`, values);
+    return { status: 'applied' };
+  }
+  const baseRevision = change.revision - 1;
+  if (existing.revision !== baseRevision) {
+    await db.run(
+      'INSERT INTO sync_conflicts (id, entity_type, entity_sync_id, local_payload, incoming_payload, detected_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [uuid(), 'planner_task', change.entitySyncId, JSON.stringify(existing), JSON.stringify(payload), nowIso()]
+    );
+    return { status: 'conflict' };
+  }
+  const fields = extractSyncableTaskFieldsPhone(payload);
+  fields.revision = change.revision;
+  fields.device_id = change.deviceId;
+  const sets = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
+  await db.run(`UPDATE local_tasks SET ${sets} WHERE id = ?`, [...Object.values(fields), change.entitySyncId]);
+  return { status: 'applied' };
+}
+
+async function applyIncomingEventChangeOnPhone(db, change) {
+  const payload = change.payload || {};
+  const existingEvent = (await db.query('SELECT 1 FROM local_task_events WHERE id = ?', [change.entitySyncId])).values?.[0];
+  if (existingEvent) return { status: 'duplicate' };
+  const taskExists = (await db.query('SELECT 1 FROM local_tasks WHERE id = ?', [payload.taskSyncId])).values?.[0];
+  if (!taskExists) return { status: 'deferred', reason: 'referenced task not yet present' };
+  await db.run(
+    'INSERT INTO local_task_events (id, task_id, event_type, from_status, to_status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    [change.entitySyncId, payload.taskSyncId, payload.eventType, String(payload.fromStatus || ''), String(payload.toStatus || ''), payload.createdAt || nowIso()]
+  );
+  return { status: 'applied' };
+}
+
+// Mirrors the desktop's own hasAppliedSyncChange/markSyncChangeApplied gate
+// (server/db.js) exactly. Without this, a crash between applying a pulled
+// batch and persisting the advanced sync_cursor would cause the next sync to
+// re-request and re-apply the SAME desktop changes -- for a task update,
+// existing.revision would already equal the incoming revision (not
+// baseRevision), so the fast-forward-or-conflict check below would
+// misclassify a harmless redelivery as a genuine conflict.
+async function applyIncomingChangeOnPhone(db, change) {
+  const existing = (await db.query('SELECT 1 FROM sync_applied_changes WHERE change_id = ?', [change.changeId])).values?.[0];
+  if (existing) return { status: 'duplicate' };
+  let result;
+  if (change.entityType === 'planner_task') result = await applyIncomingTaskChangeOnPhone(db, change);
+  else if (change.entityType === 'planner_task_event') result = await applyIncomingEventChangeOnPhone(db, change);
+  else result = { status: 'rejected', reason: 'unknown entity type' };
+  if (result.status === 'applied' || result.status === 'conflict') {
+    await db.run('INSERT OR IGNORE INTO sync_applied_changes (change_id, applied_at) VALUES (?, ?)', [change.changeId, nowIso()]);
+  }
+  return result;
+}
+
+// One push-then-pull round trip. Never throws for an expected condition (not
+// paired, desktop unreachable) -- those are reported in the returned status
+// so a caller (a periodic timer, a Settings "Sync now" button) can show the
+// user something honest instead of an unhandled rejection. A genuinely
+// unexpected failure (a malformed response, a local write erroring) is
+// caught too and reported the same way, since a background sync tick must
+// never crash the app it runs inside.
+export async function localSyncNow() {
+  const db = await getDb();
+  const settings = await localSyncSettings();
+  if (!settings.paired) return { status: 'not_paired' };
+  const device = await deviceId(db);
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+    let health;
+    try {
+      health = await fetch(`${settings.baseUrl}/health`, { signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!health.ok) throw new Error(`Desktop responded ${health.status}.`);
+
+    const pending = (await db.query('SELECT * FROM sync_outbox WHERE seq > ? ORDER BY seq ASC LIMIT 200', [settings.lastPushedSeq])).values || [];
+    const changes = pending.map((row) => ({
+      changeId: row.change_id, entityType: row.entity_type, entitySyncId: row.entity_sync_id, op: row.op,
+      payload: row.payload ? JSON.parse(row.payload) : null, revision: row.revision, deviceId: row.device_id
+    }));
+
+    const exchangeController = new AbortController();
+    const exchangeTimeout = setTimeout(() => exchangeController.abort(), 15000);
+    let response;
+    try {
+      response = await fetch(`${settings.baseUrl}/exchange`, {
+        method: 'POST',
+        signal: exchangeController.signal,
+        headers: { 'Content-Type': 'application/json', 'X-LPS-Pairing-Token': settings.pairingToken },
+        body: JSON.stringify({ deviceId: device, sinceSeq: settings.cursor, changes })
+      });
+    } finally {
+      clearTimeout(exchangeTimeout);
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Desktop rejected the sync request (${response.status}).`);
+    }
+    const data = await response.json();
+
+    let applied = 0;
+    let conflicts = 0;
+    // Applied strictly in the order the desktop sent them, matching the
+    // desktop's own same-batch task-before-event ordering guarantee.
+    for (const change of data.changes || []) {
+      const result = await applyIncomingChangeOnPhone(db, change);
+      if (result.status === 'applied') applied += 1;
+      if (result.status === 'conflict') conflicts += 1;
+    }
+
+    // The pushed cursor only advances past changes the desktop durably
+    // resolved one way or another (applied/duplicate/conflict). A 'deferred'
+    // result (its referenced task hasn't arrived yet) or an outright
+    // rejection must stay unacknowledged so the SAME change is resent next
+    // time -- advancing past it here would silently drop it forever, since
+    // this phone would never again consider it "pending". Resending an
+    // already-resolved change later (once a stop point is hit) is harmless:
+    // the desktop's change_id ledger makes re-application a no-op.
+    const pushResultByChangeId = new Map((data.results || []).map((r) => [r.changeId, r.status]));
+    const RESOLVED_STATUSES = new Set(['applied', 'duplicate', 'conflict']);
+    let maxPushedSeq = settings.lastPushedSeq;
+    for (const row of pending) {
+      if (!RESOLVED_STATUSES.has(pushResultByChangeId.get(row.change_id))) break;
+      maxPushedSeq = row.seq;
+    }
+    await setSetting(db, 'sync_last_pushed_seq', String(maxPushedSeq));
+    await setSetting(db, 'sync_cursor', String(data.cursor ?? settings.cursor));
+    await setSetting(db, 'sync_last_sync_at', nowIso());
+    await setSetting(db, 'sync_last_error', '');
+    return { status: 'ok', pushed: pending.length, pulled: (data.changes || []).length, applied, conflicts };
+  } catch (error) {
+    const message = error?.name === 'AbortError' ? 'Desktop did not respond in time.' : (error?.message || 'Sync failed.');
+    await setSetting(db, 'sync_last_error', message);
+    return { status: /did not respond|fetch|network|abort/i.test(message) ? 'unreachable' : 'error', message };
+  }
 }

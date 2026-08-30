@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 486,
+  "total": 495,
   "mapped": 43,
-  "unmapped": 443,
-  "fingerprint": "5c68ad15c60f250f0939bc92ba60477db059a46eec36228613d03f5d07ba5548",
+  "unmapped": 452,
+  "fingerprint": "00299071414ba15af1b84ec9986b315131ec1c0a783752d1100f886877d26928",
   "byOwner": {
     "App": {
-      "total": 6,
+      "total": 7,
       "mapped": 0,
-      "unmapped": 6
+      "unmapped": 7
     },
     "ApprovalQueue": {
       "total": 5,
@@ -111,6 +111,11 @@
       "mapped": 0,
       "unmapped": 6
     },
+    "NativeSyncPanel": {
+      "total": 5,
+      "mapped": 0,
+      "unmapped": 5
+    },
     "NavigationMenu": {
       "total": 4,
       "mapped": 0,
@@ -187,9 +192,9 @@
       "unmapped": 12
     },
     "SettingsView": {
-      "total": 48,
+      "total": 51,
       "mapped": 0,
-      "unmapped": 48
+      "unmapped": 51
     },
     "SetupRecovery": {
       "total": 7,

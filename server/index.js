@@ -2,6 +2,7 @@ import express from 'express';
 import { execFile, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -10,7 +11,7 @@ import { execFileWithTreeAbort } from './processTree.js';
 // Imported before ./db.js so any staged database restore is applied before the
 // SQLite connection is opened.
 import './restoreBootstrap.js';
-import { db, dbPath, getSetting, migrate, recordSyncOutboxEntry, SECRET_SETTING_KEYS, setSetting } from './db.js';
+import { db, dbPath, getSetting, hasAppliedSyncChange, listOutgoingSyncChanges, markSyncChangeApplied, migrate, recordSyncConflict, recordSyncOutboxEntry, SECRET_SETTING_KEYS, setSetting } from './db.js';
 import { authRateLimit, LOCAL_USER_ID, loginUser, MULTI_USER, registerUser, requireAuth } from './auth.js';
 import { evaluateMutationGuard, isMutation, originAllowed } from './mutationGuard.js';
 import { proposeConfirmation, confirmAndApply, getConfirmation, recoverInterruptedConfirmations } from './confirmations.js';
@@ -3100,8 +3101,11 @@ function applyPlannerTaskFields(existing, requestedFields, { actor = 'user', sou
   // this record's own sync_id (never the internal integer id) and its new
   // revision, so a future sync engine can apply this exact change or
   // detect that it conflicts with an edit made on the other device.
-  recordSyncOutboxEntry({ entityType: 'planner_task', entitySyncId: record.sync_id, op: 'upsert', payload: record, revision: record.revision, userId: existing.user_id });
-  if (event) recordSyncOutboxEntry({ entityType: 'planner_task_event', entitySyncId: event.sync_id, op: 'upsert', payload: event, revision: 1, userId: existing.user_id });
+  recordSyncOutboxEntry({ entityType: 'planner_task', entitySyncId: record.sync_id, op: 'upsert', payload: record, revision: record.revision, deviceId: 'desktop', userId: existing.user_id });
+  // event.task_id is this device's own internal integer FK -- meaningless to
+  // a peer device, which only ever knows tasks by sync_id. taskSyncId is the
+  // portable identifier a receiving device actually looks the task up by.
+  if (event) recordSyncOutboxEntry({ entityType: 'planner_task_event', entitySyncId: event.sync_id, op: 'upsert', payload: { ...event, taskSyncId: record.sync_id }, revision: 1, deviceId: 'desktop', userId: existing.user_id });
   return { record, event };
 }
 
@@ -3258,6 +3262,37 @@ app.get('/api/planner/tasks/:id/events', (req, res) => {
       ) AS supporting_evidence_count
     FROM planner_task_events e WHERE e.task_id = ? ORDER BY e.id DESC LIMIT 50`, [req.params.id]);
   ok(res, latest.reverse().map(publicPlannerTaskEvent));
+});
+
+// --- Phone<->desktop sync pairing (Phase 4 transport) -----------------------
+// The desktop's main HTTP listener stays loopback-only exactly as it always
+// was (see listenHost below) -- these two routes only ever let the DESKTOP'S
+// OWN Settings UI view/generate the pairing secret. The phone never talks to
+// this app instance at all; it talks to the small dedicated bridge server
+// (search "phone<->desktop sync bridge" further down this file), which is
+// the only thing bound to a LAN-reachable address, and only once a pairing
+// token exists.
+const SYNC_PAIRING_TOKEN_KEY = 'syncPairingToken';
+const SYNC_BRIDGE_PORT = Number(process.env.LIFE_PLANNER_SYNC_PORT || 4178);
+
+function localNetworkAddresses() {
+  const addresses = [];
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (entry.family === 'IPv4' && !entry.internal) addresses.push(entry.address);
+    }
+  }
+  return addresses;
+}
+
+app.get('/api/sync/pairing', (_req, res) => {
+  ok(res, { token: getSetting(SYNC_PAIRING_TOKEN_KEY, null), addresses: localNetworkAddresses(), port: SYNC_BRIDGE_PORT });
+});
+
+app.post('/api/sync/pairing/regenerate', (_req, res) => {
+  const token = crypto.randomBytes(24).toString('base64url');
+  setSetting(SYNC_PAIRING_TOKEN_KEY, token);
+  ok(res, { token, addresses: localNetworkAddresses(), port: SYNC_BRIDGE_PORT });
 });
 
 app.get('/api/planner/tasks/:id/evidence', (req, res) => {
@@ -10258,6 +10293,185 @@ async function warmManagedLlamaServerAtStartup() {
     console.warn(`Background local-model warm-up skipped: ${error.message}`);
   }
 }
+
+// --- Phone<->desktop sync bridge --------------------------------------------
+// A SEPARATE tiny HTTP server, not a route on `app` above. The main app stays
+// loopback-only exactly as it always has been (listenHost below) -- widening
+// that listener's bind address would also expose every other route (chat,
+// coding, memory, settings) to the LAN, which is a far bigger change than
+// this feature calls for. This bridge exposes exactly two endpoints, and only
+// once the user has generated a pairing token from desktop Settings; with no
+// token set it still binds (so /health is always reachable for a "can I see
+// the desktop at all" check from the phone's pairing screen) but /exchange
+// refuses every request.
+function extractSyncableTaskFields(payload) {
+  const fields = readPlannerTaskFields(payload || {});
+  if (typeof payload?.pinned !== 'undefined') fields.pinned = payload.pinned ? 1 : 0;
+  if (typeof payload?.status === 'string' && ['active', 'completed', 'deferred', 'parked'].includes(payload.status)) fields.status = payload.status;
+  if (Object.hasOwn(payload || {}, 'completed_at')) fields.completed_at = payload.completed_at || null;
+  return fields;
+}
+
+// Tasks are plain revisioned rows: fast-forward when the incoming edit was
+// made against this device's current revision, otherwise it is a genuine
+// conflict (both sides advanced since the last common point) -- see the
+// module comment on sync_conflicts in db.js for why that is never resolved
+// by picking a winner automatically. Forwarding the applied result into this
+// device's own outbox (keyed by the ORIGINATING device_id, not 'desktop')
+// means a future third device sees it too, without ever echoing it straight
+// back to the device that just sent it.
+function applyIncomingTaskChange(change, userId) {
+  const payload = change.payload || {};
+  if (change.op === 'tombstone') {
+    // Neither client can currently delete a task (desktop has no delete
+    // route; the phone has no delete UI), so nothing produces this yet.
+    // Refusing explicitly beats guessing at delete semantics no real
+    // caller has exercised.
+    return { status: 'unsupported' };
+  }
+  const existing = row('SELECT * FROM planner_tasks WHERE sync_id = ? AND user_id = ?', [change.entitySyncId, userId]);
+  if (!existing) {
+    const fields = extractSyncableTaskFields(payload);
+    fields.title = fields.title || String(payload.title || '').trim();
+    if (!fields.title) return { status: 'rejected', reason: 'missing title' };
+    fields.user_id = userId;
+    fields.sync_id = change.entitySyncId;
+    fields.device_id = change.deviceId;
+    fields.revision = change.revision;
+    const columns = Object.keys(fields);
+    const id = transaction(() => db.prepare(`INSERT INTO planner_tasks (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`).run(...Object.values(fields)).lastInsertRowid);
+    const created = row('SELECT * FROM planner_tasks WHERE id = ?', [id]);
+    recordSyncOutboxEntry({ entityType: 'planner_task', entitySyncId: created.sync_id, op: 'upsert', payload: created, revision: created.revision, deviceId: change.deviceId, userId });
+    return { status: 'applied' };
+  }
+  const baseRevision = change.revision - 1;
+  if (existing.revision !== baseRevision) {
+    recordSyncConflict({ entityType: 'planner_task', entitySyncId: change.entitySyncId, localPayload: existing, incomingPayload: payload });
+    return { status: 'conflict' };
+  }
+  const fields = extractSyncableTaskFields(payload);
+  fields.revision = change.revision;
+  fields.device_id = change.deviceId;
+  const sets = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
+  transaction(() => db.prepare(`UPDATE planner_tasks SET ${sets} WHERE id = ?`).run(...Object.values(fields), existing.id));
+  const updated = row('SELECT * FROM planner_tasks WHERE id = ?', [existing.id]);
+  recordSyncOutboxEntry({ entityType: 'planner_task', entitySyncId: updated.sync_id, op: 'upsert', payload: updated, revision: updated.revision, deviceId: change.deviceId, userId });
+  return { status: 'applied' };
+}
+
+// Lifecycle events are append-only and never conflict with each other -- the
+// only real question is whether the task they reference has arrived yet.
+// "deferred" (not yet applied, not recorded as an error either) lets a later
+// sync pass retry once that task exists, instead of silently dropping the
+// event because of a wire-order accident.
+function applyIncomingEventChange(change, userId) {
+  const payload = change.payload || {};
+  if (row('SELECT 1 FROM planner_task_events WHERE sync_id = ?', [change.entitySyncId])) return { status: 'duplicate' };
+  const task = row('SELECT id FROM planner_tasks WHERE sync_id = ? AND user_id = ?', [payload.taskSyncId, userId]);
+  if (!task) return { status: 'deferred', reason: 'referenced task not yet present' };
+  if (!['completed', 'deferred', 'parked', 'reopened', 'reactivated'].includes(payload.eventType)) return { status: 'rejected', reason: 'unknown event type' };
+  db.prepare(`INSERT INTO planner_task_events (task_id, event_type, from_status, to_status, actor, source, reference, sync_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(task.id, payload.eventType, String(payload.fromStatus || ''), String(payload.toStatus || ''), 'user', 'phone-sync', null, change.entitySyncId);
+  const created = row('SELECT * FROM planner_task_events WHERE sync_id = ?', [change.entitySyncId]);
+  recordSyncOutboxEntry({ entityType: 'planner_task_event', entitySyncId: created.sync_id, op: 'upsert', payload: { ...created, taskSyncId: payload.taskSyncId }, revision: 1, deviceId: change.deviceId, userId });
+  return { status: 'applied' };
+}
+
+function applyIncomingChange(change, userId) {
+  if (!change || typeof change.changeId !== 'string' || typeof change.entitySyncId !== 'string' || !Number.isInteger(change.revision)) {
+    return { changeId: change?.changeId, status: 'rejected', reason: 'malformed change' };
+  }
+  if (hasAppliedSyncChange(change.changeId)) return { changeId: change.changeId, status: 'duplicate' };
+  let result;
+  try {
+    if (change.entityType === 'planner_task') result = applyIncomingTaskChange(change, userId);
+    else if (change.entityType === 'planner_task_event') result = applyIncomingEventChange(change, userId);
+    else result = { status: 'rejected', reason: 'unknown entity type' };
+  } catch (error) {
+    result = { status: 'error', reason: error.message };
+  }
+  if (result.status === 'applied' || result.status === 'conflict') markSyncChangeApplied(change.changeId);
+  return { changeId: change.changeId, ...result };
+}
+
+function pairingTokenMatches(header) {
+  const configured = getSetting(SYNC_PAIRING_TOKEN_KEY, null);
+  if (!configured) return false;
+  const supplied = String(header || '');
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(configured);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+const SYNC_BODY_LIMIT_BYTES = 2 * 1024 * 1024;
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > SYNC_BODY_LIMIT_BYTES) { reject(new Error('Request body too large.')); req.destroy(); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); }
+      catch { reject(new Error('Invalid JSON body.')); }
+    });
+    req.on('error', reject);
+  });
+}
+
+function sendJson(res, statusCode, body) {
+  const text = JSON.stringify(body);
+  res.writeHead(statusCode, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text) });
+  res.end(text);
+}
+
+// Deliberately always LOCAL_USER_ID, never req.userId -- there is no
+// req.userId here at all, since this raw http server has no requireAuth
+// middleware of its own. This bridge is a personal-desktop feature (pairing
+// one phone to the one desktop it runs on); a hosted (LIFE_PLANNER_MULTI_USER)
+// deployment is a separate, multi-tenant process where this feature does not
+// apply. Same accepted scope boundary as plannerDayData()'s own
+// LOCAL_USER_ID default a few hundred lines up.
+const syncBridgeServer = http.createServer(async (req, res) => {
+  try {
+    if (req.method === 'GET' && req.url === '/health') return sendJson(res, 200, { ok: true });
+    if (req.method === 'POST' && req.url === '/exchange') {
+      if (!pairingTokenMatches(req.headers['x-lps-pairing-token'])) return sendJson(res, 401, { ok: false, error: 'Invalid or missing pairing token.' });
+      const body = await readJsonBody(req);
+      const deviceId = String(body.deviceId || '').trim();
+      const sinceSeq = Number.isInteger(body.sinceSeq) ? body.sinceSeq : 0;
+      const incoming = Array.isArray(body.changes) ? body.changes : [];
+      if (!deviceId) return sendJson(res, 400, { ok: false, error: 'deviceId is required.' });
+      if (incoming.length > 500) return sendJson(res, 400, { ok: false, error: 'Too many changes in one batch.' });
+      // Applied in the order the phone sent them -- within one device's own
+      // outbox a task's own upsert is always recorded before an event that
+      // references it, so processing in-order here means the event's task
+      // lookup in applyIncomingEventChange almost always succeeds on the
+      // first pass rather than falling into its "deferred" branch.
+      const results = incoming.map((change) => applyIncomingChange({ ...change, deviceId }, LOCAL_USER_ID));
+      const { changes: outgoing, cursor } = listOutgoingSyncChanges({ sinceSeq, excludeDeviceId: deviceId, userId: LOCAL_USER_ID });
+      return sendJson(res, 200, {
+        ok: true,
+        results,
+        cursor,
+        changes: outgoing.map((c) => ({
+          changeId: c.change_id, entityType: c.entity_type, entitySyncId: c.entity_sync_id, op: c.op,
+          payload: c.payload ? JSON.parse(c.payload) : null, revision: c.revision, deviceId: c.device_id, createdAt: c.created_at
+        }))
+      });
+    }
+    sendJson(res, 404, { ok: false, error: 'Not found.' });
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: error.message || 'Sync exchange failed.' });
+  }
+});
+syncBridgeServer.listen(SYNC_BRIDGE_PORT, '0.0.0.0', () => {
+  console.log(`Phone sync bridge listening at http://0.0.0.0:${SYNC_BRIDGE_PORT} (pairing ${getSetting(SYNC_PAIRING_TOKEN_KEY, null) ? 'enabled' : 'not yet configured'})`);
+});
 
 const listenHost = process.env.LIFE_PLANNER_HOST || '127.0.0.1';
 app.listen(port, listenHost, () => {

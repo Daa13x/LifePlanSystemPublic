@@ -18,7 +18,7 @@ db.exec('PRAGMA busy_timeout = 5000');
 db.exec('PRAGMA foreign_keys = ON');
 db.exec('PRAGMA secure_delete = ON');
 
-export const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken', 'browserConnectorToken', 'maRelayPairToken']);
+export const SECRET_SETTING_KEYS = new Set(['hfToken', 'githubToken', 'browserConnectorToken', 'maRelayPairToken', 'syncPairingToken']);
 const DPAPI_PREFIX = 'dpapi:v1:';
 const warnedSecretDecryptions = new Set();
 const secretCache = new Map();
@@ -837,6 +837,55 @@ export function recordSyncOutboxEntry({ entityType, entitySyncId, op, payload, r
     INSERT OR IGNORE INTO sync_outbox (change_id, entity_type, entity_sync_id, op, payload, revision, device_id, user_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(changeId, entityType, entitySyncId, op, payload === undefined ? null : JSON.stringify(payload), revision, deviceId || 'desktop', userId);
+}
+
+// Transport primitives for the phone<->desktop exchange (server/index.js's
+// POST /api/sync/exchange). Entity-specific upsert/conflict decisions live
+// there, next to the existing planner field allowlist -- this module only
+// owns the journal/ledger storage, the same split as recordSyncOutboxEntry
+// above.
+export function hasAppliedSyncChange(changeId) {
+  return Boolean(db.prepare('SELECT 1 FROM sync_applied_changes WHERE change_id = ?').get(changeId));
+}
+
+export function markSyncChangeApplied(changeId) {
+  db.prepare('INSERT OR IGNORE INTO sync_applied_changes (change_id) VALUES (?)').run(changeId);
+}
+
+export function recordSyncConflict({ entityType, entitySyncId, localPayload, incomingPayload }) {
+  db.prepare(`
+    INSERT INTO sync_conflicts (entity_type, entity_sync_id, local_payload, incoming_payload)
+    VALUES (?, ?, ?, ?)
+  `).run(entityType, entitySyncId, JSON.stringify(localPayload), JSON.stringify(incomingPayload));
+}
+
+// Everything this user's desktop has recorded after `sinceSeq`, excluding
+// entries that originated on the requesting device itself -- a peer never
+// needs its own changes echoed back to it. Returns the outbox rows AND the
+// true current max seq (not just the max among the returned rows), so a
+// caller whose own excluded changes are the newest in the table still
+// advances its cursor past them instead of re-requesting the same page
+// forever.
+export function listOutgoingSyncChanges({ sinceSeq, excludeDeviceId, userId, limit = 200 }) {
+  // Bounded, matching the phone's own LIMIT on the push side (see
+  // localSyncNow in src/localData.js) -- a device offline for a long stretch
+  // must never make one /exchange response unboundedly large. When the page
+  // is truncated, the cursor advances only to the LAST row actually
+  // returned, not the table's true max -- jumping straight to the true max
+  // here would make the caller skip every un-paged row between the two,
+  // silently losing them from that device's view. A page that returns fewer
+  // rows than the limit really did see everything currently available, so
+  // jumping to the true max there is exactly right, not an approximation.
+  const changes = db.prepare(`
+    SELECT seq, change_id, entity_type, entity_sync_id, op, payload, revision, device_id, created_at
+    FROM sync_outbox
+    WHERE user_id = ? AND seq > ? AND device_id != ?
+    ORDER BY seq ASC
+    LIMIT ?
+  `).all(userId, sinceSeq, excludeDeviceId, limit);
+  const maxRow = db.prepare('SELECT COALESCE(MAX(seq), 0) AS maxSeq FROM sync_outbox WHERE user_id = ?').get(userId);
+  const cursor = changes.length === limit ? changes[changes.length - 1].seq : Math.max(sinceSeq, maxRow.maxSeq);
+  return { changes, cursor };
 }
 
 export function getSetting(key, fallback = null) {
