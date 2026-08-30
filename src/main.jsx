@@ -41,8 +41,9 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import { PRIMARY_NAVIGATION, MOBILE_PRIMARY_NAVIGATION, SECTION_TABS, MOBILE_SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
-import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate } from './localData.js';
+import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate, localCompleteTask, localDeferTask, localListTasks } from './localData.js';
 import { matchLocalCommand, isLocalCommandPattern, LOCAL_COMMAND_EXAMPLES } from './localCommands.js';
+import { ensureNotificationPermission, registerReminderActions, reconcileAllReminders } from './localNotifications.js';
 import { renderMarkdown } from './markdown.js';
 import { awaitChatSendResult, isChatSendOriginActive, isLatestChatConnectionRequest } from './chatSendClient.js';
 import {
@@ -129,6 +130,15 @@ const plannerApi = IS_NATIVE ? localPlannerApi : api;
 // with no reachable server still needs somewhere to keep its conversation
 // (see src/localData.js's local_chat_sessions/local_chat_messages).
 const chatApi = IS_NATIVE ? localChatApi : api;
+
+// Shared by every place a native mutation can change a task's deadline/
+// status: Today's own load(), a deterministic Chat command, and app
+// startup. One place to fetch-and-filter rather than duplicating the same
+// "active tasks with a deadline" query at each call site.
+async function reconcileRemindersFromCurrentTasks() {
+  const tasks = await localListTasks();
+  return reconcileAllReminders(tasks.filter((t) => t.status === 'active' && t.deadline));
+}
 const VISIBLE_NAVIGATION = IS_NATIVE ? MOBILE_PRIMARY_NAVIGATION : PRIMARY_NAVIGATION;
 // On native, only expose the tab lists for sections a phone tester can
 // actually reach (Workboard) -- spreading the full desktop SECTION_TABS
@@ -612,6 +622,43 @@ function App() {
 
   useEffect(() => {
     refreshAll().catch((err) => setNotice(err.message));
+    if (IS_NATIVE) {
+      // Best-effort: a tester declining notification permission must not
+      // block anything else the app does. Reconciled here once at startup
+      // too -- not just from DailyPlanner's load(), since the app can open
+      // on any route (Chat is the default) and a task completed/deleted
+      // while closed must not leave a stale reminder just because Today
+      // was never visited this session.
+      ensureNotificationPermission().catch(() => {});
+      reconcileRemindersFromCurrentTasks().catch(() => {});
+      registerReminderActions({
+        // The plugin's cancel() only removes a PENDING alarm, never a
+        // notification already sitting in the shade -- a tap on one that's
+        // stale (its task already completed elsewhere, or deleted) must not
+        // apply a transition that's no longer meaningful. Check current
+        // status first rather than trusting the tapped notification's own
+        // assumption of what state the task is still in. Also reconciles
+        // directly here (not just via refreshSignal -> DailyPlanner) so
+        // acting on a reminder works the same whether or not Today happens
+        // to be the mounted route.
+        onDone: async (taskId) => {
+          const current = (await localListTasks()).find((t) => t.id === taskId);
+          if (current?.status === 'active') {
+            await localCompleteTask(taskId);
+            setRefreshSignal((value) => value + 1);
+            reconcileRemindersFromCurrentTasks().catch(() => {});
+          }
+        },
+        onDefer: async (taskId) => {
+          const current = (await localListTasks()).find((t) => t.id === taskId);
+          if (current?.status === 'active') {
+            await localDeferTask(taskId);
+            setRefreshSignal((value) => value + 1);
+            reconcileRemindersFromCurrentTasks().catch(() => {});
+          }
+        }
+      }).catch(() => {});
+    }
   }, []);
 
   useEffect(() => {
@@ -1128,7 +1175,17 @@ function DailyPlanner({ refreshSignal }) {
   const [editForm, setEditForm] = useState(EMPTY_PLANNER_FORM);
 
   const load = async () => {
-    try { setDay(await plannerApi('/api/planner/day')); setError(null); }
+    try {
+      const nextDay = await plannerApi('/api/planner/day');
+      setDay(nextDay);
+      setError(null);
+      // Reconciles against the CURRENT active/deadline state after every
+      // load, regardless of which path changed a task (a UI button here, or
+      // a deterministic Chat command in a different component) -- one
+      // reconciliation point instead of a scheduling hook duplicated across
+      // every mutation call site.
+      if (IS_NATIVE) reconcileRemindersFromCurrentTasks().catch(() => {});
+    }
     catch (err) { setError(err.message); }
     finally { setLoading(false); }
   };
@@ -2838,6 +2895,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         const assistantMsg = await localAppendMessage(selectedSession, 'assistant', reply);
         setDraft('');
         setMessages((current) => [...current, userMsg, assistantMsg]);
+        if (local.handled) reconcileRemindersFromCurrentTasks().catch(() => {});
       } catch (error) {
         setNotice(error.message);
       } finally {
