@@ -1560,4 +1560,13 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
   .coding-console-row code { display: none; }
   .coding-file-preview > summary { align-items: flex-start; flex-direction: column; padding-block: 7px; }
   .coding-line { grid-template-columns: 36px minmax(max-content, 1fr); }
+
+  /* .chat-layout had no responsive override at all: a fixed 280px sidebar
+     column left almost no room for the actual chat pane on a phone-width
+     screen (confirmed by grep -- this selector previously appeared exactly
+     once in the whole stylesheet). Stack sidebar above the chat pane
+     instead, matching the same collapse-to-one-column pattern already used
+     for .coding-ide above. */
+  .chat-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: calc(100vh - 112px); }
+  .chat-sidebar { max-height: 220px; }
 }
