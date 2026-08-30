@@ -15,8 +15,9 @@
     "build": "node scripts/write-build-info.mjs && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "start": "node server/index.js",
-    "check": "npm run verify:sync-contract && npm run verify:navigation-consolidation && npm run verify:chat-capabilities && npm run verify:action-registry && npm run verify:action-control-inventory && npm run verify:renderer-bridge && npm run verify:capacity-planner && npm run verify:planner-completion-history && npm run verify:local-answerability && npm run verify:personal-identity-grounding && npm run verify:work-order && npm run verify:feedback-intake && npm run verify:unattended-loop-guard && npm run verify:loop-attempts-http && npm run verify:failure-taxonomy && npm run verify:cost-routing && npm run verify:authority-boundary && npm run verify:agent-mode && npm run verify:bible-harness && npm run verify:native-authority-doc && npm run verify:native-coding-readiness && npm run verify:onboarding-capture && npm run verify:ui-reality && npm run verify:accessibility && npm run build",
+    "check": "npm run verify:sync-contract && npm run verify:navigation-consolidation && npm run verify:chat-capabilities && npm run verify:action-registry && npm run verify:action-control-inventory && npm run verify:renderer-bridge && npm run verify:capacity-planner && npm run verify:planner-completion-history && npm run verify:local-answerability && npm run verify:personal-identity-grounding && npm run verify:work-order && npm run verify:feedback-intake && npm run verify:unattended-loop-guard && npm run verify:loop-attempts-http && npm run verify:failure-taxonomy && npm run verify:cost-routing && npm run verify:authority-boundary && npm run verify:agent-mode && npm run verify:bible-harness && npm run verify:native-authority-doc && npm run verify:native-coding-readiness && npm run verify:onboarding-capture && npm run verify:ui-reality && npm run verify:accessibility && npm run verify:local-commands && npm run build",
     "verify:accessibility": "node scripts/verify-accessibility.mjs",
+    "verify:local-commands": "node --experimental-test-module-mocks --test scripts/verify-local-commands.mjs",
     "verify:navigation-consolidation": "node scripts/verify-navigation-consolidation.mjs",
     "verify:chat-capabilities": "node scripts/verify-chat-capabilities.mjs",
     "verify:action-registry": "node scripts/verify-action-registry.mjs && node scripts/verify-action-registry-ui.mjs && node scripts/verify-action-registry-http.mjs",
@@ -125,9 +126,11 @@
     "verify:build-provenance": "node scripts/verify-build-provenance.mjs"
   },
   "dependencies": {
+    "@capacitor-community/sqlite": "^8.1.1",
     "@capacitor/android": "^8.5.0",
     "@capacitor/cli": "^8.5.0",
     "@capacitor/core": "^8.5.0",
+    "@capacitor/local-notifications": "^8.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "express": "4.22.2",
     "lucide-react": "^0.468.0",

@@ -41,6 +41,8 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import { PRIMARY_NAVIGATION, MOBILE_PRIMARY_NAVIGATION, SECTION_TABS, MOBILE_SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
+import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate } from './localData.js';
+import { matchLocalCommand, isLocalCommandPattern, LOCAL_COMMAND_EXAMPLES } from './localCommands.js';
 import { renderMarkdown } from './markdown.js';
 import { awaitChatSendResult, isChatSendOriginActive, isLatestChatConnectionRequest } from './chatSendClient.js';
 import {
@@ -119,6 +121,14 @@ function ChatGptMark({ size = 18, ...props }) {
 
 const navIcons = { workboard: ListChecks, chat: MessageSquareText, knowledge: Brain, system: Wrench, settings: Settings };
 const IS_NATIVE = Capacitor.isNativePlatform();
+// Zero-setup standalone phone: Today/Planner always reads and writes an
+// on-device SQLite database on native, never the server -- the phone must
+// be fully usable with no PC, no VPS, and no configured server at all.
+const plannerApi = IS_NATIVE ? localPlannerApi : api;
+// Chat sessions/messages: same reasoning as plannerApi above -- a phone
+// with no reachable server still needs somewhere to keep its conversation
+// (see src/localData.js's local_chat_sessions/local_chat_messages).
+const chatApi = IS_NATIVE ? localChatApi : api;
 const VISIBLE_NAVIGATION = IS_NATIVE ? MOBILE_PRIMARY_NAVIGATION : PRIMARY_NAVIGATION;
 // On native, only expose the tab lists for sections a phone tester can
 // actually reach (Workboard) -- spreading the full desktop SECTION_TABS
@@ -555,18 +565,29 @@ function App() {
   }
 
   async function refreshAll() {
+    // On native, a phone with no reachable server must still show its own
+    // chat sessions -- never leave Chat's sidebar empty just because the
+    // (optional, desktop-only-for-now) bootstrap call failed.
+    if (IS_NATIVE) {
+      const sessions = await chatApi('/api/chat/sessions').catch(() => []);
+      setSessions(sessions);
+      setSelectedSession((current) => current && sessions.some((session) => session.id === current) ? current : sessions[0]?.id || null);
+    }
     const [data, mem, pendingApprovals] = await Promise.all([
-      api('/api/bootstrap'),
-      api('/api/memory'),
+      api('/api/bootstrap').catch((error) => { if (!IS_NATIVE) throw error; return null; }),
+      api('/api/memory').catch((error) => { if (!IS_NATIVE) throw error; return null; }),
       api('/api/approvals').catch(() => null)
     ]);
+    if (!data) return; // No server reachable on native -- local Today/Chat already work independently.
     setBoot(data);
     setPlanner(data.planner);
     setProjects(data.projects);
     setModels(data.models);
     setSettings(data.settings || {});
-    setSessions(data.sessions);
-    setSelectedSession((current) => current && data.sessions.some((session) => session.id === current) ? current : data.sessions[0]?.id || null);
+    if (!IS_NATIVE) {
+      setSessions(data.sessions);
+      setSelectedSession((current) => current && data.sessions.some((session) => session.id === current) ? current : data.sessions[0]?.id || null);
+    }
     setMemory(mem);
     setApprovals(pendingApprovals || data.planner.approvals || []);
   }
@@ -578,7 +599,7 @@ function App() {
     try {
       await refreshAll();
       if (selectedSession) {
-        setMessages(await api(`/api/chat/sessions/${selectedSession}/messages`));
+        setMessages(await chatApi(`/api/chat/sessions/${selectedSession}/messages`));
       }
       setRefreshSignal((value) => value + 1);
       setNotice('Refresh complete.');
@@ -602,7 +623,7 @@ function App() {
 
   useEffect(() => {
     if (!selectedSession) return;
-    api(`/api/chat/sessions/${selectedSession}/messages`).then(setMessages).catch((err) => setNotice(err.message));
+    chatApi(`/api/chat/sessions/${selectedSession}/messages`).then(setMessages).catch((err) => setNotice(err.message));
   }, [selectedSession]);
 
   const activeSession = useMemo(() => sessions.find((session) => session.id === selectedSession), [sessions, selectedSession]);
@@ -1107,7 +1128,7 @@ function DailyPlanner({ refreshSignal }) {
   const [editForm, setEditForm] = useState(EMPTY_PLANNER_FORM);
 
   const load = async () => {
-    try { setDay(await api('/api/planner/day')); setError(null); }
+    try { setDay(await plannerApi('/api/planner/day')); setError(null); }
     catch (err) { setError(err.message); }
     finally { setLoading(false); }
   };
@@ -1126,19 +1147,19 @@ function DailyPlanner({ refreshSignal }) {
     return succeeded;
   }
 
-  const setMode = (mode) => act(`mode:${mode}`, () => api('/api/planner/capacity', { method: 'POST', body: JSON.stringify({ mode }) }));
-  const taskAction = (id, path) => act(`${path}:${id}`, () => api(`/api/planner/tasks/${id}/${path}`, { method: 'POST', body: JSON.stringify({}) }));
+  const setMode = (mode) => act(`mode:${mode}`, () => plannerApi('/api/planner/capacity', { method: 'POST', body: JSON.stringify({ mode }) }));
+  const taskAction = (id, path) => act(`${path}:${id}`, () => plannerApi(`/api/planner/tasks/${id}/${path}`, { method: 'POST', body: JSON.stringify({}) }));
 
   async function addTask(event) {
     event.preventDefault();
     if (!form.title.trim()) return;
-    const ok = await act('create', () => api('/api/planner/tasks', { method: 'POST', body: JSON.stringify(form) }));
+    const ok = await act('create', () => plannerApi('/api/planner/tasks', { method: 'POST', body: JSON.stringify(form) }));
     if (ok) { setForm(EMPTY_PLANNER_FORM); setShowAdd(false); }
   }
   function startEdit(task) { setEditingId(task.id); setEditForm(plannerFormFromTask(task)); }
   async function saveEdit(id) {
     if (!editForm.title.trim()) return;
-    const ok = await act(`edit:${id}`, () => api(`/api/planner/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(editForm) }));
+    const ok = await act(`edit:${id}`, () => plannerApi(`/api/planner/tasks/${id}`, { method: 'PATCH', body: JSON.stringify(editForm) }));
     if (ok) setEditingId(null);
   }
 
@@ -2794,6 +2815,37 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   async function send() {
     if (!draft.trim() || !selectedSession || chatBusy) return;
     const outgoing = draft;
+
+    // Zero-API-key standalone Chat: deterministic commands run entirely
+    // locally, with no network involved at all. When nothing matches and no
+    // server is already known to be reachable (runtimeUnreachable was set by
+    // the existing /api/models/runtime probe on mount -- reusing that
+    // signal rather than making a new request purely to find out), give an
+    // honest local explanation instead of attempting a doomed fetch.
+    if (IS_NATIVE && (isLocalCommandPattern(outgoing) || runtimeUnreachable)) {
+      // chatBusy is set (and checked at the top of this function) BEFORE
+      // matchLocalCommand runs -- isLocalCommandPattern above is a pure
+      // pattern test with no side effect, so a rapid double-tap is blocked
+      // here rather than being able to execute an "add"/"mark done" mutation
+      // twice before this component re-renders.
+      setChatBusy(true);
+      try {
+        const local = await matchLocalCommand(outgoing);
+        const reply = local.handled
+          ? local.reply
+          : `I can't reach an AI provider right now, so I can only help with local commands, for example:\n${LOCAL_COMMAND_EXAMPLES.map((e) => `- ${e}`).join('\n')}`;
+        const userMsg = await localAppendMessage(selectedSession, 'user', outgoing);
+        const assistantMsg = await localAppendMessage(selectedSession, 'assistant', reply);
+        setDraft('');
+        setMessages((current) => [...current, userMsg, assistantMsg]);
+      } catch (error) {
+        setNotice(error.message);
+      } finally {
+        setChatBusy(false);
+      }
+      return;
+    }
+
     if (await prepareDirectCloudRequest(outgoing)) {
       setDraft('');
       return;
@@ -2913,14 +2965,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   async function newSession() {
-    const session = await api('/api/chat/sessions', { method: 'POST', body: JSON.stringify({ title: 'New planning chat' }) });
+    const session = await chatApi('/api/chat/sessions', { method: 'POST', body: JSON.stringify({ title: 'New planning chat' }) });
     setSessions((current) => [session, ...current]);
     setSelectedSession(session.id);
     navigate('chat', null, session.id);
   }
 
   async function patchSession(id, body) {
-    const updated = await api(`/api/chat/sessions/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
+    const updated = await chatApi(`/api/chat/sessions/${id}`, { method: 'PATCH', body: JSON.stringify(body) });
     setSessions((current) => current.map((session) => (session.id === id ? updated : session)).filter((session) => !session.deleted));
     if (body.deleted && selectedSession === id) {
       const nextSession = sessions.find((session) => session.id !== id);
