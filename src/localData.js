@@ -194,6 +194,13 @@ async function getDb() {
       ? await sqliteConn.retrieveConnection(DB_NAME, false)
       : await sqliteConn.createConnection(DB_NAME, false, 'no-encryption', 1, false);
     await db.open();
+    // WAL mode (matching server/db.js's desktop connection) lets a reader
+    // and a writer touch the database concurrently instead of the default
+    // rollback journal's single-writer exclusivity. Required for the
+    // planned Phase 5 watch bridge: a native WearableListenerService will
+    // open its own connection to this same file to answer "what's my next
+    // task" even while the WebView's own connection is mid-write.
+    await db.execute('PRAGMA journal_mode=WAL;');
     // local_settings must exist before runMigrations can read/write
     // schema_version, so it is created unconditionally up front rather than
     // as part of the numbered migrations it tracks.
