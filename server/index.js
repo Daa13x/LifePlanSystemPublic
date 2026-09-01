@@ -2361,8 +2361,21 @@ async function plannerData() {
     WHERE k.status NOT IN ('archived', 'deprecated', 'superseded')
     ORDER BY COALESCE(k.due_at, k.updated_at) ASC, k.confidence ASC
   `).map((item) => normalizeBrowserBlocker(item, browserReady, connectorConnected));
-  const pendingApprovals = allRows('SELECT * FROM approvals WHERE status = ? ORDER BY created_at DESC', ['pending']);
-  const candidates = allRows('SELECT * FROM memory_candidates WHERE status IN (?, ?) ORDER BY created_at DESC', ['candidate', 'deferred']);
+  // Beta authorization fix, 2026-09-01: approvals and memory_candidates
+  // have no user_id column and these queries have never been scoped by
+  // one -- on the single-user desktop this is correct (there is only ever
+  // one real user), but under a hosted LIFE_PLANNER_MULTI_USER deployment
+  // it would show every tester every OTHER tester's pending AI-agent
+  // approvals and memory candidates, some of which can carry chat-derived
+  // private content. Neither feature is part of the intended beta
+  // functionality (both are single-instance-assistant power-user
+  // workflows, not per-tester planner/chat use) -- rather than retrofit
+  // per-user ownership onto tables and workflows that were never designed
+  // for multi-tenancy, they are made INTENTIONALLY UNAVAILABLE in hosted
+  // mode (empty, not an error) until real per-user semantics for these
+  // specific AI-agent features are deliberately designed.
+  const pendingApprovals = MULTI_USER ? [] : allRows('SELECT * FROM approvals WHERE status = ? ORDER BY created_at DESC', ['pending']);
+  const candidates = MULTI_USER ? [] : allRows('SELECT * FROM memory_candidates WHERE status IN (?, ?) ORDER BY created_at DESC', ['candidate', 'deferred']);
   const staleCutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
   const stale = items.filter((item) => {
     const reviewed = item.last_reviewed ? new Date(item.last_reviewed).getTime() : 0;
@@ -2900,7 +2913,38 @@ app.post('/api/planner/refresh', async (_req, res) => {
 // The current capacity mode is an explicit, persisted user choice (a setting),
 // never inferred. The day view is computed transparently by capacityPlanner.js.
 const CAPACITY_MODE_SETTING = 'capacityMode';
-function currentCapacityMode() { return normalizeCapacityMode(getSetting(CAPACITY_MODE_SETTING, DEFAULT_CAPACITY_MODE)); }
+
+// Beta authorization fix, 2026-09-01: capacityMode is real per-user state
+// (it changes how a tester's OWN day plan is computed), so it needs
+// per-user scoping under a hosted LIFE_PLANNER_MULTI_USER deployment --
+// but the `settings` table (key TEXT PRIMARY KEY, value TEXT) also holds
+// genuinely global keys (sync pairing tokens, model registry defaults,
+// etc.), so this does NOT turn `settings` into a per-user table. Instead
+// it uses a narrowly-scoped composite key (`capacityMode:<userId>`) for
+// exactly this one setting under MULTI_USER, leaving every other settings
+// key, and the single-user desktop's own plain `capacityMode` key,
+// untouched. `getSetting`/`setSetting` already accept arbitrary key
+// strings -- no schema change needed.
+//
+// Migration fallback is deliberately narrow, NOT a generic default source:
+// only LOCAL_USER_ID (the pre-existing single desktop owner's own account
+// -- the one real account that could already have a legacy value from
+// before MULTI_USER was ever turned on) falls back to the legacy bare key
+// when it has no scoped value yet, so that owner's real prior value is
+// never silently lost. Every OTHER (real tester) account falls back
+// straight to DEFAULT_CAPACITY_MODE, NEVER to the legacy key -- an
+// upgraded installation with an existing legacy value must not have every
+// newly-registered tester silently inherit the desktop owner's own
+// capacity mode. The moment ANY user explicitly sets their own mode, it
+// is written to THEIR OWN scoped key from then on; the legacy key itself
+// is never deleted (ordinary single-user desktop operation, MULTI_USER
+// unset, still reads/writes it directly, unaffected by any of this).
+function capacityModeSettingKey(userId) { return MULTI_USER ? `${CAPACITY_MODE_SETTING}:${userId}` : CAPACITY_MODE_SETTING; }
+function currentCapacityMode(userId) {
+  if (!MULTI_USER) return normalizeCapacityMode(getSetting(CAPACITY_MODE_SETTING, DEFAULT_CAPACITY_MODE));
+  const legacyFallback = userId === LOCAL_USER_ID ? getSetting(CAPACITY_MODE_SETTING, DEFAULT_CAPACITY_MODE) : DEFAULT_CAPACITY_MODE;
+  return normalizeCapacityMode(getSetting(capacityModeSettingKey(userId), legacyFallback));
+}
 
 function plannerTaskToEngine(taskRow) {
   return {
@@ -3132,7 +3176,7 @@ function runPlannerMutation(req, route, request, execute) {
 // cross-tester disclosure of the mobile Today view (which always passes a
 // real, authenticated req.userId).
 function plannerDayData(userId = LOCAL_USER_ID) {
-  const mode = currentCapacityMode();
+  const mode = currentCapacityMode(userId);
   const tasks = allRows("SELECT * FROM planner_tasks WHERE status = 'active' AND user_id = ? ORDER BY updated_at DESC", [userId]).map(plannerTaskToEngine);
   const recentlyCompleted = allRows(`
     SELECT t.*,
@@ -3155,12 +3199,18 @@ function plannerDayData(userId = LOCAL_USER_ID) {
 
 app.get('/api/planner/day', (req, res) => ok(res, plannerDayData(req.userId)));
 
-app.get('/api/planner/capacity', (_req, res) => ok(res, { mode: currentCapacityMode(), modes: CAPACITY_MODES }));
+// Beta authorization fix, 2026-09-01: real per-user state -- see
+// capacityModeSettingKey()/currentCapacityMode()'s own comments above for
+// the full design (a narrowly-scoped composite settings key under
+// MULTI_USER, not a per-user settings table, with a fallback chain to the
+// legacy global key so the pre-existing desktop owner's real value is
+// never silently lost).
+app.get('/api/planner/capacity', (req, res) => ok(res, { mode: currentCapacityMode(req.userId), modes: CAPACITY_MODES }));
 
 app.post('/api/planner/capacity', (req, res) => {
   const requested = String(req.body?.mode || '');
   if (!CAPACITY_MODES.includes(requested)) return fail(res, 400, `Unknown capacity mode. Choose one of: ${CAPACITY_MODES.join(', ')}.`);
-  setSetting(CAPACITY_MODE_SETTING, requested);
+  setSetting(capacityModeSettingKey(req.userId), requested);
   ok(res, { mode: requested, modes: CAPACITY_MODES });
 });
 
@@ -10469,9 +10519,25 @@ const syncBridgeServer = http.createServer(async (req, res) => {
     sendJson(res, 400, { ok: false, error: error.message || 'Sync exchange failed.' });
   }
 });
-syncBridgeServer.listen(SYNC_BRIDGE_PORT, '0.0.0.0', () => {
-  console.log(`Phone sync bridge listening at http://0.0.0.0:${SYNC_BRIDGE_PORT} (pairing ${getSetting(SYNC_PAIRING_TOKEN_KEY, null) ? 'enabled' : 'not yet configured'})`);
-});
+// Beta security fix, 2026-09-01: this bridge is a personal-desktop/LAN
+// pairing feature ONLY (see its own module comment above -- it always
+// resolves data against LOCAL_USER_ID, has no per-user auth, and only a
+// static pairing token gates writes). A hosted LIFE_PLANNER_MULTI_USER
+// deployment is a separate, multi-tenant process where "the one local
+// desktop account" does not exist -- so this listener must not exist
+// there either, regardless of firewall configuration (defense in depth:
+// the application itself must not create an unnecessary all-interface
+// listener in hosted beta, not merely rely on UFW to happen to block it).
+// Ordinary single-user/desktop operation is completely unaffected: the
+// bridge still binds 0.0.0.0 exactly as before, since real LAN reachability
+// from the paired phone is the whole point of that feature.
+if (!MULTI_USER) {
+  syncBridgeServer.listen(SYNC_BRIDGE_PORT, '0.0.0.0', () => {
+    console.log(`Phone sync bridge listening at http://0.0.0.0:${SYNC_BRIDGE_PORT} (pairing ${getSetting(SYNC_PAIRING_TOKEN_KEY, null) ? 'enabled' : 'not yet configured'})`);
+  });
+} else {
+  console.log('Phone sync bridge disabled: LIFE_PLANNER_MULTI_USER is set (desktop-only LAN pairing feature, not applicable to a hosted multi-tenant deployment).');
+}
 
 const listenHost = process.env.LIFE_PLANNER_HOST || '127.0.0.1';
 app.listen(port, listenHost, () => {

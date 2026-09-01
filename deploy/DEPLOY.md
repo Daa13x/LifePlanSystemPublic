@@ -39,6 +39,17 @@ apt-get update && apt-get install -y caddy
 Only 22 (SSH), 80, and 443 are ever open to the internet. Port 4177 (the
 Express app) is never opened -- it's reached only via Caddy on localhost.
 
+**Port 4178 (the phone<->desktop LAN sync bridge) does not exist in this
+deployment at all.** It is a personal-desktop pairing feature only (always
+resolves data against the single local desktop account, no per-user auth,
+only a static pairing token) -- with `LIFE_PLANNER_MULTI_USER=1` set (as
+this deployment always sets it, see step 4), the application itself never
+starts that listener. This is enforced in code (`server/index.js`, gated
+on `MULTI_USER`), not merely by the firewall rules above happening to
+block it -- verified by `npm run verify:sync-bridge-multiuser`. Do not
+open port 4178 in `ufw` for this deployment; there is nothing listening on
+it to reach.
+
 ```bash
 ufw allow OpenSSH
 ufw allow 80/tcp
