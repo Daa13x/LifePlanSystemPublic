@@ -20,4 +20,11 @@ try {
     assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=?").get(table === 'chat_sessions' ? 'idx_chat_sessions_user' : 'idx_planner_tasks_user'));
   }
   db.close(); console.log('Legacy user-column migration preserves rows and is idempotent.');
-} finally { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
+} finally {
+  // Windows can retain a just-closed SQLite WAL directory momentarily.
+  let removed = false;
+  for (let attempt = 0; attempt < 10 && !removed; attempt++) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); removed = true; }
+    catch (error) { if (attempt === 9) throw error; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+  }
+}
