@@ -131,7 +131,6 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
-    CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id, deleted, pinned, updated_at);
 
     CREATE TABLE IF NOT EXISTS chat_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -317,17 +316,6 @@ export function migrate() {
     );
   `);
 
-  // Existing installations predate per-user ownership. Every pre-existing row
-  // is real desktop data that belongs to the fixed local user -- attributing
-  // it there on backfill is the only choice that does not silently orphan or
-  // hide a real tester's/owner's existing chats and tasks.
-  for (const table of ['chat_sessions', 'planner_tasks']) {
-    try {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN user_id INTEGER NOT NULL DEFAULT ${LOCAL_USER_ID}`);
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_user ON ${table}(user_id)`);
-    } catch { /* already present */ }
-  }
-
   // Existing installations predate per-action correlation tracing. Keep this
   // additive so the action gateway upgrades an old database in place.
   try { db.exec('ALTER TABLE chat_audit ADD COLUMN correlation_id TEXT'); } catch { /* already present */ }
@@ -427,7 +415,6 @@ export function migrate() {
       completed_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_planner_tasks_status ON planner_tasks(status);
-    CREATE INDEX IF NOT EXISTS idx_planner_tasks_user ON planner_tasks(user_id, status);
 
     -- Append-only Planner lifecycle history. A completion event proves only
     -- that LPS recorded a state transition; it is not independent evidence
@@ -664,6 +651,20 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_partner_relay_artifacts_status ON partner_relay_artifacts(status, received_at);
   `);
+
+  // Existing installations predate per-user ownership. Ensure the additive
+  // columns before creating indexes that reference them: CREATE TABLE IF NOT
+  // EXISTS does not retrofit an old table, and an early index failure would
+  // otherwise prevent this backfill from ever running.
+  for (const table of ['chat_sessions', 'planner_tasks']) {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN user_id INTEGER NOT NULL DEFAULT ${LOCAL_USER_ID}`);
+    } catch (error) {
+      if (!/duplicate column name:\s*user_id/i.test(String(error?.message || ''))) throw error;
+    }
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id, deleted, pinned, updated_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_planner_tasks_user ON planner_tasks(user_id, status)');
 
   // Existing databases predate the explicit feedback -> Quality review bridge.
   // The backlink makes routing idempotent and inspectable without promoting or
