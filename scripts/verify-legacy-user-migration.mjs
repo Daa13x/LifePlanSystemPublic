@@ -11,7 +11,7 @@ try {
   const legacy = new DatabaseSync(file);
   legacy.exec("CREATE TABLE chat_sessions (id INTEGER PRIMARY KEY, title TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, created_at TEXT, updated_at TEXT); INSERT INTO chat_sessions VALUES (7, 'preserve chat', 1, 0, 'x', 'x'); CREATE TABLE planner_tasks (id INTEGER PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active'); INSERT INTO planner_tasks VALUES (9, 'preserve task', 'active');");
   legacy.close();
-  const run = () => execFileSync(process.execPath, ['--input-type=module', '-e', "const { db } = await import('./server/db.js'); db.close();"], { cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, LIFE_PLANNER_DB: file }, stdio: 'pipe' });
+  const run = () => execFileSync(process.execPath, ['--input-type=module', '-e', "const { db, migrate } = await import('./server/db.js'); migrate(); db.close();"], { cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, LIFE_PLANNER_DB: file }, stdio: 'pipe' });
   run(); run();
   const db = new DatabaseSync(file);
   for (const [table, id, title] of [['chat_sessions', 7, 'preserve chat'], ['planner_tasks', 9, 'preserve task']]) {
@@ -25,6 +25,6 @@ try {
   let removed = false;
   for (let attempt = 0; attempt < 10 && !removed; attempt++) {
     try { fs.rmSync(dir, { recursive: true, force: true }); removed = true; }
-    catch (error) { if (attempt === 9) throw error; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+    catch (error) { if (attempt === 9) console.warn(`cleanup warning after closed handles: ${error.code || error.message}`); else Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
   }
 }
