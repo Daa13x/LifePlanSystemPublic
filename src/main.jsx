@@ -66,12 +66,12 @@ import { Capacitor } from '@capacitor/core';
 // binds only to 127.0.0.1 (LOOPBACK ONLY, a deliberate security choice --
 // see server/index.js's own app.listen call and its "no public firewall
 // rule is needed for local use" documentation elsewhere in this file).
-// That is NOT changed here: the supported closed-beta connection path is
-// `adb reverse tcp:4177 tcp:4177` over a USB-connected/authorized device,
-// which makes the DEVICE's own 127.0.0.1:4177 forward to the desktop's
-// loopback server -- so the native base URL below still targets
-// 127.0.0.1, exactly like the desktop build, without ever exposing the
-// server to the wider LAN.
+// That is NOT changed here. The Android companion's personal Planner sync is
+// configured separately through NativeSyncPanel and reaches the user's own
+// narrow, token-authenticated LAN bridge on port 4178. This API base is only
+// for optional hosted services or the USB `adb reverse tcp:4177 tcp:4177`
+// diagnostic path, which makes the DEVICE's own loopback reach the desktop
+// without exposing the full server to the wider LAN.
 // A hosted Closed Beta deployment (a remote HTTPS server a tester's phone
 // reaches without adb reverse/the desktop being on) is a different origin
 // than 127.0.0.1 -- so on native this is user-configurable, not a constant.
@@ -629,6 +629,11 @@ function App() {
   useEffect(() => {
     refreshAll().catch((err) => setNotice(err.message));
     if (IS_NATIVE) {
+      // First launch should present the generic personal-PC pairing flow
+      // directly. A saved pairing stays quiet and reconnects below.
+      localSyncSettings().then((current) => {
+        if (!current.paired) setSyncPanelOpen(true);
+      }).catch(() => {});
       // Best-effort: a tester declining notification permission must not
       // block anything else the app does. Reconciled here once at startup
       // too -- not just from DailyPlanner's load(), since the app can open
@@ -777,10 +782,10 @@ function App() {
               <RefreshCcw size={18} />
             </button>
             <ThemeToggle theme={theme} setTheme={setTheme} />
-            {IS_NATIVE && <button className="icon-button" onClick={() => setSyncPanelOpen(true)} aria-label="Pair with desktop" title="Pair with desktop">
+            {IS_NATIVE && <button className="icon-button" onClick={() => setSyncPanelOpen(true)} aria-label="Pair with my LifePlanSystem PC" title="Pair with my LifePlanSystem PC">
               <Smartphone size={18} />
             </button>}
-            {IS_NATIVE && <button className="icon-button" onClick={() => setBackendPanelOpen(true)} aria-label="Configure LifePlanSystem server" title="Configure LifePlanSystem server">
+            {IS_NATIVE && <button className="icon-button" onClick={() => setBackendPanelOpen(true)} aria-label="Configure optional hosted LifePlanSystem server" title="Configure LifePlanSystem server (optional)">
               <KeyRound size={18} />
             </button>}
             {!IS_NATIVE && <button className={cx('icon-button', route.section === 'settings' && 'active')} onClick={() => navigate('settings')} aria-label="Open Settings" aria-current={route.section === 'settings' ? 'page' : undefined} title="Open Settings">
@@ -788,7 +793,7 @@ function App() {
             </button>}
           </div>
         </header>
-        {IS_NATIVE && syncPanelOpen && <NativeSyncPanel onClose={() => setSyncPanelOpen(false)} />}
+        {IS_NATIVE && syncPanelOpen && <NativeSyncPanel onClose={() => setSyncPanelOpen(false)} onPaired={() => setRefreshSignal((value) => value + 1)} />}
         {IS_NATIVE && backendPanelOpen && <NativeBackendPanel onClose={() => setBackendPanelOpen(false)} />}
         {notice && (
           <div className="notice-banner" role="status">
@@ -3602,11 +3607,11 @@ function NativeBackendPanel({ onClose }) {
     <div className="picker-overlay" onClick={onClose}>
       <div className="picker" onClick={(event) => event.stopPropagation()}>
         <div className="picker-head">
-          <strong>Connect to LifePlanSystem</strong>
+          <strong>Optional hosted LifePlanSystem services</strong>
           <button className="icon-button" onClick={onClose} aria-label="Close server panel"><X size={16} /></button>
         </div>
         <div className="picker-controls" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
-          <small>Use the HTTPS address supplied for the Closed Beta. For a USB-connected desktop test, use the loopback default after running adb reverse.</small>
+          <small>Your personal Planner pairs with your own PC from the phone icon; it does not need this setting. Use this only for an optional HTTPS-hosted service, or for a USB-connected desktop test after running adb reverse.</small>
           <input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} placeholder="https://your-beta-server.example.com" autoCapitalize="none" autoCorrect="off" />
           <div className="decision-row">
             <button className="primary" onClick={connect} disabled={busy || !serverUrl.trim()}>{busy ? 'Connecting…' : 'Save and connect'}</button>
@@ -3623,11 +3628,12 @@ function NativeBackendPanel({ onClose }) {
 // module comment above localSyncSettings in src/localData.js) -- the
 // desktop's own Settings > Sync panel shows the address and token this form
 // expects; the phone never discovers the desktop on its own.
-function NativeSyncPanel({ onClose }) {
+function NativeSyncPanel({ onClose, onPaired }) {
   const [form, setForm] = useState({ baseUrl: '', pairingToken: '' });
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [replacementRequired, setReplacementRequired] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -3640,16 +3646,26 @@ function NativeSyncPanel({ onClose }) {
     return () => { cancelled = true; };
   }, []);
 
-  async function save() {
+  async function save(replaceExisting = false) {
     setBusy(true);
+    setReplacementRequired(false);
+    setStatus((current) => ({ ...(current || {}), connectionStatus: 'connecting', lastError: '' }));
     try {
-      const settings = await localSetSyncPairing(form);
+      const settings = await localSetSyncPairing({ ...form, replaceExisting });
+      setForm({ baseUrl: settings.baseUrl, pairingToken: settings.pairingToken });
       setStatus(settings);
+      onPaired?.();
     } catch (error) {
-      setStatus((s) => ({ ...s, lastError: error.message }));
+      setReplacementRequired(error?.code === 'SYNC_REPLACEMENT_REQUIRED');
+      setStatus((current) => ({ ...(current || {}), connectionStatus: 'error', lastError: error.message }));
     } finally {
       setBusy(false);
     }
+  }
+
+  function replaceDesktop() {
+    const confirmed = window.confirm('Replace the paired LifePlanSystem PC? This clears synced Planner tasks and sync history from this phone before pairing with the new PC. Phone-only notes, memory candidates, and chats remain.');
+    if (confirmed) save(true);
   }
 
   async function syncNow() {
@@ -3668,28 +3684,36 @@ function NativeSyncPanel({ onClose }) {
     <div className="picker-overlay" onClick={onClose}>
       <div className="picker" onClick={(e) => e.stopPropagation()}>
         <div className="picker-head">
-          <strong>Pair with desktop</strong>
+          <strong>Pair with my LifePlanSystem PC</strong>
           <button className="icon-button" onClick={onClose} aria-label="Close sync panel"><X size={16} /></button>
         </div>
         <div className="picker-controls" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
-          <small>On the desktop app, open Settings and generate a pairing code, then copy the address and code shown there into the two fields below.</small>
+          <small>On your own PC, open LifePlanSystem → Settings → Phone sync. Enter the address shown by LifePlanSystem on that PC and its pairing code. The app verifies the PC and code before saving them.</small>
           <input
-            placeholder="Desktop address, e.g. http://192.168.1.20:4178"
+            placeholder="Address shown by LifePlanSystem on your PC"
             value={form.baseUrl}
             onChange={(e) => setForm((f) => ({ ...f, baseUrl: e.target.value }))}
           />
           <input
+            type="password"
             placeholder="Pairing code"
             value={form.pairingToken}
             onChange={(e) => setForm((f) => ({ ...f, pairingToken: e.target.value }))}
+            autoComplete="off"
           />
           <div className="decision-row">
-            <button className="primary" onClick={save} disabled={busy || !form.baseUrl || !form.pairingToken}>{busy ? 'Saving…' : 'Save pairing'}</button>
+            <button className="primary" onClick={() => save(false)} disabled={busy || !form.baseUrl || !form.pairingToken}>{busy ? 'Verifying…' : 'Verify and save pairing'}</button>
             <button onClick={syncNow} disabled={busy || !loaded || !status?.paired}>{busy ? 'Syncing…' : 'Sync now'}</button>
           </div>
+          {replacementRequired && (
+            <div className="decision-row">
+              <button onClick={replaceDesktop} disabled={busy}>Replace paired PC and clear synced Planner data</button>
+            </div>
+          )}
           {loaded && (
             <small>
-              {status?.paired ? 'Paired with a desktop.' : 'Not paired yet.'}
+              {status?.paired ? `Paired with your LifePlanSystem PC${status.serverId ? ` (${status.serverId.slice(0, 8)})` : ''}.` : 'Not paired yet.'}
+              {status?.connectionStatus ? ` Connection: ${status.connectionStatus}.` : ''}
               {status?.lastSyncAt ? ` Last synced ${new Date(status.lastSyncAt).toLocaleString()}.` : ''}
               {status?.lastResult ? ` Last result: ${status.lastResult.status}${status.lastResult.status === 'ok' ? ` (pushed ${status.lastResult.pushed}, pulled ${status.lastResult.pulled}, conflicts ${status.lastResult.conflicts})` : status.lastResult.message ? ` — ${status.lastResult.message}` : ''}.` : ''}
               {status?.lastError ? ` Last error: ${status.lastError}` : ''}
@@ -7388,7 +7412,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
       </div>
       <div className="panel service-sync-panel">
         <h2>Phone sync</h2>
-        <p>Pair the standalone Android app to this desktop so tasks, goals, and Planner history sync both ways whenever your phone can reach this machine on the same network. Nothing is exposed until you generate a pairing code below.</p>
+        <p><strong>Pair this phone with this PC.</strong> The addresses below are derived from this machine's current network interfaces. Pair the standalone Android app to this personal LifePlanSystem so tasks, goals, and Planner history sync both ways on the same network. Nothing is writable until you generate a pairing code below.</p>
         {syncPairing?.token ? (
           <>
             {syncPairing.addresses.length === 0 && <p className="source-warning warn">No LAN network address detected — connect this desktop to Wi-Fi or Ethernet first, then regenerate.</p>}
@@ -7398,6 +7422,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
               </label>
             ))}
             <label>Pairing code (enter this in the phone app)<input readOnly value={syncPairing.token} onFocus={(event) => event.target.select()} /></label>
+            {syncPairing.serverId && <small>This PC identity: {syncPairing.serverId}</small>}
           </>
         ) : (
           <p className="source-warning info">No pairing code generated yet. Generate one, then enter the address and code shown here into the phone app's pairing screen (the phone icon in its top bar).</p>

@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 502,
+  "total": 503,
   "mapped": 43,
-  "unmapped": 459,
-  "fingerprint": "cead89837ece399c451cae4c740542245d3696acb52aaedea58de496948088bb",
+  "unmapped": 460,
+  "fingerprint": "515f0de62b6c5550878b815b4721d78ae7759fee33de6653dd1ae0b2ce2ff13c",
   "byOwner": {
     "App": {
       "total": 8,
@@ -117,9 +117,9 @@
       "unmapped": 4
     },
     "NativeSyncPanel": {
-      "total": 5,
+      "total": 6,
       "mapped": 0,
-      "unmapped": 5
+      "unmapped": 6
     },
     "NavigationMenu": {
       "total": 4,

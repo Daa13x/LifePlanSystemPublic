@@ -3339,7 +3339,28 @@ app.get('/api/planner/tasks/:id/events', (req, res) => {
 // the only thing bound to a LAN-reachable address, and only once a pairing
 // token exists.
 const SYNC_PAIRING_TOKEN_KEY = 'syncPairingToken';
+const SYNC_SERVER_ID_KEY = 'syncServerId';
+const SYNC_USER_ID_KEY = 'syncUserId';
+const SYNC_SERVICE = 'lifeplansystem-phone-sync';
+const SYNC_PROTOCOL_VERSION = 1;
 const SYNC_BRIDGE_PORT = Number(process.env.LIFE_PLANNER_SYNC_PORT || 4178);
+
+function stableSyncIdentityValue(key) {
+  const existing = String(getSetting(key, '') || '');
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(existing)) return existing;
+  const value = crypto.randomUUID();
+  setSetting(key, value);
+  return value;
+}
+
+function syncBridgeIdentity() {
+  return {
+    service: SYNC_SERVICE,
+    protocolVersion: SYNC_PROTOCOL_VERSION,
+    serverId: stableSyncIdentityValue(SYNC_SERVER_ID_KEY),
+    userId: stableSyncIdentityValue(SYNC_USER_ID_KEY)
+  };
+}
 
 function localNetworkAddresses() {
   const addresses = [];
@@ -3352,13 +3373,13 @@ function localNetworkAddresses() {
 }
 
 app.get('/api/sync/pairing', (_req, res) => {
-  ok(res, { token: getSetting(SYNC_PAIRING_TOKEN_KEY, null), addresses: localNetworkAddresses(), port: SYNC_BRIDGE_PORT });
+  ok(res, { token: getSetting(SYNC_PAIRING_TOKEN_KEY, null), addresses: localNetworkAddresses(), port: SYNC_BRIDGE_PORT, ...syncBridgeIdentity() });
 });
 
 app.post('/api/sync/pairing/regenerate', (_req, res) => {
   const token = crypto.randomBytes(24).toString('base64url');
   setSetting(SYNC_PAIRING_TOKEN_KEY, token);
-  ok(res, { token, addresses: localNetworkAddresses(), port: SYNC_BRIDGE_PORT });
+  ok(res, { token, addresses: localNetworkAddresses(), port: SYNC_BRIDGE_PORT, ...syncBridgeIdentity() });
 });
 
 app.get('/api/planner/tasks/:id/evidence', (req, res) => {
@@ -10507,7 +10528,11 @@ function sendJson(res, statusCode, body) {
 // LOCAL_USER_ID default a few hundred lines up.
 const syncBridgeServer = http.createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/health') return sendJson(res, 200, { ok: true });
+    if (req.method === 'GET' && req.url === '/health') return sendJson(res, 200, { ok: true, service: SYNC_SERVICE, protocolVersion: SYNC_PROTOCOL_VERSION });
+    if (req.method === 'GET' && req.url === '/identity') {
+      if (!pairingTokenMatches(req.headers['x-lps-pairing-token'])) return sendJson(res, 401, { ok: false, error: 'Invalid or missing pairing token.' });
+      return sendJson(res, 200, { ok: true, ...syncBridgeIdentity() });
+    }
     if (req.method === 'POST' && req.url === '/exchange') {
       if (!pairingTokenMatches(req.headers['x-lps-pairing-token'])) return sendJson(res, 401, { ok: false, error: 'Invalid or missing pairing token.' });
       const body = await readJsonBody(req);
@@ -10525,6 +10550,7 @@ const syncBridgeServer = http.createServer(async (req, res) => {
       const { changes: outgoing, cursor } = listOutgoingSyncChanges({ sinceSeq, excludeDeviceId: deviceId, userId: LOCAL_USER_ID });
       return sendJson(res, 200, {
         ok: true,
+        ...syncBridgeIdentity(),
         results,
         cursor,
         changes: outgoing.map((c) => ({

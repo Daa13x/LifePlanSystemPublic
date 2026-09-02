@@ -56,7 +56,10 @@ try {
   const mutHeaders = { 'Content-Type': 'application/json', 'X-LPS-CSRF': csrfToken };
 
   // --- bridge health is reachable even before any pairing exists ---------
-  line((await fetch(`${bridge}/health`)).ok, 'sync bridge /health is reachable with no pairing configured');
+  const health = await fetch(`${bridge}/health`).then((r) => r.json());
+  line(health.ok && health.service === 'lifeplansystem-phone-sync' && health.protocolVersion === 1, 'sync bridge /health identifies a compatible protocol without exposing a credential');
+  const identityNoToken = await fetch(`${bridge}/identity`);
+  line(identityNoToken.status === 401, 'stable desktop identity is not exposed without the pairing credential');
   const exchangeNoToken = await fetch(`${bridge}/exchange`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceId: 'x', sinceSeq: 0, changes: [] }) });
   line(exchangeNoToken.status === 401, '/exchange refuses every request before a pairing token exists');
 
@@ -64,6 +67,8 @@ try {
   const pairing = await fetch(`${base}/api/sync/pairing/regenerate`, { method: 'POST', headers: mutHeaders }).then(json);
   line(typeof pairing.token === 'string' && pairing.token.length >= 20, 'regenerating pairing returns a real token');
   const authHeaders = { 'Content-Type': 'application/json', 'X-LPS-Pairing-Token': pairing.token };
+  const identity = await fetch(`${bridge}/identity`, { headers: authHeaders }).then((r) => r.json());
+  line(identity.ok && identity.serverId === pairing.serverId && identity.userId === pairing.userId, 'authenticated pairing returns the same stable PC/user identity shown by desktop Settings');
 
   const badToken = await fetch(`${bridge}/exchange`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-LPS-Pairing-Token': 'wrong' }, body: JSON.stringify({ deviceId: 'x', sinceSeq: 0, changes: [] }) });
   line(badToken.status === 401, 'a wrong pairing token is refused even once one is configured');
@@ -72,6 +77,7 @@ try {
   const desktopTask = await fetch(`${base}/api/planner/tasks`, { method: 'POST', headers: mutHeaders, body: JSON.stringify({ title: 'Desktop task' }) }).then(json);
   const pull1 = await fetch(`${bridge}/exchange`, { method: 'POST', headers: authHeaders, body: JSON.stringify({ deviceId: 'phone-1', sinceSeq: 0, changes: [] }) }).then((r) => r.json()).then((b) => b);
   line(pull1.ok === true, 'first exchange call succeeds');
+  line(pull1.serverId === identity.serverId && pull1.userId === identity.userId, 'every exchange is bound to the authenticated personal PC/user identity');
   const pulledDesktopTask = pull1.changes.find((c) => c.entitySyncId === desktopTask.sync_id);
   line(Boolean(pulledDesktopTask), 'a task created on desktop before pairing is included in the phone\'s first pull');
   line(pulledDesktopTask?.payload?.title === 'Desktop task', 'the pulled task payload carries the real title');

@@ -11,13 +11,13 @@
 // reused directly rather than re-implemented, so day-ranking behaves
 // identically to the desktop/hosted server.
 //
-// Every row carries sync metadata (revision, deleted, sync_status) up front
-// so a future bidirectional desktop sync (Phase 4) does not require another
-// schema migration -- but no sync engine exists yet. Today, everything here
-// is local_only and stays on the device until that lands.
+// Every row carries sync metadata (revision, deleted, sync_status). The v0.1
+// transport below synchronises Planner tasks/lifecycle events with the one
+// personal LPS PC whose authenticated identity the phone has saved; notes,
+// memory candidates and Chat remain phone-local.
 
 import { planDay, CAPACITY_MODES, DEFAULT_CAPACITY_MODE, normalizeCapacityMode } from '../server/capacityPlanner.js';
-import { normalizeSyncBaseUrl } from './nativeConnection.js';
+import { exchangeSyncChanges, planSyncPairingTransition, verifySyncServer } from './nativeConnection.js';
 
 const DB_NAME = 'lps_local';
 let dbPromise = null;
@@ -618,36 +618,77 @@ export async function localPlannerApi(path, options = {}) {
 
 export async function localSyncSettings() {
   const db = await getDb();
-  const [baseUrl, pairingToken, cursor, lastPushedSeq, lastSyncAt, lastError] = await Promise.all(
-    ['sync_base_url', 'sync_pairing_token', 'sync_cursor', 'sync_last_pushed_seq', 'sync_last_sync_at', 'sync_last_error'].map((key) => getSetting(db, key))
+  const [baseUrl, pairingToken, serverId, userId, protocolVersion, connectionStatus, cursor, lastPushedSeq, lastSyncAt, lastVerifiedAt, lastError] = await Promise.all(
+    [
+      'sync_base_url', 'sync_pairing_token', 'sync_server_id', 'sync_user_id', 'sync_protocol_version',
+      'sync_connection_status', 'sync_cursor', 'sync_last_pushed_seq', 'sync_last_sync_at',
+      'sync_last_verified_at', 'sync_last_error'
+    ].map((key) => getSetting(db, key))
   );
+  const paired = Boolean(baseUrl && pairingToken);
   return {
     baseUrl: baseUrl || '',
     pairingToken: pairingToken || '',
-    paired: Boolean(baseUrl && pairingToken),
+    serverId: serverId || '',
+    userId: userId || '',
+    protocolVersion: Number(protocolVersion || 0),
+    connectionStatus: connectionStatus || (paired ? 'unknown' : 'not_paired'),
+    paired,
     cursor: Number(cursor || 0),
     lastPushedSeq: Number(lastPushedSeq || 0),
     lastSyncAt: lastSyncAt || null,
+    lastVerifiedAt: lastVerifiedAt || null,
     lastError: lastError || null
   };
 }
 
-export async function localSetSyncPairing({ baseUrl, pairingToken }) {
+export async function persistSyncPairingTransition(db, { candidate, pairingToken, transition, verifiedAt = nowIso() }) {
+  await db.beginTransaction();
+  try {
+    if (transition.clearSyncedPlanner) {
+      // A phone belongs to one personal desktop sync scope at a time in v0.1.
+      // Clear only data that participates in that relationship; local notes,
+      // memory candidates and chats are not synced and remain on the phone.
+      await db.execute(`
+        DELETE FROM local_task_events;
+        DELETE FROM local_tasks;
+        DELETE FROM sync_outbox;
+        DELETE FROM sync_applied_changes;
+        DELETE FROM sync_conflicts;
+      `);
+    }
+    await setSetting(db, 'sync_base_url', candidate.baseUrl);
+    await setSetting(db, 'sync_pairing_token', pairingToken);
+    await setSetting(db, 'sync_server_id', candidate.serverId);
+    await setSetting(db, 'sync_user_id', candidate.userId);
+    await setSetting(db, 'sync_protocol_version', String(candidate.protocolVersion));
+    await setSetting(db, 'sync_connection_status', 'connected');
+    await setSetting(db, 'sync_last_verified_at', verifiedAt);
+    await setSetting(db, 'sync_last_error', '');
+    if (!transition.preserveProgress) {
+      await setSetting(db, 'sync_cursor', '0');
+      await setSetting(db, 'sync_last_pushed_seq', '0');
+      await setSetting(db, 'sync_last_sync_at', '');
+    }
+    await db.commitTransaction();
+  } catch (error) {
+    await db.rollbackTransaction().catch(() => {});
+    throw error;
+  }
+}
+
+export async function localSetSyncPairing({ baseUrl, pairingToken, replaceExisting = false }) {
   const db = await getDb();
-  const cleanUrl = normalizeSyncBaseUrl(baseUrl);
   const cleanToken = String(pairingToken || '').trim();
   if (!cleanToken) throw new Error('Pairing code is required.');
-  await setSetting(db, 'sync_base_url', cleanUrl);
-  await setSetting(db, 'sync_pairing_token', cleanToken);
-  // Re-pairing (a new/changed desktop) invalidates any cursor from a
-  // previous desktop's outbox -- seq numbers are only meaningful relative to
-  // the specific database that issued them, so starting over at 0 means the
-  // full current history is exchanged again rather than silently missing
-  // entries a stale cursor would skip past.
-  await setSetting(db, 'sync_cursor', '0');
-  await setSetting(db, 'sync_last_pushed_seq', '0');
-  await setSetting(db, 'sync_last_error', '');
-  return localSyncSettings();
+  // Verify both service identity and credential BEFORE persisting either one.
+  // A typo, a non-LPS web server, or PC A's code sent to PC B cannot replace
+  // the phone's last working pairing.
+  const candidate = await verifySyncServer({ baseUrl, pairingToken: cleanToken });
+  const current = await localSyncSettings();
+  const transition = planSyncPairingTransition(current, candidate, { replaceExisting });
+  await persistSyncPairingTransition(db, { candidate, pairingToken: cleanToken, transition });
+  return { ...(await localSyncSettings()), transition: transition.mode };
 }
 
 function extractSyncableTaskFieldsPhone(payload) {
@@ -739,21 +780,27 @@ async function applyIncomingChangeOnPhone(db, change) {
 export async function localSyncNow() {
   const db = await getDb();
   const settings = await localSyncSettings();
-  if (!settings.paired) return { status: 'not_paired' };
+  if (!settings.paired) {
+    await setSetting(db, 'sync_connection_status', 'not_paired');
+    return { status: 'not_paired' };
+  }
   const device = await deviceId(db);
   try {
-    // Revalidate persisted values too: an address saved by an older APK must
-    // not bypass the current private-network/HTTPS boundary after upgrade.
-    const baseUrl = normalizeSyncBaseUrl(settings.baseUrl);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
-    let health;
-    try {
-      health = await fetch(`${baseUrl}/health`, { signal: controller.signal });
-    } finally {
-      clearTimeout(timeout);
+    // Every sync re-authenticates the saved endpoint and checks its stable PC
+    // identity before transmitting phone data. This also upgrades a legacy
+    // same-endpoint pairing by recording the newly available identity.
+    const identity = await verifySyncServer({ baseUrl: settings.baseUrl, pairingToken: settings.pairingToken });
+    if (settings.serverId && identity.serverId !== settings.serverId) {
+      throw Object.assign(new Error('This address now belongs to a different LifePlanSystem PC. Re-pair explicitly before syncing.'), { code: 'SYNC_SERVER_CHANGED' });
     }
-    if (!health.ok) throw new Error(`Desktop responded ${health.status}.`);
+    if (settings.userId && identity.userId !== settings.userId) {
+      throw Object.assign(new Error('The paired LifePlanSystem user identity changed. Re-pair explicitly before syncing.'), { code: 'SYNC_SERVER_CHANGED' });
+    }
+    if (!settings.serverId) {
+      await setSetting(db, 'sync_server_id', identity.serverId);
+      await setSetting(db, 'sync_user_id', identity.userId);
+      await setSetting(db, 'sync_protocol_version', String(identity.protocolVersion));
+    }
 
     const pending = (await db.query('SELECT * FROM sync_outbox WHERE seq > ? ORDER BY seq ASC LIMIT 200', [settings.lastPushedSeq])).values || [];
     const changes = pending.map((row) => ({
@@ -761,24 +808,14 @@ export async function localSyncNow() {
       payload: row.payload ? JSON.parse(row.payload) : null, revision: row.revision, deviceId: row.device_id
     }));
 
-    const exchangeController = new AbortController();
-    const exchangeTimeout = setTimeout(() => exchangeController.abort(), 15000);
-    let response;
-    try {
-      response = await fetch(`${baseUrl}/exchange`, {
-        method: 'POST',
-        signal: exchangeController.signal,
-        headers: { 'Content-Type': 'application/json', 'X-LPS-Pairing-Token': settings.pairingToken },
-        body: JSON.stringify({ deviceId: device, sinceSeq: settings.cursor, changes })
-      });
-    } finally {
-      clearTimeout(exchangeTimeout);
+    const data = await exchangeSyncChanges({
+      baseUrl: identity.baseUrl,
+      pairingToken: settings.pairingToken,
+      payload: { deviceId: device, sinceSeq: settings.cursor, changes }
+    });
+    if (data.serverId !== identity.serverId || data.userId !== identity.userId) {
+      throw Object.assign(new Error('The sync response identity did not match the paired LifePlanSystem PC.'), { code: 'SYNC_SERVER_CHANGED' });
     }
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.error || `Desktop rejected the sync request (${response.status}).`);
-    }
-    const data = await response.json();
 
     let applied = 0;
     let conflicts = 0;
@@ -808,11 +845,21 @@ export async function localSyncNow() {
     await setSetting(db, 'sync_last_pushed_seq', String(maxPushedSeq));
     await setSetting(db, 'sync_cursor', String(data.cursor ?? settings.cursor));
     await setSetting(db, 'sync_last_sync_at', nowIso());
+    await setSetting(db, 'sync_last_verified_at', nowIso());
+    await setSetting(db, 'sync_connection_status', 'connected');
     await setSetting(db, 'sync_last_error', '');
     return { status: 'ok', pushed: pending.length, pulled: (data.changes || []).length, applied, conflicts };
   } catch (error) {
-    const message = error?.name === 'AbortError' ? 'Desktop did not respond in time.' : (error?.message || 'Sync failed.');
+    const message = error?.message || 'Sync failed.';
+    const status = error?.code === 'SYNC_UNREACHABLE'
+      ? 'unreachable'
+      : error?.code === 'SYNC_AUTH_FAILED'
+        ? 'authentication_required'
+        : error?.code === 'SYNC_SERVER_CHANGED'
+          ? 'server_changed'
+          : 'error';
+    await setSetting(db, 'sync_connection_status', status);
     await setSetting(db, 'sync_last_error', message);
-    return { status: /did not respond|fetch|network|abort/i.test(message) ? 'unreachable' : 'error', message };
+    return { status, message };
   }
 }
