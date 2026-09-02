@@ -764,8 +764,8 @@ export function createCapabilityRegistry(deps) {
         id: { type: 'id', required: true },
         status: { type: 'string', required: true, enum: [...FEEDBACK_TRIAGE_STATUSES] }
       },
-      async handler(args) {
-        const current = await dep('readFeedback')({ id: args.id });
+      async handler(args, context) {
+        const current = await dep('readFeedback')({ id: args.id, userId: context.userId });
         if (!current) throw new Error(`Feedback ${args.id} was not found.`);
         const status = normalizeFeedbackTriageStatus(args.status);
         if (status === 'routed' && !current.actionable) throw new Error('Only actionable feedback can be routed to Quality review.');

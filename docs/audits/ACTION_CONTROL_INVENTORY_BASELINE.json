@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 495,
+  "total": 502,
   "mapped": 43,
-  "unmapped": 452,
-  "fingerprint": "00299071414ba15af1b84ec9986b315131ec1c0a783752d1100f886877d26928",
+  "unmapped": 459,
+  "fingerprint": "cead89837ece399c451cae4c740542245d3696acb52aaedea58de496948088bb",
   "byOwner": {
     "App": {
-      "total": 7,
+      "total": 8,
       "mapped": 0,
-      "unmapped": 7
+      "unmapped": 8
     },
     "ApprovalQueue": {
       "total": 5,
@@ -72,9 +72,9 @@
       "unmapped": 23
     },
     "FeedbackControl": {
-      "total": 5,
+      "total": 7,
       "mapped": 0,
-      "unmapped": 5
+      "unmapped": 7
     },
     "FeedbackReview": {
       "total": 4,
@@ -110,6 +110,11 @@
       "total": 6,
       "mapped": 0,
       "unmapped": 6
+    },
+    "NativeBackendPanel": {
+      "total": 4,
+      "mapped": 0,
+      "unmapped": 4
     },
     "NativeSyncPanel": {
       "total": 5,

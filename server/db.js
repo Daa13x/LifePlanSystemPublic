@@ -482,6 +482,7 @@ export function migrate() {
     -- items stay local under the memory-approval boundary.
     CREATE TABLE IF NOT EXISTS feedback (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL DEFAULT 1,
       sentiment TEXT NOT NULL CHECK (sentiment IN ('useful','wrong','confusing','broken','unnecessary','incomplete')),
       surface TEXT NOT NULL DEFAULT '',
       work_item TEXT,
@@ -665,6 +666,15 @@ export function migrate() {
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id, deleted, pinned, updated_at)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_planner_tasks_user ON planner_tasks(user_id, status)');
+
+  // Existing feedback predates hosted beta accounts. Preserve legacy desktop
+  // rows as the fixed local user, then attribute new submissions explicitly.
+  try {
+    db.exec(`ALTER TABLE feedback ADD COLUMN user_id INTEGER NOT NULL DEFAULT ${LOCAL_USER_ID}`);
+  } catch (error) {
+    if (!/duplicate column name:\s*user_id/i.test(String(error?.message || ''))) throw error;
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_feedback_user_status ON feedback(user_id, status, created_at)');
 
   // Existing databases predate the explicit feedback -> Quality review bridge.
   // The backlink makes routing idempotent and inspectable without promoting or

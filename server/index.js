@@ -782,6 +782,10 @@ const HOSTED_ALLOWED_PREFIXES = [
 ];
 app.use((req, res, next) => {
   if (!MULTI_USER) return next();
+  // Testers may submit feedback, but hosted clients may not enumerate or
+  // mutate the shared maintainer review queue. Keep this exception exact and
+  // method-bound instead of allowlisting the whole /api/feedback prefix.
+  if (req.method === 'POST' && req.path === '/api/feedback') return next();
   if (HOSTED_ALLOWED_PREFIXES.some((prefix) => req.path === prefix || req.path.startsWith(prefix))) return next();
   return fail(res, 404, 'Not found.');
 });
@@ -4332,8 +4336,10 @@ const capabilityRegistry = createCapabilityRegistry({
     if (view === 'blocked') return { summary: planner.summary, records: asItems(planner.blockers) };
     return { summary: planner.summary, records: asItems([...planner.focus, ...planner.blockers, ...planner.waiting].slice(0, limit)) };
   },
-  readFeedback({ id }) {
-    return row('SELECT * FROM feedback WHERE id = ?', [id]);
+  readFeedback({ id, userId }) {
+    return MULTI_USER
+      ? row('SELECT * FROM feedback WHERE id = ? AND user_id = ?', [id, userId])
+      : row('SELECT * FROM feedback WHERE id = ?', [id]);
   },
   async readWorkboard({ id, type }) {
     if (type === 'project') {
@@ -5739,10 +5745,10 @@ app.post('/api/feedback', (req, res) => {
     return fail(res, 400, error.message);
   }
   const id = db.prepare(`
-    INSERT INTO feedback (sentiment, surface, work_item, run_id, provider, app_version, note, evidence, sensitive, actionable, theme_key)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(record.sentiment, record.surface, record.workItem, record.runId, record.provider, record.appVersion, record.note, record.evidence, record.sensitive ? 1 : 0, record.actionable ? 1 : 0, record.themeKey).lastInsertRowid;
-  ok(res, row('SELECT * FROM feedback WHERE id = ?', [id]));
+    INSERT INTO feedback (user_id, sentiment, surface, work_item, run_id, provider, app_version, note, evidence, sensitive, actionable, theme_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(req.userId, record.sentiment, record.surface, record.workItem, record.runId, record.provider, record.appVersion, record.note, record.evidence, record.sensitive ? 1 : 0, record.actionable ? 1 : 0, record.themeKey).lastInsertRowid;
+  ok(res, row('SELECT * FROM feedback WHERE id = ? AND user_id = ?', [id, req.userId]));
 });
 
 app.get('/api/feedback', (req, res) => {

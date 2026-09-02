@@ -120,6 +120,16 @@ try {
   const renameAsB = await fetch(`${base}/api/chat/sessions/${sessionA.id}`, { method: 'PATCH', headers: mutB, body: JSON.stringify({ title: 'Hijacked' }) });
   line(renameAsB.status === 404, "B cannot rename A's chat session by known ID");
 
+  // --- mobile feedback is submit-only in hosted mode ---------------------
+  const feedbackA = await fetch(`${base}/api/feedback`, { method: 'POST', headers: mutA, body: JSON.stringify({ sentiment: 'useful', surface: 'android:chat', runId: 'alice-run' }) }).then(json);
+  const feedbackB = await fetch(`${base}/api/feedback`, { method: 'POST', headers: mutB, body: JSON.stringify({ sentiment: 'broken', surface: 'android:chat', runId: 'bob-run', note: 'retry path' }) }).then(json);
+  line(feedbackA.ok === true && feedbackA.data.user_id === regA.data.userId, "A's hosted feedback is accepted and attributed to A");
+  line(feedbackB.ok === true && feedbackB.data.user_id === regB.data.userId, "B's hosted feedback is accepted and attributed to B");
+  const feedbackQueueAsA = await fetch(`${base}/api/feedback`, { headers: auth(tokenA) });
+  line(feedbackQueueAsA.status === 404, 'a hosted tester cannot enumerate the maintainer feedback queue');
+  const feedbackPatchAsA = await fetch(`${base}/api/feedback/${feedbackA.data.id}`, { method: 'PATCH', headers: mutA, body: JSON.stringify({ status: 'dismissed' }) });
+  line(feedbackPatchAsA.status === 404, 'a hosted tester cannot mutate feedback after submission');
+
   // --- roadmap is not reachable at all in hosted mode (not a live leak) --
   const roadmapAsA = await fetch(`${base}/api/roadmap`, { headers: auth(tokenA) });
   line(roadmapAsA.status === 404, '/api/roadmap is not reachable under MULTI_USER (excluded from the hosted allowlist)');

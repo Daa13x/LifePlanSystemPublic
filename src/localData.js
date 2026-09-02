@@ -17,6 +17,7 @@
 // is local_only and stays on the device until that lands.
 
 import { planDay, CAPACITY_MODES, DEFAULT_CAPACITY_MODE, normalizeCapacityMode } from '../server/capacityPlanner.js';
+import { normalizeSyncBaseUrl } from './nativeConnection.js';
 
 const DB_NAME = 'lps_local';
 let dbPromise = null;
@@ -633,9 +634,9 @@ export async function localSyncSettings() {
 
 export async function localSetSyncPairing({ baseUrl, pairingToken }) {
   const db = await getDb();
-  const cleanUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
+  const cleanUrl = normalizeSyncBaseUrl(baseUrl);
   const cleanToken = String(pairingToken || '').trim();
-  if (cleanUrl && !/^https?:\/\/[^/]+$/.test(cleanUrl)) throw new Error('Desktop address must look like http://<ip>:<port>.');
+  if (!cleanToken) throw new Error('Pairing code is required.');
   await setSetting(db, 'sync_base_url', cleanUrl);
   await setSetting(db, 'sync_pairing_token', cleanToken);
   // Re-pairing (a new/changed desktop) invalidates any cursor from a
@@ -741,11 +742,14 @@ export async function localSyncNow() {
   if (!settings.paired) return { status: 'not_paired' };
   const device = await deviceId(db);
   try {
+    // Revalidate persisted values too: an address saved by an older APK must
+    // not bypass the current private-network/HTTPS boundary after upgrade.
+    const baseUrl = normalizeSyncBaseUrl(settings.baseUrl);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 4000);
     let health;
     try {
-      health = await fetch(`${settings.baseUrl}/health`, { signal: controller.signal });
+      health = await fetch(`${baseUrl}/health`, { signal: controller.signal });
     } finally {
       clearTimeout(timeout);
     }
@@ -761,7 +765,7 @@ export async function localSyncNow() {
     const exchangeTimeout = setTimeout(() => exchangeController.abort(), 15000);
     let response;
     try {
-      response = await fetch(`${settings.baseUrl}/exchange`, {
+      response = await fetch(`${baseUrl}/exchange`, {
         method: 'POST',
         signal: exchangeController.signal,
         headers: { 'Content-Type': 'application/json', 'X-LPS-Pairing-Token': settings.pairingToken },

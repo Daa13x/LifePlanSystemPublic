@@ -21,9 +21,10 @@ assert.match(ui, /route\.tab === 'feedback' && <FeedbackReview[^>]*refreshSignal
 assert.match(ui, /function FeedbackControl\(/, 'FeedbackControl component exists');
 assert.match(ui, /<MessageVoice text=\{body\} \/><FeedbackControl message=\{message\} \/>/, 'the capture control sits on assistant replies');
 assert.match(ui, /api\('\/api\/feedback', \{ method: 'POST', body: JSON\.stringify\(\{ sentiment: chosen, surface: 'chat:reply', runId: String\(message\.id\)/, 'captured feedback posts sentiment + attribution (surface + run id)');
-// It must never disrupt the chat: capture errors are swallowed.
+// It must never disrupt the chat, but a failed send must be honest and retryable.
 const control = ui.slice(ui.indexOf('function FeedbackControl'), ui.indexOf('function FeedbackReview'));
-assert.match(control, /catch \{ \/\* feedback capture must never disrupt the conversation \*\/ \}/, 'a failed capture never disrupts the conversation');
+assert.match(control, /catch \{ setMode\('error'\); \}/, 'a failed capture enters an explicit error state');
+assert.match(control, /Feedback was not sent\.[\s\S]*Retry/, 'a failed capture exposes a retry without disrupting the conversation');
 
 // Review queue: reads the queue, shows consolidation proposals, and triages.
 assert.match(ui, /function FeedbackReview\(/, 'FeedbackReview component exists');

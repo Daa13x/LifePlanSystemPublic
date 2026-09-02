@@ -43,9 +43,10 @@ import {
 import './styles.css';
 import { PRIMARY_NAVIGATION, MOBILE_PRIMARY_NAVIGATION, SECTION_TABS, MOBILE_SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
 import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate, localCompleteTask, localDeferTask, localListTasks, localSyncSettings, localSetSyncPairing, localSyncNow } from './localData.js';
-import { matchLocalCommand, isLocalCommandPattern, LOCAL_COMMAND_EXAMPLES } from './localCommands.js';
+import { matchLocalCommand, LOCAL_COMMAND_EXAMPLES } from './localCommands.js';
 import { ensureNotificationPermission, registerReminderActions, reconcileAllReminders } from './localNotifications.js';
 import { renderMarkdown } from './markdown.js';
+import { normalizeNativeServerUrl } from './nativeConnection.js';
 import { awaitChatSendResult, isChatSendOriginActive, isLatestChatConnectionRequest } from './chatSendClient.js';
 import {
   normalizeDetailMode,
@@ -77,12 +78,14 @@ import { Capacitor } from '@capacitor/core';
 // Persisted with plain localStorage: it is per-installation configuration,
 // not a secret, and each Capacitor app has its own isolated WebView storage.
 function readNativeServerUrl() {
-  try { return localStorage.getItem('lps.serverUrl') || 'http://127.0.0.1:4177'; } catch { return 'http://127.0.0.1:4177'; }
+  try { return normalizeNativeServerUrl(localStorage.getItem('lps.serverUrl') || 'http://127.0.0.1:4177'); } catch { return 'http://127.0.0.1:4177'; }
 }
 let API = Capacitor.isNativePlatform() ? readNativeServerUrl() : '';
 function setNativeServerUrl(url) {
-  API = url;
-  try { localStorage.setItem('lps.serverUrl', url); } catch { /* private-browsing storage denial; API still updates in-memory */ }
+  const normalized = normalizeNativeServerUrl(url);
+  API = normalized;
+  try { localStorage.setItem('lps.serverUrl', normalized); } catch { /* private-browsing storage denial; API still updates in-memory */ }
+  return normalized;
 }
 
 // The bearer token issued by /api/auth/register or /api/auth/login on a
@@ -527,6 +530,7 @@ function App() {
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
+  const [backendPanelOpen, setBackendPanelOpen] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -776,12 +780,16 @@ function App() {
             {IS_NATIVE && <button className="icon-button" onClick={() => setSyncPanelOpen(true)} aria-label="Pair with desktop" title="Pair with desktop">
               <Smartphone size={18} />
             </button>}
+            {IS_NATIVE && <button className="icon-button" onClick={() => setBackendPanelOpen(true)} aria-label="Configure LifePlanSystem server" title="Configure LifePlanSystem server">
+              <KeyRound size={18} />
+            </button>}
             {!IS_NATIVE && <button className={cx('icon-button', route.section === 'settings' && 'active')} onClick={() => navigate('settings')} aria-label="Open Settings" aria-current={route.section === 'settings' ? 'page' : undefined} title="Open Settings">
               <Settings size={18} />
             </button>}
           </div>
         </header>
         {IS_NATIVE && syncPanelOpen && <NativeSyncPanel onClose={() => setSyncPanelOpen(false)} />}
+        {IS_NATIVE && backendPanelOpen && <NativeBackendPanel onClose={() => setBackendPanelOpen(false)} />}
         {notice && (
           <div className="notice-banner" role="status">
             <span>{notice}</span>
@@ -1659,13 +1667,15 @@ function FeedbackControl({ message }) {
   const metadata = parseMessageMetadata(message.metadata);
   const submit = async (chosen) => {
     setPending(true);
+    setSentiment(chosen);
     try {
       await api('/api/feedback', { method: 'POST', body: JSON.stringify({ sentiment: chosen, surface: 'chat:reply', runId: String(message.id), provider: metadata?.model || metadata?.runtime || null, note: note.trim() || null }) });
       setDoneLabel(chosen); setMode('done'); setNote('');
-    } catch { /* feedback capture must never disrupt the conversation */ }
+    } catch { setMode('error'); }
     setPending(false);
   };
   if (mode === 'done') return <span className="feedback-thanks" role="status">Thanks — “{doneLabel}” logged for review.</span>;
+  if (mode === 'error') return <span className="feedback-control" role="alert"><span>Feedback was not sent.</span><button type="button" className="feedback-send" disabled={pending} onClick={() => submit(sentiment)}>{pending ? 'Retrying…' : 'Retry'}</button><button type="button" className="feedback-quick" disabled={pending} onClick={() => setMode('idle')}>Cancel</button></span>;
   return (
     <span className="feedback-control">
       <button type="button" className="feedback-quick" title="Mark this reply useful" aria-label="Mark reply useful" disabled={pending} onClick={() => submit('useful')}>👍</button>
@@ -2892,24 +2902,22 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     if (!draft.trim() || !selectedSession || chatBusy) return;
     const outgoing = draft;
 
-    // Zero-API-key standalone Chat: deterministic commands run entirely
-    // locally, with no network involved at all. When nothing matches and no
-    // server is already known to be reachable (runtimeUnreachable was set by
-    // the existing /api/models/runtime probe on mount -- reusing that
-    // signal rather than making a new request purely to find out), give an
-    // honest local explanation instead of attempting a doomed fetch.
-    if (IS_NATIVE && (isLocalCommandPattern(outgoing) || runtimeUnreachable)) {
+    // Closed Beta v0.1 keeps phone chat sessions in on-device SQLite. A phone
+    // session UUID is not a server chat-session ID, so sending it to the
+    // desktop/hosted streaming route would guarantee a false 404 whenever a
+    // backend happened to be reachable. Keep native Chat on its verified local
+    // command boundary until a deliberate session-sync protocol exists.
+    if (IS_NATIVE) {
       // chatBusy is set (and checked at the top of this function) BEFORE
-      // matchLocalCommand runs -- isLocalCommandPattern above is a pure
-      // pattern test with no side effect, so a rapid double-tap is blocked
-      // here rather than being able to execute an "add"/"mark done" mutation
-      // twice before this component re-renders.
+      // chatBusy is set before matchLocalCommand runs, so a rapid double-tap
+      // cannot execute an "add"/"mark done" mutation twice before this
+      // component re-renders.
       setChatBusy(true);
       try {
         const local = await matchLocalCommand(outgoing);
         const reply = local.handled
           ? local.reply
-          : `I can't reach an AI provider right now, so I can only help with local commands, for example:\n${LOCAL_COMMAND_EXAMPLES.map((e) => `- ${e}`).join('\n')}`;
+          : `This Closed Beta keeps phone chat on device for now. I can help with local commands, for example:\n${LOCAL_COMMAND_EXAMPLES.map((e) => `- ${e}`).join('\n')}`;
         const userMsg = await localAppendMessage(selectedSession, 'user', outgoing);
         const assistantMsg = await localAppendMessage(selectedSession, 'assistant', reply);
         setDraft('');
@@ -3555,6 +3563,58 @@ function ProjectProposalCard({ proposal, busy, onConfirm, onCancel }) {
         <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
       </div>
       <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. No Workboard card exists until you confirm.</small>
+    </div>
+  );
+}
+
+// Native backend configuration stays reachable after the app deliberately
+// falls back to standalone mode, so a tester can correct a server URL and
+// retry without clearing application data.
+function NativeBackendPanel({ onClose }) {
+  const [serverUrl, setServerUrl] = useState(API);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function connect() {
+    setBusy(true);
+    setError('');
+    const previous = API;
+    let timeout;
+    try {
+      const normalized = setNativeServerUrl(serverUrl);
+      if (normalized !== previous) setAuthToken('');
+      const controller = new AbortController();
+      timeout = setTimeout(() => controller.abort(), 5000);
+      const headers = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+      const response = await fetch(`${normalized}/api/auth/me`, { headers, signal: controller.signal });
+      if (response.status !== 401 && !response.ok) throw new Error(`Server responded ${response.status}.`);
+      window.location.reload();
+    } catch (cause) {
+      const detail = cause?.name === 'AbortError' ? 'The server did not respond in time.' : cause?.message;
+      setError(detail || 'The server could not be reached.');
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="picker-overlay" onClick={onClose}>
+      <div className="picker" onClick={(event) => event.stopPropagation()}>
+        <div className="picker-head">
+          <strong>Connect to LifePlanSystem</strong>
+          <button className="icon-button" onClick={onClose} aria-label="Close server panel"><X size={16} /></button>
+        </div>
+        <div className="picker-controls" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
+          <small>Use the HTTPS address supplied for the Closed Beta. For a USB-connected desktop test, use the loopback default after running adb reverse.</small>
+          <input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} placeholder="https://your-beta-server.example.com" autoCapitalize="none" autoCorrect="off" />
+          <div className="decision-row">
+            <button className="primary" onClick={connect} disabled={busy || !serverUrl.trim()}>{busy ? 'Connecting…' : 'Save and connect'}</button>
+            <button onClick={() => setServerUrl('http://127.0.0.1:4177')} disabled={busy}>Use USB default</button>
+          </div>
+          {error && <small className="auth-gate-error" role="alert">{error} Check the address and tap Save and connect to retry.</small>}
+        </div>
+      </div>
     </div>
   );
 }
