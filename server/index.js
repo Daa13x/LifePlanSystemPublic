@@ -1054,11 +1054,23 @@ function classifyAndRedactCloudPrompt(prompt) {
 function prepareCloudEgress(req) {
   const targetAgent = String(req.body.target_agent || 'ChatGPT').trim();
   const localDraft = String(req.body.local_draft || '').trim();
+  const mode = String(req.body.consultation_mode || 'REVIEW').trim().toUpperCase();
+  if (!['REVIEW', 'STRUCTURED_ADVISOR'].includes(mode)) throw new Error('consultation_mode must be REVIEW or STRUCTURED_ADVISOR.');
   const contexts = selectedContextFiles(req.body.context_paths || []);
-  const assembled = req.body.prompt?.trim() || buildCloudConsultationPrompt({ targetAgent, localDraft, contexts });
+  const suppliedPrompt = String(req.body.prompt || '').trim();
+  if (mode === 'STRUCTURED_ADVISOR' && !suppliedPrompt) {
+    throw new Error('STRUCTURED_ADVISOR requires the exact advisor instruction in prompt.');
+  }
+  // REVIEW intentionally wraps a local draft for critique. STRUCTURED_ADVISOR
+  // deliberately sends its explicitly supplied task verbatim (after the same
+  // egress classification/redaction) so a machine-readable response contract
+  // is not accidentally demoted into review material.
+  const assembled = mode === 'STRUCTURED_ADVISOR'
+    ? suppliedPrompt
+    : suppliedPrompt || buildCloudConsultationPrompt({ targetAgent, localDraft, contexts });
   const classified = classifyAndRedactCloudPrompt(assembled);
   const promptHash = crypto.createHash('sha256').update(`${targetAgent}\0${classified.prompt}`, 'utf8').digest('hex');
-  return { targetAgent, localDraft, contexts, prompt: classified.prompt, promptHash, findings: classified.findings, changed: classified.changed, blocked: classified.blocked };
+  return { targetAgent, localDraft, mode, contexts, prompt: classified.prompt, promptHash, findings: classified.findings, changed: classified.changed, blocked: classified.blocked };
 }
 
 function buildBrowserAgentAssistPrompt({ targetAgent = 'ChatGPT', localDraft = '', contexts = [] }) {
@@ -7260,6 +7272,7 @@ app.post('/api/browser/consult/preview', (req, res) => {
     const prepared = prepareCloudEgress(req);
     ok(res, {
       targetAgent: prepared.targetAgent,
+      mode: prepared.mode,
       prompt: prepared.prompt,
       promptHash: prepared.promptHash,
       findings: prepared.findings,

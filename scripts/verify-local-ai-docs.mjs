@@ -102,6 +102,24 @@ try {
   assert.match(preview.body.data.prompt, /secret=\[REDACTED\]/);
   assert.match(preview.body.data.promptHash, /^[a-f0-9]{64}$/);
 
+  const structured = await jsonApi('/api/browser/consult/preview', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      target_agent: 'ChatGPT', local_draft: 'local audit label', consultation_mode: 'STRUCTURED_ADVISOR',
+      prompt: 'Return ONLY one AtomProposal JSON object with exact required keys.'
+    })
+  });
+  assert.equal(structured.response.status, 200);
+  assert.equal(structured.body.data.mode, 'STRUCTURED_ADVISOR');
+  assert.equal(structured.body.data.prompt, 'Return ONLY one AtomProposal JSON object with exact required keys.');
+  assert.doesNotMatch(structured.body.data.prompt, /Review the local draft/i);
+
+  const missingStructuredPrompt = await jsonApi('/api/browser/consult/preview', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      target_agent: 'ChatGPT', local_draft: 'local audit label', consultation_mode: 'STRUCTURED_ADVISOR'
+    })
+  });
+  assert.equal(missingStructuredPrompt.response.status, 400);
+
   const sensitivePreview = await jsonApi('/api/browser/consult/preview', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       target_agent: 'Claude', local_draft: 'My medication changed after a hospital appointment.'
