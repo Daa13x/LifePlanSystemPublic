@@ -13,7 +13,9 @@
 
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { classifyChatIntent, shouldCreateMemoryCandidate } from '../server/chatIntent.js';
+import { capabilityRequestForChatIntent, classifyChatIntent, shouldCreateMemoryCandidate } from '../server/chatIntent.js';
+import { buildChatCommandCatalog, CHAT_COMMANDS, explicitChatCommand } from '../server/chatCommands.js';
+import { createCapabilityRegistry } from '../server/chatCapabilities.js';
 import { renderMarkdown } from '../src/markdown.js';
 
 let failures = 0;
@@ -41,13 +43,41 @@ console.log('--- chat behaviour verification ---');
     ['What time is it?', 'current_time'],
     ['Do you have live news today?', 'live_news'],
     ['Where are my memories stored locally?', 'memory_storage'],
-    ['Where do you store my memory?', 'memory_storage']
+    ['Where do you store my memory?', 'memory_storage'],
+    ['show my plan for today', 'planner_today'],
+    ['/today', 'planner_today'],
+    ['/status', 'system_status'],
+    ['/model', 'model_query'],
+    ['/projects', 'workboard_list'],
+    ['/blockers', 'blocked_query'],
+    ['list recent local runs', 'recent_runs'],
+    ['/runs', 'recent_runs']
   ];
   for (const [input, expected] of cases) {
     const got = classifyChatIntent(input);
     line(got === expected, `intent(${JSON.stringify(input)}) = ${got} (expected ${expected})`);
   }
 }
+
+const actionMappings = new Map([
+  ['system_status', 'system.status'],
+  ['model_query', 'system.models'],
+  ['recent_runs', 'system.runs'],
+  ['workboard_list', 'workboard.list'],
+  ['blocked_query', 'workboard.list'],
+  ['planner_today', 'planner.today']
+]);
+for (const [intent, actionId] of actionMappings) {
+  const request = capabilityRequestForChatIntent(intent);
+  line(request?.actionId === actionId, `intent ${intent} delegates to the universal ${actionId} action`);
+}
+line(capabilityRequestForChatIntent('conversation') === null, 'ordinary conversation has no action-registry request');
+
+const commandCatalog = buildChatCommandCatalog(createCapabilityRegistry({}).listActions());
+line(commandCatalog.length === CHAT_COMMANDS.length, 'every built-in Chat command resolves to a live universal action');
+line(commandCatalog.every((command) => command.permission && command.risk && command.confirmation), 'command discovery inherits permission, risk, and confirmation from the action registry');
+line(explicitChatCommand('/add-task Buy milk')?.actionId === 'planner.propose_create', 'parameterised task command resolves to the proposal action');
+line(explicitChatCommand('/does-not-exist') === null, 'unknown slash commands do not gain action authority');
 
 // 2. Memory-candidate gating.
 {

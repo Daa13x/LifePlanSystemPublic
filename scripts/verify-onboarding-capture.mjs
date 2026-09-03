@@ -84,6 +84,10 @@ try {
   line(seedMessages.length === 1 && seedMessages[0].role === 'assistant' && /what's one thing/i.test(seedMessages[0].content), 'the kickoff session opens with the one seeded guided question');
 
   const candidatesBefore = (await api('/api/memory')).body.data.candidates.length;
+  const firstCommand = await api(`/api/chat/sessions/${kickoff.id}/messages`, { method: 'POST', json: { content: '/status' } });
+  const firstCommandReply = firstCommand.body.data.messages.find((m) => m.role === 'assistant');
+  line(firstCommand.status === 200 && firstCommand.body.data.runtime === 'action registry' && /System status/.test(firstCommandReply?.content || ''), 'a slash command in the fresh kickoff chat executes normally instead of becoming the onboarding answer');
+  line((await api('/api/memory')).body.data.candidates.length === candidatesBefore, 'the kickoff slash command is not force-saved as personal memory');
   const genericAnswer = 'Trying to keep on top of my freelance invoicing this month';
   const answered = await api(`/api/chat/sessions/${kickoff.id}/messages`, { method: 'POST', json: { content: genericAnswer } });
   line(answered.status === 200, 'the onboarding answer is accepted');

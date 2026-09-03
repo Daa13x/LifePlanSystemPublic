@@ -7,8 +7,12 @@
 // explicit-data intents are allowed to surface internal status; everything else
 // stays conversational.
 
+import { explicitChatCommandIntent } from './chatCommands.js';
+
 export function classifyChatIntent(message) {
   const lower = String(message || '').toLowerCase();
+  const commandIntent = explicitChatCommandIntent(message);
+  if (commandIntent) return commandIntent;
 
   const asksList = /\b(list|show|display|name|give me|what are|which are|tell me|how many)\b/.test(lower);
   const asksWhat = /\b(what|which|show|display|tell me|list|how many|any)\b/.test(lower);
@@ -17,6 +21,9 @@ export function classifyChatIntent(message) {
   if (/\bwhat(?:'s| is)?\s+(?:the )?(?:current )?time\b|\bwhat time is it\b/.test(lower)) return 'current_time';
   if (/\b(?:live|latest|today'?s)\s+news\b|\bdo you have live news\b/.test(lower)) return 'live_news';
   if (/\bwhere (?:are|is) (?:my )?(?:memories|memory) stored(?: locally)?\b|\bwhere do you store (?:my )?(?:memories|memory)\b/.test(lower)) return 'memory_storage';
+  if (/\b(?:show|display|what(?:'s| is)|read|check)\s+(?:my\s+)?(?:plan\s+for\s+)?today\b/.test(lower)
+    || /\bwhat (?:tasks?|have i got|do i have)\b[^.?!]*\btoday\b/.test(lower)) return 'planner_today';
+  if (/\b(?:show|list|display|what are)\b[^.?!]*\b(?:recent|latest)\s+(?:local\s+)?runs?\b/.test(lower)) return 'recent_runs';
 
   // Active model.
   if (/\b(which|what)\s+model\b/.test(lower)
@@ -44,6 +51,21 @@ export function classifyChatIntent(message) {
   }
 
   return 'conversation';
+}
+
+// Maps conversational/explicit command intent onto the existing universal
+// action registry. This is an adapter, not a second command owner: schemas,
+// permissions, risk, auditing, data access and execution all remain in
+// chatCapabilities.js/actionRegistry.js.
+export function capabilityRequestForChatIntent(intent) {
+  return ({
+    system_status: { actionId: 'system.status', args: {} },
+    model_query: { actionId: 'system.models', args: { limit: 25 } },
+    recent_runs: { actionId: 'system.runs', args: { limit: 8 } },
+    workboard_list: { actionId: 'workboard.list', args: { view: 'projects', limit: 25 } },
+    blocked_query: { actionId: 'workboard.list', args: { view: 'blocked', limit: 25 } },
+    planner_today: { actionId: 'planner.today', args: {} }
+  })[intent] || null;
 }
 
 // Decide whether a chat message should become a review-only memory candidate.

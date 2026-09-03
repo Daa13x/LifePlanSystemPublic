@@ -162,7 +162,13 @@ const HANDLERS = [
 // same command, and a captured free-text group (an added task's title, a
 // "remember that" fact) never ends up with a stray period glued onto it.
 function normalizeCommandText(text) {
-  return String(text || '').trim().replace(/[.!?]+$/, '');
+  const normalized = String(text || '').trim().replace(/[.!?]+$/, '');
+  const slash = normalized.match(/^\/(today|completed|deferred|notes)\s*$/i)?.[1]?.toLowerCase();
+  if (slash === 'today') return 'show today';
+  if (slash === 'completed') return 'show completed tasks';
+  if (slash === 'deferred') return 'show deferred tasks';
+  if (slash === 'notes') return 'show notes';
+  return normalized.replace(/^\/add-task\s+/i, 'add ');
 }
 
 export function isLocalCommandPattern(text) {

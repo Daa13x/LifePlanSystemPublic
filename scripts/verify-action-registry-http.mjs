@@ -143,6 +143,7 @@ try {
   fixtureDb.close();
 
   const catalog = await api('/api/actions');
+  const commands = await api('/api/chat/commands');
   const knowledge = catalog.body?.data?.find((action) => action.id === 'knowledge.search');
   const knowledgeRead = catalog.body?.data?.find((action) => action.id === 'knowledge.read');
   const workboardRead = catalog.body?.data?.find((action) => action.id === 'workboard.read');
@@ -164,6 +165,8 @@ try {
   const codingProposeTaskAction = catalog.body?.data?.find((action) => action.id === 'coding.propose_task');
   const feedbackTriageAction = catalog.body?.data?.find((action) => action.id === 'feedback.propose_triage');
   line(catalog.status === 200 && Boolean(knowledge), 'neutral action catalog exposes knowledge.search');
+  line(commands.status === 200 && commands.body?.data?.length === 11, 'Chat command discovery exposes the bounded built-in catalog');
+  line(commands.body?.data?.every((command) => catalog.body?.data?.some((action) => action.id === command.actionId && action.permission === command.permission && action.risk === command.risk && action.confirmation === command.confirmation)), 'every Chat command inherits authority metadata from its live registered action');
   line(catalog.body?.data?.length === 21 && Boolean(knowledgeRead) && Boolean(workboardRead) && Boolean(createProposal) && Boolean(updateProposal) && Boolean(systemStatus) && Boolean(systemModels) && Boolean(systemRuns) && Boolean(conversationSearch) && Boolean(plannerToday) && Boolean(navigationWorkboard) && Boolean(navigationSystem) && Boolean(navigationSettings) && Boolean(navigationPlanner) && Boolean(plannerCreate) && Boolean(plannerUpdate) && Boolean(projectCreateProposal) && Boolean(plannerRefreshAction) && Boolean(codingProposeTaskAction) && Boolean(feedbackTriageAction), 'neutral catalog exposes every bounded registered capability');
   line(codingProposeTaskAction?.permission === 'coding.propose' && codingProposeTaskAction?.risk === 'REVERSIBLE_WRITE' && codingProposeTaskAction?.confirmation === 'user_confirmation', 'coding.propose_task advertises its write risk and user-confirmation requirement');
   line(plannerRefreshAction?.permission === 'planner.refresh' && plannerRefreshAction?.risk === 'GOVERNED_STAGING' && plannerRefreshAction?.confirmation === 'none' && JSON.stringify(plannerRefreshAction?.inputSchema) === '{}' && plannerRefreshAction?.sourceControls?.includes('planner.refresh-workboard'), 'planner.refresh advertises its governed-staging contract and takes no caller arguments');
@@ -284,6 +287,11 @@ try {
 
   const statusContextBefore = await api(`/api/chat/sessions/${sessionId}/context-records`);
   const statusItemsBefore = await api('/api/items?all=1');
+  const uploadedContext = await api(`/api/chat/sessions/${sessionId}/context/upload`, { method: 'POST', json: { name: 'chat-evidence.md', base64: Buffer.from('# Local evidence\nAttachment works.', 'utf8').toString('base64') } });
+  const uploadedRecord = uploadedContext.body?.data?.find((item) => String(item.path).startsWith('chat-upload:'));
+  line(uploadedContext.status === 200 && Boolean(uploadedRecord), 'desktop Chat accepts a bounded local text upload through the existing conversation-context owner');
+  const rejectedUpload = await api(`/api/chat/sessions/${sessionId}/context/upload`, { method: 'POST', json: { name: 'unsafe.exe', base64: Buffer.from('not executable here', 'utf8').toString('base64') } });
+  line(rejectedUpload.status === 400, 'Chat upload rejects unsupported binary/executable extensions without claiming extraction');
   const statusConfirmationsBeforeDb = new DatabaseSync(dbPath, { readOnly: true });
   const statusConfirmationsBefore = Number(statusConfirmationsBeforeDb.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
   statusConfirmationsBeforeDb.close();
@@ -298,6 +306,12 @@ try {
   line(statusResponse.status === 200 && statusAction?.status === 'success' && statusAction?.actionId === 'system.status' && statusAction?.data?.sqlite?.ready === true && typeof statusAction?.data?.browserConnector?.connected === 'boolean', 'system.status returns a structured authoritative local receipt');
   line(JSON.stringify(Object.keys(statusAction?.data || {}).sort()) === JSON.stringify(['browserConnector', 'health', 'model', 'repository', 'runtime', 'sqlite', 'workboard']) && JSON.stringify(statusAction?.data || {}).length < 3000, 'system.status response has a strict bounded top-level shape');
   line(statusContextBefore.body?.data?.length === statusContextAfter.body?.data?.length && statusItemsBefore.body?.data?.length === statusItemsAfter.body?.data?.length && statusConfirmationsBefore === statusConfirmationsAfter, 'checking system status creates no attachment, Workboard item, or confirmation');
+  const conversationalStatus = await api(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', json: { content: 'What is the current system status?' } });
+  const conversationalReply = conversationalStatus.body?.data?.messages?.find((message) => message.role === 'assistant');
+  line(conversationalStatus.status === 200 && /System status/.test(conversationalReply?.content || '') && conversationalReply?.metadata?.includes('action-registry'), 'normal Chat intent invokes system.status through the registry and returns the result as a conversational reply');
+  const explicitStatus = await api(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', json: { content: '/status' } });
+  const explicitReply = explicitStatus.body?.data?.messages?.find((message) => message.role === 'assistant');
+  line(explicitStatus.status === 200 && /System status/.test(explicitReply?.content || '') && explicitReply?.metadata?.includes('action-registry'), 'explicit /status invokes the same registered action and returns the result as a conversational reply');
   const modelsResponse = await api('/api/actions/system.models/invoke', { method: 'POST', json: { session_id: sessionId, args: { limit: 5 } } });
   const runsResponse = await api('/api/actions/system.runs/invoke', { method: 'POST', json: { session_id: sessionId, args: { limit: 5 } } });
   const modelsAction = modelsResponse.body?.data;

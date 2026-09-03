@@ -647,6 +647,8 @@ h3 { font-size: 14px; font-weight: 700; }
   height: calc(100vh - 112px);
   margin-top: 0;
 }
+.chat-layout.sidebar-collapsed { grid-template-columns: minmax(0, 1fr); }
+.chat-layout.sidebar-collapsed .chat-sidebar { display: none; }
 .chat-sidebar {
   display: grid;
   grid-template-rows: minmax(0, 1fr);
@@ -683,8 +685,12 @@ h3 { font-size: 14px; font-weight: 700; }
 .local-source-list summary { cursor: pointer; color: var(--accent); }
 .local-source-list ul { margin: 5px 0 0; padding-left: 16px; max-height: 140px; overflow: auto; }
 .local-source-list li { overflow-wrap: anywhere; }
-.chat-panel { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; overflow: hidden; position: relative; }
-.chat-header { padding: 16px; border-bottom: 1px solid var(--line); }
+.chat-panel { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; position: relative; }
+.chat-header { min-height: 52px; padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+.chat-header .chat-title { min-width: 0; display: flex; align-items: center; gap: 6px; flex: 1; }
+.chat-header .chat-title h2 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-header .row-actions { margin-left: auto; }
+.chat-sidebar-toggle, .chat-rename { flex: 0 0 auto; }
 .messages { padding: 16px; overflow: auto; display: grid; gap: 12px; align-content: start; scroll-behavior: auto; overflow-anchor: none; }
 
 /* Floating "Jump to latest" control, shown only when the user has scrolled up. */
@@ -801,7 +807,44 @@ h3 { font-size: 14px; font-weight: 700; }
 .voice-button.failed { color: #d98a8a; }
 .message.streaming { opacity: 0.92; }
 
-.composer { padding: 14px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 10px; }
+.composer { width: 100%; min-width: 0; padding: 14px; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: end; }
+.chat-actions-toggle { margin-bottom: 4px; }
+.chat-actions-toggle.selected { color: var(--accent); border-color: var(--accent); }
+.command-picker {
+  grid-column: 1 / -1;
+  max-height: 280px;
+  overflow: auto;
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+.command-picker > button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+.command-picker > button:hover, .command-picker > button:focus-visible { background: var(--panel-2); }
+.command-picker code { color: var(--accent); }
+.command-picker span { min-width: 0; display: flex; flex-direction: column; }
+.command-picker small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.command-hints { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.command-hints > small { color: var(--muted); }
+.command-hints > button { padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--accent); background: transparent; }
+.command-settings-list { display: grid; gap: 6px; margin: 10px 0 14px; }
+.command-setting-row { display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+.command-setting-row > span { min-width: 0; display: flex; flex-direction: column; }
+.command-setting-row small { color: var(--muted); }
 .cloud-composer { grid-column: 1 / -1; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .cloud-composer > span { color: var(--muted); font-size: 18px; }
 .cloud-composer select { width: auto; padding: 6px 8px; }
@@ -837,6 +880,7 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   border-bottom: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel-2) 58%, transparent);
 }
+.chat-actions-panel { max-height: min(46vh, 420px); overflow: auto; }
 
 .source-warning {
   border: 1px solid var(--line);
@@ -1369,29 +1413,7 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
   .roadmap-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* ---- Central Chat: connection bar, context selectors, proposals ---- */
-.connection-bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--panel-2);
-}
-.conn-item { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.conn-item > span { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-.conn-item > strong { font-size: 0.82rem; font-weight: 600; }
-.conn-item > strong.good { color: var(--green); }
-.conn-item > strong.warn { color: var(--amber); }
-.conn-item .link {
-  align-self: flex-start;
-  background: transparent;
-  color: var(--accent);
-  padding: 0;
-  font-size: 0.7rem;
-  text-decoration: underline;
-}
+/* ---- Central Chat: contextual selectors and proposals ---- */
 .context-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .context-actions > button {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1400,6 +1422,20 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
   font-size: 0.8rem;
 }
 .context-actions > button:hover { border-color: var(--accent); }
+.attachment-upload-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--panel);
+  cursor: pointer;
+}
+.attachment-upload-button:hover { border-color: var(--accent); }
+.attachment-upload-button.disabled { opacity: .55; cursor: wait; }
+.attachment-upload-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .inline-form.compact { display: inline-flex; gap: 6px; margin-left: auto; }
 .inline-form.compact select { max-width: 220px; }
 .context-chips button.chip-knowledge { border-color: var(--blue); }
@@ -1594,9 +1630,9 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
      once in the whole stylesheet). Stack sidebar above the chat pane
      instead, matching the same collapse-to-one-column pattern already used
      for .coding-ide above. */
-  .main.chat-main-shell { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+  .main.chat-main-shell { width: 100%; min-width: 0; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
   .chat-main-shell .topbar { flex: 0 0 auto; }
-  .chat-layout { flex: 1 1 auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: auto; min-height: 0; }
+  .chat-layout { width: 100%; min-width: 0; flex: 1 1 auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: auto; min-height: 0; }
   .chat-sidebar { max-height: 150px; }
   .chat-header { padding: 10px 12px; }
   .chat-header h2, .chat-header p { margin-block: 2px; }
@@ -1610,6 +1646,7 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
   .composer { padding: 10px; grid-template-columns: minmax(0, 1fr); }
   .composer textarea { min-height: 46px; }
   .composer > button { width: 100%; justify-content: center; }
+  .command-picker > button { grid-template-columns: minmax(0, 1fr); gap: 3px; }
   .item-row { align-items: stretch; flex-direction: column; }
   .item-row > .button-row { width: 100%; }
   .item-row > .button-row > button { flex: 1 1 auto; min-height: 38px; }

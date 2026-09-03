@@ -36,7 +36,7 @@ function intersects(a, b) {
 async function assertWithinWidth(locator, width, label) {
   const boxes = await locator.evaluateAll((nodes) => nodes.map((node) => {
     const box = node.getBoundingClientRect();
-    return { x: box.x, y: box.y, width: box.width, height: box.height };
+    return { tag: node.tagName, className: node.className, x: box.x, y: box.y, width: box.width, height: box.height };
   }));
   assert.ok(boxes.length > 0, `${label} is populated`);
   for (const box of boxes) assert.ok(box.x >= -0.5 && box.x + box.width <= width + 0.5, `${label} stays inside the ${width}px viewport: ${JSON.stringify(box)}`);
@@ -67,7 +67,6 @@ try {
     await page.addInitScript(() => { window.androidBridge = {}; });
     await page.goto(url, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.chat-layout');
-    await page.getByText('On-device Chat', { exact: true }).waitFor();
     await page.getByText('Your phone-native task', { exact: false }).waitFor();
     await page.waitForTimeout(150);
 
@@ -82,6 +81,13 @@ try {
 
     const composer = page.locator('.composer');
     const input = composer.locator('textarea');
+    await input.fill('/');
+    await page.getByRole('listbox', { name: 'Chat commands' }).waitFor();
+    assert.equal(await page.getByRole('option').count(), 5, 'slash opens native command discovery');
+    await input.fill('/to');
+    assert.equal(await page.getByRole('option').count(), 1, 'partial slash command filters discovery');
+    await page.getByRole('option').click();
+    assert.equal(await input.inputValue(), '/today', 'choosing a command fills the authoritative command text');
     await input.fill('show today');
     const composerBox = await composer.boundingBox();
     assert.ok(composerBox && composerBox.y >= 0 && composerBox.y + composerBox.height <= viewport.height + 0.5, `the whole Chat composer is visible at ${viewport.width}px`);
@@ -90,6 +96,10 @@ try {
     await assertNoOverlap(composer.locator('textarea, button'), 'Chat composer');
     assert.equal(await page.locator('.cloud-composer').count(), 0, 'server-only cloud controls are hidden on Android v0.1');
     assert.equal(await page.locator('.context-actions button').count(), 0, 'server-only context actions are hidden rather than left dead');
+    assert.equal(await page.getByText('On-device Chat', { exact: true }).count(), 0, 'technical mobile help is not permanently shown in the conversation');
+    await page.getByRole('button', { name: 'Open actions and attachments' }).click();
+    await page.getByText('On-device Chat', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Close actions and attachments' }).click();
 
     const messageActions = page.locator('.message.assistant .message-actions');
     await assertWithinWidth(messageActions.locator('button'), viewport.width, 'message feedback controls');

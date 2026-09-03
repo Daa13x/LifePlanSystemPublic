@@ -42,7 +42,8 @@ import {
 import { createRendererBridge } from './rendererBridge.js';
 import { buildManagedLlamaArgs, DEFAULT_LLAMA_GPU_LAYERS, normalizeLlamaGpuLayers } from './llamaLaunch.js';
 import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
-import { classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
+import { capabilityRequestForChatIntent, classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
+import { buildChatCommandCatalog } from './chatCommands.js';
 import { resolveAgentMode } from './agentMode.js';
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
 import { assessLocalAnswerability } from './localAnswerability.js';
@@ -1547,7 +1548,11 @@ function insertChatUserTurn(sessionId, content) {
   // transaction()), so a crash between persisting the answer and generating
   // the acknowledgement can never leave onboarding pending against an already
   // -captured answer and force-capture a later, unrelated message instead.
-  const onboarding = isPendingOnboardingAnswer(sessionId);
+  // A command/data request in the kickoff conversation is not an answer to the
+  // guided life-context question. Execute it normally and keep onboarding
+  // pending so `/status`, `/today`, and equivalent natural requests work on a
+  // fresh install without being force-saved as personal memory.
+  const onboarding = isPendingOnboardingAnswer(sessionId) && classifyChatIntent(content) === 'conversation';
   const candidateId = (shouldCreateMemoryCandidate(content).create || onboarding)
     ? createCandidateFromMessage(sessionId, messageId, content, { force: onboarding })
     : null;
@@ -1698,6 +1703,21 @@ function ensureBundledLocalRuntimeDefaults() {
   }
 }
 
+const CHAT_UPLOAD_PREFIX = 'chat-upload:';
+const CHAT_UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
+const CHAT_UPLOAD_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.json', '.csv', '.tsv', '.yaml', '.yml', '.log']);
+const chatUploadDir = path.join(path.dirname(dbPath), 'chat-uploads');
+
+function resolveChatContextFile(recordedPath) {
+  const value = String(recordedPath || '');
+  if (!value.startsWith(CHAT_UPLOAD_PREFIX)) return safeExistingWorkspaceFile(value);
+  const storedName = value.slice(CHAT_UPLOAD_PREFIX.length);
+  if (!/^[a-f0-9]{24}-[A-Za-z0-9._-]{1,100}$/.test(storedName)) throw new Error('Invalid Chat upload reference.');
+  const absolute = path.resolve(chatUploadDir, storedName);
+  if (path.dirname(absolute) !== path.resolve(chatUploadDir) || !fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) throw new Error('Chat upload not found.');
+  return { absolute, normalized: value };
+}
+
 function readChatContextFiles(sessionId) {
   const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
   let remaining = 10000;
@@ -1705,8 +1725,8 @@ function readChatContextFiles(sessionId) {
   for (const item of contexts) {
     if (remaining <= 0) break;
     try {
-      const target = safeExistingWorkspaceFile(item.path);
-      if (isProtectedWorkspacePath(target.normalized)) continue;
+      const target = resolveChatContextFile(item.path);
+      if (!target.normalized.startsWith(CHAT_UPLOAD_PREFIX) && isProtectedWorkspacePath(target.normalized)) continue;
       const text = fs.readFileSync(target.absolute, 'utf8').slice(0, remaining);
       assertNoMaReferenceMaterial({ filePath: target.normalized, text });
       remaining -= text.length;
@@ -1877,8 +1897,45 @@ function markdownList(items) {
   return items.map((item) => `- ${item}`).join('\n');
 }
 
-async function answerDataQuery(intent) {
-  const facts = lightweightGroundingFacts();
+function formatCapabilityChatReply(intent, data) {
+  if (intent === 'system_status') {
+    return [
+      '### System status',
+      '',
+      `- **Database:** ${data.sqlite?.ready ? 'ready' : 'unavailable'}`,
+      `- **Model:** ${data.model?.name || 'none assigned'} (${data.model?.assigned ? 'assigned' : 'not assigned'})`,
+      `- **Runtime:** ${data.runtime?.managedServerRunning ? 'server running' : data.runtime?.endpointConfigured ? 'endpoint configured' : 'not running'}`,
+      `- **Repository:** ${data.repository?.available ? data.repository.hasChanges ? 'has changes' : 'clean' : 'unavailable'}`,
+      `- **Browser connector:** ${data.browserConnector?.connected ? 'connected' : 'disconnected'}`
+    ].join('\n');
+  }
+  if (intent === 'model_query') {
+    const assigned = (data.models || []).find((model) => model.assigned_role);
+    return assigned
+      ? `The assigned Planner Assistant is **${assigned.name}** (${assigned.available ? 'available' : 'currently unavailable'}).`
+      : data.models?.length
+        ? `No Planner Assistant is assigned. ${data.models.length} local model record(s) are available in Settings.`
+        : 'No local model is currently recorded or assigned. Open Settings to configure one.';
+  }
+  if (intent === 'recent_runs') {
+    return data.runs?.length
+      ? `Recent local runs:\n\n${markdownList(data.runs.map((run) => `${run.title} — ${run.status}`))}`
+      : 'There are no recent local runs.';
+  }
+  if (intent === 'planner_today') {
+    return data.visible?.length
+      ? `Today:\n\n${markdownList(data.visible.map((task) => `${task.title}${task.active_step ? ` — ${task.active_step}` : ''}${task.blocked ? ' (blocked)' : ''}`))}`
+      : 'Nothing is currently scheduled for Today.';
+  }
+  if (intent === 'workboard_list' || intent === 'blocked_query') {
+    const records = data.records || [];
+    if (!records.length) return intent === 'blocked_query' ? 'Nothing is currently blocked.' : 'You have no active Workboard projects right now.';
+    return `${intent === 'blocked_query' ? 'Currently blocked' : 'Your active Workboard projects'}:\n\n${markdownList(records.map((record) => `${record.title}${record.status ? ` — ${record.status}` : ''}`))}`;
+  }
+  throw new Error(`Unsupported Chat capability result: ${intent}`);
+}
+
+async function answerDataQuery(intent, userId, signal) {
   if (intent === 'memory_storage') {
     const privateRepo = path.resolve(String(process.env.LIFE_PLANNER_PRIVATE_REPO || '').trim() || path.join(os.homedir(), 'Documents', 'LifePlanSystem'));
     const safePath = (value) => String(value || '').replace(/[\r\n`]/g, '');
@@ -1903,51 +1960,20 @@ async function answerDataQuery(intent) {
   if (intent === 'live_news') {
     return { mode: 'deterministic runtime', content: 'I do not have an approved live-news connection in this local session, so I cannot verify today\'s news.', diagnostics: { endpointType: 'deterministic-runtime', routingReason: 'live_news', liveNewsAvailable: false } };
   }
-  if (intent === 'workboard_list') {
-    const content = facts.projectNames.length
-      ? `Your active Workboard projects are:\n\n${markdownList(facts.projectNames)}`
-      : 'You have no active Workboard projects right now.';
-    return { mode: 'workboard (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'workboard_list' } };
-  }
-  if (intent === 'blocked_query') {
-    const content = facts.blockedItems.length
-      ? `Currently blocked:\n\n${markdownList(facts.blockedItems)}`
-      : 'Nothing is currently blocked.';
-    return { mode: 'blocked (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'blocked_query' } };
-  }
-
-  const model = await localModelStatus();
-  const runtimeLine = model.managedServerRunning
-    ? `local llama.cpp server running${model.managedEndpoint ? ` (${model.managedEndpoint})` : ''}`
-    : model.endpointConfigured
-      ? `local endpoint (${model.endpoint})`
-      : model.assigned
-        ? 'assigned model, loads on next message'
-        : 'no local runtime active';
-  const modelName = model.model?.name || (model.endpointConfigured ? model.endpointModelName || 'configured endpoint model' : 'none assigned');
-
-  if (intent === 'model_query') {
-    const content = model.assigned || model.endpointConfigured
-      ? `The active model is **${modelName}** (${runtimeLine}). No cloud model is used.`
-      : 'No local model is currently assigned. Open Settings to assign a GGUF model or configure a local endpoint.';
-    return { mode: 'model (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'model_query' } };
-  }
-
-  // system_status
-  const content = [
-    '### System status',
-    '',
-    `- **Model:** ${modelName} (${model.assigned || model.endpointConfigured ? 'ready' : 'not ready'})`,
-    `- **Runtime:** ${runtimeLine}`,
-    '- **Database:** ready (local SQLite)',
-    `- **Workboard:** ${facts.projects} active project(s), ${facts.blocked} blocked, ${facts.review} awaiting review, ${facts.candidates} memory candidate(s)`
-  ].join('\n');
-  return { mode: 'status (local data)', content, diagnostics: { endpointType: 'local-data', routingReason: 'system_status' } };
+  const request = capabilityRequestForChatIntent(intent);
+  if (!request) throw new Error(`Unsupported local data intent: ${intent}`);
+  const result = await capabilityRegistry.execute(request.actionId, request.args, { caller: 'human-ui', signal, userId });
+  if (result.status !== 'success') throw new Error(result.error?.message || `${request.actionId} was blocked.`);
+  return {
+    mode: 'action registry',
+    content: formatCapabilityChatReply(intent, result.data),
+    diagnostics: { endpointType: 'action-registry', routingReason: intent, actionId: request.actionId, correlationId: result.correlationId }
+  };
 }
 
 // Single entry point for a chat turn: explicit data questions are answered from
 // local data without the model; everything else is an ordinary conversation.
-async function generateAssistantTurn(sessionId, userMessage, signal, onToken, onStatus, candidateId = null, onboardingAnswered = false) {
+async function generateAssistantTurn(sessionId, userMessage, signal, onToken, onStatus, candidateId = null, onboardingAnswered = false, userId = null) {
   // Guided first-run capture: the deterministic acknowledgement for the one
   // seeded onboarding question. This must work even when no Planner Assistant
   // model is configured yet, which is the normal state on a fresh install.
@@ -1966,7 +1992,7 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
   }
   const intent = classifyChatIntent(userMessage);
   if (intent !== 'conversation') {
-    const answer = await answerDataQuery(intent);
+    const answer = await answerDataQuery(intent, userId, signal);
     if (typeof onToken === 'function' && answer.content) onToken(answer.content);
     return answer;
   }
@@ -3541,6 +3567,31 @@ app.post('/api/chat/sessions/:id/context', (req, res) => {
   }
 });
 
+app.post('/api/chat/sessions/:id/context/upload', (req, res) => {
+  const session = row('SELECT * FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [req.params.id, req.userId]);
+  if (!session) return fail(res, 404, 'Session not found.');
+  try {
+    const originalName = path.basename(String(req.body?.name || '').trim()).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100);
+    const extension = path.extname(originalName).toLowerCase();
+    if (!originalName || !CHAT_UPLOAD_EXTENSIONS.has(extension)) throw new Error('Attach a plain-text, Markdown, JSON, CSV, TSV, YAML, or log file. PDF/image extraction is not connected here yet.');
+    const encoded = String(req.body?.base64 || '');
+    if (!encoded || encoded.length > Math.ceil(CHAT_UPLOAD_MAX_BYTES * 4 / 3) + 8 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) throw new Error('The uploaded file is missing, invalid, or larger than 2 MB.');
+    const bytes = Buffer.from(encoded, 'base64');
+    if (!bytes.length || bytes.length > CHAT_UPLOAD_MAX_BYTES || bytes.includes(0)) throw new Error('The uploaded file must be non-empty UTF-8 text no larger than 2 MB.');
+    const text = bytes.toString('utf8');
+    if (Buffer.byteLength(text, 'utf8') !== bytes.length || text.includes('\uFFFD')) throw new Error('The uploaded file must be valid UTF-8 text.');
+    assertNoMaReferenceMaterial({ filePath: originalName, text });
+    fs.mkdirSync(chatUploadDir, { recursive: true });
+    const storedName = `${crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 24)}-${originalName}`;
+    const reference = `${CHAT_UPLOAD_PREFIX}${storedName}`;
+    try { fs.writeFileSync(path.join(chatUploadDir, storedName), bytes, { flag: 'wx' }); } catch (error) { if (error?.code !== 'EEXIST') throw error; }
+    db.prepare(`INSERT INTO chat_context_files (session_id, path) VALUES (?, ?) ON CONFLICT(session_id, path) DO NOTHING`).run(req.params.id, reference);
+    ok(res, allRows('SELECT * FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [req.params.id]));
+  } catch (error) {
+    fail(res, 400, error.message);
+  }
+});
+
 app.delete('/api/chat/sessions/:id/context/:contextId', (req, res) => {
   if (!row('SELECT id FROM chat_sessions WHERE id = ? AND user_id = ?', [req.params.id, req.userId])) return fail(res, 404, 'Session not found.');
   db.prepare('DELETE FROM chat_context_files WHERE id = ? AND session_id = ?').run(req.params.contextId, req.params.id);
@@ -3637,7 +3688,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   const startedAt = Date.now();
   let assistant;
   try {
-    assistant = await generateAssistantTurn(sessionId, content, controller.signal, undefined, undefined, claim.created?.candidateId ?? null, Boolean(claim.created?.onboardingAnswered));
+    assistant = await generateAssistantTurn(sessionId, content, controller.signal, undefined, undefined, claim.created?.candidateId ?? null, Boolean(claim.created?.onboardingAnswered), req.userId);
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
@@ -3696,7 +3747,7 @@ app.post('/api/chat/sessions/:id/messages/stream', async (req, res) => {
   const startedAt = Date.now();
   let assistant;
   try {
-    assistant = await generateAssistantTurn(sessionId, content, controller.signal, (delta) => emit('token', { delta }), (status) => emit('status', status), claim.created?.candidateId ?? null, Boolean(claim.created?.onboardingAnswered));
+    assistant = await generateAssistantTurn(sessionId, content, controller.signal, (delta) => emit('token', { delta }), (status) => emit('status', status), claim.created?.candidateId ?? null, Boolean(claim.created?.onboardingAnswered), req.userId);
   } catch (error) {
     const cancelled = controller.signal.aborted;
     lastRuntimeResult = { ok: false, mode: cancelled ? 'cancelled' : 'error', detail: cancelled ? 'Cancelled by user.' : error.message, at: new Date().toISOString() };
@@ -4486,6 +4537,7 @@ app.get('/api/chat/capabilities', (_req, res) => ok(res, capabilityRegistry.list
 // add permissions. The bounded catalog exposes the Context Picker reads and the
 // Workboard-create preview; the latter is bound here to a durable confirmation.
 app.get('/api/actions', (_req, res) => ok(res, capabilityRegistry.listActions()));
+app.get('/api/chat/commands', (_req, res) => ok(res, buildChatCommandCatalog(capabilityRegistry.listActions())));
 
 app.get('/api/actions/:id', async (req, res) => {
   const contract = await capabilityRegistry.inspect(req.params.id, { caller: 'human-ui' });
@@ -10370,20 +10422,6 @@ function runDevTaskScan(reason) {
   }
 }
 
-async function warmManagedLlamaServerAtStartup() {
-  try {
-    const status = await localModelStatus();
-    if (!status.assigned || !status.llamaServerExists || status.managedServerReady) return;
-    console.log('Warming the assigned local model in the background…');
-    await startManagedLlamaServer();
-    console.log('Assigned local model is warmed and ready for Chat.');
-  } catch (error) {
-    // Model warm-up is an optimisation only: a failed warm-up must never block
-    // the desktop shell, Settings repair flow, or a later explicit chat retry.
-    console.warn(`Background local-model warm-up skipped: ${error.message}`);
-  }
-}
-
 // --- Phone<->desktop sync bridge --------------------------------------------
 // A SEPARATE tiny HTTP server, not a route on `app` above. The main app stays
 // loopback-only exactly as it always has been (listenHost below) -- widening
@@ -10590,10 +10628,10 @@ app.listen(port, listenHost, () => {
   // Autonomous dev-task scan on startup, deferred so it never blocks boot, then
   // a light periodic re-scan. Dedupe keeps repeat runs from re-staging anything.
   setTimeout(() => runDevTaskScan('startup'), 1500);
-  // Start loading the selected local model after the HTTP server is accepting
-  // requests. This moves the one-time model-to-memory cost away from the first
-  // user message while keeping startup responsive.
-  setTimeout(() => warmManagedLlamaServerAtStartup(), 2500);
+  // Local inference is demand-loaded by the first Chat/coding request (or an
+  // explicit Settings start). Opening LPS must not allocate a large model,
+  // start Vision inference, or retry a failed model merely because the shell
+  // launched.
   setInterval(() => runDevTaskScan('interval'), DEV_TASK_SCAN_INTERVAL_MS).unref();
   // Time out unacknowledged navigation commands and prune closed/silent renderers.
   setInterval(() => sweepRendererBridge(), RENDERER_COMMAND_TTL_MS).unref();

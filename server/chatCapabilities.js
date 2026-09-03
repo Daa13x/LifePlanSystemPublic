@@ -489,7 +489,7 @@ const ACTION_METADATA = Object.freeze({
   'planner.propose_create': {
     label: 'Propose a Planner task', feature: 'Chat task proposal', permission: 'planner.propose', risk: ACTION_RISKS.REVERSIBLE_WRITE,
     confirmation: ACTION_CONFIRMATIONS.USER, sideEffects: ['Persists a time-limited review proposal; no Daily Planner task is created until the user confirms it.'],
-    sourceControls: ['chat.planner-proposal.open', 'chat.planner-proposal.preview', 'chat.planner-proposal.confirm'], testId: 'action.planner.propose_create',
+    sourceControls: ['chat.planner-proposal.open', 'chat.planner-proposal.preview', 'chat.planner-proposal.confirm', 'chat.command.add-task'], testId: 'action.planner.propose_create',
     resultSchema: resultObject(['proposal', 'operation', 'affects', 'preview', 'confirmation_required'], { proposal: { type: 'boolean' }, operation: { type: 'string' }, affects: { type: 'string' }, preview: { type: 'object' }, confirmation_required: { type: 'boolean' } })
   },
   'project.propose_create': {
@@ -512,7 +512,7 @@ const ACTION_METADATA = Object.freeze({
   },
   'system.status': {
     label: 'Read system status', feature: 'System', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-status-check'], testId: 'action.system.status',
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.command.system-status'], testId: 'action.system.status',
     resultSchema: resultObject(
       ['health', 'sqlite', 'model', 'runtime', 'workboard', 'browserConnector', 'repository'],
       { health: { type: 'object' }, sqlite: { type: 'object' }, model: { type: 'object' }, runtime: { type: 'object' }, workboard: { type: ['object', 'null'] }, browserConnector: { type: 'object' }, repository: { type: 'object' } }
@@ -520,7 +520,7 @@ const ACTION_METADATA = Object.freeze({
   },
   'system.models': {
     label: 'List local models', feature: 'System models', permission: 'models.read', risk: ACTION_RISKS.READ_ONLY,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-models-check'], testId: 'action.system.models',
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.command.models'], testId: 'action.system.models',
     resultSchema: resultObject(['models', 'count', 'truncated'], { models: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
   },
   // Classified GOVERNED_STAGING, not REVERSIBLE_WRITE: the registry's own contract
@@ -543,7 +543,7 @@ const ACTION_METADATA = Object.freeze({
   },
   'system.runs': {
     label: 'List local runs', feature: 'System runs', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.system-runs-check'], testId: 'action.system.runs',
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.command.runs'], testId: 'action.system.runs',
     resultSchema: resultObject(['runs', 'count', 'truncated'], { runs: { type: 'array' }, count: { type: 'integer' }, truncated: { type: 'boolean' } })
   },
   'conversation.search': {
@@ -553,14 +553,14 @@ const ACTION_METADATA = Object.freeze({
   },
   'planner.today': {
     label: 'Read today plan', feature: 'Daily Planner', permission: 'planner.today.read', risk: ACTION_RISKS.SENSITIVE_DATA,
-    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.connection.planner-today-check'], testId: 'action.planner.today',
+    confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.command.today'], testId: 'action.planner.today',
     resultSchema: resultObject(['mode', 'visible_limit', 'pinned_count', 'visible', 'deferred', 'truncated'], { mode: { type: 'string' }, visible_limit: { type: 'integer' }, pinned_count: { type: 'integer' }, visible: { type: 'array' }, deferred: { type: 'array' }, truncated: { type: 'boolean' } })
   },
   'navigation.workboard': {
     label: 'Open the Workboard', feature: 'Chat navigation', permission: 'navigation.control', risk: ACTION_RISKS.VIEW_NAVIGATION,
     confirmation: ACTION_CONFIRMATIONS.NONE,
     sideEffects: ['Changes the active view of the requesting window to the Workboard section; no stored data is modified and it is immediately reversible.'],
-    sourceControls: ['chat.navigation.open-workboard'], testId: 'action.navigation.workboard',
+    sourceControls: ['chat.command.open-workboard'], testId: 'action.navigation.workboard',
     resultSchema: resultObject(
       ['destination', 'requested', 'applied', 'status'],
       { destination: { type: 'string' }, requested: { type: 'boolean' }, applied: { type: 'boolean' }, status: { type: 'string' }, route: { type: ['string', 'null'] }, failure_category: { type: ['string', 'null'] } }
@@ -570,7 +570,7 @@ const ACTION_METADATA = Object.freeze({
     label: 'Open System', feature: 'Chat navigation', permission: 'navigation.control', risk: ACTION_RISKS.VIEW_NAVIGATION,
     confirmation: ACTION_CONFIRMATIONS.NONE,
     sideEffects: ['Changes the active view of the requesting window to the System section; no stored data is modified and it is immediately reversible.'],
-    sourceControls: ['chat.navigation.open-system'], testId: 'action.navigation.system',
+    sourceControls: ['chat.navigation.open-system', 'chat.command.open-diagnostics'], testId: 'action.navigation.system',
     resultSchema: resultObject(
       ['destination', 'requested', 'applied', 'status'],
       { destination: { type: 'string' }, requested: { type: 'boolean' }, applied: { type: 'boolean' }, status: { type: 'string' }, route: { type: ['string', 'null'] }, failure_category: { type: ['string', 'null'] } }
@@ -580,7 +580,7 @@ const ACTION_METADATA = Object.freeze({
     label: 'Open Settings', feature: 'Chat navigation', permission: 'navigation.control', risk: ACTION_RISKS.VIEW_NAVIGATION,
     confirmation: ACTION_CONFIRMATIONS.NONE,
     sideEffects: ['Changes the active view of the requesting window to Settings; no stored data is modified and it is immediately reversible.'],
-    sourceControls: ['chat.navigation.open-settings', 'setup-recovery.diagnostics.open-model-settings'], testId: 'action.navigation.settings',
+    sourceControls: ['setup-recovery.diagnostics.open-model-settings', 'chat.command.open-settings'], testId: 'action.navigation.settings',
     resultSchema: resultObject(
       ['destination', 'requested', 'applied', 'status'],
       { destination: { type: 'string' }, requested: { type: 'boolean' }, applied: { type: 'boolean' }, status: { type: 'string' }, route: { type: ['string', 'null'] }, failure_category: { type: ['string', 'null'] } }
@@ -590,7 +590,7 @@ const ACTION_METADATA = Object.freeze({
     label: 'Open Today', feature: 'Chat navigation', permission: 'navigation.control', risk: ACTION_RISKS.VIEW_NAVIGATION,
     confirmation: ACTION_CONFIRMATIONS.NONE,
     sideEffects: ['Changes the active view of the requesting window to the Daily Planner; no stored data is modified and it is immediately reversible.'],
-    sourceControls: ['chat.navigation.open-planner'], testId: 'action.navigation.planner',
+    sourceControls: ['chat.command.open-today'], testId: 'action.navigation.planner',
     resultSchema: resultObject(
       ['destination', 'requested', 'applied', 'status'],
       { destination: { type: 'string' }, requested: { type: 'boolean' }, applied: { type: 'boolean' }, status: { type: 'string' }, route: { type: ['string', 'null'] }, failure_category: { type: ['string', 'null'] } }

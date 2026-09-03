@@ -63,7 +63,10 @@ for (const phrase of ['nothing recorded yet', 'Prepared — connection required'
 // from server data (api(...)), never from a literal fabricated total.
 line(/api\('\/api\/feedback'\)/.test(ui) && /api\('\/api\/workboard\/cards'\)/.test(ui), 'user-facing lists read real server data, not fabricated literals');
 line(!/capabilities\?\.length\s*\?\?\s*\d+/.test(ui), 'Chat does not fabricate a capability count while connection truth is unavailable');
-line(ui.includes("connectionState === 'unavailable' ? 'Unavailable' : 'Checking…'"), 'Chat labels unresolved and failed capability discovery honestly');
+line(!ui.includes('function ChatConnectionBar('), 'Chat omits the permanent runtime/capability dashboard');
+line(server.includes("mode: 'action registry'") && server.includes("endpointType: 'action-registry'"), 'Chat diagnostics are delivered conversationally through the action registry');
+line(!server.includes('warmManagedLlamaServerAtStartup') && !server.includes('Warming the assigned local model in the background'), 'opening LPS does not prewarm or retry a local model in the background');
+line(/if \(status\.assigned && status\.llamaServerExists && !status\.managedServerReady\)[\s\S]*await startManagedLlamaServer\(\)/.test(server), 'the assigned local model remains demand-loadable by a real inference request');
 line(!ui.includes("settings.storageLocation || 'Checking local database…'"), 'System storage status does not depend on the dormant arbitrary storageLocation setting');
 line(ui.includes("const storageAvailable = Boolean(runtime?.activeDatabasePath)") && ui.includes("storageAvailable ? 'Local SQLite database' : boot ? 'Database unavailable'"), 'System storage availability derives from authoritative runtime diagnostics without exposing a filesystem path');
 line(ui.includes('<p role="status" aria-live="polite">{storage}</p>'), 'dynamic System storage truth is exposed as a polite status update');

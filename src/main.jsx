@@ -23,7 +23,11 @@ import {
   ListChecks,
   MessageSquareText,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Paperclip,
   Pause,
+  Pencil,
   Play,
   Plus,
   Route,
@@ -126,6 +130,13 @@ function ChatGptMark({ size = 18, ...props }) {
 
 const navIcons = { workboard: ListChecks, chat: MessageSquareText, knowledge: Brain, system: Wrench, settings: Settings };
 const IS_NATIVE = Capacitor.isNativePlatform();
+const NATIVE_CHAT_COMMANDS = Object.freeze([
+  { command: '/today', usage: '/today', label: 'Today', description: 'Show the on-device Today plan.' },
+  { command: '/add-task', usage: '/add-task <title>', label: 'Add task', description: 'Create an on-device Planner task.' },
+  { command: '/completed', usage: '/completed', label: 'Completed tasks', description: 'Show completed on-device tasks.' },
+  { command: '/deferred', usage: '/deferred', label: 'Deferred tasks', description: 'Show deferred on-device tasks.' },
+  { command: '/notes', usage: '/notes', label: 'Notes', description: 'Show on-device notes.' }
+]);
 // Zero-setup standalone phone: Today/Planner always reads and writes an
 // on-device SQLite database on native, never the server -- the phone must
 // be fully usable with no PC, no VPS, and no configured server at all.
@@ -2324,23 +2335,20 @@ function SourceCards({ sources }) {
 function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice, navigate, settings }) {
   const detailMode = normalizeDetailMode(settings?.assistantResponseDetail);
   const [draft, setDraft] = useState('');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(IS_NATIVE);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [commandCatalog, setCommandCatalog] = useState(IS_NATIVE ? NATIVE_CHAT_COMMANDS : []);
   const [chatBusy, setChatBusy] = useState(false);
   const [streamingText, setStreamingText] = useState(null);
-  const [runtimeMode, setRuntimeMode] = useState('');
   // Truthful "model warming up" note shown while the local model loads on the
   // first message, so a normal ~1 min warm-up is not mistaken for a hang.
   const [warmupNote, setWarmupNote] = useState('');
   const [runtime, setRuntime] = useState(null);
-  const [runtimeUnreachable, setRuntimeUnreachable] = useState(false);
   const [repoFiles, setRepoFiles] = useState([]);
   const [contextFiles, setContextFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState('');
+  const [contextUploadBusy, setContextUploadBusy] = useState(false);
   const [connection, setConnection] = useState(null);
-  const [connectionState, setConnectionState] = useState('checking');
-  const [systemStatusPreview, setSystemStatusPreview] = useState(null);
-  const [systemModelsPreview, setSystemModelsPreview] = useState(null);
-  const [systemRunsPreview, setSystemRunsPreview] = useState(null);
-  const [plannerTodayPreview, setPlannerTodayPreview] = useState(null);
   const [systemCheckBusy, setSystemCheckBusy] = useState('');
   const [historyQuery, setHistoryQuery] = useState('');
   const [historyResults, setHistoryResults] = useState([]);
@@ -2362,7 +2370,6 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   const [projectProposal, setProjectProposal] = useState(null);
   const [projectProposalBusy, setProjectProposalBusy] = useState(false);
   const [plannerProposalBusy, setPlannerProposalBusy] = useState(false);
-  const [plannerUpdateForm, setPlannerUpdateForm] = useState(null);
   const [cloudChecks, setCloudChecks] = useState([]);
   const [cloudScope, setCloudScope] = useState('latest-turn');
   const [cloudPreview, setCloudPreview] = useState(null);
@@ -2377,6 +2384,11 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   useEffect(() => {
     chatInstanceActiveRef.current = true;
     return () => { chatInstanceActiveRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (IS_NATIVE) return;
+    api('/api/chat/commands').then(setCommandCatalog).catch((error) => setNotice(`Commands unavailable: ${error.message}`));
   }, []);
 
   // --- ChatGPT-style auto-scroll for the message container (not the window) ---
@@ -2423,13 +2435,11 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     if (IS_NATIVE) {
       connectionRequestRef.current += 1;
       setConnection(null);
-      setConnectionState('unavailable');
       return;
     }
     if (!sessionId) {
       connectionRequestRef.current += 1;
       setConnection(null);
-      setConnectionState('unavailable');
       return;
     }
     if (!isChatSendOriginActive(selectedSessionRef.current, sessionId, chatInstanceActiveRef.current)) return;
@@ -2442,20 +2452,15 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       sessionId,
       chatInstanceActiveRef.current
     );
-    if (canApply()) {
-      setConnectionState('checking');
-    }
     try {
       const next = await api(`/api/chat/sessions/${sessionId}/connection`);
       if (canApply()) {
         setConnection(next);
         setChatBusy(Boolean(next.generating));
-        setConnectionState('ready');
       }
     } catch {
       if (canApply()) {
         setConnection(null);
-        setConnectionState('unavailable');
       }
     }
   }
@@ -2545,58 +2550,6 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       const result = await invokeAction('navigation.planner', {});
       if (result.data?.applied) setNotice('Opened Today.');
       else setNotice(`Daily Planner navigation did not apply (${result.data?.status || 'unknown'}).`);
-    } catch (error) {
-      setNotice(error.message);
-    } finally {
-      setSystemCheckBusy('');
-    }
-  }
-
-  async function checkSystemStatus() {
-    if (systemCheckBusy) return;
-    setSystemCheckBusy('status');
-    try {
-      const result = await invokeAction('system.status', {});
-      setSystemStatusPreview(result.data);
-    } catch (error) {
-      setNotice(error.message);
-    } finally {
-      setSystemCheckBusy('');
-    }
-  }
-
-  async function checkSystemModels() {
-    if (systemCheckBusy) return;
-    setSystemCheckBusy('models');
-    try {
-      const result = await invokeAction('system.models', { limit: 5 });
-      setSystemModelsPreview(result.data);
-    } catch (error) {
-      setNotice(error.message);
-    } finally {
-      setSystemCheckBusy('');
-    }
-  }
-
-  async function checkSystemRuns() {
-    if (systemCheckBusy) return;
-    setSystemCheckBusy('runs');
-    try {
-      const result = await invokeAction('system.runs', { limit: 5 });
-      setSystemRunsPreview(result.data);
-    } catch (error) {
-      setNotice(error.message);
-    } finally {
-      setSystemCheckBusy('');
-    }
-  }
-
-  async function checkPlannerToday() {
-    if (systemCheckBusy) return;
-    setSystemCheckBusy('planner');
-    try {
-      const result = await invokeAction('planner.today', {});
-      setPlannerTodayPreview(result.data);
     } catch (error) {
       setNotice(error.message);
     } finally {
@@ -2814,70 +2767,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       setPlannerProposal(null);
       setPlannerProposeOpen(false);
       setPlannerProposeForm({ title: '', next_action: '', deadline: '', importance: 3, effort: 3 });
-      setPlannerUpdateForm(null);
-      try {
-        const today = await invokeAction('planner.today', {});
-        setPlannerTodayPreview(today.data);
-      } catch {
-        // Never retain a stale pre-mutation preview if the canonical refresh fails.
-        setPlannerTodayPreview(null);
-      }
       refreshAll();
     } catch (err) { setNotice(err.message); }
-    finally { setPlannerProposalBusy(false); }
-  }
-
-  // Open the edit form for one planner task, pre-filled from its exact current
-  // values (fetched from the canonical Planner endpoint) so the before/after diff
-  // is accurate and only genuinely changed fields become an update.
-  async function openPlannerUpdate(task) {
-    if (plannerProposalBusy) return;
-    setPlannerProposal(null);
-    try {
-      const tasks = await api('/api/planner/tasks');
-      const full = tasks.find((t) => t.id === task.id);
-      if (!full) return setNotice('That planner task is no longer available.');
-      setPlannerUpdateForm({
-        id: full.id,
-        title: full.title || '',
-        next_action: full.next_action || '',
-        deadline: full.deadline || '',
-        importance: full.importance ?? 3,
-        effort: full.effort ?? 3,
-        status: full.status || 'active'
-      });
-    } catch (error) { setNotice(error.message); }
-  }
-
-  async function submitProposePlannerUpdate() {
-    const form = plannerUpdateForm;
-    if (!form || !form.title.trim() || plannerProposalBusy) return;
-    setPlannerProposalBusy(true);
-    try {
-      const changes = {
-        title: form.title,
-        next_action: form.next_action,
-        importance: Number(form.importance) || 3,
-        effort: Number(form.effort) || 3,
-        deadline: form.deadline || '',
-        status: form.status
-      };
-      const r = await invokeAction('planner.propose_update', { id: form.id, changes });
-      // A proposal only — the task is not changed until the user confirms below.
-      setPlannerProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
-    } catch (error) { setNotice(error.message); }
-    finally { setPlannerProposalBusy(false); }
-  }
-
-  async function proposePlannerStatus(task, status) {
-    if (!task?.id || plannerProposalBusy) return;
-    setPlannerProposalBusy(true);
-    setPlannerProposal(null);
-    try {
-      const r = await invokeAction('planner.propose_update', { id: task.id, changes: { status } });
-      // Status controls use the same state-bound review and confirmation path as Edit.
-      setPlannerProposal({ ...r.data, confirmation: r.confirmation, correlationId: r.correlationId });
-    } catch (error) { setNotice(error.message); }
     finally { setPlannerProposalBusy(false); }
   }
 
@@ -2903,9 +2794,27 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     }
     if (canRenderOrigin()) {
       setMessages((current) => [...current.filter((m) => m.id !== optimisticId), ...result.messages]);
-      setRuntimeMode(result.runtime || '');
       if (result.error) setNotice(result.error);
     }
+  }
+
+  function safeCustomCommands() {
+    if (!Array.isArray(settings?.chatCustomCommands) || IS_NATIVE) return [];
+    const targets = new Set(commandCatalog.filter((command) => command.customizable).map((command) => command.command));
+    return settings.chatCustomCommands
+      .filter((item) => /^\/[a-z][a-z0-9-]{1,30}$/.test(item?.command || '') && targets.has(item?.target))
+      .slice(0, 20);
+  }
+
+  function expandCustomCommand(text) {
+    const match = String(text || '').trim().match(/^(\/[a-z][a-z0-9-]*)(.*)$/i);
+    if (!match) return text;
+    const custom = safeCustomCommands().find((item) => item.command === match[1].toLowerCase());
+    return custom ? `${custom.target}${match[2] || ''}` : text;
+  }
+
+  function chooseCommand(command) {
+    setDraft(command.usage?.includes('<') ? `${command.command} ` : command.command);
   }
 
   async function prepareDirectCloudRequest(outgoing) {
@@ -2931,9 +2840,44 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     return true;
   }
 
+  // Thin natural-language/explicit-command adapter over the universal action
+  // registry. It owns no capability logic: navigation, proposal validation,
+  // permission checks, durable confirmation and auditing all stay with the
+  // existing registered action handlers.
+  async function prepareDirectUiAction(outgoing) {
+    const text = String(outgoing || '').trim();
+    const lower = text.toLowerCase();
+    if (/^(?:\/open-today|open (?:my )?(?:today|daily planner))$/.test(lower)) {
+      await openPlannerViaAction();
+      return true;
+    }
+    if (/^(?:\/workboard|open (?:the )?workboard)$/.test(lower)) {
+      await openWorkboardViaAction();
+      return true;
+    }
+    if (/^(?:\/settings|open settings)$/.test(lower)) {
+      await openSettingsViaAction();
+      return true;
+    }
+    if (/^(?:\/diagnostics|open (?:system|diagnostics)|show diagnostics)$/.test(lower)) {
+      await openSystemViaAction();
+      return true;
+    }
+    const plannerCreate = text.match(/^(?:\/add-task\s+|(?:add|create) (?:a )?(?:planner )?task(?: called| named| to)?\s+)(.+)$/i);
+    if (plannerCreate?.[1]?.trim()) {
+      const result = await invokeAction('planner.propose_create', { title: plannerCreate[1].trim(), next_action: '', importance: 3, effort: 3 });
+      setPlannerProposal({ ...result.data, confirmation: result.confirmation, correlationId: result.correlationId });
+      setPlannerProposeOpen(false);
+      setActionsOpen(true);
+      setNotice('Review the proposed Planner task, then allow or decline it.');
+      return true;
+    }
+    return false;
+  }
+
   async function send() {
     if (!draft.trim() || !selectedSession || chatBusy) return;
-    const outgoing = draft;
+    const outgoing = expandCustomCommand(draft);
 
     // Closed Beta v0.1 keeps phone chat sessions in on-device SQLite. A phone
     // session UUID is not a server chat-session ID, so sending it to the
@@ -2964,6 +2908,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       return;
     }
 
+    if (await prepareDirectUiAction(outgoing)) {
+      setDraft('');
+      return;
+    }
     if (await prepareDirectCloudRequest(outgoing)) {
       setDraft('');
       return;
@@ -2992,7 +2940,6 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       const decoder = new TextDecoder();
       let buffer = '';
       let acc = '';
-      let runtimeLabel = '';
       let streamError = null;
       let terminalEvent = false;
       readStream: for (;;) {
@@ -3012,13 +2959,11 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           if (event === 'token') { acc += data.delta; if (canRenderOrigin()) { setStreamingText(acc); setWarmupNote(''); } }
           else if (event === 'status') { if (data.phase === 'warming' && canRenderOrigin()) setWarmupNote(data.message || 'Starting the local model…'); }
           else if (event === 'done') {
-            runtimeLabel = data.runtime || '';
             if (canRenderOrigin()) setWarmupNote('');
             terminalEvent = true;
             break;
           } else if (event === 'error') {
             streamError = data.error;
-            runtimeLabel = data.runtime || '';
             if (canRenderOrigin()) setWarmupNote('');
             terminalEvent = true;
             break;
@@ -3033,7 +2978,6 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         }
       }
       if (canRenderOrigin()) {
-        setRuntimeMode(runtimeLabel);
         if (streamError) setNotice(streamError);
       }
       // Reconcile with the server's persisted history so the list is always
@@ -3097,6 +3041,13 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       setSelectedSession(nextSession?.id || null);
       navigate('chat', null, nextSession?.id || null);
     }
+  }
+
+  async function renameSession(session) {
+    const title = window.prompt('Rename chat', session.title);
+    if (!title?.trim() || title.trim() === session.title) return;
+    await patchSession(session.id, { title: title.trim() });
+    setNotice(`Renamed chat to “${title.trim()}”.`);
   }
 
   async function syncSessionToMemory(session) {
@@ -3171,7 +3122,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   useEffect(() => {
     if (IS_NATIVE) return;
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
-    api('/api/models/runtime').then(setRuntime).catch((err) => { setRuntimeUnreachable(true); setNotice(err.message); });
+    api('/api/models/runtime').then(setRuntime).catch((err) => setNotice(err.message));
     refreshCloudProviders();
   }, []);
   useEffect(() => {
@@ -3219,22 +3170,21 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }, [cloudChecks, selectedSession]);
 
   const modelReady = Boolean(runtime?.endpointConfigured || runtime?.assigned || runtime?.managedServerRunning);
-  const modelStatus = runtimeUnreachable
-    ? (IS_NATIVE
-      ? 'Cannot reach the desktop LifePlanSystem. Make sure it is running on your computer and the phone is connected (adb reverse tcp:4177 tcp:4177), then reopen the app.'
-      : 'Cannot reach the LifePlanSystem server. Make sure it is running, then reload.')
-    : !runtime
-      ? 'Checking local Planner Assistant setup...'
-      : modelReady
-      ? runtime.managedServerRunning
-        ? `Planner Assistant endpoint is running at ${runtime.managedEndpoint}.`
-        : runtime.endpointConfigured
-          ? `Planner Assistant will try local endpoint ${runtime.endpoint}.`
-          : `Planner Assistant model is assigned: ${runtime.model?.name}.`
-      : 'No Planner Assistant model or local endpoint is configured. Your message can still be saved and reviewed as a memory candidate, but no assistant reply will be invented until local inference is available.';
-
+  const customCommandCatalog = safeCustomCommands().map((item) => ({
+    command: item.command,
+    usage: item.command,
+    label: item.label || item.command,
+    description: `Runs ${item.target} through its registered action contract.`,
+    target: item.target,
+    custom: true
+  }));
+  const availableCommands = [...commandCatalog, ...customCommandCatalog];
+  const commandQuery = draft.trimStart().startsWith('/') ? draft.trimStart().split(/\s/, 1)[0].toLowerCase() : '';
+  const visibleCommands = commandQuery
+    ? availableCommands.filter((command) => command.command.startsWith(commandQuery)).slice(0, 8)
+    : [];
   return (
-    <section className="chat-layout">
+    <section className={cx('chat-layout', sidebarCollapsed && 'sidebar-collapsed')}>
       <div className="chat-sidebar">
         <div className="session-list">
           <button className="primary" onClick={newSession}><Plus size={16} /> New chat</button>
@@ -3269,35 +3219,34 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       </div>
       <div className="chat-panel">
         <div className="chat-header">
-          <div>
+          <button className="icon-button chat-sidebar-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? 'Show conversations' : 'Hide conversations'} title={sidebarCollapsed ? 'Show conversations' : 'Hide conversations'}>
+            {sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
+          </button>
+          <div className="chat-title">
             <h2>{activeSession?.title || 'Chat'}</h2>
-            <p>Messages persist. Useful statements become reviewable memory candidates.{runtimeMode ? ` Last runtime: ${runtimeMode}.` : ''}</p>
+            {activeSession && <button className="icon-button chat-rename" onClick={() => renameSession(activeSession)} aria-label={`Rename ${activeSession.title}`} title="Rename chat"><Pencil size={15} /></button>}
           </div>
           {activeSession && (
             <div className="row-actions">
-              <button className="icon-button" onClick={() => patchSession(activeSession.id, { pinned: activeSession.pinned ? 0 : 1 })}><Archive size={16} /></button>
-              <button className="icon-button" onClick={() => {
-                const title = window.prompt('Rename chat', activeSession.title);
-                if (title) patchSession(activeSession.id, { title });
-              }}>Aa</button>
-              <button className="icon-button danger" onClick={() => patchSession(activeSession.id, { deleted: 1 })}><Trash2 size={16} /></button>
+              <button className="icon-button" onClick={() => patchSession(activeSession.id, { pinned: activeSession.pinned ? 0 : 1 })} aria-label={activeSession.pinned ? 'Unpin chat' : 'Pin chat'} title={activeSession.pinned ? 'Unpin chat' : 'Pin chat'}><Archive size={16} /></button>
+              <button className="icon-button danger" onClick={() => deleteSessionFromList(activeSession)} aria-label="Delete chat" title="Delete chat"><Trash2 size={16} /></button>
             </div>
           )}
         </div>
-        <div className={cx('context-bar', IS_NATIVE && 'native-chat-context')}>
+        {actionsOpen && <div className={cx('context-bar', 'chat-actions-panel', IS_NATIVE && 'native-chat-context')}>
           {IS_NATIVE ? (
             <div className="source-warning info" role="status">
               <strong>On-device Chat</strong>
-              <small>Works without a PC. Try “add task Buy milk”, “show today”, “complete Buy milk”, or “defer Buy milk”.</small>
+              <small>Works without a PC. Try “add task Buy milk”, “show today”, “complete Buy milk”, or “defer Buy milk”. File/camera context is not connected to on-device Chat yet.</small>
             </div>
           ) : <>
-          <ChatConnectionBar connection={connection} connectionState={connectionState} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} proposalBusy={plannerProposalBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} onProposePlannerStatus={proposePlannerStatus} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
             <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.open" onClick={() => { setProposeOpen((v) => !v); setProposal(null); }}><Plus size={15} /> Propose task</button>
             <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.open" onClick={() => { setPlannerProposeOpen((v) => !v); setPlannerProposal(null); }}><Plus size={15} /> Add planner task</button>
             <button data-action-id="project.propose_create" data-control-id="chat.project-proposal.open" onClick={() => { setProjectProposeOpen((v) => !v); setProjectProposal(null); }}><Plus size={15} /> Propose card</button>
+            <button data-action-id="navigation.system" data-control-id="chat.navigation.open-system" onClick={openSystemViaAction} disabled={Boolean(systemCheckBusy)}><Wrench size={15} /> Diagnostics</button>
             {!IS_NATIVE && <div className="inline-form compact">
               <select value={selectedFile} onChange={(event) => setSelectedFile(event.target.value)}>
                 <option value="">Attach repo file…</option>
@@ -3305,8 +3254,20 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               </select>
               <button onClick={addContextFile} disabled={!selectedFile}><Plus size={15} /> Add file</button>
             </div>}
+            {!IS_NATIVE && <label className={cx('attachment-upload-button', contextUploadBusy && 'disabled')}>
+              <Upload size={15} /> {contextUploadBusy ? 'Attaching…' : 'Upload text file'}
+              <input type="file" accept=".txt,.md,.markdown,.json,.csv,.tsv,.yaml,.yml,.log,text/plain,text/markdown,application/json" disabled={contextUploadBusy} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; if (file) uploadContextFile(file); }} />
+            </label>}
           </div>
-          {(contextRecords.length > 0 || contextFiles.length > 0) ? (
+          {settings?.chatActionSuggestions !== false && (
+            <div className="command-hints" aria-label="Suggested commands">
+              <small>Try a command</small>
+              {commandCatalog.filter((command) => ['/today', '/projects', '/status', '/add-task'].includes(command.command)).map((command) => (
+                <button key={command.command} onClick={() => chooseCommand(command)}>{command.usage || command.command}</button>
+              ))}
+            </div>
+          )}
+          {(contextRecords.length > 0 || contextFiles.length > 0) && (
             <div className="context-chips">
               {contextRecords.map((rec) => (
                 <button key={`rec-${rec.id}`} className={rec.kind.startsWith('knowledge') ? 'chip-knowledge' : 'chip-workboard'} onClick={() => removeContextRecord(rec.id)} title={`Remove ${rec.label}`}>
@@ -3318,18 +3279,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               {contextFiles.map((file) => (
                 <button key={`file-${file.id}`} onClick={() => removeContextFile(file.id)} title="Remove context file">
                   <FileText size={13} />
-                  <span>{file.path}</span>
+                  <span>{file.path.startsWith('chat-upload:') ? file.path.replace(/^chat-upload:[a-f0-9]{24}-/, '') : file.path}</span>
                   <X size={13} />
                 </button>
               ))}
-            </div>
-          ) : (
-            <div className="context-chips"><span>No records or files attached. Reviewed local Knowledge and bundled GitHub documentation remain searchable; attach records deliberately for focused context.</span></div>
-          )}
-          {!modelReady && (
-            <div className="source-warning warn">
-              <strong>Planner Assistant setup needed</strong>
-              <small>{modelStatus} Use the Settings cog (top-right) to assign a local GGUF model.</small>
             </div>
           )}
           {proposeOpen && (
@@ -3363,23 +3316,6 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               </div>
             </div>
           )}
-          {plannerUpdateForm && (
-            <div className="propose-form">
-              <small>Editing Daily Planner task #{plannerUpdateForm.id}</small>
-              <input value={plannerUpdateForm.title} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, title: e.target.value }))} placeholder="Planner task title" />
-              <input value={plannerUpdateForm.next_action} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, next_action: e.target.value }))} placeholder="Next action (optional)" />
-              <div className="quick-add-row">
-                <label>Deadline<input type="date" value={plannerUpdateForm.deadline} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, deadline: e.target.value }))} /></label>
-                <label>Importance<select value={plannerUpdateForm.importance} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, importance: Number(e.target.value) }))}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
-                <label>Effort<select value={plannerUpdateForm.effort} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, effort: Number(e.target.value) }))}>{[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
-                <label>Status<select value={plannerUpdateForm.status} onChange={(e) => setPlannerUpdateForm((f) => ({ ...f, status: e.target.value }))}>{['active', 'completed', 'deferred', 'parked'].map((s) => <option key={s} value={s}>{s}</option>)}</select></label>
-              </div>
-              <div className="quick-add-row">
-                <button data-action-id="planner.propose_update" data-control-id="chat.planner-update.preview" className="primary" onClick={submitProposePlannerUpdate} disabled={plannerProposalBusy || !plannerUpdateForm.title.trim()}>{plannerProposalBusy ? 'Preparing…' : 'Preview update'}</button>
-                <button onClick={() => { setPlannerUpdateForm(null); setPlannerProposal(null); }} disabled={plannerProposalBusy}>Cancel</button>
-              </div>
-            </div>
-          )}
           {plannerProposal && <PlannerProposalCard proposal={plannerProposal} busy={plannerProposalBusy} onConfirm={confirmPlannerProposal} onCancel={() => setPlannerProposal(null)} />}
           {projectProposeOpen && (
             <div className="propose-form">
@@ -3394,7 +3330,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           )}
           {projectProposal && <ProjectProposalCard proposal={projectProposal} busy={projectProposalBusy} onConfirm={confirmProjectProposal} onCancel={() => setProjectProposal(null)} />}
           </>}
-        </div>
+        </div>}
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
           {streamingText !== null && (
@@ -3414,10 +3350,22 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </button>
         )}
         <div className="composer">
-          {!IS_NATIVE && <><div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected', !item.configured && 'setup-required')} onClick={() => chooseCloudProvider(item)} title={item.configured ? `Prepare a reviewed ${item.provider} cloud check` : `Prepare locally, then connect ${item.provider}`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} aria-hidden="true" /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud provider model" value={cloudModel} onChange={(event) => { setCloudModel(event.target.value); setCloudPreview(null); }}><option value={cloudProviders.find((item) => item.provider === cloudProvider)?.model || ''}>{cloudProviders.find((item) => item.provider === cloudProvider)?.model || 'Provider default'}</option></select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => { setCloudScope(event.target.value); setCloudPreview(null); }}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider}>Review cloud prompt</button></> : <small>Enable a cloud provider in Settings with +.</small>}</div>
+          {visibleCommands.length > 0 && (
+            <div className="command-picker" role="listbox" aria-label="Chat commands">
+              {visibleCommands.map((command) => (
+                <button key={command.command} type="button" role="option" aria-selected="false" onClick={() => chooseCommand(command)}>
+                  <code>{command.usage || command.command}</code>
+                  <span><strong>{command.label}</strong><small>{command.description}</small></span>
+                  {!IS_NATIVE && <Pill tone={command.confirmation === 'user_confirmation' ? 'warn' : 'default'}>{command.confirmation === 'user_confirmation' ? 'asks first' : command.risk?.toLowerCase().replaceAll('_', ' ')}</Pill>}
+                </button>
+              ))}
+            </div>
+          )}
+          {!IS_NATIVE && actionsOpen && <><div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected', !item.configured && 'setup-required')} onClick={() => chooseCloudProvider(item)} title={item.configured ? `Prepare a reviewed ${item.provider} cloud check` : `Prepare locally, then connect ${item.provider}`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} aria-hidden="true" /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud provider model" value={cloudModel} onChange={(event) => { setCloudModel(event.target.value); setCloudPreview(null); }}><option value={cloudProviders.find((item) => item.provider === cloudProvider)?.model || ''}>{cloudProviders.find((item) => item.provider === cloudProvider)?.model || 'Provider default'}</option></select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => { setCloudScope(event.target.value); setCloudPreview(null); }}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider}>Review cloud prompt</button></> : <small>Enable a cloud provider in Settings with +.</small>}</div>
           {cloudPreview && <div className="cloud-preview"><strong>{cloudProvider} cloud check</strong><small>{cloudPreview.model} · {cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><label>Focus for the cloud consultant (optional)<textarea value={cloudInstruction} maxLength={1200} onChange={(event) => { setCloudInstruction(event.target.value); setCloudPreview(null); }} placeholder="For example: focus on missing risks and a clearer next reply." /></label><details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck}>Ask {cloudProvider}</button>}</div>}
           {cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}</>}
-          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
+          <button className={cx('icon-button', 'chat-actions-toggle', actionsOpen && 'selected')} onClick={() => setActionsOpen((value) => !value)} aria-label={actionsOpen ? 'Close actions and attachments' : 'Open actions and attachments'} title={actionsOpen ? 'Close actions and attachments' : 'Actions and attachments'}><Paperclip size={18} /></button>
+          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={IS_NATIVE ? 'Message LifePlanSystem or type a local command…' : 'Message LifePlanSystem…'} disabled={chatBusy} />
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
           <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
@@ -3447,83 +3395,6 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   </article>;
 }
 
-function ChatConnectionBar({ connection, connectionState, runtime, generating, statusPreview, modelsPreview, runsPreview, plannerPreview, checkBusy, proposalBusy, onCheckStatus, onCheckModels, onCheckRuns, onCheckPlanner, onOpenWorkboard, onOpenSystem, onOpenSettings, onOpenPlanner, onEditPlannerTask, onProposePlannerStatus }) {
-  const modelName = connection?.model?.name || runtime?.model?.name || null;
-  const modelAssigned = connection?.model?.assigned ?? Boolean(runtime?.assigned);
-  const running = connection?.runtime?.managedServerRunning ?? Boolean(runtime?.managedServerRunning);
-  const ready = connection?.runtime?.ready ?? Boolean(runtime?.managedServerRunning || runtime?.endpointConfigured || runtime?.assigned);
-  const last = connection?.runtime?.lastResult;
-  const attached = connection?.attached || { knowledge: 0, workboard: 0, files: 0 };
-  const available = connection?.available || { total: 0, knowledge: 0, workboard: 0, files: 0, sources: [] };
-  const genStatus = generating ? 'generating…' : running ? 'ready · server running' : ready ? 'ready' : 'setup needed';
-  return (
-    <div className="connection-bar">
-      <div className="conn-item">
-        <span>Model</span>
-        <strong className={modelAssigned ? 'good' : 'warn'}>{modelName || 'None assigned'}</strong>
-        <button className="link" data-action-id="navigation.settings" data-control-id="chat.navigation.open-settings" onClick={onOpenSettings} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation-settings' ? 'Opening…' : 'Assign / change'}</button>
-      </div>
-      <div className="conn-item">
-        <span>Runtime</span>
-        <strong className={generating ? 'good' : ''}>{genStatus}</strong>
-        <button className="link" data-action-id="system.status" data-control-id="chat.connection.system-status-check" onClick={onCheckStatus} disabled={Boolean(checkBusy)}>{checkBusy === 'status' ? 'Checking…' : 'Check status'}</button>
-        <button className="link" data-action-id="system.models" data-control-id="chat.connection.system-models-check" onClick={onCheckModels} disabled={Boolean(checkBusy)}>{checkBusy === 'models' ? 'Checking…' : 'Check models'}</button>
-        <button className="link" data-action-id="system.runs" data-control-id="chat.connection.system-runs-check" onClick={onCheckRuns} disabled={Boolean(checkBusy)}>{checkBusy === 'runs' ? 'Checking…' : 'Recent runs'}</button>
-        <button className="link" data-action-id="planner.today" data-control-id="chat.connection.planner-today-check" onClick={onCheckPlanner} disabled={Boolean(checkBusy)}>{checkBusy === 'planner' ? 'Checking…' : 'Check today'}</button>
-        <button className="link" data-action-id="navigation.planner" data-control-id="chat.navigation.open-planner" onClick={onOpenPlanner} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation-planner' ? 'Opening…' : 'Open Today'}</button>
-        <button className="link" data-action-id="navigation.workboard" data-control-id="chat.navigation.open-workboard" onClick={onOpenWorkboard} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation' ? 'Opening…' : 'Open Workboard'}</button>
-        <button className="link" data-action-id="navigation.system" data-control-id="chat.navigation.open-system" onClick={onOpenSystem} disabled={Boolean(checkBusy)}>{checkBusy === 'navigation-system' ? 'Opening…' : 'Open full System'}</button>
-        {statusPreview ? (
-          <small role="status">
-            DB {statusPreview.sqlite?.ready ? 'ready' : 'unavailable'} · model {statusPreview.model?.assigned ? 'assigned' : 'not assigned'} · repository {statusPreview.repository?.available ? statusPreview.repository.hasChanges ? 'has changes' : 'clean' : 'unavailable'} · browser connector {statusPreview.browserConnector?.connected ? 'connected' : 'disconnected'}
-          </small>
-        ) : null}
-        {modelsPreview ? <small role="status">{modelsPreview.count} model(s): {modelsPreview.models.length ? modelsPreview.models.map((model) => model.name).join(', ') : 'none recorded'}</small> : null}
-        {runsPreview ? <small role="status">{runsPreview.count} recent run(s): {runsPreview.runs.length ? runsPreview.runs.map((run) => `${run.title} (${run.status})`).join(', ') : 'none recorded'}</small> : null}
-        {plannerPreview ? (
-          <div className="planner-preview" role="status">
-            <small>Today · {plannerPreview.mode} · {plannerPreview.visible.length} task(s)</small>
-            {plannerPreview.visible.length
-              ? plannerPreview.visible.map((task) => (
-                <span key={task.id} className="planner-preview-task">
-                  {task.title}
-                  <button className="link" data-action-id="planner.propose_update" data-control-id="chat.planner-update.open" onClick={() => onEditPlannerTask(task)} disabled={Boolean(checkBusy || proposalBusy)}>Edit</button>
-                  <button className="link" data-action-id="planner.propose_update" data-control-id="chat.planner-status.complete" onClick={() => onProposePlannerStatus(task, 'completed')} disabled={Boolean(checkBusy || proposalBusy)}>Done</button>
-                  <button className="link" data-action-id="planner.propose_update" data-control-id="chat.planner-status.defer" onClick={() => onProposePlannerStatus(task, 'deferred')} disabled={Boolean(checkBusy || proposalBusy)}>Not today</button>
-                </span>
-              ))
-              : <small>nothing scheduled</small>}
-          </div>
-        ) : null}
-      </div>
-      <div className="conn-item">
-        <span>Always-on local sources</span>
-        <strong>{available.knowledge} Knowledge · {available.workboard} Workboard · {available.files} file(s)</strong>
-        <small>{available.total} safe records searchable</small>
-        {available.sources.length > 0 && <details className="local-source-list"><summary>Show indexed source files</summary><ul>{available.sources.map((source) => <li key={source}>{source}</li>)}</ul></details>}
-        <span>Attached context</span>
-        <strong>{attached.knowledge} Knowledge · {attached.workboard} Workboard · {attached.files} file(s)</strong>
-      </div>
-      <div className="conn-item">
-        <span>Capabilities</span>
-        <strong role="status" aria-live="polite">{connectionState === 'ready' && Array.isArray(connection?.capabilities)
-          ? `${connection.capabilities.length} tools`
-          : connectionState === 'unavailable' ? 'Unavailable' : 'Checking…'}</strong>
-      </div>
-      <div className="conn-item">
-        <span>Conversation</span>
-        <strong>#{connection?.conversationId ?? '—'}</strong>
-      </div>
-      {last && (
-        <div className="conn-item">
-          <span>Last runtime</span>
-          <strong className={last.ok ? 'good' : 'warn'}>{last.ok ? last.mode : `${last.mode} error`}</strong>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ProposalCard({ proposal, busy, onConfirm, onCancel }) {
   const isUpdate = proposal.operation === 'workboard.update';
   return (
@@ -3546,9 +3417,9 @@ function ProposalCard({ proposal, busy, onConfirm, onCancel }) {
       </div>
       <div className="decision-row">
         {isUpdate
-          ? <button data-action-id="workboard.propose_update" data-control-id="chat.workboard-update.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Confirm and apply'}</button>
-          : <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Confirm and apply'}</button>}
-        <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
+          ? <button data-action-id="workboard.propose_update" data-control-id="chat.workboard-update.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Allow'}</button>
+          : <button data-action-id="workboard.propose_create" data-control-id="chat.workboard-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Allow'}</button>}
+        <button onClick={onCancel} disabled={busy}><X size={15} /> Decline</button>
       </div>
       <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. Nothing is written to the Workboard until you confirm.</small>
     </div>
@@ -3581,9 +3452,9 @@ function PlannerProposalCard({ proposal, busy, onConfirm, onCancel }) {
       </div>
       <div className="decision-row">
         {isUpdate
-          ? <button data-action-id="planner.propose_update" data-control-id="chat.planner-update.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Confirm and update task'}</button>
-          : <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Creating…' : 'Confirm and create task'}</button>}
-        <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
+          ? <button data-action-id="planner.propose_update" data-control-id="chat.planner-update.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Applying…' : 'Allow'}</button>
+          : <button data-action-id="planner.propose_create" data-control-id="chat.planner-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Creating…' : 'Allow'}</button>}
+        <button onClick={onCancel} disabled={busy}><X size={15} /> Decline</button>
       </div>
       <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. {isUpdate ? 'No task is changed' : 'No Daily Planner task exists'} until you confirm.</small>
     </div>
@@ -3602,8 +3473,8 @@ function ProjectProposalCard({ proposal, busy, onConfirm, onCancel }) {
         {preview.next_action ? <div><span>next action</span><strong>{preview.next_action}</strong></div> : null}
       </div>
       <div className="decision-row">
-        <button data-action-id="project.propose_create" data-control-id="chat.project-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Creating…' : 'Confirm and create card'}</button>
-        <button onClick={onCancel} disabled={busy}><X size={15} /> Cancel</button>
+        <button data-action-id="project.propose_create" data-control-id="chat.project-proposal.confirm" className="primary" onClick={onConfirm} disabled={busy}><Check size={15} /> {busy ? 'Creating…' : 'Allow'}</button>
+        <button onClick={onCancel} disabled={busy}><X size={15} /> Decline</button>
       </div>
       <small>This time-limited proposal is bound to this chat and cannot be replaced by the browser. No Workboard card exists until you confirm.</small>
     </div>
@@ -3639,6 +3510,23 @@ function NativeBackendPanel({ onClose }) {
       if (timeout) clearTimeout(timeout);
       setBusy(false);
     }
+  }
+
+  async function uploadContextFile(file) {
+    if (!selectedSession || !file || contextUploadBusy) return;
+    setContextUploadBusy(true);
+    try {
+      if (file.size > 2 * 1024 * 1024) throw new Error('Chat text attachments are limited to 2 MB.');
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = '';
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      setContextFiles(await api(`/api/chat/sessions/${selectedSession}/context/upload`, {
+        method: 'POST',
+        body: JSON.stringify({ name: file.name, base64: btoa(binary) })
+      }));
+      setNotice(`${file.name} attached locally to this conversation.`);
+    } catch (error) { setNotice(error.message); }
+    finally { setContextUploadBusy(false); }
   }
 
   return (
@@ -7192,6 +7080,11 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
   const [hfFiles, setHfFiles] = useState([]);
   const [downloadFolder, setDownloadFolder] = useState(settings.modelDownloadFolder || '');
   const [responseDetail, setResponseDetail] = useState(normalizeDetailMode(settings.assistantResponseDetail));
+  const [chatActionSuggestions, setChatActionSuggestions] = useState(settings.chatActionSuggestions !== false);
+  const [chatCommands, setChatCommands] = useState([]);
+  const [chatCustomCommands, setChatCustomCommands] = useState(Array.isArray(settings.chatCustomCommands) ? settings.chatCustomCommands : []);
+  const [customCommandName, setCustomCommandName] = useState('');
+  const [customCommandTarget, setCustomCommandTarget] = useState('/today');
   const [saveStatus, setSaveStatus] = useState('Settings load from local SQLite when the app starts. Click Save after changing model, endpoint, connector, or download values.');
   const recommendedQwen = useMemo(() => recommendedQwenForHardware(hardware), [hardware]);
 
@@ -7209,6 +7102,11 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
       if (status.host) setPartnerRelayHost(status.host);
     }).catch((err) => setNotice(err.message));
     api('/api/sync/pairing').then(setSyncPairing).catch((err) => setNotice(err.message));
+    api('/api/chat/commands').then((commands) => {
+      setChatCommands(commands);
+      const first = commands.find((command) => command.customizable);
+      if (first) setCustomCommandTarget(first.command);
+    }).catch((err) => setNotice(err.message));
   }, []);
 
   async function regenerateSyncPairing() {
@@ -7261,7 +7159,9 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
           llamaGpuLayers: Number(llamaGpuLayers),
           browserAgentMode,
           cloudEnabledProviders,
-          assistantResponseDetail: responseDetail
+          assistantResponseDetail: responseDetail,
+          chatActionSuggestions,
+          chatCustomCommands
         })
       });
       setSettings(data);
@@ -7290,6 +7190,40 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
     } catch (err) {
       setNotice(err.message);
     }
+  }
+
+  async function saveCommandSettings(nextCustom = chatCustomCommands, nextSuggestions = chatActionSuggestions) {
+    try {
+      const data = await api('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify({ chatActionSuggestions: nextSuggestions, chatCustomCommands: nextCustom })
+      });
+      setSettings(data);
+      setNotice('Chat command settings saved locally. Permissions and confirmations are unchanged.');
+    } catch (error) { setNotice(error.message); }
+  }
+
+  async function changeActionSuggestions(enabled) {
+    setChatActionSuggestions(enabled);
+    await saveCommandSettings(chatCustomCommands, enabled);
+  }
+
+  async function addCustomCommand() {
+    const name = customCommandName.trim().toLowerCase();
+    if (!/^\/?[a-z][a-z0-9-]{1,30}$/.test(name)) return setNotice('Use 2–31 letters, numbers, or hyphens for a custom command.');
+    const command = name.startsWith('/') ? name : `/${name}`;
+    if (chatCommands.some((item) => item.command === command) || chatCustomCommands.some((item) => item.command === command)) return setNotice(`${command} already exists.`);
+    if (!chatCommands.some((item) => item.command === customCommandTarget && item.customizable)) return setNotice('Choose an allowed built-in command target.');
+    const next = [...chatCustomCommands, { command, target: customCommandTarget, label: command.slice(1).replaceAll('-', ' ') }];
+    setChatCustomCommands(next);
+    setCustomCommandName('');
+    await saveCommandSettings(next, chatActionSuggestions);
+  }
+
+  async function removeCustomCommand(command) {
+    const next = chatCustomCommands.filter((item) => item.command !== command);
+    setChatCustomCommands(next);
+    await saveCommandSettings(next, chatActionSuggestions);
   }
 
   async function scan() {
@@ -7518,6 +7452,35 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
           <strong>Applies immediately</strong>
           <small>Saved to local settings and applied to Chat right away, including how diagnostics are shown for saved replies that already carry structured metadata. Markdown always renders; this only controls diagnostic visibility. Older replies keep their original wording.</small>
         </div>
+      </div>
+      <div className="panel commands-settings">
+        <h2>Commands</h2>
+        <p>Built-in commands are discovery shortcuts for registered LPS actions. Their permission, risk, confirmation, and audit rules come from the action registry and cannot be weakened here.</p>
+        <label className="checkbox-row"><input type="checkbox" checked={chatActionSuggestions} onChange={(event) => changeActionSuggestions(event.target.checked)} /> Show contextual command suggestions in Chat</label>
+        <small>Turning suggestions off changes only hints. Explicit commands, permissions, Allow/Decline, approvals, and hard human gates remain unchanged.</small>
+        <div className="command-settings-list">
+          {chatCommands.map((command) => (
+            <div key={command.command} className="command-setting-row">
+              <code>{command.usage || command.command}</code>
+              <span><strong>{command.label}</strong><small>{command.description}</small></span>
+              <Pill tone={command.confirmation === 'user_confirmation' ? 'warn' : 'default'}>{command.confirmation === 'user_confirmation' ? 'asks first' : command.risk?.toLowerCase().replaceAll('_', ' ')}</Pill>
+            </div>
+          ))}
+        </div>
+        <h3>Custom shortcuts</h3>
+        <p>Create a harmless alias for an existing navigation command. Custom commands cannot run shell/code or create new authority.</p>
+        <div className="inline-form">
+          <input value={customCommandName} onChange={(event) => setCustomCommandName(event.target.value)} placeholder="my-today" aria-label="Custom command name" />
+          <select value={customCommandTarget} onChange={(event) => setCustomCommandTarget(event.target.value)} aria-label="Custom command target">
+            {chatCommands.filter((command) => command.customizable).map((command) => <option key={command.command} value={command.command}>{command.command}</option>)}
+          </select>
+          <button onClick={addCustomCommand} disabled={!customCommandName.trim()}>Add shortcut</button>
+        </div>
+        {chatCustomCommands.map((command) => (
+          <div key={command.command} className="command-setting-row">
+            <code>{command.command}</code><span>Runs {command.target}</span><button onClick={() => removeCustomCommand(command.command)}>Remove</button>
+          </div>
+        ))}
       </div>
       <div className="panel">
         <h2>Model Picker</h2>

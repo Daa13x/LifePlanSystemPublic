@@ -193,7 +193,7 @@ assert.match(ui, /function NativeBackendPanel/, 'native app has an always-reacha
 assert.match(ui, /if \(localSessions\.length === 0\)[\s\S]*title: 'New planning chat'/, 'a fresh phone creates an on-device chat session so its composer is usable immediately');
 assert.match(ui, /Phone storage unavailable: \$\{error\.message\}/, 'native storage errors remain visible without replacing the application shell');
 assert.match(ui, /IS_NATIVE \? \([\s\S]*On-device Chat[\s\S]*\) : <>/, 'native Chat replaces server-only context controls with an honest local-command boundary');
-assert.match(ui, /!IS_NATIVE && <><div className="cloud-composer"/, 'unavailable desktop cloud controls are not shown in native Chat');
+assert.match(ui, /!IS_NATIVE && actionsOpen && <><div className="cloud-composer"/, 'unavailable desktop cloud controls are not shown in native Chat and stay contextual on desktop');
 assert.match(styles, /\.main\.chat-main-shell \{[^}]*height: 100dvh;[^}]*display: flex;/, 'phone Chat owns a bounded dynamic viewport');
 assert.match(styles, /\.chat-panel \{[^}]*grid-template-rows: auto minmax\(0, 1fr\) auto;[^}]*overflow: hidden;/, 'the message pane shrinks rather than pushing the composer off-screen');
 assert.match(ui, /Pair with my LifePlanSystem PC/, 'native top bar exposes generic personal-PC pairing');

@@ -12,6 +12,11 @@ assert.ok(start >= 0 && end > start, 'ContextPicker source slice exists');
 const picker = ui.slice(start, end);
 
 assert.match(ui, /function invokeAction\(name, args\)/, 'UI has one action invocation adapter');
+assert.match(ui, /api\('\/api\/chat\/commands'\)\.then\(setCommandCatalog\)/, 'Chat discovers commands from the server catalog instead of owning capability contracts');
+assert.match(ui, /className="command-picker" role="listbox" aria-label="Chat commands"/, 'slash command discovery renders as an accessible filtered picker');
+assert.match(ui, /availableCommands\.filter\(\(command\) => command\.command\.startsWith\(commandQuery\)\)/, 'partial slash input filters command discovery');
+assert.match(ui, /targets = new Set\(commandCatalog\.filter\(\(command\) => command\.customizable\)/, 'custom aliases are constrained to server-declared customizable commands');
+assert.match(ui, /Permissions and confirmations are unchanged/, 'the Commands setting states that suggestions cannot bypass authority');
 assert.match(ui, /\/api\/actions\/\$\{encodeURIComponent\(name\)\}\/invoke/, 'UI adapter uses the neutral action gateway');
 assert.match(ui, /\['success', 'needs_confirmation', 'needs_approval'\]\.includes\(result\.status\)/, 'UI handles structured non-success outcomes before reading action data');
 assert.match(ui, /result\.error\?\.message \|\| `Action \$\{name\} did not complete/, 'UI surfaces the registry error instead of an undefined-data failure');
@@ -24,7 +29,14 @@ const neutralCalls = [...ui.matchAll(/invokeAction\('([^']+)'/g)].map((match) =>
 // invokeNeutralAction adapter -- the same established pattern SetupRecovery
 // uses for navigation.settings above -- rather than through Chat's local
 // invokeAction.
-const CHAT_ADAPTER_EXEMPT_ACTIONS = ['planner.refresh', 'coding.propose_task', 'feedback.propose_triage'];
+const CHAT_ADAPTER_EXEMPT_ACTIONS = [
+  'planner.refresh', 'coding.propose_task', 'feedback.propose_triage',
+  // Read-only conversational commands are invoked server-side by the same
+  // registry after intent classification, rather than by a permanent Chat UI
+  // control. Planner updates remain available from Today; the removed Chat
+  // preview was unreachable once its permanent diagnostics card was retired.
+  'system.status', 'system.models', 'system.runs', 'planner.today', 'planner.propose_update'
+];
 assert.deepEqual([...new Set(neutralCalls)].sort(), NEUTRAL_ACTION_NAMES.filter((name) => !CHAT_ADAPTER_EXEMPT_ACTIONS.includes(name)).sort(), 'every Chat-reachable neutral action uses the bounded Context Picker / Workboard proposal / system / navigation adapter');
 assert.match(ui, /invokeNeutralAction\('planner\.refresh', \{\}, selectedSession\)/, 'the Planner page Refresh Workboard control uses the shared neutral action adapter directly, matching the SetupRecovery navigation pattern');
 assert.match(ui, /invokeNeutralAction\('coding\.propose_task', draft, selectedSession\)/, 'the Planner page coding-task propose control uses the shared neutral action adapter directly');
@@ -66,11 +78,8 @@ assert.match(updateFunction, /invokeAction\('workboard\.propose_update', \{ type
 assert.doesNotMatch(updateFunction, /\/api\/items|method:\s*['"]PATCH['"]|context-records|onAttach/, 'previewing a Workboard update cannot write or attach a record');
 assert.match(ui, /JSON\.stringify\(\{ confirmationId, token \}\)/, 'confirmation submits only the durable identifier and one-time token');
 assert.doesNotMatch(ui, /JSON\.stringify\(\{ proposal \}\)/, 'the UI never resubmits a mutable proposal');
-assert.match(ui, /invokeAction\('system\.status', \{\}\)/, 'Chat system-status check uses the neutral action gateway');
-assert.match(ui, /invokeAction\('system\.models', \{ limit: 5 \}\)/, 'Chat model check uses the neutral action gateway');
-assert.match(ui, /invokeAction\('system\.runs', \{ limit: 5 \}\)/, 'Chat recent-runs check uses the neutral action gateway');
+assert.match(server, /capabilityRegistry\.execute\(request\.actionId, request\.args, \{ caller: 'human-ui'/, 'conversational data commands use the neutral action gateway server-side');
 assert.match(ui, /invokeAction\('conversation\.search', \{ query, limit: 8 \}\)/, 'explicit Chat history search uses the neutral action gateway');
-assert.match(ui, /invokeAction\('planner\.today', \{\}\)/, 'Daily Planner check uses the neutral action gateway');
 assert.match(ui, /invokeAction\('project\.propose_create', \{ title: projectProposeForm\.title, body: projectProposeForm\.body, next_action: projectProposeForm\.next_action \}\)/, 'Workboard card create preview uses the neutral action gateway');
 
 const searchControls = [...picker.matchAll(/<(?:input|select)\b[^>]*\bonChange=\{\(e\) => onSearch\([^>]+>/g)].map((match) => match[0]);
@@ -123,7 +132,7 @@ for (const control of searchControls) {
   assert.ok(manifest[actionId], `${actionId} does not orphan the visible control`);
 }
 const mappedControls = [...ui.matchAll(/<(?:button|input|select)\b[^>]*\bdata-action-id="[^"]+"[^>]*\bdata-control-id="[^"]+"[^>]*>/g)].map((match) => match[0]);
-assert.equal(mappedControls.length, 43, 'the bounded slice has exactly forty-three mapped trigger/search/preview/proposal/system/history/planner/project/navigation/refresh/coding/item-action/feedback-triage controls');
+assert.equal(mappedControls.length, 32, 'the simplified UI keeps exactly thirty-two mapped contextual/search/proposal/navigation/refresh/coding/item-action/feedback controls');
 const controlMappings = mappedControls.map((control) => ({
   actionId: control.match(/data-action-id="([^"]+)"/)[1],
   controlId: control.match(/data-control-id="([^"]+)"/)[1]
@@ -148,19 +157,15 @@ assert.deepEqual(
   ['chat.context-picker.workboard-update', 'chat.workboard-update.confirm', 'planner.item-actions.confirm', 'planner.item-actions.done', 'planner.item-actions.drop', 'planner.item-actions.seen'],
   'the complete visible Workboard-update preview/confirm family, including the Planner grid item-action buttons, has stable identifiers'
 );
-assert.deepEqual(
-  controlMappings.filter((mapping) => mapping.actionId === 'system.status').map((mapping) => mapping.controlId),
-  ['chat.connection.system-status-check'],
-  'the visible Chat status control maps to the bounded system.status action'
-);
-assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.models').map((mapping) => mapping.controlId), ['chat.connection.system-models-check'], 'the visible model control maps to system.models');
-assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.runs').map((mapping) => mapping.controlId), ['chat.connection.system-runs-check'], 'the visible recent-runs control maps to system.runs');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.status').map((mapping) => mapping.controlId), [], 'system status is no longer permanent Chat chrome');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.models').map((mapping) => mapping.controlId), [], 'model diagnostics are no longer permanent Chat chrome');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'system.runs').map((mapping) => mapping.controlId), [], 'run diagnostics are no longer permanent Chat chrome');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'conversation.search').map((mapping) => mapping.controlId), ['chat.history-search.submit'], 'the explicit history-search submit control maps to conversation.search');
-assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'planner.today').map((mapping) => mapping.controlId), ['chat.connection.planner-today-check'], 'the visible today control maps to planner.today');
-assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.workboard').map((mapping) => mapping.controlId), ['chat.navigation.open-workboard'], 'the visible Open Workboard control maps to the navigation.workboard action');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'planner.today').map((mapping) => mapping.controlId), [], 'Today reads are command-driven rather than permanent Chat chrome');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.workboard').map((mapping) => mapping.controlId), [], 'Open Workboard is command-driven rather than permanent Chat chrome');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.system').map((mapping) => mapping.controlId), ['chat.navigation.open-system'], 'the visible Open System control maps to the navigation.system action');
-assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.settings').map((mapping) => mapping.controlId).sort(), ['chat.navigation.open-settings', 'setup-recovery.diagnostics.open-model-settings'], 'Chat and Setup diagnostics map their Settings navigation controls to one action');
-assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.planner').map((mapping) => mapping.controlId), ['chat.navigation.open-planner'], 'the visible Open Today control maps to the navigation.planner action');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.settings').map((mapping) => mapping.controlId), ['setup-recovery.diagnostics.open-model-settings'], 'Setup diagnostics keeps its registry-backed Settings navigation control');
+assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'navigation.planner').map((mapping) => mapping.controlId), [], 'Open Today is command-driven rather than permanent Chat chrome');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'planner.refresh').map((mapping) => mapping.controlId), ['planner.refresh-workboard'], 'the visible Refresh Workboard control maps to the planner.refresh action');
 assert.deepEqual(controlMappings.filter((mapping) => mapping.actionId === 'coding.propose_task').map((mapping) => mapping.controlId).sort(), ['planner.coding-queue.confirm', 'planner.coding-queue.seal-and-queue'], 'the complete visible coding-task seal/confirm control family has stable identifiers');
 assert.deepEqual(
@@ -175,8 +180,8 @@ assert.deepEqual(
 );
 assert.deepEqual(
   controlMappings.filter((mapping) => mapping.actionId === 'planner.propose_update').map((mapping) => mapping.controlId).sort(),
-  ['chat.planner-status.complete', 'chat.planner-status.defer', 'chat.planner-update.confirm', 'chat.planner-update.open', 'chat.planner-update.preview'],
-  'the complete visible Daily Planner update control family has stable identifiers'
+  ['chat.planner-update.confirm'],
+  'the contextual Daily Planner update confirmation retains its stable identifier without permanent Today buttons'
 );
 const attachControlStart = picker.indexOf('<button className="picker-row"');
 const attachControlEnd = picker.indexOf('</button>', attachControlStart) + '</button>'.length;
@@ -191,12 +196,22 @@ assert.match(previewControl, /onClick=\{\(\) => onPreview\(rec\)\}/, 'Preview in
 assert.doesNotMatch(previewControl, /onAttach/, 'Preview does not invoke Attach');
 assert.ok(attachControlEnd <= previewControlStart, 'Attach and Preview are separate sibling controls');
 for (const [actionId, action] of Object.entries(manifest)) {
-  assert.deepEqual(
-    action.sourceControls.slice().sort(),
-    controlMappings.filter((mapping) => mapping.actionId === actionId).map((mapping) => mapping.controlId).sort(),
-    `${actionId} metadata and visible control IDs match bidirectionally`
-  );
+  for (const visibleControl of controlMappings.filter((mapping) => mapping.actionId === actionId)) {
+    assert.ok(action.sourceControls.includes(visibleControl.controlId), `${actionId} declares visible control ${visibleControl.controlId}`);
+  }
 }
+
+for (const [actionId, commandId] of [
+  ['system.status', 'chat.command.system-status'],
+  ['system.models', 'chat.command.models'],
+  ['system.runs', 'chat.command.runs'],
+  ['planner.today', 'chat.command.today'],
+  ['navigation.workboard', 'chat.command.open-workboard'],
+  ['navigation.system', 'chat.command.open-diagnostics'],
+  ['navigation.settings', 'chat.command.open-settings'],
+  ['navigation.planner', 'chat.command.open-today'],
+  ['planner.propose_create', 'chat.command.add-task']
+]) assert.ok(manifest[actionId].sourceControls.includes(commandId), `${actionId} declares command exposure ${commandId}`);
 
 assert.match(server, /app\.get\('\/api\/actions',[^\n]+capabilityRegistry\.listActions\(\)/, 'server lists only the neutral action slice');
 assert.match(server, /app\.get\('\/api\/actions\/:id'/, 'server inspects one neutral action');
@@ -214,19 +229,11 @@ assert.equal(manifest['planner.propose_create'].risk, 'REVERSIBLE_WRITE', 'plann
 assert.equal(manifest['planner.propose_create'].confirmation, 'user_confirmation', 'Daily Planner task creation requires explicit user confirmation');
 assert.equal(manifest['planner.propose_update'].risk, 'REVERSIBLE_WRITE', 'planner.propose_update is a proposal write risk');
 assert.equal(manifest['planner.propose_update'].confirmation, 'user_confirmation', 'Daily Planner task update requires explicit user confirmation');
-assert.match(ui, /invokeAction\('planner\.propose_update', \{ id: form\.id, changes \}\)/, 'the planner Edit/Preview control invokes planner.propose_update with the typed id and bounded changes');
-assert.match(ui, /invokeAction\('planner\.propose_update', \{ id: task\.id, changes: \{ status \} \}\)/, 'the Done and Not today controls invoke the same typed planner update action');
-const statusProposalStart = ui.indexOf('async function proposePlannerStatus');
-const statusProposalEnd = ui.indexOf('\n  async function sendViaJson', statusProposalStart);
-const statusProposal = ui.slice(statusProposalStart, statusProposalEnd);
-assert.ok(statusProposalStart >= 0 && statusProposalEnd > statusProposalStart, 'the bounded planner status adapter is present');
-assert.doesNotMatch(statusProposal, /\/api\/planner\/tasks|method:\s*'PATCH'|method:\s*'POST'/, 'the planner status adapter cannot mutate a task directly');
 const plannerConfirmStart = ui.indexOf('async function confirmPlannerProposal');
-const plannerConfirmEnd = ui.indexOf('\n  // Open the edit form', plannerConfirmStart);
+const plannerConfirmEnd = ui.indexOf('\n  async function sendViaJson', plannerConfirmStart);
 const plannerConfirm = ui.slice(plannerConfirmStart, plannerConfirmEnd);
 assert.ok(plannerConfirmStart >= 0 && plannerConfirmEnd > plannerConfirmStart, 'the bounded Planner confirmation adapter is present');
-assert.match(plannerConfirm, /const today = await invokeAction\('planner\.today', \{\}\);\s*setPlannerTodayPreview\(today\.data\)/, 'a successful Planner mutation refreshes the canonical Today preview');
-assert.match(plannerConfirm, /catch \{[\s\S]*setPlannerTodayPreview\(null\)/, 'a failed post-mutation refresh clears stale Today data rather than retaining it');
+assert.match(plannerConfirm, /refreshAll\(\)/, 'a successful Planner mutation refreshes canonical application data');
 assert.match(ui, /invokeAction\('planner\.propose_create'/, 'the Add planner task control invokes planner.propose_create through the neutral gateway');
 assert.match(ui, /\/api\/chat\/sessions\/\$\{selectedSession\}\/planner\/confirm/, 'the planner confirm control submits only to the durable planner confirmation endpoint');
 assert.match(server, /app\.post\('\/api\/chat\/sessions\/:id\/planner\/confirm'/, 'the server exposes the durable Daily Planner confirmation endpoint');
@@ -256,21 +263,13 @@ const workboardPreviewRenderer = picker.slice(picker.indexOf('function Workboard
 assert.match(workboardPreviewRenderer, /record\.identity\?\.type/, 'Workboard preview renders the authoritative entity type');
 assert.match(workboardPreviewRenderer, /record\.children\.map/, 'Workboard preview renders bounded linked-item identities');
 assert.doesNotMatch(workboardPreviewRenderer, /dangerouslySetInnerHTML/, 'Workboard preview never renders record content as HTML');
-const statusRendererStart = ui.indexOf('function ChatConnectionBar(');
-const statusRendererEnd = ui.indexOf('\nfunction ProposalCard(', statusRendererStart);
-const statusRenderer = ui.slice(statusRendererStart, statusRendererEnd);
-assert.doesNotMatch(statusRenderer, /capabilities\?\.length\s*\?\?\s*\d+/, 'capability count never falls back to a fabricated registry size');
-assert.match(statusRenderer, /connectionState === 'ready'[\s\S]*connection\.capabilities\.length[\s\S]*'Unavailable'[\s\S]*'Checking…'/, 'capability count is shown only from a ready connection, with honest unavailable and checking states');
-assert.match(statusRenderer, /<strong role="status" aria-live="polite">\{connectionState/, 'dynamic capability discovery is announced as a polite status update');
-assert.match(statusRenderer, /data-action-id="system\.status" data-control-id="chat\.connection\.system-status-check"/, 'system status trigger carries stable registry and control IDs');
-assert.match(statusRenderer, /data-action-id="system\.models" data-control-id="chat\.connection\.system-models-check"/, 'system models trigger carries stable registry and control IDs');
-assert.match(statusRenderer, /data-action-id="system\.runs" data-control-id="chat\.connection\.system-runs-check"/, 'system runs trigger carries stable registry and control IDs');
-assert.match(statusRenderer, /data-action-id="planner\.today" data-control-id="chat\.connection\.planner-today-check"/, 'Daily Planner trigger carries stable registry and control IDs');
-assert.match(statusRenderer, /statusPreview\.sqlite\?\.ready/, 'status receipt is rendered from the neutral action result');
-assert.match(statusRenderer, /modelsPreview\.models\.map/, 'bounded model summaries are rendered from the neutral action result');
-assert.match(statusRenderer, /runsPreview\.runs\.map/, 'bounded run summaries are rendered from the neutral action result');
-assert.match(statusRenderer, /plannerPreview\.visible\.map/, 'bounded Daily Planner task titles are rendered from the neutral action result');
-assert.doesNotMatch(statusRenderer, /dangerouslySetInnerHTML/, 'system status receipt renders only as React text');
+assert.doesNotMatch(ui, /function ChatConnectionBar\(/, 'the permanent technical connection dashboard is removed from Chat');
+assert.match(ui, /sidebarCollapsed && 'sidebar-collapsed'/, 'the conversation sidebar can release its width to Chat');
+assert.match(ui, /<Pencil size=\{15\}/, 'rename uses a recognisable pencil beside the title');
+assert.match(ui, /actionsOpen && <div className=\{cx\('context-bar', 'chat-actions-panel'/, 'attachments and actions are contextual rather than permanently open');
+assert.match(ui, /actionsOpen && <><div className="cloud-composer"/, 'cloud controls are contextual rather than permanent composer chrome');
+assert.match(ui, /prepareDirectUiAction\(outgoing\)/, 'desktop natural-language commands are checked before an ordinary model turn');
+assert.match(ui, /invokeAction\('planner\.propose_create',[\s\S]*setPlannerProposal\(/, 'natural-language task creation uses the existing proposal action and approval card');
 const historyFunctionStart = ui.indexOf('async function searchChatHistory(');
 const historyOpenStart = ui.indexOf('function openHistoryResult(', historyFunctionStart);
 const historySearchFunction = ui.slice(historyFunctionStart, historyOpenStart);

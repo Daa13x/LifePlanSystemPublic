@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 504,
-  "mapped": 43,
-  "unmapped": 461,
-  "fingerprint": "7b2589ab45e2728028b6dc657689ef9fe79f6107f48fa43c1492cf69800cc4eb",
+  "total": 495,
+  "mapped": 32,
+  "unmapped": 463,
+  "fingerprint": "1b818d399c0eeee857744614f95546db0beced698c4f9607205284bf85a0bb55",
   "byOwner": {
     "App": {
       "total": 8,
@@ -32,14 +32,9 @@
       "unmapped": 10
     },
     "Chat": {
-      "total": 56,
       "mapped": 10,
-      "unmapped": 46
-    },
-    "ChatConnectionBar": {
-      "total": 12,
-      "mapped": 11,
-      "unmapped": 1
+      "total": 54,
+      "unmapped": 44
     },
     "CloudCheckCard": {
       "total": 9,
@@ -197,9 +192,9 @@
       "unmapped": 12
     },
     "SettingsView": {
-      "total": 51,
+      "total": 56,
       "mapped": 0,
-      "unmapped": 51
+      "unmapped": 56
     },
     "SetupRecovery": {
       "total": 7,
