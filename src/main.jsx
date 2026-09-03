@@ -551,9 +551,11 @@ function App() {
     };
   }, []);
 
-  // Register this window with the server-side navigation bridge exactly once so
-  // authenticated navigation commands can be delivered to it and acknowledged.
-  useEffect(() => { startRendererBridge(selectedSession); }, []);
+  // Register desktop/browser windows with the server-side navigation bridge.
+  // The standalone Android client has no full desktop server at its WebView
+  // origin (and does not need server-driven window navigation), so starting the
+  // bridge there would create a misleading background network failure.
+  useEffect(() => { if (!IS_NATIVE) startRendererBridge(selectedSession); }, []);
 
   function navigate(section, tab = null, sessionId = null) {
     const next = { section, tab: tab || nav.find((entry) => entry.id === section)?.defaultTab || null, sessionId, legacy: false };
@@ -2418,6 +2420,12 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }, [selectedSession]);
 
   async function loadConnection(sessionId = selectedSession) {
+    if (IS_NATIVE) {
+      connectionRequestRef.current += 1;
+      setConnection(null);
+      setConnectionState('unavailable');
+      return;
+    }
     if (!sessionId) {
       connectionRequestRef.current += 1;
       setConnection(null);
@@ -2451,7 +2459,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       }
     }
   }
-  async function loadCloudChecks(sessionId = selectedSession) { if (sessionId) try { setCloudChecks(await api(`/api/chat/sessions/${sessionId}/cloud-checks`)); } catch {} }
+  async function loadCloudChecks(sessionId = selectedSession) { if (!IS_NATIVE && sessionId) try { setCloudChecks(await api(`/api/chat/sessions/${sessionId}/cloud-checks`)); } catch {} }
   async function previewCloudCheck() { try { setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, model: cloudModel, instruction: cloudInstruction }) })); } catch (err) { setNotice(err.message); } }
   async function chooseCloudProvider(provider) {
     setCloudProvider(provider.provider);
@@ -2479,6 +2487,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }[status] || 'Preparing cloud prompt');
 
   async function loadContextRecords(sessionId = selectedSession) {
+    if (IS_NATIVE) { setContextRecords([]); return; }
     if (!sessionId) return;
     try { setContextRecords(await api(`/api/chat/sessions/${sessionId}/context-records`)); } catch { /* non-fatal */ }
   }
@@ -3109,6 +3118,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   async function loadContext(sessionId = selectedSession) {
+    if (IS_NATIVE) { setContextFiles([]); return; }
     if (!sessionId) return;
     try {
       setContextFiles(await api(`/api/chat/sessions/${sessionId}/context`));
@@ -3159,11 +3169,13 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   useEffect(() => {
+    if (IS_NATIVE) return;
     api('/api/repo/files?q=').then(setRepoFiles).catch((err) => setNotice(err.message));
     api('/api/models/runtime').then(setRuntime).catch((err) => { setRuntimeUnreachable(true); setNotice(err.message); });
     refreshCloudProviders();
   }, []);
   useEffect(() => {
+    if (IS_NATIVE) return undefined;
     const timer = window.setInterval(refreshCloudProviders, 3000);
     return () => window.clearInterval(timer);
   }, []);
