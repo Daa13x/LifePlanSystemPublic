@@ -108,7 +108,7 @@ try {
     identityB,
     { replaceExisting: true }
   );
-  assert.equal(replacement.clearSyncedPlanner, true, 'explicit PC replacement requires clearing PC A Planner/transport state');
+  assert.equal(replacement.resetTransport, true, 'explicit PC replacement requires clearing PC A transport state without deleting phone Planner data');
 
   const firstB = await exchangeSyncChanges({
     baseUrl: pcB.syncUrl,

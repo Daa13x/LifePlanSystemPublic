@@ -125,26 +125,27 @@ export async function exchangeSyncChanges({ baseUrl, pairingToken, payload, fetc
 }
 
 // Decide whether entering another address is merely the same PC at a new LAN
-// address or a real ownership switch. The latter must be explicit because
-// carrying one person's planner/outbox into another person's PC would leak
-// data. Legacy installations without an identity may adopt only the exact
+// address or a real transport switch. Ordinary Planner data belongs to the
+// phone and is never cleared by this decision. A real switch is still explicit
+// because PC-A credentials and queued transport work must never be replayed to
+// PC B. Legacy installations without an identity may adopt only the exact
 // endpoint they already stored; any other endpoint requires replacement.
 export function planSyncPairingTransition(current, candidate, { replaceExisting = false } = {}) {
   const hasCurrentPairing = Boolean(current?.baseUrl && current?.pairingToken);
-  if (!hasCurrentPairing) return { mode: 'initial', clearSyncedPlanner: false, preserveProgress: false };
+  if (!hasCurrentPairing) return { mode: 'initial', resetTransport: false, preserveProgress: false };
   if (current.serverId && current.serverId === candidate.serverId) {
-    return { mode: 'same-server', clearSyncedPlanner: false, preserveProgress: true };
+    return { mode: 'same-server', resetTransport: false, preserveProgress: true };
   }
   if (!current.serverId) {
     let currentEndpoint = '';
     try { currentEndpoint = normalizeSyncBaseUrl(current.baseUrl); } catch { /* unsafe legacy value cannot be adopted */ }
-    if (currentEndpoint === candidate.baseUrl) return { mode: 'legacy-adopt', clearSyncedPlanner: false, preserveProgress: true };
+    if (currentEndpoint === candidate.baseUrl) return { mode: 'legacy-adopt', resetTransport: false, preserveProgress: true };
   }
   if (!replaceExisting) {
     throw syncError(
-      'This phone is paired with a different LifePlanSystem PC. Replacing it must explicitly clear this phone\'s synced Planner data first.',
+      'This phone is paired with a different LifePlanSystem PC. Replacing it must explicitly reset the old PC connection first. Phone Planner data will remain on this device.',
       'SYNC_REPLACEMENT_REQUIRED'
     );
   }
-  return { mode: 'replace-server', clearSyncedPlanner: true, preserveProgress: false };
+  return { mode: 'replace-server', resetTransport: true, preserveProgress: false };
 }

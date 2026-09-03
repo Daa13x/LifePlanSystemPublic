@@ -42,7 +42,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import { PRIMARY_NAVIGATION, MOBILE_PRIMARY_NAVIGATION, SECTION_TABS, MOBILE_SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
-import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate, localCompleteTask, localDeferTask, localListTasks, localSyncSettings, localSetSyncPairing, localSyncNow } from './localData.js';
+import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate, localCompleteTask, localDeferTask, localListTasks, localListProjects, localCreateProject, localUpdateProject, localListProjectCards, localSyncSettings, localSetSyncPairing, localRemoveSyncPairing, localSyncNow } from './localData.js';
 import { matchLocalCommand, LOCAL_COMMAND_EXAMPLES } from './localCommands.js';
 import { ensureNotificationPermission, registerReminderActions, reconcileAllReminders } from './localNotifications.js';
 import { renderMarkdown } from './markdown.js';
@@ -1487,7 +1487,7 @@ function LayeredWorkboard({ setNotice, refreshSignal }) {
   const [cards, setCards] = useState(null);
   useEffect(() => {
     let live = true;
-    (async () => { try { const data = await api('/api/workboard/cards'); if (live) setCards(data); } catch (err) { setNotice(err.message); } })();
+    (async () => { try { const data = IS_NATIVE ? await localListProjectCards() : await api('/api/workboard/cards'); if (live) setCards(data); } catch (err) { setNotice(err.message); } })();
     return () => { live = false; };
   }, [refreshSignal]);
   if (!cards) return <Empty title="Loading cards" body="Assembling canonical work orders." />;
@@ -1773,17 +1773,19 @@ function CompletedWorkboard({ setNotice, refreshSignal }) {
   const [records, setRecords] = useState({ items: [], projects: [], roadmap: [], runs: [] });
 
   useEffect(() => {
-    Promise.all([api('/api/items?all=1'), api('/api/projects'), api('/api/roadmap'), api('/api/tooling/openhands/requests').catch(() => [])])
-      .then(([items, projects, roadmap, runs]) => setRecords({ items, projects, roadmap, runs }))
-      .catch((err) => setNotice(err.message));
+    const request = IS_NATIVE
+      ? Promise.all([localListTasks(), localListProjects()]).then(([items, projects]) => ({ items, projects, roadmap: [], runs: [] }))
+      : Promise.all([api('/api/items?all=1'), api('/api/projects'), api('/api/roadmap'), api('/api/tooling/openhands/requests').catch(() => [])])
+        .then(([items, projects, roadmap, runs]) => ({ items, projects, roadmap, runs }));
+    request.then(setRecords).catch((err) => setNotice(err.message));
   }, [refreshSignal, setNotice]);
 
-  const items = records.items.filter((item) => ['done', 'archived', 'deprecated', 'superseded'].includes(item.status));
+  const items = records.items.filter((item) => ['done', 'completed', 'archived', 'deprecated', 'superseded'].includes(item.status));
   const projects = records.projects.filter((project) => ['done', 'completed', 'archived'].includes(project.status));
   const roadmap = records.roadmap.filter((item) => item.status === 'done');
   const runs = records.runs.filter((run) => ['completed', 'succeeded', 'executor-ran'].includes(run.status));
   const groups = [
-    ['Workboard records', items, (item) => <ItemRow item={item} compact />],
+    [IS_NATIVE ? 'Planner tasks' : 'Workboard records', items, (item) => <ItemRow item={item} compact />],
     ['Projects', projects, (project) => <ItemRow item={{ ...project, title: project.name, type: 'project' }} compact />],
     ['Development roadmap', roadmap, (item) => <ItemRow item={{ ...item, type: item.category || 'roadmap' }} compact />],
     ['Execution requests', runs, (run) => <ItemRow item={{ ...run, type: 'execution request' }} compact />]
@@ -3664,8 +3666,22 @@ function NativeSyncPanel({ onClose, onPaired }) {
   }
 
   function replaceDesktop() {
-    const confirmed = window.confirm('Replace the paired LifePlanSystem PC? This clears synced Planner tasks and sync history from this phone before pairing with the new PC. Phone-only notes, memory candidates, and chats remain.');
+    const confirmed = window.confirm('Replace the paired LifePlanSystem PC? This removes the old PC credential and its pending sync work. Planner, Today, tasks, notes, memory candidates, and chats remain on this phone.');
     if (confirmed) save(true);
+  }
+
+  async function removeDesktop() {
+    const confirmed = window.confirm('Remove this paired PC? PC-only sync will stop, but LifePlanSystem and all ordinary Planner data remain on this phone.');
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      const settings = await localRemoveSyncPairing();
+      setForm({ baseUrl: '', pairingToken: '' });
+      setStatus(settings);
+      setReplacementRequired(false);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function syncNow() {
@@ -3689,6 +3705,7 @@ function NativeSyncPanel({ onClose, onPaired }) {
         </div>
         <div className="picker-controls" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.5rem' }}>
           <small>On your own PC, open LifePlanSystem → Settings → Phone sync. Enter the address shown by LifePlanSystem on that PC and its pairing code. The app verifies the PC and code before saving them.</small>
+          <small>Pairing is optional. Planner, Today, normal tasks, notes, mobile state, and on-device features work with no PC. A paired PC adds sync and genuinely desktop-only capabilities.</small>
           <input
             placeholder="Address shown by LifePlanSystem on your PC"
             value={form.baseUrl}
@@ -3704,10 +3721,11 @@ function NativeSyncPanel({ onClose, onPaired }) {
           <div className="decision-row">
             <button className="primary" onClick={() => save(false)} disabled={busy || !form.baseUrl || !form.pairingToken}>{busy ? 'Verifying…' : 'Verify and save pairing'}</button>
             <button onClick={syncNow} disabled={busy || !loaded || !status?.paired}>{busy ? 'Syncing…' : 'Sync now'}</button>
+            {status?.paired && <button onClick={removeDesktop} disabled={busy}>Remove paired PC</button>}
           </div>
           {replacementRequired && (
             <div className="decision-row">
-              <button onClick={replaceDesktop} disabled={busy}>Replace paired PC and clear synced Planner data</button>
+              <button onClick={replaceDesktop} disabled={busy}>Replace paired PC; keep phone Planner data</button>
             </div>
           )}
           {loaded && (
@@ -4159,6 +4177,15 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
   const [editing, setEditing] = useState(null);
   const [projectDraft, setProjectDraft] = useState({ name: '', status: 'active', owner: 'user', confidence: 0.75, next_action: '', shareability: 'unknown' });
 
+  useEffect(() => {
+    if (IS_NATIVE) localListProjects().then(setProjects).catch((err) => setNotice(err.message));
+  }, [setProjects, setNotice]);
+
+  async function refreshProjects() {
+    if (IS_NATIVE) setProjects(await localListProjects());
+    else await refreshAll();
+  }
+
   function startEdit(project) {
     setEditing(project);
     setProjectDraft({
@@ -4174,18 +4201,21 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
   async function createProject() {
     if (!name.trim()) return;
     try {
-      await api('/api/approvals', {
-        method: 'POST',
-        body: JSON.stringify({
-          action_type: 'create_project',
-          title: `Create project: ${name}`,
-          priority: 'P2',
-          payload: { name, next_action: 'Define next action.', evidence: 'Project proposed from Projects view.' }
-        })
-      });
+      if (IS_NATIVE) await localCreateProject({ name, next_action: 'Define next action.' });
+      else {
+        await api('/api/approvals', {
+          method: 'POST',
+          body: JSON.stringify({
+            action_type: 'create_project',
+            title: `Create project: ${name}`,
+            priority: 'P2',
+            payload: { name, next_action: 'Define next action.', evidence: 'Project proposed from Projects view.' }
+          })
+        });
+      }
       setName('');
-      setNotice('Project proposal added to approval queue.');
-      await refreshAll();
+      setNotice(IS_NATIVE ? 'Project saved on this phone.' : 'Project proposal added to approval queue.');
+      await refreshProjects();
     } catch (err) {
       setNotice(err.message);
     }
@@ -4194,36 +4224,39 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
   async function proposeProjectUpdate() {
     if (!editing || !projectDraft.name.trim()) return;
     try {
-      await api('/api/approvals', {
-        method: 'POST',
-        body: JSON.stringify({
-          action_type: 'update_project',
-          title: `Update project: ${editing.name}`,
-          priority: 'P2',
-          payload: {
-            id: editing.id,
-            previous: {
-              name: editing.name,
-              status: editing.status,
-              owner: editing.owner,
-              confidence: editing.confidence,
-              next_action: editing.next_action || '',
-              shareability: editing.shareability || 'unknown'
-            },
-            updates: {
-              ...projectDraft,
-              confidence: Number(projectDraft.confidence),
-              evidence: 'Project update proposed from Projects view.'
-            },
-            summary: `Update ${editing.name}`,
-            risk: 'medium',
-            source: 'Projects view'
-          }
-        })
-      });
+      if (IS_NATIVE) await localUpdateProject(editing.id, projectDraft);
+      else {
+        await api('/api/approvals', {
+          method: 'POST',
+          body: JSON.stringify({
+            action_type: 'update_project',
+            title: `Update project: ${editing.name}`,
+            priority: 'P2',
+            payload: {
+              id: editing.id,
+              previous: {
+                name: editing.name,
+                status: editing.status,
+                owner: editing.owner,
+                confidence: editing.confidence,
+                next_action: editing.next_action || '',
+                shareability: editing.shareability || 'unknown'
+              },
+              updates: {
+                ...projectDraft,
+                confidence: Number(projectDraft.confidence),
+                evidence: 'Project update proposed from Projects view.'
+              },
+              summary: `Update ${editing.name}`,
+              risk: 'medium',
+              source: 'Projects view'
+            }
+          })
+        });
+      }
       setEditing(null);
-      setNotice('Project update proposal added to approval queue.');
-      await refreshAll();
+      setNotice(IS_NATIVE ? 'Project updated on this phone.' : 'Project update proposal added to approval queue.');
+      await refreshProjects();
     } catch (err) {
       setNotice(err.message);
     }
@@ -4234,7 +4267,7 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
       <div className="panel">
       <div className="inline-form">
         <input value={name} onChange={(event) => setName(event.target.value)} placeholder="New project name" />
-        <button className="primary" onClick={createProject}><Plus size={16} /> Propose project</button>
+        <button className="primary" onClick={createProject}><Plus size={16} /> {IS_NATIVE ? 'Add project' : 'Propose project'}</button>
       </div>
       <div className="table-list">
         {projects.map((project) => (
@@ -4247,8 +4280,8 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
       </div>
       {editing && (
         <div className="panel">
-          <h2>Edit Project Proposal</h2>
-          <p>Project changes go through approval before updating the database.</p>
+          <h2>{IS_NATIVE ? 'Edit Project' : 'Edit Project Proposal'}</h2>
+          <p>{IS_NATIVE ? 'This personal project is stored on this phone and does not require a PC.' : 'Project changes go through approval before updating the database.'}</p>
           <label>Name</label>
           <input value={projectDraft.name} onChange={(event) => setProjectDraft((draft) => ({ ...draft, name: event.target.value }))} />
           <label>Status</label>
@@ -4273,7 +4306,7 @@ function Projects({ projects, setProjects, setNotice, refreshAll }) {
             <option value="public-shareable">Public-shareable — eligible only after export review</option>
           </select>
           <div className="decision-row">
-            <button className="primary" onClick={proposeProjectUpdate}><Check size={16} /> Propose update</button>
+            <button className="primary" onClick={proposeProjectUpdate}><Check size={16} /> {IS_NATIVE ? 'Save project' : 'Propose update'}</button>
             <button onClick={() => setEditing(null)}><X size={16} /> Cancel</button>
           </div>
         </div>

@@ -13,7 +13,7 @@ import {
   planSyncPairingTransition,
   verifySyncServer
 } from '../src/nativeConnection.js';
-import { persistSyncPairingTransition } from '../src/localData.js';
+import { persistSyncPairingRemoval, persistSyncPairingTransition } from '../src/localData.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
@@ -74,12 +74,12 @@ try {
 
   assert.deepEqual(
     planSyncPairingTransition({}, identityA),
-    { mode: 'initial', clearSyncedPlanner: false, preserveProgress: false },
+    { mode: 'initial', resetTransport: false, preserveProgress: false },
     'a fresh installation can pair with any compatible personal PC'
   );
   assert.deepEqual(
     planSyncPairingTransition({ baseUrl: pcA.baseUrl, pairingToken: 'pairing-code-a', serverId: identityA.serverId }, { ...identityA, baseUrl: 'http://127.0.0.1:49999' }),
-    { mode: 'same-server', clearSyncedPlanner: false, preserveProgress: true },
+    { mode: 'same-server', resetTransport: false, preserveProgress: true },
     'the same stable PC identity may move to a new LAN address without resetting sync progress'
   );
   assert.throws(
@@ -89,28 +89,26 @@ try {
   );
   assert.deepEqual(
     planSyncPairingTransition({ baseUrl: pcA.baseUrl, pairingToken: 'pairing-code-a', serverId: identityA.serverId }, identityB, { replaceExisting: true }),
-    { mode: 'replace-server', clearSyncedPlanner: true, preserveProgress: false },
-    'an explicit PC replacement clears the old synced Planner scope'
+    { mode: 'replace-server', resetTransport: true, preserveProgress: false },
+    'an explicit PC replacement resets only the old PC transport scope'
   );
   assert.equal(pcB.requests.some((request) => request.token === 'pairing-code-a'), true, 'credential-isolation rejection was exercised against the real PC B endpoint');
 
-  // Exercise the real phone persistence helper against SQLite, not only its
-  // planning function. All five synced Planner/transport tables must clear on
-  // PC replacement while phone-only data remains.
+  // Exercise the real phone persistence helpers against SQLite, not only the
+  // planning function. Planner data exists and remains usable with zero PCs;
+  // an initial pairing binds only the pending transport journal to that PC.
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec(`
     CREATE TABLE local_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE local_tasks (id TEXT PRIMARY KEY);
     CREATE TABLE local_task_events (id TEXT PRIMARY KEY);
-    CREATE TABLE sync_outbox (change_id TEXT PRIMARY KEY);
+    CREATE TABLE sync_outbox (change_id TEXT PRIMARY KEY, server_id TEXT);
     CREATE TABLE sync_applied_changes (change_id TEXT PRIMARY KEY);
     CREATE TABLE sync_conflicts (id TEXT PRIMARY KEY);
     CREATE TABLE local_notes (id TEXT PRIMARY KEY);
-    INSERT INTO local_tasks VALUES ('task-a');
-    INSERT INTO local_task_events VALUES ('event-a');
-    INSERT INTO sync_outbox VALUES ('outbox-a');
-    INSERT INTO sync_applied_changes VALUES ('applied-a');
-    INSERT INTO sync_conflicts VALUES ('conflict-a');
+    INSERT INTO local_tasks VALUES ('phone-native-task');
+    INSERT INTO local_task_events VALUES ('phone-native-event');
+    INSERT INTO sync_outbox VALUES ('unpaired-phone-change', NULL);
     INSERT INTO local_notes VALUES ('phone-only-note');
   `);
   const db = {
@@ -120,17 +118,34 @@ try {
     execute: async (sql) => sqlite.exec(sql),
     run: async (sql, values = []) => sqlite.prepare(sql).run(...values)
   };
+  const setting = (key) => sqlite.prepare('SELECT value FROM local_settings WHERE key = ?').get(key)?.value;
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_tasks').get().count, 1, 'Android Planner works and persists with zero registered PCs');
+  await persistSyncPairingTransition(db, {
+    candidate: identityA,
+    pairingToken: 'pairing-code-a',
+    transition: planSyncPairingTransition({}, identityA),
+    verifiedAt: '2026-09-03T00:00:00.000Z'
+  });
+  assert.equal(sqlite.prepare("SELECT server_id FROM sync_outbox WHERE change_id = 'unpaired-phone-change'").get().server_id, identityA.serverId, 'zero-PC work binds only after the user verifies PC A');
+
+  sqlite.exec(`
+    INSERT INTO sync_outbox VALUES ('pending-pc-a-work', '${identityA.serverId}');
+    INSERT INTO sync_applied_changes VALUES ('applied-a');
+    INSERT INTO sync_conflicts VALUES ('conflict-a');
+  `);
   const replacement = planSyncPairingTransition(
     { baseUrl: pcA.baseUrl, pairingToken: 'pairing-code-a', serverId: identityA.serverId },
     identityB,
     { replaceExisting: true }
   );
   await persistSyncPairingTransition(db, { candidate: identityB, pairingToken: 'pairing-code-b', transition: replacement, verifiedAt: '2026-09-02T00:00:00.000Z' });
-  for (const table of ['local_tasks', 'local_task_events', 'sync_outbox', 'sync_applied_changes', 'sync_conflicts']) {
-    assert.equal(sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, `${table} is cleared when replacing PC A with PC B`);
+  for (const table of ['sync_outbox', 'sync_applied_changes', 'sync_conflicts']) {
+    assert.equal(sqlite.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, `${table} is reset when replacing PC A with PC B`);
   }
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_tasks').get().count, 1, 'ordinary Planner tasks survive PC replacement');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_task_events').get().count, 1, 'ordinary Planner history survives PC replacement');
   assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_notes').get().count, 1, 'phone-only data remains when replacing the synced PC');
-  const setting = (key) => sqlite.prepare('SELECT value FROM local_settings WHERE key = ?').get(key)?.value;
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM sync_outbox WHERE change_id = 'pending-pc-a-work'").get().count, 0, 'PC-A-specific pending work cannot replay into PC B');
   assert.equal(setting('sync_base_url'), identityB.baseUrl);
   assert.equal(setting('sync_pairing_token'), 'pairing-code-b');
   assert.equal(setting('sync_server_id'), identityB.serverId);
@@ -139,16 +154,27 @@ try {
   assert.equal(setting('sync_cursor'), '0');
   assert.equal(setting('sync_last_pushed_seq'), '0');
 
-  sqlite.exec("INSERT INTO local_tasks VALUES ('task-b'); UPDATE local_settings SET value = '7' WHERE key = 'sync_cursor';");
+  sqlite.exec("INSERT INTO local_tasks VALUES ('phone-native-task-2'); INSERT INTO sync_outbox VALUES ('pending-pc-b-work', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'); UPDATE local_settings SET value = '7' WHERE key = 'sync_cursor';");
   const samePcAtNewAddress = { ...identityB, baseUrl: 'http://127.0.0.1:49998' };
   const addressChange = planSyncPairingTransition(
     { baseUrl: identityB.baseUrl, pairingToken: 'pairing-code-b', serverId: identityB.serverId },
     samePcAtNewAddress
   );
   await persistSyncPairingTransition(db, { candidate: samePcAtNewAddress, pairingToken: 'rotated-code-b', transition: addressChange });
-  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_tasks').get().count, 1, 'same-PC address changes retain synced Planner data');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_tasks').get().count, 2, 'same-PC address changes retain phone Planner data');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM sync_outbox').get().count, 1, 'same stable PC identity retains its pending work when its IP changes');
   assert.equal(setting('sync_cursor'), '7', 'same-PC address changes retain sync progress');
   assert.equal(setting('sync_base_url'), samePcAtNewAddress.baseUrl, 'same-PC address changes persist the new endpoint');
+
+  // Removing an unavailable/failed PC is a capability change, never an app or
+  // Planner reset. Only its credential and transport state disappear.
+  await persistSyncPairingRemoval(db);
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_tasks').get().count, 2, 'ordinary Planner data survives removing the paired PC');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_task_events').get().count, 1, 'Planner history survives removing the paired PC');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM local_notes').get().count, 1, 'other phone-native features survive removing the paired PC');
+  assert.equal(sqlite.prepare('SELECT COUNT(*) AS count FROM sync_outbox').get().count, 0, 'removed-PC pending work cannot replay after a later pairing');
+  assert.equal(setting('sync_base_url'), undefined, 'removing a PC removes its endpoint');
+  assert.equal(setting('sync_pairing_token'), undefined, 'removing a PC removes its credential');
   sqlite.close();
 } finally {
   await Promise.all([pcA, pcB].map(({ server }) => new Promise((resolve) => server.close(resolve))));
@@ -166,20 +192,33 @@ assert.match(ui, /function NativeBackendPanel/, 'native app has an always-reacha
 assert.match(ui, /Pair with my LifePlanSystem PC/, 'native top bar exposes generic personal-PC pairing');
 assert.match(ui, /if \(!current\.paired\) setSyncPanelOpen\(true\)/, 'a fresh native installation opens pairing on first launch');
 assert.match(ui, /Address shown by LifePlanSystem on your PC/, 'pairing UI asks for the current user PC address, not a fixed address');
-assert.match(ui, /Replace paired PC and clear synced Planner data/, 'switching personal PCs requires an explicit data-scope reset');
+assert.match(ui, /Pairing is optional\. Planner, Today, normal tasks, notes, mobile state/, 'the UI states that phone-native LPS works with zero PCs');
+assert.match(ui, /Replace paired PC; keep phone Planner data/, 'switching personal PCs explicitly preserves phone-owned Planner data');
+assert.match(ui, /Remove paired PC/, 'the user can remove a PC without disabling phone-native LPS');
 assert.match(ui, /Configure optional hosted LifePlanSystem server/, 'optional hosted services remain distinct from personal-PC pairing');
 assert.match(ui, /Save and connect[\s\S]*Use USB default/, 'native backend setup has connect/retry and USB-loopback paths');
 const pairingStart = localData.indexOf('export async function localSetSyncPairing');
 const pairingEnd = localData.indexOf('\nfunction extractSyncableTaskFieldsPhone', pairingStart);
 const pairingFlow = localData.slice(pairingStart, pairingEnd);
 assert.ok(pairingFlow.indexOf('await verifySyncServer') < pairingFlow.indexOf('await persistSyncPairingTransition'), 'pairing verifies identity and credential before persistence');
-assert.match(localData, /DELETE FROM local_task_events;[\s\S]*DELETE FROM local_tasks;[\s\S]*DELETE FROM sync_outbox;[\s\S]*DELETE FROM sync_applied_changes;[\s\S]*DELETE FROM sync_conflicts;/, 'explicit PC replacement clears every synced Planner and transport table');
+assert.doesNotMatch(localData, /DELETE FROM local_task_events;|DELETE FROM local_tasks;/, 'PC replacement/removal never deletes ordinary phone Planner data');
+assert.match(localData, /SELECT \* FROM sync_outbox WHERE server_id = \? AND seq > \?/, 'only work scoped to the currently verified PC can be transmitted');
+assert.match(localData, /DELETE FROM sync_outbox;[\s\S]*DELETE FROM sync_applied_changes;[\s\S]*DELETE FROM sync_conflicts;/, 'PC replacement/removal resets the PC-specific transport state');
 assert.match(localData, /sync_server_id[\s\S]*sync_user_id[\s\S]*sync_connection_status/, 'endpoint, credential-associated identities, and connection status persist generically');
+assert.match(localData, /CREATE TABLE IF NOT EXISTS local_projects/, 'projects are durable phone-native state');
+assert.match(ui, /IS_NATIVE \? await localListProjectCards\(\) : await api\('\/api\/workboard\/cards'\)/, 'mobile Cards read phone-native projects without a PC');
+assert.match(ui, /IS_NATIVE[\s\S]*Promise\.all\(\[localListTasks\(\), localListProjects\(\)\]\)/, 'mobile Completed reads phone-native Planner and project state without a PC');
+const projectsStart = ui.indexOf('function Projects(');
+const projectsEnd = ui.indexOf('\nfunction BrowserConsult(', projectsStart);
+const projectsFlow = ui.slice(projectsStart, projectsEnd);
+assert.match(projectsFlow, /if \(IS_NATIVE\) await localCreateProject/, 'mobile projects are created directly on-device');
+assert.match(projectsFlow, /if \(IS_NATIVE\) await localUpdateProject/, 'mobile projects are updated directly on-device');
 const sendStart = ui.indexOf('async function send()');
 const sendEnd = ui.indexOf('\n  async function loadMessages', sendStart);
 const sendFlow = ui.slice(sendStart, sendEnd > sendStart ? sendEnd : sendStart + 9000);
 assert.match(sendFlow, /if \(IS_NATIVE\)/, 'native chat takes its local command path regardless of optional backend reachability');
 assert.match(sendFlow, /This Closed Beta keeps phone chat on device for now/, 'native unmatched chat is explicit about the v0.1 boundary');
+assert.match(localData, /if \(!settings\.paired\) \{[\s\S]*return \{ status: 'not_paired' \};[\s\S]*try \{/, 'zero-PC state and PC-only sync failures do not disable or mutate phone-native LPS');
 assert.match(server, /req\.method === 'POST' && req\.path === '\/api\/feedback'/, 'hosted mode allows only the feedback submission method');
 assert.match(server, /INSERT INTO feedback \(user_id, sentiment/, 'feedback submissions are attributed to the authenticated tester');
 assert.match(server, /Object\.values\(os\.networkInterfaces\(\)\)/, 'desktop pairing addresses derive from the current machine network interfaces');

@@ -12,9 +12,10 @@
 // identically to the desktop/hosted server.
 //
 // Every row carries sync metadata (revision, deleted, sync_status). The v0.1
-// transport below synchronises Planner tasks/lifecycle events with the one
-// personal LPS PC whose authenticated identity the phone has saved; notes,
-// memory candidates and Chat remain phone-local.
+// transport below can synchronise Planner tasks/lifecycle events with an
+// optional authenticated personal LPS PC. That PC is a capability endpoint,
+// never the owner of the phone's Planner: removing or replacing it preserves
+// ordinary phone data. Notes, memory candidates and Chat remain phone-local.
 
 import { planDay, CAPACITY_MODES, DEFAULT_CAPACITY_MODE, normalizeCapacityMode } from '../server/capacityPlanner.js';
 import { exchangeSyncChanges, planSyncPairingTransition, verifySyncServer } from './nativeConnection.js';
@@ -162,6 +163,30 @@ CREATE TABLE IF NOT EXISTS sync_conflicts (
   resolved_at TEXT,
   resolution TEXT
 );
+`,
+  // Bind queued phone mutations to the specific PC identity they are allowed
+  // to reach. Existing v0.1 rows are deliberately nullable until the already
+  // configured PC verifies its stable identity; they are then bound once.
+  `
+ALTER TABLE sync_outbox ADD COLUMN server_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_server_seq ON sync_outbox(server_id, seq);
+`,
+  // Projects are ordinary phone-native planning state. They intentionally do
+  // not require or belong to a paired PC; transport support can be added later
+  // without changing their local ownership.
+  `
+CREATE TABLE IF NOT EXISTS local_projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  owner TEXT NOT NULL DEFAULT 'user',
+  confidence REAL NOT NULL DEFAULT 0.75,
+  next_action TEXT NOT NULL DEFAULT '',
+  shareability TEXT NOT NULL DEFAULT 'unknown',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_local_projects_status ON local_projects(status, updated_at);
 `
 ];
 
@@ -335,10 +360,10 @@ export async function localListTasks() {
 // point of using a UUID primary key -- there is no separate id to
 // translate). change_id is generated fresh per call and is the future
 // sync engine's replay/dedup key.
-function outboxStatement(entityType, entitySyncId, op, payload, revision, deviceIdValue) {
+function outboxStatement(entityType, entitySyncId, op, payload, revision, deviceIdValue, serverId = null) {
   return {
-    statement: 'INSERT INTO sync_outbox (change_id, entity_type, entity_sync_id, op, payload, revision, device_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    values: [uuid(), entityType, entitySyncId, op, payload === undefined ? null : JSON.stringify(payload), revision, deviceIdValue, nowIso()]
+    statement: 'INSERT INTO sync_outbox (change_id, entity_type, entity_sync_id, op, payload, revision, device_id, created_at, server_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    values: [uuid(), entityType, entitySyncId, op, payload === undefined ? null : JSON.stringify(payload), revision, deviceIdValue, nowIso(), serverId || null]
   };
 }
 
@@ -349,6 +374,7 @@ export async function localCreateTask(body) {
   const id = uuid();
   const ts = nowIso();
   const device = await deviceId(db);
+  const pairedServerId = await getSetting(db, 'sync_server_id');
   const columns = ['id', 'created_at', 'updated_at', 'device_id', ...Object.keys(fields)];
   const values = [id, ts, ts, device, ...Object.values(fields)];
   await db.executeSet([
@@ -359,7 +385,7 @@ export async function localCreateTask(body) {
   // itself defaults (status, pinned, deleted, sync_status, revision), so a
   // remote peer replaying this entry would reconstruct an incomplete task.
   const row = (await db.query('SELECT * FROM local_tasks WHERE id = ?', [id])).values[0];
-  const stmt = outboxStatement('planner_task', id, 'upsert', row, row.revision, device);
+  const stmt = outboxStatement('planner_task', id, 'upsert', row, row.revision, device, pairedServerId);
   await db.run(stmt.statement, stmt.values);
   return rowToEngine(row);
 }
@@ -393,6 +419,7 @@ async function writeTaskFields(db, id, fields) {
   const columns = Object.keys(fields);
   const ts = nowIso();
   const device = await deviceId(db);
+  const pairedServerId = await getSetting(db, 'sync_server_id');
   if (columns.length) {
     const sets = columns.map((c) => `${c} = ?`).join(', ');
     // revision = revision + 1 is computed BY SQLite, not read-then-written
@@ -421,7 +448,7 @@ async function writeTaskFields(db, id, fields) {
   // the row write above, but a real, complete snapshot is worth that cost.
   const freshRow = (await db.query('SELECT * FROM local_tasks WHERE id = ?', [id])).values[0];
   if (columns.length) {
-    const stmt = outboxStatement('planner_task', id, 'upsert', freshRow, freshRow.revision, device);
+    const stmt = outboxStatement('planner_task', id, 'upsert', freshRow, freshRow.revision, device, pairedServerId);
     await db.run(stmt.statement, stmt.values);
   }
   if (eventId) {
@@ -429,7 +456,7 @@ async function writeTaskFields(db, id, fields) {
     // applyPlannerTaskFields in server/index.js) -- on the phone the task's
     // own id already IS its sync_id, so this is just that same value under
     // the shared cross-device field name a receiving peer looks for.
-    const stmt = outboxStatement('planner_task_event', eventId, 'upsert', { id: eventId, taskSyncId: id, eventType, fromStatus: existing.status, toStatus: fields.status, createdAt: ts }, 1, device);
+    const stmt = outboxStatement('planner_task_event', eventId, 'upsert', { id: eventId, taskSyncId: id, eventType, fromStatus: existing.status, toStatus: fields.status, createdAt: ts }, 1, device, pairedServerId);
     await db.run(stmt.statement, stmt.values);
   }
   return rowToEngine(freshRow, await taskEventSummary(db, id));
@@ -473,6 +500,81 @@ export async function localTaskEvents(id) {
   const db = await getDb();
   const result = await db.query('SELECT * FROM local_task_events WHERE task_id = ? ORDER BY created_at DESC LIMIT 50', [id]);
   return (result.values || []).reverse().map((e) => ({ id: e.id, eventType: e.event_type, fromStatus: e.from_status, toStatus: e.to_status, actor: 'user', source: 'local-device', createdAt: e.created_at }));
+}
+
+// --- Projects / layered cards ----------------------------------------------
+// These are phone-owned records. Unlike desktop repository/build automation,
+// creating and reviewing a personal project is not a PC-only capability.
+
+function projectRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    status: row.status,
+    owner: row.owner,
+    confidence: Number(row.confidence),
+    next_action: row.next_action || '',
+    shareability: row.shareability || 'unknown',
+    created_at: row.created_at,
+    updated_at: row.updated_at
+  };
+}
+
+export async function localListProjects() {
+  const db = await getDb();
+  const result = await db.query("SELECT * FROM local_projects ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, updated_at DESC", []);
+  return (result.values || []).map(projectRow);
+}
+
+export async function localCreateProject(body) {
+  const db = await getDb();
+  const name = String(body?.name || '').trim();
+  if (!name) throw new Error('A project name is required.');
+  const id = uuid();
+  const ts = nowIso();
+  await db.run(
+    'INSERT INTO local_projects (id, name, status, owner, confidence, next_action, shareability, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, name, 'active', 'user', 0.75, String(body?.next_action || ''), 'unknown', ts, ts]
+  );
+  return projectRow((await db.query('SELECT * FROM local_projects WHERE id = ?', [id])).values[0]);
+}
+
+export async function localUpdateProject(id, body) {
+  const db = await getDb();
+  const existing = (await db.query('SELECT * FROM local_projects WHERE id = ?', [id])).values?.[0];
+  if (!existing) throw new Error('Project not found.');
+  const allowedStatus = new Set(['active', 'blocked', 'waiting', 'stable', 'done', 'completed', 'archived']);
+  const allowedShareability = new Set(['unknown', 'private', 'local-shareable', 'public-shareable']);
+  const next = {
+    name: Object.hasOwn(body || {}, 'name') ? String(body.name || '').trim() : existing.name,
+    status: allowedStatus.has(body?.status) ? body.status : existing.status,
+    owner: Object.hasOwn(body || {}, 'owner') ? String(body.owner || '').trim() || 'user' : existing.owner,
+    confidence: Object.hasOwn(body || {}, 'confidence') ? Math.min(1, Math.max(0, Number(body.confidence) || 0)) : existing.confidence,
+    next_action: Object.hasOwn(body || {}, 'next_action') ? String(body.next_action || '') : existing.next_action,
+    shareability: allowedShareability.has(body?.shareability) ? body.shareability : existing.shareability
+  };
+  if (!next.name) throw new Error('A project name is required.');
+  await db.run(
+    'UPDATE local_projects SET name = ?, status = ?, owner = ?, confidence = ?, next_action = ?, shareability = ?, updated_at = ? WHERE id = ?',
+    [next.name, next.status, next.owner, next.confidence, next.next_action, next.shareability, nowIso(), id]
+  );
+  return projectRow((await db.query('SELECT * FROM local_projects WHERE id = ?', [id])).values[0]);
+}
+
+export async function localListProjectCards() {
+  return (await localListProjects()).map((project) => {
+    const hasExecution = Boolean(project.next_action);
+    return {
+      id: project.id,
+      pinned: { title: project.name, status: project.status, owner: project.owner, blocker: project.status === 'blocked' ? 'Project is marked blocked.' : '' },
+      glance: { confidence: project.confidence, progress: null },
+      context: { populated: true, recap: 'Phone-local personal project.', latestEvidence: '', sourceSummary: 'This Android device', lastReviewed: project.updated_at, linkedItemCount: 0 },
+      execution: { populated: hasExecution, activeAction: project.next_action, blocker: project.status === 'blocked' ? 'Project is marked blocked.' : '', subtasks: [] },
+      proof: { populated: false, verifications: [] },
+      history: { populated: false, events: [] },
+      populatedLayers: ['glance', 'context', ...(hasExecution ? ['execution'] : [])]
+    };
+  });
 }
 
 // --- Notes / quick capture --------------------------------------------------
@@ -645,17 +747,21 @@ export async function localSyncSettings() {
 export async function persistSyncPairingTransition(db, { candidate, pairingToken, transition, verifiedAt = nowIso() }) {
   await db.beginTransaction();
   try {
-    if (transition.clearSyncedPlanner) {
-      // A phone belongs to one personal desktop sync scope at a time in v0.1.
-      // Clear only data that participates in that relationship; local notes,
-      // memory candidates and chats are not synced and remain on the phone.
+    if (transition.resetTransport) {
+      // Drop only PC-scoped transport state. local_tasks and
+      // local_task_events are ordinary phone-owned Planner data and survive
+      // removing/replacing a PC. Deleting the old outbox is the fail-closed
+      // boundary that prevents pending PC-A work from replaying into PC B.
       await db.execute(`
-        DELETE FROM local_task_events;
-        DELETE FROM local_tasks;
         DELETE FROM sync_outbox;
         DELETE FROM sync_applied_changes;
         DELETE FROM sync_conflicts;
       `);
+    } else {
+      // Tasks created with zero PCs are fully valid phone-native work. On an
+      // initial pairing (or identity upgrade), bind their unscoped journal
+      // entries exactly once to the verified PC selected by the user.
+      await db.run('UPDATE sync_outbox SET server_id = ? WHERE server_id IS NULL', [candidate.serverId]);
     }
     await setSetting(db, 'sync_base_url', candidate.baseUrl);
     await setSetting(db, 'sync_pairing_token', pairingToken);
@@ -675,6 +781,36 @@ export async function persistSyncPairingTransition(db, { candidate, pairingToken
     await db.rollbackTransaction().catch(() => {});
     throw error;
   }
+}
+
+export async function persistSyncPairingRemoval(db) {
+  await db.beginTransaction();
+  try {
+    // Remove credentials and PC-specific pending/receipt state only. The
+    // phone remains a complete local LifePlanSystem client with all Planner,
+    // Today, task, note, memory and chat records intact.
+    await db.execute(`
+      DELETE FROM sync_outbox;
+      DELETE FROM sync_applied_changes;
+      DELETE FROM sync_conflicts;
+      DELETE FROM local_settings WHERE key IN (
+        'sync_base_url', 'sync_pairing_token', 'sync_server_id', 'sync_user_id',
+        'sync_protocol_version', 'sync_connection_status', 'sync_cursor',
+        'sync_last_pushed_seq', 'sync_last_sync_at', 'sync_last_verified_at',
+        'sync_last_error'
+      );
+    `);
+    await db.commitTransaction();
+  } catch (error) {
+    await db.rollbackTransaction().catch(() => {});
+    throw error;
+  }
+}
+
+export async function localRemoveSyncPairing() {
+  const db = await getDb();
+  await persistSyncPairingRemoval(db);
+  return localSyncSettings();
 }
 
 export async function localSetSyncPairing({ baseUrl, pairingToken, replaceExisting = false }) {
@@ -800,9 +936,12 @@ export async function localSyncNow() {
       await setSetting(db, 'sync_server_id', identity.serverId);
       await setSetting(db, 'sync_user_id', identity.userId);
       await setSetting(db, 'sync_protocol_version', String(identity.protocolVersion));
+      // One-time upgrade for pre-identity v0.1 outbox rows. This is safe only
+      // after the stored endpoint and credential verified the PC identity.
+      await db.run('UPDATE sync_outbox SET server_id = ? WHERE server_id IS NULL', [identity.serverId]);
     }
 
-    const pending = (await db.query('SELECT * FROM sync_outbox WHERE seq > ? ORDER BY seq ASC LIMIT 200', [settings.lastPushedSeq])).values || [];
+    const pending = (await db.query('SELECT * FROM sync_outbox WHERE server_id = ? AND seq > ? ORDER BY seq ASC LIMIT 200', [identity.serverId, settings.lastPushedSeq])).values || [];
     const changes = pending.map((row) => ({
       changeId: row.change_id, entityType: row.entity_type, entitySyncId: row.entity_sync_id, op: row.op,
       payload: row.payload ? JSON.parse(row.payload) : null, revision: row.revision, deviceId: row.device_id
