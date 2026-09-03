@@ -681,7 +681,7 @@ h3 { font-size: 14px; font-weight: 700; }
 .local-source-list summary { cursor: pointer; color: var(--accent); }
 .local-source-list ul { margin: 5px 0 0; padding-left: 16px; max-height: 140px; overflow: auto; }
 .local-source-list li { overflow-wrap: anywhere; }
-.chat-panel { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; position: relative; }
+.chat-panel { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; overflow: hidden; position: relative; }
 .chat-header { padding: 16px; border-bottom: 1px solid var(--line); }
 .messages { padding: 16px; overflow: auto; display: grid; gap: 12px; align-content: start; scroll-behavior: auto; overflow-anchor: none; }
 
@@ -1591,6 +1591,16 @@ button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 1
      once in the whole stylesheet). Stack sidebar above the chat pane
      instead, matching the same collapse-to-one-column pattern already used
      for .coding-ide above. */
-  .chat-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: calc(100vh - 112px); }
-  .chat-sidebar { max-height: 220px; }
+  .main.chat-main-shell { height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+  .chat-main-shell .topbar { flex: 0 0 auto; }
+  .chat-layout { flex: 1 1 auto; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); height: auto; min-height: 0; }
+  .chat-sidebar { max-height: 150px; }
+  .chat-header { padding: 10px 12px; }
+  .chat-header h2, .chat-header p { margin-block: 2px; }
+  .native-chat-context { padding: 6px 10px; }
+  .native-chat-context .source-warning { margin: 0; padding: 7px 9px; }
+  .messages { padding: 10px; }
+  .message { max-width: 92%; }
+  .composer { padding: 10px; grid-template-columns: minmax(0, 1fr) auto; }
+  .composer textarea { min-height: 46px; }
 }

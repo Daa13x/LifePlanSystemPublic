@@ -585,9 +585,26 @@ function App() {
     // chat sessions -- never leave Chat's sidebar empty just because the
     // (optional, desktop-only-for-now) bootstrap call failed.
     if (IS_NATIVE) {
-      const sessions = await chatApi('/api/chat/sessions').catch(() => []);
-      setSessions(sessions);
-      setSelectedSession((current) => current && sessions.some((session) => session.id === current) ? current : sessions[0]?.id || null);
+      let localSessions = [];
+      try {
+        localSessions = await chatApi('/api/chat/sessions');
+        // A fresh phone has no server (by design) and no chat rows yet. Create
+        // its first on-device conversation automatically so the composer is
+        // usable immediately instead of presenting a disabled, sessionless UI.
+        if (localSessions.length === 0) {
+          localSessions = [await chatApi('/api/chat/sessions', {
+            method: 'POST',
+            body: JSON.stringify({ title: 'New planning chat' })
+          })];
+        }
+      } catch (error) {
+        // Keep the composer and navigation mounted even when storage fails,
+        // but make the real local failure visible instead of pretending that
+        // an empty session list is a successful startup.
+        setNotice(`Phone storage unavailable: ${error.message}`);
+      }
+      setSessions(localSessions);
+      setSelectedSession((current) => current && localSessions.some((session) => session.id === current) ? current : localSessions[0]?.id || null);
     }
     const [data, mem, pendingApprovals] = await Promise.all([
       api('/api/bootstrap').catch((error) => { if (!IS_NATIVE) throw error; return null; }),
@@ -766,7 +783,7 @@ function App() {
 
   return (
     <div className="app-shell">
-      <main className="main">
+      <main className={cx('main', route.section === 'chat' && 'chat-main-shell')}>
         <header className="topbar">
           <button className="app-logo" onClick={() => navigate('chat')} aria-label="Life Planner home" title="Life Planner home">
             <img src="/life-planner-logo.png" alt="" />
@@ -3209,10 +3226,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       <div className="chat-sidebar">
         <div className="session-list">
           <button className="primary" onClick={newSession}><Plus size={16} /> New chat</button>
-          <form className="inline-form compact" onSubmit={searchChatHistory}>
+          {!IS_NATIVE && <form className="inline-form compact" onSubmit={searchChatHistory}>
             <input value={historyQuery} maxLength={240} onChange={(event) => setHistoryQuery(event.target.value)} aria-label="Search local chat history" placeholder="Search chats…" />
             <button type="submit" data-action-id="conversation.search" data-control-id="chat.history-search.submit" disabled={historySearchBusy || !historyQuery.trim()}>{historySearchBusy ? 'Searching…' : 'Search'}</button>
-          </form>
+          </form>}
           {historyResults.length ? (
             <div className="history-search-results" aria-label="Chat history search results">
               {historyResults.map((match, index) => (
@@ -3231,7 +3248,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
                 <strong>{session.title}</strong>
               </button>
               <div className="session-hover-actions" aria-label={`Actions for ${session.title}`}>
-                <button className="icon-button" onClick={() => syncSessionToMemory(session)} aria-label={`Sync ${session.title} to memory`} title="Sync chat to review-only memory"><Brain size={15} /></button>
+                {!IS_NATIVE && <button className="icon-button" onClick={() => syncSessionToMemory(session)} aria-label={`Sync ${session.title} to memory`} title="Sync chat to review-only memory"><Brain size={15} /></button>}
                 <button className="icon-button danger" onClick={() => deleteSessionFromList(session)} aria-label={`Delete ${session.title}`} title="Delete chat"><X size={16} /></button>
               </div>
             </div>
@@ -3255,8 +3272,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             </div>
           )}
         </div>
-        <div className="context-bar">
-          {!IS_NATIVE && <ChatConnectionBar connection={connection} connectionState={connectionState} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} proposalBusy={plannerProposalBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} onProposePlannerStatus={proposePlannerStatus} />}
+        <div className={cx('context-bar', IS_NATIVE && 'native-chat-context')}>
+          {IS_NATIVE ? (
+            <div className="source-warning info" role="status">
+              <strong>On-device Chat</strong>
+              <small>Works without a PC. Try “add task Buy milk”, “show today”, “complete Buy milk”, or “defer Buy milk”.</small>
+            </div>
+          ) : <>
+          <ChatConnectionBar connection={connection} connectionState={connectionState} runtime={runtime} generating={chatBusy} statusPreview={systemStatusPreview} modelsPreview={systemModelsPreview} runsPreview={systemRunsPreview} plannerPreview={plannerTodayPreview} checkBusy={systemCheckBusy} proposalBusy={plannerProposalBusy} onCheckStatus={checkSystemStatus} onCheckModels={checkSystemModels} onCheckRuns={checkSystemRuns} onCheckPlanner={checkPlannerToday} onOpenWorkboard={openWorkboardViaAction} onOpenSystem={openSystemViaAction} onOpenSettings={openSettingsViaAction} onOpenPlanner={openPlannerViaAction} onEditPlannerTask={openPlannerUpdate} onProposePlannerStatus={proposePlannerStatus} />
           <div className="context-actions">
             <button data-action-id="knowledge.search" data-control-id="chat.context-toolbar.open-knowledge" onClick={() => openPicker('knowledge')} title="Attach selected Knowledge records to this conversation; general reviewed-memory retrieval remains automatic for personal questions."><Brain size={15} /> Attach Knowledge</button>
             <button data-action-id="workboard.list" data-control-id="chat.context-toolbar.open-workboard" onClick={() => openPicker('workboard')}><ListChecks size={15} /> Use Workboard</button>
@@ -3358,6 +3381,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
             </div>
           )}
           {projectProposal && <ProjectProposalCard proposal={projectProposal} busy={projectProposalBusy} onConfirm={confirmProjectProposal} onCancel={() => setProjectProposal(null)} />}
+          </>}
         </div>
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
@@ -3378,9 +3402,9 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </button>
         )}
         <div className="composer">
-          <div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected', !item.configured && 'setup-required')} onClick={() => chooseCloudProvider(item)} title={item.configured ? `Prepare a reviewed ${item.provider} cloud check` : `Prepare locally, then connect ${item.provider}`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} aria-hidden="true" /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud provider model" value={cloudModel} onChange={(event) => { setCloudModel(event.target.value); setCloudPreview(null); }}><option value={cloudProviders.find((item) => item.provider === cloudProvider)?.model || ''}>{cloudProviders.find((item) => item.provider === cloudProvider)?.model || 'Provider default'}</option></select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => { setCloudScope(event.target.value); setCloudPreview(null); }}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider}>Review cloud prompt</button></> : <small>Enable a cloud provider in Settings with +.</small>}</div>
+          {!IS_NATIVE && <><div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected', !item.configured && 'setup-required')} onClick={() => chooseCloudProvider(item)} title={item.configured ? `Prepare a reviewed ${item.provider} cloud check` : `Prepare locally, then connect ${item.provider}`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} aria-hidden="true" /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud provider model" value={cloudModel} onChange={(event) => { setCloudModel(event.target.value); setCloudPreview(null); }}><option value={cloudProviders.find((item) => item.provider === cloudProvider)?.model || ''}>{cloudProviders.find((item) => item.provider === cloudProvider)?.model || 'Provider default'}</option></select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => { setCloudScope(event.target.value); setCloudPreview(null); }}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider}>Review cloud prompt</button></> : <small>Enable a cloud provider in Settings with +.</small>}</div>
           {cloudPreview && <div className="cloud-preview"><strong>{cloudProvider} cloud check</strong><small>{cloudPreview.model} · {cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><label>Focus for the cloud consultant (optional)<textarea value={cloudInstruction} maxLength={1200} onChange={(event) => { setCloudInstruction(event.target.value); setCloudPreview(null); }} placeholder="For example: focus on missing risks and a clearer next reply." /></label><details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck}>Ask {cloudProvider}</button>}</div>}
-          {cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}
+          {cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}</>}
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Tell Life Planner what changed, what is blocked, or what needs review..." disabled={chatBusy} />
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
           <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
@@ -3643,6 +3667,10 @@ function NativeSyncPanel({ onClose, onPaired }) {
       if (cancelled) return;
       setForm({ baseUrl: settings.baseUrl, pairingToken: settings.pairingToken });
       setStatus(settings);
+      setLoaded(true);
+    }).catch((error) => {
+      if (cancelled) return;
+      setStatus({ paired: false, connectionStatus: 'error', lastError: error.message });
       setLoaded(true);
     });
     return () => { cancelled = true; };

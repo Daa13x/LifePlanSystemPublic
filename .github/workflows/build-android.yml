@@ -82,6 +82,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install browser used by the Android viewport regression
+        run: npx playwright install chromium
+
+      - name: Verify Android local data and phone UI
+        run: npm run verify:android-beta
+
       - name: Build web app
         run: npm run build
 

@@ -226,7 +226,15 @@ async function getDb() {
     // planned Phase 5 watch bridge: a native WearableListenerService will
     // open its own connection to this same file to answer "what's my next
     // task" even while the WebView's own connection is mid-write.
-    await db.execute('PRAGMA journal_mode=WAL;');
+    // AndroidX rejects result-returning statements in execSQL(), which is the
+    // implementation used by @capacitor-community/sqlite's execute() method.
+    // journal_mode returns the effective mode, so it belongs on query().
+    // Sending it through execute() prevents the entire native database from
+    // opening and consequently makes every phone-native control appear dead.
+    const journalMode = await db.query('PRAGMA journal_mode=WAL;');
+    if (String(journalMode.values?.[0]?.journal_mode || '').toLowerCase() !== 'wal') {
+      throw new Error('Could not enable WAL mode for the on-device Planner database.');
+    }
     // local_settings must exist before runMigrations can read/write
     // schema_version, so it is created unconditionally up front rather than
     // as part of the numbered migrations it tracks.

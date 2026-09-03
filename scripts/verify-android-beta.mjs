@@ -182,6 +182,7 @@ try {
 
 const networkPolicy = read('android/app/src/main/res/xml/network_security_config.xml');
 const ui = read('src/main.jsx');
+const styles = read('src/styles.css');
 const server = read('server/index.js');
 const localData = read('src/localData.js');
 for (const source of [ui, server, localData, read('src/nativeConnection.js'), networkPolicy]) {
@@ -189,12 +190,19 @@ for (const source of [ui, server, localData, read('src/nativeConnection.js'), ne
 }
 assert.match(networkPolicy, /base-config cleartextTrafficPermitted="true"/, 'APK permits the user-entered private-LAN HTTP sync bridge');
 assert.match(ui, /function NativeBackendPanel/, 'native app has an always-reachable backend configuration panel');
+assert.match(ui, /if \(localSessions\.length === 0\)[\s\S]*title: 'New planning chat'/, 'a fresh phone creates an on-device chat session so its composer is usable immediately');
+assert.match(ui, /Phone storage unavailable: \$\{error\.message\}/, 'native storage errors remain visible without replacing the application shell');
+assert.match(ui, /IS_NATIVE \? \([\s\S]*On-device Chat[\s\S]*\) : <>/, 'native Chat replaces server-only context controls with an honest local-command boundary');
+assert.match(ui, /!IS_NATIVE && <><div className="cloud-composer"/, 'unavailable desktop cloud controls are not shown in native Chat');
+assert.match(styles, /\.main\.chat-main-shell \{[^}]*height: 100dvh;[^}]*display: flex;/, 'phone Chat owns a bounded dynamic viewport');
+assert.match(styles, /\.chat-panel \{[^}]*grid-template-rows: auto minmax\(0, 1fr\) auto;[^}]*overflow: hidden;/, 'the message pane shrinks rather than pushing the composer off-screen');
 assert.match(ui, /Pair with my LifePlanSystem PC/, 'native top bar exposes generic personal-PC pairing');
 assert.match(ui, /if \(!current\.paired\) setSyncPanelOpen\(true\)/, 'a fresh native installation opens pairing on first launch');
 assert.match(ui, /Address shown by LifePlanSystem on your PC/, 'pairing UI asks for the current user PC address, not a fixed address');
 assert.match(ui, /Pairing is optional\. Planner, Today, normal tasks, notes, mobile state/, 'the UI states that phone-native LPS works with zero PCs');
 assert.match(ui, /Replace paired PC; keep phone Planner data/, 'switching personal PCs explicitly preserves phone-owned Planner data');
 assert.match(ui, /Remove paired PC/, 'the user can remove a PC without disabling phone-native LPS');
+assert.match(ui, /localSyncSettings\(\)\.then[\s\S]*\.catch\(\(error\) => \{[\s\S]*setLoaded\(true\)/, 'pairing settings failures remain recoverable and do not strand an empty overlay');
 assert.match(ui, /Configure optional hosted LifePlanSystem server/, 'optional hosted services remain distinct from personal-PC pairing');
 assert.match(ui, /Save and connect[\s\S]*Use USB default/, 'native backend setup has connect/retry and USB-loopback paths');
 const pairingStart = localData.indexOf('export async function localSetSyncPairing');
@@ -206,6 +214,11 @@ assert.match(localData, /SELECT \* FROM sync_outbox WHERE server_id = \? AND seq
 assert.match(localData, /DELETE FROM sync_outbox;[\s\S]*DELETE FROM sync_applied_changes;[\s\S]*DELETE FROM sync_conflicts;/, 'PC replacement/removal resets the PC-specific transport state');
 assert.match(localData, /sync_server_id[\s\S]*sync_user_id[\s\S]*sync_connection_status/, 'endpoint, credential-associated identities, and connection status persist generically');
 assert.match(localData, /CREATE TABLE IF NOT EXISTS local_projects/, 'projects are durable phone-native state');
+assert.doesNotMatch(localData, /\.execute\(['"`]PRAGMA\s+journal_mode/i, 'row-returning journal_mode PRAGMA never uses the Android execSQL-backed execute API');
+assert.match(localData, /\.query\(['"`]PRAGMA journal_mode=WAL;/, 'row-returning journal_mode PRAGMA uses the plugin query API');
+const androidPluginDatabase = read('node_modules/@capacitor-community/sqlite/android/src/main/java/com/getcapacitor/community/database/sqlite/SQLite/Database.java');
+assert.match(androidPluginDatabase, /public JSObject execute\([\s\S]*?_db\.execSQL\(nCmd\);/, 'installed Android plugin execute API is proven to route through execSQL');
+assert.match(androidPluginDatabase, /public JSArray selectSQL\([\s\S]*?_db\.query\(statement, values\.toArray/, 'installed Android plugin query API is proven to route through AndroidX query');
 assert.match(ui, /IS_NATIVE \? await localListProjectCards\(\) : await api\('\/api\/workboard\/cards'\)/, 'mobile Cards read phone-native projects without a PC');
 assert.match(ui, /IS_NATIVE[\s\S]*Promise\.all\(\[localListTasks\(\), localListProjects\(\)\]\)/, 'mobile Completed reads phone-native Planner and project state without a PC');
 const projectsStart = ui.indexOf('function Projects(');
