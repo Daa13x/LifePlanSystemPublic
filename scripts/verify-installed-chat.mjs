@@ -111,7 +111,7 @@ await runWithFinalizers(async () => {
     await page.goto(evidence.pageUrl, { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'New chat' }).click();
     await page.waitForURL(/#chat\/\d+$/, { timeout: 15000 });
-    await page.getByPlaceholder('Tell Life Planner what changed, what is blocked, or what needs review...').fill(groundedPrompt);
+    await page.locator('.composer-input textarea').fill(groundedPrompt);
     const chatRequestPromise = page.waitForRequest((request) => /\/api\/chat\/sessions\/\d+\/messages\/stream$/.test(request.url()), { timeout: 15000 });
     const chatResponsePromise = page.waitForResponse((response) => /\/api\/chat\/sessions\/\d+\/messages\/stream$/.test(response.url()), { timeout: 15000 });
     await page.getByRole('button', { name: 'Send', exact: true }).click();
@@ -164,16 +164,18 @@ await runWithFinalizers(async () => {
     assert.equal(sendCloudCheck.status, 409, 'cloud send must reject when no matching signed-in provider tab is connected');
     assert.match((await sendCloudCheck.json()).error || '', /not connected|signed-in ChatGPT tab/i, 'connector rejection must be actionable');
     evidence.cloudSendRejectedWithoutProviderTab = true;
-    assert.equal(await page.locator('.cloud-composer').count(), 1, 'Chat displays one persistent compact cloud-control bar');
+    await page.getByRole('button', { name: 'Open actions and attachments' }).click();
+    assert.equal(await page.locator('.cloud-composer').count(), 1, 'Chat exposes one compact cloud-control bar through the contextual actions panel');
     assert.equal(await page.getByRole('button', { name: 'Manage cloud accounts' }).count(), 1, 'cloud account management control is accessible');
     assert.equal(await page.getByRole('button', { name: 'Use ChatGPT' }).count(), 1, 'enabled ChatGPT control remains visible even before browser connection');
     evidence.cloudComposerVisible = true;
     evidence.cloudProviderButtonVisible = true;
     await page.route('**/api/chat/cloud-providers', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: [{ provider: 'ChatGPT', model: 'Current model selected in ChatGPT', models: ['Current model selected in ChatGPT'], configured: true, connected: true, transport: 'browser session connector' }] }) }));
     await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Open actions and attachments' }).click();
     await page.getByRole('button', { name: 'Use ChatGPT' }).waitFor({ timeout: 15000 });
     await page.locator('.message.user .message-body').filter({ hasText: groundedPrompt }).last().waitFor({ timeout: 15000 });
-    await page.getByPlaceholder('Tell Life Planner what changed, what is blocked, or what needs review...').fill('Ask ChatGPT to identify any missing risks.');
+    await page.locator('.composer-input textarea').fill('Ask ChatGPT to identify any missing risks.');
     await page.getByRole('button', { name: 'Send', exact: true }).click();
     await page.locator('.cloud-preview').waitFor({ state: 'visible', timeout: 15000 });
     const directPreviewCount = await page.locator('.cloud-preview').count();
@@ -195,7 +197,7 @@ await runWithFinalizers(async () => {
     await rejected.route('**/api/csrf-token', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, data: { token: 'invalid-token' } }) }));
     await rejected.goto(`${base}/#chat/${sessionId}`, { waitUntil: 'domcontentloaded' });
     await rejected.locator('.message.user .message-body').filter({ hasText: groundedPrompt }).last().waitFor({ timeout: 15000 });
-    await rejected.getByPlaceholder('Tell Life Planner what changed, what is blocked, or what needs review...').fill('Rejected token test.');
+    await rejected.locator('.composer-input textarea').fill('Rejected token test.');
     await rejected.getByRole('button', { name: 'Send', exact: true }).click();
     await rejected.getByText('Request rejected: missing or invalid mutation token. Reload Life Planner.').waitFor({ timeout: 15000 });
     await assert.doesNotReject(rejected.getByRole('button', { name: 'Send', exact: true }).waitFor({ state: 'visible', timeout: 15000 }), 'rejected Chat send must leave the UI responsive');
