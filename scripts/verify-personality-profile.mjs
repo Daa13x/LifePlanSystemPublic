@@ -12,6 +12,8 @@ try {
   const { resolveAgentMode } = await import('../server/agentMode.js');
 
   migrate();
+  // Allow the startup seed scheduled by personality.js to run before the test closes the DB.
+  await new Promise((resolve) => setImmediate(resolve));
   const profile = personality.ensurePersonalityProfile();
 
   assert.equal(profile.id, 'lps-core-v1');
