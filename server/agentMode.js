@@ -1,3 +1,5 @@
+import { renderCurrentPersonalitySystemPrompt } from './personality.js';
+
 const ROLE_DEFINITIONS = Object.freeze({
   orchestrator: Object.freeze({
     label: 'Orchestrator',
@@ -44,7 +46,8 @@ export function resolveAgentMode(userMessage) {
     ? (explicit[1].startsWith('life') ? 'life_coach' : explicit[1])
     : inferredRole(text);
   const role = ROLE_DEFINITIONS[id] || ROLE_DEFINITIONS.orchestrator;
-  return Object.freeze({ id, label: role.label, source: explicit ? 'explicit' : 'inferred', instruction: role.instruction });
+  const personality = renderCurrentPersonalitySystemPrompt();
+  return Object.freeze({ id, label: role.label, source: explicit ? 'explicit' : 'inferred', instruction: `${role.instruction}\n\n${personality}` });
 }
 
 export const AGENT_MODE_IDS = Object.freeze(Object.keys(ROLE_DEFINITIONS));
