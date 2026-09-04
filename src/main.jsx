@@ -2882,8 +2882,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       return true;
     }
     const plannerCreate = text.match(/^(?:\/add-task\s+|(?:add|create) (?:a )?(?:planner )?task(?: called| named| to)?\s+)(.+)$/i);
-    if (plannerCreate?.[1]?.trim()) {
-      const result = await invokeAction('planner.propose_create', { title: plannerCreate[1].trim(), next_action: '', importance: 3, effort: 3 });
+    const todayCreate = text.match(/^add\s+(.+?)\s+to\s+today[.!?]*$/i);
+    const proposedTitle = String(plannerCreate?.[1] || todayCreate?.[1] || '').trim().replace(/[.!?]+$/, '').trim();
+    if (proposedTitle) {
+      const result = await invokeAction('planner.propose_create', { title: proposedTitle, next_action: '', importance: 3, effort: 3 });
       setPlannerProposal({ ...result.data, confirmation: result.confirmation, correlationId: result.correlationId });
       setPlannerProposeOpen(false);
       setActionsOpen(true);

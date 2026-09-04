@@ -31,10 +31,16 @@ const modelServer = http.createServer((req, res) => {
     modelCalls += 1;
     const payload = JSON.parse(raw || '{}');
     const prompt = String(payload.messages?.at(-1)?.content || '');
+    // The real Chat prompt includes bounded prior history. Match only the
+    // CURRENT trailing User line, otherwise an earlier [TEST HOLD] marker makes
+    // every later model request hang and turns this verifier into a false five-
+    // minute runtime timeout after conversation-history support is enabled.
+    const currentTurnHolds = /(?:^|\n)User: \[TEST HOLD\][^\n]*$/.test(prompt);
+    const currentTurnFails = /(?:^|\n)User: \[TEST FAIL\][^\n]*$/.test(prompt);
     const answer = `counted reply ${modelCalls}`;
     const finish = () => {
       if (res.writableEnded || res.destroyed) return;
-      if (prompt.includes('[TEST FAIL]')) {
+      if (currentTurnFails) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: { message: 'Injected model failure.' } }));
         return;
@@ -47,7 +53,7 @@ const modelServer = http.createServer((req, res) => {
         res.end(JSON.stringify({ choices: [{ message: { content: answer } }] }));
       }
     };
-    if (prompt.includes('[TEST HOLD]')) {
+    if (currentTurnHolds) {
       res.writeHead(200, { 'Content-Type': payload.stream ? 'text/event-stream' : 'application/json' });
       res.flushHeaders?.();
       held.push(finish);

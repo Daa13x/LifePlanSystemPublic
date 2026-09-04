@@ -331,7 +331,9 @@ function boundedRunResult(run) {
     id: truncate(run?.id || 'unknown', LIMITS.metadataMaxLength),
     title: truncate(run?.title || 'run', LIMITS.titleMaxLength),
     status: truncate(run?.status || 'unknown', LIMITS.metadataMaxLength),
-    created_at: run?.created_at ? truncate(run.created_at, LIMITS.metadataMaxLength) : null
+    created_at: run?.created_at ? truncate(run.created_at, LIMITS.metadataMaxLength) : null,
+    detail: run?.detail ? truncate(run.detail, 240) : null,
+    report_path: run?.report_path ? truncate(run.report_path, 160) : null
   };
 }
 
@@ -360,17 +362,30 @@ function boundedPlannerTask(task) {
   };
 }
 
+function boundedCompletedPlannerTask(task) {
+  if (!Number.isSafeInteger(task?.id) || task.id <= 0) throw new Error('Planner dependency returned an invalid completed-task identity.');
+  return {
+    id: task.id,
+    title: truncate(task.title || 'Untitled task', LIMITS.titleMaxLength),
+    status: truncate(task.status || 'completed', LIMITS.metadataMaxLength)
+  };
+}
+
 function boundedPlannerToday(value) {
   const day = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const visible = (Array.isArray(day.visible) ? day.visible : []).slice(0, 7).map(boundedPlannerTask);
   const deferred = (Array.isArray(day.deferred) ? day.deferred : []).slice(0, 5).map(boundedPlannerTask);
+  const recentlyCompleted = (Array.isArray(day.recentlyCompleted) ? day.recentlyCompleted : []).slice(0, 5).map(boundedCompletedPlannerTask);
   return {
     mode: truncate(day.mode || 'normal', LIMITS.metadataMaxLength),
     visible_limit: Number.isSafeInteger(day.visibleLimit) && day.visibleLimit >= 0 ? Math.min(day.visibleLimit, 7) : visible.length,
     pinned_count: Number.isSafeInteger(day.pinnedCount) && day.pinnedCount >= 0 ? Math.min(day.pinnedCount, 999) : 0,
     visible,
     deferred,
-    truncated: (Array.isArray(day.visible) && day.visible.length > visible.length) || (Array.isArray(day.deferred) && day.deferred.length > deferred.length)
+    recently_completed: recentlyCompleted,
+    truncated: (Array.isArray(day.visible) && day.visible.length > visible.length)
+      || (Array.isArray(day.deferred) && day.deferred.length > deferred.length)
+      || (Array.isArray(day.recentlyCompleted) && day.recentlyCompleted.length > recentlyCompleted.length)
   };
 }
 
@@ -554,7 +569,7 @@ const ACTION_METADATA = Object.freeze({
   'planner.today': {
     label: 'Read today plan', feature: 'Daily Planner', permission: 'planner.today.read', risk: ACTION_RISKS.SENSITIVE_DATA,
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.command.today'], testId: 'action.planner.today',
-    resultSchema: resultObject(['mode', 'visible_limit', 'pinned_count', 'visible', 'deferred', 'truncated'], { mode: { type: 'string' }, visible_limit: { type: 'integer' }, pinned_count: { type: 'integer' }, visible: { type: 'array' }, deferred: { type: 'array' }, truncated: { type: 'boolean' } })
+    resultSchema: resultObject(['mode', 'visible_limit', 'pinned_count', 'visible', 'deferred', 'recently_completed', 'truncated'], { mode: { type: 'string' }, visible_limit: { type: 'integer' }, pinned_count: { type: 'integer' }, visible: { type: 'array' }, deferred: { type: 'array' }, recently_completed: { type: 'array' }, truncated: { type: 'boolean' } })
   },
   'navigation.workboard': {
     label: 'Open the Workboard', feature: 'Chat navigation', permission: 'navigation.control', risk: ACTION_RISKS.VIEW_NAVIGATION,
@@ -605,6 +620,9 @@ const READ_ONLY_CAPABILITY_SCOPES = Object.freeze([...new Set(Object.values(ACTI
 export const NEUTRAL_ACTION_NAMES = Object.freeze(['knowledge.search', 'knowledge.read', 'workboard.list', 'workboard.read', 'workboard.propose_create', 'workboard.propose_update', 'planner.propose_create', 'planner.propose_update', 'project.propose_create', 'coding.propose_task', 'feedback.propose_triage', 'planner.refresh', 'system.status', 'system.models', 'system.runs', 'conversation.search', 'planner.today', 'navigation.workboard', 'navigation.system', 'navigation.settings', 'navigation.planner']);
 const NEUTRAL_ACTION_SET = new Set(NEUTRAL_ACTION_NAMES);
 const NEUTRAL_ACTION_SCOPES = Object.freeze([...new Set(NEUTRAL_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
+export const PERSONALITY_REASONING_ACTION_NAMES = Object.freeze(['knowledge.search', 'workboard.list', 'system.runs', 'planner.today']);
+const PERSONALITY_REASONING_ACTION_SET = new Set(PERSONALITY_REASONING_ACTION_NAMES);
+const PERSONALITY_REASONING_SCOPES = Object.freeze([...new Set(PERSONALITY_REASONING_ACTION_NAMES.map((name) => ACTION_METADATA[name].permission))]);
 
 // Caller names are selected only by trusted application code. HTTP request
 // bodies are never allowed to supply or extend these scopes.
@@ -612,13 +630,19 @@ export const CAPABILITY_CALLER_SCOPES = Object.freeze({
   'human-ui': NEUTRAL_ACTION_SCOPES,
   'legacy-human-ui': ALL_CAPABILITY_SCOPES,
   'local-agent': READ_ONLY_CAPABILITY_SCOPES,
+  'personality-reasoning': PERSONALITY_REASONING_SCOPES,
   'cloud-agent': Object.freeze([]),
   test: ALL_CAPABILITY_SCOPES
 });
 
 function trustedContext(caller, signal) {
   const actor = Object.hasOwn(CAPABILITY_CALLER_SCOPES, caller) ? caller : 'unknown';
-  return { actor, scopes: [...(CAPABILITY_CALLER_SCOPES[actor] || [])], signal };
+  return {
+    actor,
+    scopes: [...(CAPABILITY_CALLER_SCOPES[actor] || [])],
+    signal,
+    ...(actor === 'personality-reasoning' ? { allowedActionIds: PERSONALITY_REASONING_ACTION_NAMES } : {})
+  };
 }
 
 export function createCapabilityRegistry(deps) {
@@ -1073,14 +1097,17 @@ export function createCapabilityRegistry(deps) {
 
   async function inspect(name, { caller = 'unknown', signal } = {}) {
     if (!NEUTRAL_ACTION_SET.has(name)) return null;
-    return actionRegistry.inspect(name, trustedContext(caller, signal));
+    const context = trustedContext(caller, signal);
+    if (caller === 'personality-reasoning' && !PERSONALITY_REASONING_ACTION_SET.has(name)) return null;
+    return actionRegistry.inspect(name, context);
   }
 
   async function execute(name, rawArgs, { caller = 'unknown', signal, renderer, userId } = {}) {
     // `renderer` is a trusted per-request binding ({ rendererId, token }) supplied
     // only by server code, never by the model/client arguments. It reaches the
     // handler via context for view-navigation actions and is ignored by all others.
-    return actionRegistry.invoke(name, rawArgs, { ...trustedContext(caller, signal), allowedActionIds: NEUTRAL_ACTION_NAMES, renderer, userId });
+    const context = trustedContext(caller, signal);
+    return actionRegistry.invoke(name, rawArgs, { ...context, allowedActionIds: context.allowedActionIds || NEUTRAL_ACTION_NAMES, renderer, userId });
   }
 
   // Backward-compatible adapter for the existing Chat UI and verifier. It uses

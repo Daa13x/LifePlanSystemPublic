@@ -126,10 +126,15 @@ try {
   assert.ok(await page.locator('.message').count() >= 1, 'pinned-message view survives reload and contains the pinned row');
   await page.getByRole('button', { name: 'Show all messages', exact: true }).click();
 
-  await input.fill('/add-task Rendered approval proof');
-  await page.getByRole('button', { name: /Send/ }).click();
+  await input.fill('Add buy milk to today.');
+  const proposalResponsePromise = page.waitForResponse((response) => response.url().includes('/api/actions/planner.propose_create/invoke') || response.url().includes('/messages/stream'));
+  await input.press('Enter');
+  const proposalResponse = await proposalResponsePromise;
+  assert.match(proposalResponse.url(), /\/api\/actions\/planner\.propose_create\/invoke$/, `natural Today wording must not fall through to a model turn (${proposalResponse.url()})`);
+  assert.equal(proposalResponse.status(), 200, `natural Today proposal request succeeds: ${await proposalResponse.text()}`);
   await page.getByRole('button', { name: 'Allow', exact: true }).waitFor();
-  assert.equal(await page.getByRole('button', { name: 'Decline', exact: true }).count(), 1, 'a consequential command renders the existing Allow/Decline gate');
+  assert.match(await page.locator('.proposal-card').innerText(), /Buy milk/i, 'natural Today task wording reaches the existing bounded proposal');
+  assert.equal(await page.getByRole('button', { name: 'Decline', exact: true }).count(), 1, 'a consequential natural command renders the existing Allow/Decline gate');
   await page.getByRole('button', { name: 'Decline', exact: true }).click();
 
   await page.getByText('Attach Knowledge', { exact: true }).waitFor();

@@ -74,7 +74,7 @@ const deps = {
   },
   listRuns: (a) => {
     calls.push(['listRuns', a]);
-    return Array.from({ length: 30 }, (_, index) => ({ id: oversizedWorkboardText, title: oversizedWorkboardText, status: oversizedWorkboardText, created_at: oversizedWorkboardText, ignored: oversizedWorkboardText, index }));
+    return Array.from({ length: 30 }, (_, index) => ({ id: oversizedWorkboardText, title: oversizedWorkboardText, status: oversizedWorkboardText, created_at: oversizedWorkboardText, detail: oversizedWorkboardText, report_path: oversizedWorkboardText, ignored: oversizedWorkboardText, index }));
   },
   searchConversations: (a) => {
     calls.push(['searchConversations', a]);
@@ -83,7 +83,7 @@ const deps = {
   plannerToday: () => {
     calls.push(['plannerToday']);
     const tasks = Array.from({ length: 20 }, (_, index) => ({ id: index + 1, title: oversizedWorkboardText, status: 'active', activeStep: oversizedWorkboardText, deadline: oversizedWorkboardText, blocker: index === 0 ? oversizedWorkboardText : '', pinned: index === 0, reasons: Array(20).fill(oversizedWorkboardText) }));
-    return { mode: 'normal', visibleLimit: 7, pinnedCount: 1, visible: tasks, deferred: tasks };
+    return { mode: 'normal', visibleLimit: 7, pinnedCount: 1, visible: tasks, deferred: tasks, recentlyCompleted: tasks.map((task) => ({ ...task, status: 'completed' })) };
   },
   navigate: async (a) => {
     calls.push(['navigate', a]);
@@ -290,12 +290,14 @@ await checkAsync('planner.today reuses a strictly bounded canonical day result',
   const r = await reg.invoke('planner.today', {});
   assert.equal(r.data.visible.length, 7);
   assert.equal(r.data.deferred.length, 5);
+  assert.equal(r.data.recently_completed.length, 5);
+  assert.deepEqual(Object.keys(r.data.recently_completed[0]).sort(), ['id', 'status', 'title']);
   assert.equal(r.data.truncated, true);
   assert.deepEqual(Object.keys(r.data.visible[0]).sort(), ['active_step', 'blocked', 'deadline', 'id', 'pinned', 'reasons', 'status', 'title']);
   assert.ok(r.data.visible[0].title.length <= reg.LIMITS.titleMaxLength);
   assert.ok(r.data.visible[0].active_step.length <= 400);
   assert.ok(r.data.visible[0].reasons.length <= 5 && r.data.visible[0].reasons.every((reason) => reason.length <= 160));
-  assert.ok(JSON.stringify(r.data).length < 20000);
+  assert.ok(JSON.stringify(r.data).length < 23000, 'Today receipt remains bounded after adding five compact completion-history identities');
 });
 
 await throwsAsync(() => reg.invoke('knowledge.search', {}), /required/, 'missing required argument is rejected');
@@ -325,11 +327,13 @@ await checkAsync('system.runs returns bounded strict run summaries', async () =>
   const r = await reg.invoke('system.runs', { limit: 5 });
   assert.equal(r.data.runs.length, 5);
   for (const run of r.data.runs) {
-    assert.deepEqual(Object.keys(run).sort(), ['created_at', 'id', 'status', 'title']);
+    assert.deepEqual(Object.keys(run).sort(), ['created_at', 'detail', 'id', 'report_path', 'status', 'title']);
     assert.ok(run.id.length <= reg.LIMITS.metadataMaxLength);
     assert.ok(run.title.length <= reg.LIMITS.titleMaxLength);
     assert.ok(run.status.length <= reg.LIMITS.metadataMaxLength);
     assert.ok(run.created_at.length <= reg.LIMITS.metadataMaxLength);
+    assert.ok(run.detail.length <= 240);
+    assert.ok(run.report_path.length <= 160);
   }
   assert.ok(JSON.stringify(r.data).length < 6000, 'complete runs receipt stays bounded');
 });

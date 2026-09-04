@@ -1,6 +1,6 @@
 # LifePlanSystem Personality System — Development Plan
 
-Status: Phase 1 implemented; further adaptation and UI work planned  
+Status: Stable profile and bounded local behaviour wiring implemented; adaptation and provider-wide identity remain planned
 Date: 2026-09-04  
 Primary runtime owner: `server/personality.js`  
 Persistence owner: SQLite `settings` via `assistantPersonalityProfile`
@@ -20,9 +20,36 @@ The core design is:
 > Scepticism makes it verify.  
 > The supporting traits determine how it feels while doing that.
 
-## 2. Current Phase 1 implementation
+## 2. Current implementation
 
 The first durable profile is now represented as structured data rather than a single prose prompt.
+
+### IMPLEMENTED — bounded behaviour and capability selection
+
+The default profile now affects a small deterministic decision policy in `server/chatIntent.js` after explicit commands and established natural-language intents have had first refusal. High inquisitiveness, practicality and resource-consciousness can select one smallest relevant registered read; high scepticism can select one evidence check or state uncertainty when no relevant authorised read exists.
+
+Current personality-selected reads reuse the universal action registry:
+
+- `planner.today` for Today questions and Planner completion verification;
+- `system.runs` for the latest-run failure question;
+- `workboard.list` for current project progress evidence;
+- `knowledge.search` for one approved-evidence check of a confident implementation claim.
+
+The trusted invocation source is `personality-reasoning`. It has an explicit four-action allowlist. It cannot call proposal, navigation, cloud, repository, or write actions. The action registry remains the permission/risk/confirmation owner.
+
+The result returns in the same assistant turn. Assistant metadata and `chat_audit` record the invocation source, selection reason, action ID, risk, confirmation requirement, verification flag, result, and correlation ID without exposing noisy traces in normal Chat.
+
+### IMPLEMENTED — authority and evidence boundaries
+
+- Consequential phrasing such as task creation is excluded from personality execution and continues through the existing proposal → Allow/Decline → receipt flow.
+- `Add buy milk to today.` is supported by the existing Planner proposal action; it is not a silent write.
+- Confident unsupported crash-causation claims are not mirrored. Chat states that Windows event/dump evidence is required because no registered Chat crash-diagnostic read currently exists.
+- Today now returns five compact recent-completion identities from the existing Planner aggregation so a completion claim can be checked without a new capability.
+- Recent run summaries can carry a bounded existing failure/readiness reason and report path when the authoritative run request contains them.
+
+### IMPLEMENTED — behavioural regression proof
+
+Focused pure, HTTP/SQLite and rendered-browser tests cover inquisitive retrieval, sceptical verification, casual-chat no-call behaviour, insufficient evidence, one-call routing, write confirmation, all current task-mode compositions, consultation context continuity, correlated audit metadata, and same-turn result continuity.
 
 ### Dominant traits
 
@@ -141,7 +168,7 @@ Rules, permissions, safety, privacy, evidence requirements, authority boundaries
 
 This layer always outranks A, B and C.
 
-## 5. Phase 2 — editable personality profile
+## 5. PLANNED — editable personality profile
 
 Build a simple Personality section in Settings.
 
@@ -169,7 +196,7 @@ Playful                8.0
 
 Advanced editing can expose the behavioural descriptions and boundaries.
 
-## 6. Phase 3 — revisions and experimentation
+## 6. PLANNED — revisions and experimentation
 
 The generic `settings` row is sufficient for the first implementation.
 
@@ -196,7 +223,7 @@ A revision should record:
 
 Never silently self-modify the core personality.
 
-## 7. Phase 4 — user adaptation
+## 7. PLANNED — user adaptation
 
 User adaptation should initially learn **preferences**, not identity.
 
@@ -219,9 +246,9 @@ Adaptation should have:
 - explicit user override;
 - reset control.
 
-## 8. Phase 5 — behavioural evaluation
+## 8. PARTIAL — behavioural evaluation
 
-Personality should be tested by behaviour, not only by checking prompt text.
+Personality is now tested by behaviour rather than only by checking prompt text. Deterministic fixtures cover the dominant traits and authority boundary. Broader model-evaluated tone/recognisability evaluation remains planned.
 
 Create deterministic or model-evaluated fixtures for situations such as:
 
@@ -281,9 +308,9 @@ Expected behaviour:
 - humour can appear naturally;
 - it must not become repetitive or interfere with serious content.
 
-## 9. Trait interaction testing
+## 9. PARTIAL — trait interaction testing
 
-Single-trait testing is not enough.
+Single-trait testing is not enough. The implemented selector already requires inquisitive + practical + resource-conscious thresholds for proactive reads, which prevents high curiosity from becoming fan-out. Broader interaction evaluation remains planned.
 
 Important combinations include:
 
@@ -306,9 +333,9 @@ Another example:
 
 Resource-consciousness and practical judgement should stop that.
 
-## 10. Provider-agnostic identity
+## 10. DEFERRED — provider-agnostic identity
 
-The long-term target is for the same LPS personality to survive changes in the underlying model.
+The local Planner Assistant and every current task mode compile the stable profile. The long-term target is for the same LPS personality to survive changes in the underlying model. External/provider prompt compilation remains deferred because it must reuse the existing reviewed privacy/egress and spending boundaries rather than silently transmitting identity or context.
 
 ```text
 LPS identity
@@ -348,14 +375,13 @@ Until evaluation exists, do not:
 
 ## 12. Near-term development order
 
-1. Keep the Phase 1 database-backed profile and verifier green.
-2. Add rendered behavioural tests for the dominant traits.
-3. Add a read-only Personality view in Settings.
-4. Add explicit edit/save/reset controls with revisions.
-5. Separate stable core from per-user communication preferences.
-6. Add feedback-driven evaluation before any automatic adaptation.
-7. Extend the compiled identity consistently across eligible provider routes.
-8. Measure whether users can recognise the LPS identity across different models.
+1. Keep the database-backed profile, bounded decision policy, action-registry and rendered Chat verifiers green.
+2. Add a read-only Personality view in Settings.
+3. Add explicit edit/save/reset controls with revisions.
+4. Separate stable core from per-user communication preferences.
+5. Add feedback-driven evaluation before any automatic adaptation.
+6. Extend the compiled identity consistently across eligible provider routes only through reviewed egress/spending authority.
+7. Measure whether users can recognise the LPS identity across different models.
 
 ## 13. Definition of done for the personality system
 

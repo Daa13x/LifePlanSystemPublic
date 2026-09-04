@@ -29,7 +29,7 @@ assert.match(ui, /function DailyPlanner\(/, 'DailyPlanner component exists');
 
 // --- capacity modes: all seven, from the server, persisted via CSRF POST ---
 assert.match(planner, /modes\.map\(/, 'capacity modes are rendered from the server list (not a hardcoded subset)');
-assert.match(planner, /api\('\/api\/planner\/capacity', \{ method: 'POST', body: JSON\.stringify\(\{ mode \}\) \}\)/, 'mode changes persist through the capacity endpoint');
+assert.match(planner, /plannerApi\('\/api\/planner\/capacity', \{ method: 'POST', body: JSON\.stringify\(\{ mode \}\) \}\)/, 'mode changes persist through the native-aware capacity endpoint');
 assert.doesNotMatch(planner, /CAPACITY_MODES\s*=/, 'the UI does not redefine the mode list');
 
 // --- the frontend must not re-rank or re-score: it renders server order ---
@@ -58,14 +58,14 @@ for (const field of ['activeStep', 'task.why', 'definitionOfDone', 'easierVersio
 }
 
 // --- task creation + editing cover the advanced backend fields ---
-assert.match(planner, /api\('\/api\/planner\/tasks', \{ method: 'POST', body: JSON\.stringify\(form\) \}\)/, 'creating a task posts the full form');
-assert.match(planner, /api\(`\/api\/planner\/tasks\/\$\{id\}`, \{ method: 'PATCH', body: JSON\.stringify\(editForm\) \}\)/, 'editing a task patches the existing endpoint');
+assert.match(planner, /plannerApi\('\/api\/planner\/tasks', \{ method: 'POST', body: JSON\.stringify\(form\) \}\)/, 'creating a task posts the full form through the native-aware planner adapter');
+assert.match(planner, /plannerApi\(`\/api\/planner\/tasks\/\$\{id\}`, \{ method: 'PATCH', body: JSON\.stringify\(editForm\) \}\)/, 'editing a task patches the existing endpoint through the native-aware planner adapter');
 for (const field of ['definitionOfDone', 'pausePoint', 'recoveryStep', 'consequenceOfDelay', 'estimatedMinutes', 'needsOthers', 'isRecovery']) {
   assert.ok(planner.includes(field), `the task form exposes the advanced ${field} field`);
 }
 
 // --- complete / pin / defer / edit controls hit the real endpoints ---
-assert.match(planner, /api\(`\/api\/planner\/tasks\/\$\{id\}\/\$\{path\}`, \{ method: 'POST'/, 'task actions post to the per-action endpoints');
+assert.match(planner, /plannerApi\(`\/api\/planner\/tasks\/\$\{id\}\/\$\{path\}`, \{ method: 'POST'/, 'task actions post to the per-action endpoints through the native-aware planner adapter');
 for (const action of ["'complete'", "'pin'", "'defer'"]) {
   assert.ok(planner.includes(`onAction(task.id, ${action})`), `the ${action} control is wired`);
 }

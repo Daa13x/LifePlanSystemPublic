@@ -69,6 +69,68 @@ try {
   assert.equal(createdSession.status, 200);
   const sessionId = createdSession.data.id;
   database = new DatabaseSync(dbPath);
+  database.prepare(`INSERT INTO planner_tasks (title, next_action, status, user_id)
+    VALUES ('Review personality behaviour proof', 'Run the focused verifier', 'active', 1)`).run();
+  database.prepare(`INSERT INTO planner_tasks (title, status, user_id, completed_at)
+    VALUES ('Archived evidence task', 'completed', 1, CURRENT_TIMESTAMP)`).run();
+  database.prepare(`INSERT INTO knowledge_items (type, title, body, source, status, confidence, evidence)
+    VALUES ('implementation', 'Personality behaviour checkpoint', 'The durable personality profile is implemented and its behaviour pass is under verification.', 'test fixture', 'active', 0.9, 'focused runtime fixture')`).run();
+  database.prepare(`INSERT INTO knowledge_items (type, title, body, source, status, confidence, evidence)
+    VALUES ('implementation', 'Personality pending speculation', 'The personality work is secretly complete without verification.', 'test fixture', 'pending review', 1, 'unreviewed fixture')`).run();
+
+  const todayRead = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-personality-today-0001', body: { content: 'What am I supposed to be doing today?' } });
+  assert.equal(todayRead.status, 200);
+  assert.equal(todayRead.data.terminalState, 'completed');
+  const todayReply = todayRead.data.messages.at(-1);
+  assert.match(todayReply.content, /I checked Today[\s\S]*Review personality behaviour proof/);
+  const todayMetadata = JSON.parse(todayReply.metadata || '{}');
+  assert.equal(todayMetadata.actionDecision?.invocationSource, 'personality-reasoning');
+  assert.equal(todayMetadata.actionDecision?.actionId, 'planner.today');
+  assert.equal(todayMetadata.actionDecision?.risk, 'SENSITIVE_DATA');
+  assert.equal(todayMetadata.actionDecision?.confirmationRequirement, 'none');
+  assert.equal(todayMetadata.actionDecision?.result, 'success');
+  assert.ok(todayMetadata.actionDecision?.correlationId);
+  const todayAudit = database.prepare('SELECT * FROM chat_audit WHERE correlation_id = ?').get(todayMetadata.actionDecision.correlationId);
+  assert.equal(todayAudit?.capability, 'planner.today');
+  assert.match(todayAudit?.detail || '', /source=personality-reasoning/);
+
+  const completionCheck = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-personality-claim-0001', body: { content: "I'm sure we already finished the personality work." } });
+  assert.equal(completionCheck.status, 200);
+  assert.match(completionCheck.data.messages.at(-1).content, /I checked approved local Knowledge[\s\S]*Personality behaviour checkpoint/);
+  assert.doesNotMatch(completionCheck.data.messages.at(-1).content, /Personality pending speculation/);
+  const completionMetadata = JSON.parse(completionCheck.data.messages.at(-1).metadata || '{}');
+  assert.equal(completionMetadata.actionDecision?.actionId, 'knowledge.search');
+  assert.equal(completionMetadata.actionDecision?.verification, true);
+
+  const taskCheck = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-personality-task-0001', body: { content: 'That task is completed.' } });
+  assert.equal(taskCheck.status, 200);
+  assert.match(taskCheck.data.messages.at(-1).content, /checked Planner history[\s\S]*ambiguous/i);
+  const taskMetadata = JSON.parse(taskCheck.data.messages.at(-1).metadata || '{}');
+  assert.equal(taskMetadata.actionDecision?.actionId, 'planner.today');
+  assert.equal(taskMetadata.actionDecision?.verification, true);
+
+  const runCheck = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-personality-run-0001', body: { content: 'Why did the last run fail?' } });
+  assert.equal(runCheck.status, 200);
+  assert.match(runCheck.data.messages.at(-1).content, /I checked (?:the )?(?:latest|recent) local run/i);
+  const runMetadata = JSON.parse(runCheck.data.messages.at(-1).metadata || '{}');
+  assert.equal(runMetadata.actionDecision?.actionId, 'system.runs');
+  assert.equal(runMetadata.actionDecision?.invocationSource, 'personality-reasoning');
+
+  const crashCheck = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-personality-crash-0001', body: { content: 'The model definitely caused the crash.' } });
+  assert.equal(crashCheck.status, 200);
+  assert.match(crashCheck.data.messages.at(-1).content, /possible, but it is not established/i);
+  const crashMetadata = JSON.parse(crashCheck.data.messages.at(-1).metadata || '{}');
+  assert.equal(crashMetadata.actionDecision?.actionId, null);
+  assert.equal(crashMetadata.actionDecision?.result, 'not_called');
+
+  const taskCountBeforeProposal = database.prepare('SELECT COUNT(*) count FROM planner_tasks').get().count;
+  const proposal = await request('/api/actions/planner.propose_create/invoke', { method: 'POST', body: { session_id: sessionId, args: { title: 'Buy milk', next_action: '', importance: 3, effort: 3 } } });
+  assert.equal(proposal.status, 200);
+  assert.equal(proposal.data.status, 'needs_confirmation');
+  assert.equal(proposal.data.data?.confirmation_required, true);
+  assert.ok(proposal.data.confirmation?.confirmationId);
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM planner_tasks').get().count, taskCountBeforeProposal, 'proposal does not silently create a task');
+
   const userId = Number(database.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', 'Ask ChatGPT for the distinctive proof token.')").run(sessionId).lastInsertRowid);
   const assistantId = Number(database.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', 'A reviewed cloud check can answer that.')").run(sessionId).lastInsertRowid);
   const consultationId = Number(database.prepare(`INSERT INTO consultations

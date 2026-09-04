@@ -42,7 +42,13 @@ import {
 import { createRendererBridge } from './rendererBridge.js';
 import { buildManagedLlamaArgs, DEFAULT_LLAMA_GPU_LAYERS, normalizeLlamaGpuLayers } from './llamaLaunch.js';
 import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
-import { capabilityRequestForChatIntent, classifyChatIntent, shouldCreateMemoryCandidate } from './chatIntent.js';
+import {
+  capabilityRequestForChatIntent,
+  classifyChatIntent,
+  formatPersonalityCapabilityReply,
+  selectPersonalityCapabilityPlan,
+  shouldCreateMemoryCandidate
+} from './chatIntent.js';
 import { buildChatCommandCatalog } from './chatCommands.js';
 import {
   CHAT_CONSULTATION_MAX_RECEIPTS,
@@ -56,6 +62,7 @@ import {
   requestedConsultationId
 } from './chatReliability.js';
 import { resolveAgentMode } from './agentMode.js';
+import { getPersonalityProfile } from './personality.js';
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
 import { assessLocalAnswerability } from './localAnswerability.js';
 import { buildWorkOrder } from './workOrder.js';
@@ -2004,7 +2011,7 @@ function formatCapabilityChatReply(intent, data) {
   throw new Error(`Unsupported Chat capability result: ${intent}`);
 }
 
-async function answerDataQuery(intent, userId, signal) {
+async function answerDataQuery(intent, userId, signal, { sessionId = null, invocationSource = 'natural-language-intent' } = {}) {
   if (intent === 'memory_storage') {
     const privateRepo = path.resolve(String(process.env.LIFE_PLANNER_PRIVATE_REPO || '').trim() || path.join(os.homedir(), 'Documents', 'LifePlanSystem'));
     const safePath = (value) => String(value || '').replace(/[\r\n`]/g, '');
@@ -2031,12 +2038,79 @@ async function answerDataQuery(intent, userId, signal) {
   }
   const request = capabilityRequestForChatIntent(intent);
   if (!request) throw new Error(`Unsupported local data intent: ${intent}`);
+  const contract = await capabilityRegistry.inspect(request.actionId, { caller: 'human-ui', signal });
   const result = await capabilityRegistry.execute(request.actionId, request.args, { caller: 'human-ui', signal, userId });
   if (result.status !== 'success') throw new Error(result.error?.message || `${request.actionId} was blocked.`);
+  writeChatAudit(
+    sessionId,
+    request.actionId,
+    'read',
+    `source=${invocationSource}; reason=${intent}; risk=${contract?.risk || 'unknown'}; confirmation=${contract?.confirmation || 'unknown'}`,
+    result.correlationId
+  );
   return {
     mode: 'action registry',
     content: formatCapabilityChatReply(intent, result.data),
-    diagnostics: { endpointType: 'action-registry', routingReason: intent, actionId: request.actionId, correlationId: result.correlationId }
+    diagnostics: {
+      endpointType: 'action-registry',
+      routingReason: intent,
+      invocationSource,
+      selectionReason: `The user directly requested ${intent.replaceAll('_', ' ')}.`,
+      actionId: request.actionId,
+      actionRisk: contract?.risk || null,
+      confirmationRequirement: contract?.confirmation || null,
+      verification: false,
+      actionResult: result.status,
+      correlationId: result.correlationId
+    }
+  };
+}
+
+async function answerPersonalityDecision(sessionId, plan, userId, signal) {
+  if (plan.kind === 'uncertainty') {
+    const content = formatPersonalityCapabilityReply(plan);
+    writeChatAudit(sessionId, 'personality.evidence-boundary', 'no_call', `source=personality-reasoning; reason=${plan.reason}; verification=false`);
+    return {
+      mode: 'personality evidence boundary',
+      content,
+      diagnostics: {
+        endpointType: 'personality-reasoning',
+        routingReason: plan.replyKind,
+        invocationSource: 'personality-reasoning',
+        selectionReason: plan.reason,
+        actionId: null,
+        actionRisk: null,
+        confirmationRequirement: null,
+        verification: false,
+        actionResult: 'not_called',
+        correlationId: null
+      }
+    };
+  }
+
+  const contract = await capabilityRegistry.inspect(plan.actionId, { caller: 'personality-reasoning', signal });
+  const result = await capabilityRegistry.execute(plan.actionId, plan.args, { caller: 'personality-reasoning', signal, userId });
+  const detail = `source=personality-reasoning; reason=${plan.reason}; verification=${plan.verification}; risk=${contract?.risk || 'unknown'}; confirmation=${contract?.confirmation || 'unknown'}`;
+  writeChatAudit(sessionId, plan.actionId, result.status === 'success' ? 'read' : result.status, detail, result.correlationId);
+
+  const content = result.status === 'success'
+    ? formatPersonalityCapabilityReply(plan, result.data)
+    : `I tried the smallest relevant local check, but it ${result.status === 'unavailable' ? 'is unavailable' : 'did not complete'} (${result.error?.code || 'unknown error'}). I do not have enough evidence to answer confidently.`;
+  return {
+    mode: 'personality action registry',
+    content,
+    diagnostics: {
+      endpointType: 'action-registry',
+      routingReason: plan.replyKind,
+      invocationSource: 'personality-reasoning',
+      selectionReason: plan.reason,
+      actionId: plan.actionId,
+      actionRisk: contract?.risk || null,
+      confirmationRequirement: contract?.confirmation || null,
+      verification: Boolean(plan.verification),
+      actionResult: result.status,
+      correlationId: result.correlationId
+    }
   };
 }
 
@@ -2084,7 +2158,14 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
   }
   const intent = classifyChatIntent(userMessage);
   if (intent !== 'conversation') {
-    const answer = await answerDataQuery(intent, userId, signal);
+    const invocationSource = /^\s*\//.test(userMessage) ? 'explicit-command' : 'natural-language-intent';
+    const answer = await answerDataQuery(intent, userId, signal, { sessionId, invocationSource });
+    if (typeof onToken === 'function' && answer.content) onToken(answer.content);
+    return answer;
+  }
+  const personalityPlan = selectPersonalityCapabilityPlan(userMessage, getPersonalityProfile());
+  if (personalityPlan) {
+    const answer = await answerPersonalityDecision(sessionId, personalityPlan, userId, signal);
     if (typeof onToken === 'function' && answer.content) onToken(answer.content);
     return answer;
   }
@@ -2460,6 +2541,19 @@ function buildAssistantMetadata(sessionId, candidateId, assistant, elapsedMs) {
     // casual conversation). The UI can render this and offer the EXISTING
     // reviewed cloud-check control; it never triggers a send on its own.
     localAnswerability: assistant.answerability || null,
+    actionDecision: assistant.diagnostics?.invocationSource
+      ? {
+          invocationSource: assistant.diagnostics.invocationSource,
+          selectionReason: assistant.diagnostics.selectionReason || null,
+          routingReason: assistant.diagnostics.routingReason || null,
+          actionId: assistant.diagnostics.actionId || null,
+          risk: assistant.diagnostics.actionRisk || null,
+          confirmationRequirement: assistant.diagnostics.confirmationRequirement || null,
+          verification: Boolean(assistant.diagnostics.verification),
+          result: assistant.diagnostics.actionResult || null,
+          correlationId: assistant.diagnostics.correlationId || null
+        }
+      : null,
     tokens: assistant.diagnostics?.usage || null,
     timingMs: typeof elapsedMs === 'number' ? elapsedMs : null,
     fallback: (assistant.mode === 'unavailable' || assistant.mode === 'runtime error') ? assistant.mode : null,
@@ -4471,12 +4565,13 @@ const capabilityRegistry = createCapabilityRegistry({
     const out = [];
     if (scope === 'all' || scope === 'approved' || scope === 'rules') {
       const typeClause = scope === 'rules' ? "AND k.type = 'rule'" : '';
+      const statusClause = scope === 'approved' ? "AND k.status IN ('active','stable','stale','blocked')" : "AND k.status NOT IN ('archived','deprecated','superseded')";
       const rows = allRows(`
         SELECT k.*, p.name AS project_name FROM knowledge_items k
         LEFT JOIN projects p ON p.id = k.project_id
         WHERE (k.title LIKE ? ESCAPE '\\' OR k.body LIKE ? ESCAPE '\\')
           ${typeClause}
-          AND k.status NOT IN ('archived','deprecated','superseded')
+          ${statusClause}
         ORDER BY k.confidence DESC, k.updated_at DESC LIMIT ?`, [like, like, cap]);
       for (const r of rows) out.push({ ...r, kind: 'item' });
     }
@@ -4604,7 +4699,14 @@ const capabilityRegistry = createCapabilityRegistry({
   listRuns({ limit }) {
     let runs = [];
     try {
-      runs = readOpenHandsRequests().map((r) => ({ id: r.id, title: r.title || r.goal || 'run', status: r.status || 'unknown', created_at: r.created_at || r.createdAt || null }));
+      runs = readOpenHandsRequests().map((r) => ({
+        id: r.id,
+        title: r.title || r.goal || 'run',
+        status: r.status || 'unknown',
+        created_at: r.created_at || r.createdAt || null,
+        detail: r.executorValidationResultReason || r.invocationReadinessReason || r.gitAuthorityReason || null,
+        report_path: r.reportPath || null
+      }));
     } catch { runs = []; }
     runs.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     return runs.slice(0, limit);

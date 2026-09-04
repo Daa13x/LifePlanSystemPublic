@@ -9,7 +9,7 @@ process.env.LIFE_PLANNER_DB = path.join(tempDir, 'personality.sqlite');
 try {
   const personality = await import('../server/personality.js');
   const { db, migrate } = await import('../server/db.js');
-  const { resolveAgentMode } = await import('../server/agentMode.js');
+  const { AGENT_MODE_IDS, resolveAgentMode } = await import('../server/agentMode.js');
 
   migrate();
   // Allow the startup seed scheduled by personality.js to run before the test closes the DB.
@@ -32,9 +32,20 @@ try {
   assert.match(rendered, /Sceptical does not mean argumentative/i);
   assert.match(rendered, /governance, safety, privacy, permission and tool rules always override personality/i);
 
-  const mode = resolveAgentMode('help me think through this');
-  assert.match(mode.instruction, /LifePlanSystem personality:/);
-  assert.match(mode.instruction, /Curious enough to investigate; sceptical enough to verify/i);
+  const modePrompts = {
+    orchestrator: '/mode orchestrator help me think through this',
+    coder: '/mode coder fix the repository test',
+    writer: '/mode writer draft this note',
+    life_coach: '/mode life coach help me plan my day'
+  };
+  assert.deepEqual([...AGENT_MODE_IDS].sort(), Object.keys(modePrompts).sort());
+  for (const [id, prompt] of Object.entries(modePrompts)) {
+    const mode = resolveAgentMode(prompt);
+    assert.equal(mode.id, id);
+    assert.match(mode.instruction, /LifePlanSystem personality:/);
+    assert.match(mode.instruction, /Curious enough to investigate; sceptical enough to verify/i);
+    assert.match(mode.instruction, /governance, safety, privacy, permission and tool rules always override personality/i);
+  }
 
   db.close();
   console.log('Personality profile verification passed.');

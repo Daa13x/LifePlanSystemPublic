@@ -13,7 +13,13 @@
 
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { capabilityRequestForChatIntent, classifyChatIntent, shouldCreateMemoryCandidate } from '../server/chatIntent.js';
+import {
+  capabilityRequestForChatIntent,
+  classifyChatIntent,
+  formatPersonalityCapabilityReply,
+  selectPersonalityCapabilityPlan,
+  shouldCreateMemoryCandidate
+} from '../server/chatIntent.js';
 import { buildChatCommandCatalog, CHAT_COMMANDS, explicitChatCommand } from '../server/chatCommands.js';
 import { createCapabilityRegistry } from '../server/chatCapabilities.js';
 import { renderMarkdown } from '../src/markdown.js';
@@ -104,6 +110,51 @@ line(commandCatalog.length === CHAT_COMMANDS.length, 'every built-in Chat comman
 line(commandCatalog.every((command) => command.permission && command.risk && command.confirmation), 'command discovery inherits permission, risk, and confirmation from the action registry');
 line(explicitChatCommand('/add-task Buy milk')?.actionId === 'planner.propose_create', 'parameterised task command resolves to the proposal action');
 line(explicitChatCommand('/does-not-exist') === null, 'unknown slash commands do not gain action authority');
+
+// Personality-aware behaviour is a bounded adapter over the same registry.
+// The profile is injected so this pure test proves that trait strength changes
+// selection rather than merely changing prompt wording.
+{
+  const activeProfile = { traits: [
+    { id: 'inquisitive', strength: 10 },
+    { id: 'sceptical', strength: 9.5 },
+    { id: 'practical', strength: 9 },
+    { id: 'resource-conscious', strength: 7.5 }
+  ] };
+  const inactiveProfile = { traits: activeProfile.traits.map((trait) => ({ ...trait, strength: 0 })) };
+
+  const today = selectPersonalityCapabilityPlan('What am I supposed to be doing today?', activeProfile);
+  line(today?.actionId === 'planner.today' && today.replyKind === 'today', 'inquisitiveness selects the existing Today read');
+  line(selectPersonalityCapabilityPlan('What am I supposed to be doing today?', inactiveProfile) === null, 'low trait strengths do not select the personality read');
+
+  const run = selectPersonalityCapabilityPlan('Why did the last run fail?', activeProfile);
+  line(run?.actionId === 'system.runs' && run.args.limit === 1, 'resource-conscious routing selects one bounded run read');
+
+  const claim = selectPersonalityCapabilityPlan("I'm sure we already finished the personality work.", activeProfile);
+  line(claim?.actionId === 'knowledge.search' && claim.verification === true && claim.args.scope === 'approved', 'scepticism checks a confident completion claim against approved evidence');
+
+  const taskClaim = selectPersonalityCapabilityPlan('That task is completed.', activeProfile);
+  line(taskClaim?.actionId === 'planner.today' && taskClaim.verification === true, 'scepticism checks a Planner completion claim');
+
+  const crash = selectPersonalityCapabilityPlan('The model definitely caused the crash.', activeProfile);
+  line(crash?.kind === 'uncertainty' && crash.actionId === null, 'unsupported causal claim states uncertainty without an irrelevant tool call');
+  line(/not established/i.test(formatPersonalityCapabilityReply(crash)), 'unsupported causal reply does not mirror the user assumption');
+
+  line(selectPersonalityCapabilityPlan('Hello', activeProfile) === null, 'simple conversation causes zero personality action fan-out');
+  line(selectPersonalityCapabilityPlan('Add buy milk to today.', activeProfile) === null, 'consequential task intent is not authorised by personality');
+  line(/cannot establish what failed or why/i.test(formatPersonalityCapabilityReply(run, { runs: [] })), 'insufficient run evidence produces explicit uncertainty');
+
+  const registry = createCapabilityRegistry({
+    searchKnowledge: async () => [],
+    plannerToday: async () => ({ mode: 'normal', visible: [], deferred: [], recentlyCompleted: [] })
+  });
+  const personalityRead = await registry.execute('planner.today', {}, { caller: 'personality-reasoning', userId: 1 });
+  line(personalityRead.status === 'success', 'trusted personality source can execute its narrow existing read allowlist');
+  const personalityWrite = await registry.execute('planner.propose_create', { title: 'Buy milk' }, { caller: 'personality-reasoning', userId: 1 });
+  line(personalityWrite.status === 'blocked', 'personality source cannot invoke a write/proposal action');
+  const humanProposal = await registry.execute('planner.propose_create', { title: 'Buy milk' }, { caller: 'human-ui', userId: 1 });
+  line(humanProposal.status === 'needs_confirmation' && humanProposal.data?.confirmation_required === true, 'the existing human proposal still requires Allow/Decline');
+}
 
 // 2. Memory-candidate gating.
 {

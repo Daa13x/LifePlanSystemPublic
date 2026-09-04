@@ -68,6 +68,142 @@ export function capabilityRequestForChatIntent(intent) {
   })[intent] || null;
 }
 
+function personalityTraitStrength(profile, id) {
+  const trait = Array.isArray(profile?.traits) ? profile.traits.find((item) => item?.id === id) : null;
+  const strength = Number(trait?.strength);
+  return Number.isFinite(strength) ? Math.max(0, Math.min(10, strength)) : 0;
+}
+
+function readPlan(actionId, args, replyKind, reason, { verification = false, subject = null } = {}) {
+  return Object.freeze({
+    kind: 'capability',
+    actionId,
+    args: Object.freeze({ ...args }),
+    replyKind,
+    reason,
+    verification,
+    subject
+  });
+}
+
+// Personality changes the preference for a small set of already-registered
+// local reads; it never creates authority or capability. This policy runs only
+// after explicit commands and ordinary natural-language intents have had first
+// refusal. It returns at most ONE read, keeping inquisitiveness bounded by the
+// practical/resource-conscious traits and leaving every permission check in the
+// universal action registry.
+export function selectPersonalityCapabilityPlan(message, profile) {
+  const text = String(message || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+
+  const inquisitive = personalityTraitStrength(profile, 'inquisitive');
+  const sceptical = personalityTraitStrength(profile, 'sceptical');
+  const practical = personalityTraitStrength(profile, 'practical');
+  const resourceConscious = personalityTraitStrength(profile, 'resource-conscious');
+
+  // Consequential requests remain owned by the existing proposal/confirmation
+  // adapters. A strong personality may prefer an action; it may not authorise it.
+  if (/^(?:please\s+)?(?:add|create|delete|remove|change|update|mark|defer|send|publish|buy|book|order)\b/i.test(text)) return null;
+  if (/^(?:hi|hello|hey|hiya|howdy|yo|thanks|thank you|ok|okay)[\s,.!?]*$/i.test(text)) return null;
+
+  const boundedReadPreference = inquisitive >= 7.5 && practical >= 6 && resourceConscious >= 5;
+  if (boundedReadPreference
+      && /\bwhat (?:am i|are we) (?:supposed|meant) to (?:be )?(?:doing|work(?:ing)? on)\b[^.?!]*\btoday\b/i.test(text)) {
+    return readPlan('planner.today', {}, 'today', 'Current Today evidence can answer this directly.');
+  }
+  if (boundedReadPreference
+      && /\bwhy did (?:the )?(?:last|latest|that) (?:run|job|execution) (?:fail|break|stop)\b/i.test(text)) {
+    return readPlan('system.runs', { limit: 1 }, 'last_run_failure', 'The smallest relevant check is the latest local run.');
+  }
+  if (boundedReadPreference
+      && /\b(?:how far along is|what(?:'s| is) the progress (?:of|on)|how is)\b[^.?!]*\b(?:this|the|my|our)?\s*project\b/i.test(text)) {
+    return readPlan('workboard.list', { view: 'projects', limit: 8 }, 'project_progress', 'Current Workboard projects are the smallest available progress evidence.');
+  }
+
+  if (sceptical >= 7.5) {
+    const completedTask = text.match(/^(?:i(?:'m| am) sure\s+)?(.{1,120}?)\s+(?:is|was|has been)\s+(?:already\s+)?(?:completed|done|finished)[.!?]*$/i);
+    if (completedTask && /\btask\b/i.test(completedTask[1])) {
+      const rawSubject = completedTask[1].replace(/^(?:that|the)\s+task\s*/i, '').trim();
+      return readPlan('planner.today', {}, 'task_completion_claim', 'Planner state can check the completion claim without changing it.', {
+        verification: true,
+        subject: rawSubject && !/^(?:that|the)\s+task$/i.test(completedTask[1]) ? rawSubject : null
+      });
+    }
+
+    if (/\b(?:i(?:'m| am) sure|definitely|certainly|already)\b[^.?!]*\b(?:finished|completed|implemented|done)\b/i.test(text)) {
+      const subject = /\bpersonality\b/i.test(text) ? 'personality' : 'implementation';
+      return readPlan('knowledge.search', { query: subject, scope: 'approved', limit: 5 }, 'completion_claim', 'A confident completion claim should be checked against approved local evidence once.', { verification: true, subject });
+    }
+
+    if (/\b(?:model|ai|llm)\b[^.?!]*\b(?:definitely|certainly|must have)\b[^.?!]*\b(?:caused|triggered)\b[^.?!]*\b(?:crash|bsod|shutdown|restart)\b/i.test(text)
+        || /\b(?:model|ai|llm)\b[^.?!]*\b(?:caused|triggered)\b[^.?!]*\b(?:crash|bsod|shutdown|restart)\b[^.?!]*(?:right|correct)\??$/i.test(text)) {
+      return Object.freeze({
+        kind: 'uncertainty',
+        actionId: null,
+        args: Object.freeze({}),
+        replyKind: 'unsupported_causal_claim',
+        reason: 'No registered Chat read exposes Windows crash evidence, so agreement would invent certainty.',
+        verification: false,
+        subject: 'crash cause'
+      });
+    }
+  }
+
+  return null;
+}
+
+function compactEvidenceList(items, format) {
+  return items.slice(0, 5).map((item) => `- ${format(item)}`).join('\n');
+}
+
+// Converts the bounded result of the selected EXISTING action into the same
+// conversational turn. It deliberately distinguishes evidence from proof.
+export function formatPersonalityCapabilityReply(plan, data = {}) {
+  if (plan?.replyKind === 'unsupported_causal_claim') {
+    return "That is possible, but it is not established. I do not have an authorised crash-diagnostic read in Chat, so I cannot honestly say the model caused the crash without Windows event or dump evidence.";
+  }
+  if (plan?.replyKind === 'today') {
+    const tasks = Array.isArray(data.visible) ? data.visible : [];
+    return tasks.length
+      ? `I checked Today. Your current focus is:\n\n${compactEvidenceList(tasks, (task) => `${task.title}${task.active_step ? ` — ${task.active_step}` : ''}${task.blocked ? ' (blocked)' : ''}`)}`
+      : 'I checked Today. Nothing is currently scheduled there.';
+  }
+  if (plan?.replyKind === 'last_run_failure') {
+    const latest = Array.isArray(data.runs) ? data.runs[0] : null;
+    if (!latest) return "I checked the recent local runs, but there is no run record available, so I cannot establish what failed or why.";
+    const failed = /fail|error|blocked|crash|invalid/i.test(String(latest.status || ''));
+    const detail = String(latest.detail || '').trim();
+    if (!failed) return `I checked the latest local run: **${latest.title}** is recorded as **${latest.status}**. That does not support the premise that the last run failed.`;
+    return detail
+      ? `I checked the latest local run. **${latest.title}** is **${latest.status}**. The recorded reason is: ${detail}`
+      : `I checked the latest local run. **${latest.title}** is **${latest.status}**, but its bounded run record contains no failure reason, so I can verify the status but not honestly explain why.`;
+  }
+  if (plan?.replyKind === 'project_progress') {
+    const projects = Array.isArray(data.records) ? data.records : [];
+    if (!projects.length) return 'I checked the Workboard, but there is no active project record available to establish progress.';
+    return `I checked the current Workboard projects:\n\n${compactEvidenceList(projects, (project) => `${project.title}${project.status ? ` — ${project.status}` : ''}`)}\n\nThere is no verified completion percentage in this read, so I will not invent one.`;
+  }
+  if (plan?.replyKind === 'completion_claim') {
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (!items.length) return `I checked approved local Knowledge for **${plan.subject || 'that work'}**, but found no sufficient evidence to verify the completion claim.`;
+    return `I checked approved local Knowledge before agreeing. I found:\n\n${compactEvidenceList(items, (item) => `${item.title}${item.provenance?.status ? ` — ${item.provenance.status}` : ''}`)}\n\nThose records are relevant evidence, but their presence alone is not proof that every part of the work is complete.`;
+  }
+  if (plan?.replyKind === 'task_completion_claim') {
+    const completed = Array.isArray(data.recently_completed) ? data.recently_completed : [];
+    if (!plan.subject) {
+      return completed.length
+        ? `I checked Planner history, but “that task” is ambiguous. Recent completed tasks include:\n\n${compactEvidenceList(completed, (task) => task.title)}\n\nTell me which one you mean before I treat the claim as established.`
+        : 'I checked Planner history, but “that task” is ambiguous and there is no recent completed task record to verify it.';
+    }
+    const subject = plan.subject.toLowerCase();
+    const match = completed.find((task) => String(task.title || '').toLowerCase().includes(subject) || subject.includes(String(task.title || '').toLowerCase()));
+    return match
+      ? `I checked Planner history. **${match.title}** is recorded as **${match.status}**.`
+      : `I checked Planner history, but I could not find a recent completed task matching **${plan.subject}**, so I cannot verify that claim.`;
+  }
+  throw new Error(`Unsupported personality capability reply: ${plan?.replyKind || '<missing>'}`);
+}
+
 // Decide whether a chat message should become a review-only memory candidate.
 // Default is NO. A candidate is only proposed when the user explicitly asks to
 // remember/save it, or the text carries a durable signal (preference, decision,
