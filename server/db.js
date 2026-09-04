@@ -137,6 +137,7 @@ export function migrate() {
       session_id INTEGER NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
       role TEXT NOT NULL CHECK (role IN ('user','assistant','system')),
       content TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -350,7 +351,7 @@ export function migrate() {
   // tokens, timing). Stored as JSON so the answer body stays clean and the
   // UI can surface diagnostics in a Details panel by response-detail mode.
   // Older rows keep metadata = NULL and simply render their saved body.
-  for (const column of [['metadata', 'TEXT']]) {
+  for (const column of [['metadata', 'TEXT'], ['pinned', 'INTEGER NOT NULL DEFAULT 0']]) {
     try {
       db.exec(`ALTER TABLE chat_messages ADD COLUMN ${column[0]} ${column[1]}`);
     } catch {

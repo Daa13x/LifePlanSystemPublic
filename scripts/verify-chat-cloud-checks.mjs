@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { CLOUD_GUIDANCE_MAX_CHARS } from '../server/chatReliability.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (name) => fs.readFileSync(path.join(root, name), 'utf8');
@@ -23,7 +24,7 @@ const checks = [
   ['guidance consumed after assistant persistence', /guidance_consumed_at = CURRENT_TIMESTAMP/]
   ,['guidance provenance stored with assistant reply', /cloudCheckId: check\.id/],
   ['model registry is connector-truthful', /Current model selected in ChatGPT/],
-  ['server validates focus length', /Cloud-check guidance must be 1,200 characters or fewer/],
+  ['server validates focus length without truncation', /instruction\.length > CLOUD_GUIDANCE_MAX_CHARS[\s\S]*Your text was not truncated/],
   ['send requires matching provider tab', /No signed-in \$\{check\.provider\} tab is connected/],
   ['dismissal keeps persisted audit record', /feedback_dismissed_at = COALESCE/]
 ];
@@ -40,7 +41,9 @@ const uiChecks = [
   ['reviewed focus instruction', /Focus for the cloud consultant/],
   ['explicit candidate action', /Save as memory candidate/],
   ['active polling', /setInterval\(\(\) => loadCloudChecks\(\), 1500\)/]
+  ,['visible focus limit', /cloudInstruction\.length\.toLocaleString\(\)\} \/ \{CLOUD_GUIDANCE_MAX_CHARS\.toLocaleString\(\)\}/]
+  ,['focus text is never browser-truncated', !ui.includes('maxLength={1200}')]
 ];
-for (const [label, pattern] of uiChecks) { const ok = pattern.test(ui); console.log(`${ok ? 'ok' : 'FAIL'} ${label}`); if (!ok) failed++; }
+for (const [label, expectation] of uiChecks) { const ok = typeof expectation === 'boolean' ? expectation : expectation.test(ui); console.log(`${ok ? 'ok' : 'FAIL'} ${label}`); if (!ok) failed++; }
 if (failed) process.exit(1);
-console.log('Cloud-check contract verification passed.');
+console.log(`Cloud-check contract verification passed with a visible ${CLOUD_GUIDANCE_MAX_CHARS.toLocaleString()} character focus boundary.`);

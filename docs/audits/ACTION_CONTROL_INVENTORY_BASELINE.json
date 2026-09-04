@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "source": "src/main.jsx",
-  "total": 495,
+  "total": 497,
   "mapped": 32,
-  "unmapped": 463,
-  "fingerprint": "1b818d399c0eeee857744614f95546db0beced698c4f9607205284bf85a0bb55",
+  "unmapped": 465,
+  "fingerprint": "c18074a3a6aae2d18412d88a30000e16e87018a35e6dbcceab3ce483b454fcc9",
   "byOwner": {
     "App": {
       "total": 8,
@@ -33,8 +33,8 @@
     },
     "Chat": {
       "mapped": 10,
-      "total": 54,
-      "unmapped": 44
+      "total": 55,
+      "unmapped": 45
     },
     "CloudCheckCard": {
       "total": 9,
@@ -95,6 +95,11 @@
       "total": 4,
       "mapped": 0,
       "unmapped": 4
+    },
+    "MessageBubble": {
+      "total": 1,
+      "mapped": 0,
+      "unmapped": 1
     },
     "MessageVoice": {
       "total": 1,

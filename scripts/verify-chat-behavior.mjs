@@ -17,6 +17,12 @@ import { capabilityRequestForChatIntent, classifyChatIntent, shouldCreateMemoryC
 import { buildChatCommandCatalog, CHAT_COMMANDS, explicitChatCommand } from '../server/chatCommands.js';
 import { createCapabilityRegistry } from '../server/chatCapabilities.js';
 import { renderMarkdown } from '../src/markdown.js';
+import {
+  boundedConversationHistory,
+  classifyConsultationReference,
+  enforceAssistantResponseConsistency,
+  formatConsultationReply
+} from '../server/chatReliability.js';
 
 let failures = 0;
 const line = (ok, msg) => { if (!ok) failures++; console.log(`${ok ? 'ok  ' : 'FAIL'}  ${msg}`); };
@@ -57,6 +63,26 @@ console.log('--- chat behaviour verification ---');
     const got = classifyChatIntent(input);
     line(got === expected, `intent(${JSON.stringify(input)}) = ${got} (expected ${expected})`);
   }
+}
+
+// 4. Consultation references and receipt-backed consistency guards.
+{
+  const consultation = { id: 19, consultation_id: 19, provider: 'ChatGPT', model: 'Current model selected in ChatGPT', status: 'completed', response: 'ATOMPROOF42' };
+  line(classifyConsultationReference('what did you get from chatgpt?', { hasCompletedConsultation: true }) === 'result', 'ChatGPT result question resolves to the completed consultation');
+  line(classifyConsultationReference('use that answer', { hasCompletedConsultation: true }) === 'use', 'contextual use-that-answer resolves to one-shot guidance');
+  line(classifyConsultationReference('remove guidance', { hasCompletedConsultation: true }) === 'remove', 'contextual guidance removal resolves to the same owner');
+  line(classifyConsultationReference("what's this?", { hasCompletedConsultation: true }) === 'describe', 'vague reference prefers the current consultation object');
+  line(/ATOMPROOF42/.test(formatConsultationReply(consultation)), 'receipt-grounded reply carries the actual provider result');
+
+  const denial = enforceAssistantResponseConsistency({ content: "I don't have access to ChatGPT or external messages.", userMessage: 'what did ChatGPT say?', consultation });
+  line(denial.changed && /ATOMPROOF42/.test(denial.content), 'a false cloud-access denial is replaced from the durable receipt');
+  const action = enforceAssistantResponseConsistency({ content: "I've saved that task for you.", userMessage: 'remember this', actionReceipt: null });
+  line(action.changed && /no verified action receipt/i.test(action.content), 'an unreceipted save claim fails closed');
+  const identity = enforceAssistantResponseConsistency({ content: "I'm Google's Gemini assistant.", userMessage: 'who are you?', route: { model: 'Qwen local' } });
+  line(identity.changed && /LifePlanSystem Planner Assistant/.test(identity.content) && /Qwen local/.test(identity.content), 'provider identity is grounded in the actual local route');
+
+  const history = boundedConversationHistory(Array.from({ length: 20 }, (_, index) => ({ id: index + 1, role: index % 2 ? 'assistant' : 'user', content: `turn-${index + 1}` })));
+  line(history.length === 14 && history[0].id === 7 && history.at(-1).id === 20, 'conversation context is deterministically bounded to the latest 14 visible turns');
 }
 
 const actionMappings = new Map([

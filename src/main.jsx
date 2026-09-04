@@ -28,6 +28,7 @@ import {
   Paperclip,
   Pause,
   Pencil,
+  Pin,
   Play,
   Plus,
   Route,
@@ -52,6 +53,7 @@ import { ensureNotificationPermission, registerReminderActions, reconcileAllRemi
 import { renderMarkdown } from './markdown.js';
 import { normalizeNativeServerUrl } from './nativeConnection.js';
 import { awaitChatSendResult, isChatSendOriginActive, isLatestChatConnectionRequest } from './chatSendClient.js';
+import { CHAT_MESSAGE_MAX_CHARS, CLOUD_GUIDANCE_MAX_CHARS } from '../server/chatReliability.js';
 import {
   normalizeDetailMode,
   parseMessageMetadata,
@@ -2270,7 +2272,7 @@ function MessageVoice({ text }) {
 // diagnostics in the Details panel. New replies use stored metadata; older
 // replies fall back to the display-only legacy-text parser, which fails safe
 // (shows the original message verbatim) when the structure is uncertain.
-function MessageBubble({ message, mode }) {
+function MessageBubble({ message, mode, onPin }) {
   let body = message.content;
   let details = null;
 
@@ -2297,8 +2299,11 @@ function MessageBubble({ message, mode }) {
       {message.role === 'assistant' && (
         <EscalationHint answerability={parseMessageMetadata(message.metadata)?.localAnswerability} />
       )}
-      {message.role === 'assistant' && body.trim() && (
-        <div className="message-actions"><MessageVoice text={body} /><FeedbackControl message={message} /></div>
+      {body.trim() && (
+        <div className="message-actions">
+          {message.role === 'assistant' && <><MessageVoice text={body} /><FeedbackControl message={message} /></>}
+          {onPin && <button type="button" className={cx('message-pin', message.pinned && 'active')} onClick={() => onPin(message)} title={message.pinned ? 'Unpin message' : 'Pin message'} aria-label={message.pinned ? 'Unpin message' : 'Pin message'} aria-pressed={Boolean(message.pinned)}><Pin size={14} /></button>}
+        </div>
       )}
       {details}
     </div>
@@ -2335,6 +2340,7 @@ function SourceCards({ sources }) {
 function Chat({ sessions, activeSession, selectedSession, setSelectedSession, setSessions, messages, setMessages, refreshAll, setNotice, navigate, settings }) {
   const detailMode = normalizeDetailMode(settings?.assistantResponseDetail);
   const [draft, setDraft] = useState('');
+  const [showPinnedOnly, setShowPinnedOnly] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(IS_NATIVE);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [commandCatalog, setCommandCatalog] = useState(IS_NATIVE ? NATIVE_CHAT_COMMANDS : []);
@@ -2465,7 +2471,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     }
   }
   async function loadCloudChecks(sessionId = selectedSession) { if (!IS_NATIVE && sessionId) try { setCloudChecks(await api(`/api/chat/sessions/${sessionId}/cloud-checks`)); } catch {} }
-  async function previewCloudCheck() { try { setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, model: cloudModel, instruction: cloudInstruction }) })); } catch (err) { setNotice(err.message); } }
+  async function previewCloudCheck() {
+    if (cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS) return setNotice(`Cloud guidance is ${cloudInstruction.length.toLocaleString()} characters. Keep it to ${CLOUD_GUIDANCE_MAX_CHARS.toLocaleString()} or fewer; your text has been preserved.`);
+    try { setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, model: cloudModel, instruction: cloudInstruction }) })); } catch (err) { setNotice(err.message); }
+  }
   async function chooseCloudProvider(provider) {
     setCloudProvider(provider.provider);
     setCloudModel(provider.model || '');
@@ -2480,10 +2489,19 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       if (!provider.configured) setNotice(`${provider.provider} prompt prepared locally. Connect its browser session with + before sending.`);
     } catch (err) { setNotice(err.message); }
   }
-  async function createCloudCheck() { try { const result = await api(`/api/chat/sessions/${selectedSession}/cloud-checks`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, model: cloudModel, instruction: cloudInstruction, idempotency_key: crypto.randomUUID().replaceAll('-', '') }) }); if (!result.blocked) await api(`/api/chat/cloud-checks/${result.check.id}/send`, { method: 'POST' }); setCloudPreview(null); await loadCloudChecks(); } catch (err) { setNotice(`${cloudProvider || 'Cloud provider'} could not send: ${err.message} Open Cloud accounts with + to connect the LPS Browser Agent and a signed-in provider tab.`); await loadCloudChecks(); } }
+  async function createCloudCheck() {
+    if (cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS) return setNotice(`Cloud guidance exceeds the visible ${CLOUD_GUIDANCE_MAX_CHARS.toLocaleString()} character limit. Your text is still in the editor.`);
+    if (cloudPreview?.instruction !== cloudInstruction) return setNotice('Review the updated exact cloud prompt before sending. Your guidance text has been preserved.');
+    try { const result = await api(`/api/chat/sessions/${selectedSession}/cloud-checks`, { method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: cloudProvider, model: cloudModel, instruction: cloudInstruction, idempotency_key: crypto.randomUUID().replaceAll('-', '') }) }); if (!result.blocked) await api(`/api/chat/cloud-checks/${result.check.id}/send`, { method: 'POST' }); setCloudPreview(null); await loadCloudChecks(); } catch (err) { setNotice(`${cloudProvider || 'Cloud provider'} could not send: ${err.message} Open Cloud accounts with + to connect the LPS Browser Agent and a signed-in provider tab.`); await loadCloudChecks(); }
+  }
   async function sendCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(`Cloud check could not send: ${err.message} Open Cloud accounts with + to connect the provider.`); } }
   async function saveCloudCandidate(id) { try { await api(`/api/chat/cloud-checks/${id}/memory-candidate`, { method: 'POST' }); await loadCloudChecks(); refreshAll(); setNotice('Cloud response saved as a review-only memory candidate.'); } catch (err) { setNotice(err.message); } }
-  async function setCloudGuidance(id, active) { try { await api(`/api/chat/cloud-checks/${id}/guidance`, { method: active ? 'POST' : 'DELETE' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
+  async function setCloudGuidance(id, active) {
+    try {
+      const result = await api(`/api/chat/cloud-checks/${id}/guidance`, { method: active ? 'POST' : 'DELETE' });
+      setCloudChecks((current) => current.map((check) => Number(check.id) === Number(result.check.id) ? result.check : active ? { ...check, guidance_active: 0 } : check));
+    } catch (err) { setNotice(err.message); }
+  }
   async function cancelCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/cancel`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function dismissCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/dismiss`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function retryCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/retry`, { method: 'POST' }); await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
@@ -2878,6 +2896,10 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   async function send() {
     if (!draft.trim() || !selectedSession || chatBusy) return;
     const outgoing = expandCustomCommand(draft);
+    if (outgoing.length > CHAT_MESSAGE_MAX_CHARS) {
+      setNotice(`This message is ${outgoing.length.toLocaleString()} characters. The limit is ${CHAT_MESSAGE_MAX_CHARS.toLocaleString()}; nothing was sent or truncated.`);
+      return;
+    }
 
     // Closed Beta v0.1 keeps phone chat sessions in on-device SQLite. A phone
     // session UUID is not a server chat-session ID, so sending it to the
@@ -2957,6 +2979,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           let data;
           try { data = JSON.parse(dataRaw); } catch { continue; }
           if (event === 'token') { acc += data.delta; if (canRenderOrigin()) { setStreamingText(acc); setWarmupNote(''); } }
+          else if (event === 'reset') { acc = data.delta || ''; if (canRenderOrigin()) { setStreamingText(acc); setWarmupNote(''); } }
           else if (event === 'status') { if (data.phase === 'warming' && canRenderOrigin()) setWarmupNote(data.message || 'Starting the local model…'); }
           else if (event === 'done') {
             if (canRenderOrigin()) setWarmupNote('');
@@ -2992,6 +3015,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           if (canRenderOrigin()) {
             setNotice(jsonErr.message);
             setMessages((current) => current.filter((m) => m.id !== optimisticId));
+            setDraft((current) => current || outgoing);
           }
         }
       } else {
@@ -3012,8 +3036,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         setChatBusy(false);
       }
       refreshAll();
-      if (canRenderOrigin()) loadConnection(originSessionId);
+      if (canRenderOrigin()) { loadConnection(originSessionId); loadCloudChecks(originSessionId); }
     }
+  }
+
+  function handleComposerKeyDown(event) {
+    if (IS_NATIVE || event.key !== 'Enter' || event.shiftKey || event.nativeEvent?.isComposing || event.isComposing) return;
+    event.preventDefault();
+    if (!chatBusy && draft.trim() && draft.length <= CHAT_MESSAGE_MAX_CHARS) send();
   }
 
   async function cancelGeneration() {
@@ -3041,6 +3071,14 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       setSelectedSession(nextSession?.id || null);
       navigate('chat', null, nextSession?.id || null);
     }
+  }
+
+  async function toggleMessagePin(message) {
+    try {
+      const updated = await api(`/api/chat/messages/${message.id}`, { method: 'PATCH', body: JSON.stringify({ pinned: !Boolean(message.pinned) }) });
+      setMessages((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setNotice(updated.pinned ? 'Pinned message to this conversation.' : 'Unpinned message.');
+    } catch (error) { setNotice(error.message); }
   }
 
   async function renameSession(session) {
@@ -3144,6 +3182,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
     pickerPreviewRequestRef.current += 1;
     setPicker(null);
   }, [selectedSession]);
+  useEffect(() => { setShowPinnedOnly(false); }, [selectedSession]);
   useEffect(() => {
     const originSessionId = selectedSession;
     if (!originSessionId || !connection?.generating || String(connection.conversationId) !== String(originSessionId)) return undefined;
@@ -3228,6 +3267,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </div>
           {activeSession && (
             <div className="row-actions">
+              <button className={cx('icon-button', showPinnedOnly && 'selected')} onClick={() => setShowPinnedOnly((value) => !value)} aria-label={showPinnedOnly ? 'Show all messages' : 'View pinned messages'} title={showPinnedOnly ? 'Show all messages' : 'View pinned messages'}><Pin size={16} /></button>
               <button className="icon-button" onClick={() => patchSession(activeSession.id, { pinned: activeSession.pinned ? 0 : 1 })} aria-label={activeSession.pinned ? 'Unpin chat' : 'Pin chat'} title={activeSession.pinned ? 'Unpin chat' : 'Pin chat'}><Archive size={16} /></button>
               <button className="icon-button danger" onClick={() => deleteSessionFromList(activeSession)} aria-label="Delete chat" title="Delete chat"><Trash2 size={16} /></button>
             </div>
@@ -3332,7 +3372,8 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
           </>}
         </div>}
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
-          {messages.map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
+          {showPinnedOnly && !messages.some((message) => message.pinned) && <Empty title="No pinned messages" body="Pin a user message or reply to keep it in this conversation's focused view." />}
+          {messages.filter((message) => !showPinnedOnly || message.pinned).map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} onPin={IS_NATIVE ? null : toggleMessagePin} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
               <span>assistant</span>
@@ -3361,13 +3402,13 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               ))}
             </div>
           )}
-          {!IS_NATIVE && actionsOpen && <><div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected', !item.configured && 'setup-required')} onClick={() => chooseCloudProvider(item)} title={item.configured ? `Prepare a reviewed ${item.provider} cloud check` : `Prepare locally, then connect ${item.provider}`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} aria-hidden="true" /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud provider model" value={cloudModel} onChange={(event) => { setCloudModel(event.target.value); setCloudPreview(null); }}><option value={cloudProviders.find((item) => item.provider === cloudProvider)?.model || ''}>{cloudProviders.find((item) => item.provider === cloudProvider)?.model || 'Provider default'}</option></select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => { setCloudScope(event.target.value); setCloudPreview(null); }}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider}>Review cloud prompt</button></> : <small>Enable a cloud provider in Settings with +.</small>}</div>
-          {cloudPreview && <div className="cloud-preview"><strong>{cloudProvider} cloud check</strong><small>{cloudPreview.model} · {cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><label>Focus for the cloud consultant (optional)<textarea value={cloudInstruction} maxLength={1200} onChange={(event) => { setCloudInstruction(event.target.value); setCloudPreview(null); }} placeholder="For example: focus on missing risks and a clearer next reply." /></label><details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck}>Ask {cloudProvider}</button>}</div>}
-          {cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}</>}
+          {!IS_NATIVE && actionsOpen && <><div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected', !item.configured && 'setup-required')} onClick={() => chooseCloudProvider(item)} title={item.configured ? `Prepare a reviewed ${item.provider} cloud check` : `Prepare locally, then connect ${item.provider}`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} aria-hidden="true" /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud provider model" value={cloudModel} onChange={(event) => { setCloudModel(event.target.value); setCloudPreview(null); }}><option value={cloudProviders.find((item) => item.provider === cloudProvider)?.model || ''}>{cloudProviders.find((item) => item.provider === cloudProvider)?.model || 'Provider default'}</option></select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => { setCloudScope(event.target.value); setCloudPreview(null); }}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider || cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS}>Review cloud prompt</button></> : <small>Enable a cloud provider in Settings with +.</small>}</div>
+          {cloudPreview && <div className="cloud-preview"><strong>{cloudProvider} cloud check</strong><small>{cloudPreview.model} · {cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><label>Focus for the cloud consultant (optional)<textarea value={cloudInstruction} onChange={(event) => setCloudInstruction(event.target.value)} placeholder="For example: focus on missing risks and a clearer next reply." /></label><small className={cx('character-count', cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS && 'over-limit')}>{cloudInstruction.length.toLocaleString()} / {CLOUD_GUIDANCE_MAX_CHARS.toLocaleString()} characters. Use Full conversation for larger in-chat context; text over the limit stays here until you edit it.</small>{cloudPreview.instruction !== cloudInstruction && <small role="status">Guidance changed. Review the exact prompt again before sending.</small>}<details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck} disabled={cloudPreview.instruction !== cloudInstruction || cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS}>Ask {cloudProvider}</button>}</div>}</>}
+          {!IS_NATIVE && cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info cloud-guidance-banner" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}
           <button className={cx('icon-button', 'chat-actions-toggle', actionsOpen && 'selected')} onClick={() => setActionsOpen((value) => !value)} aria-label={actionsOpen ? 'Close actions and attachments' : 'Open actions and attachments'} title={actionsOpen ? 'Close actions and attachments' : 'Actions and attachments'}><Paperclip size={18} /></button>
-          <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={IS_NATIVE ? 'Message LifePlanSystem or type a local command…' : 'Message LifePlanSystem…'} disabled={chatBusy} />
+          <div className="composer-input"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={IS_NATIVE ? 'Message LifePlanSystem or type a local command…' : 'Message LifePlanSystem…'} disabled={chatBusy} aria-describedby="chat-character-count" /><small id="chat-character-count" className={cx('character-count', draft.length > CHAT_MESSAGE_MAX_CHARS && 'over-limit')}>{draft.length.toLocaleString()} / {CHAT_MESSAGE_MAX_CHARS.toLocaleString()}</small></div>
           {chatBusy && <button onClick={cancelGeneration} title="Cancel local model generation"><X size={16} /> Cancel</button>}
-          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim()} title={modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
+          <button className="primary" onClick={send} disabled={chatBusy || !draft.trim() || draft.length > CHAT_MESSAGE_MAX_CHARS} title={draft.length > CHAT_MESSAGE_MAX_CHARS ? 'Message is over the visible character limit; nothing will be truncated.' : modelReady ? 'Send to Planner Assistant' : 'Save the message; local inference must be configured before an assistant response is generated.'}><Bot size={16} /> {chatBusy ? 'Thinking...' : 'Send'}</button>
         </div>
         {picker && <ContextPicker picker={picker} onSearch={runPickerSearch} onPreview={previewContextRecord} onProposeUpdate={submitProposeUpdate} proposalBusy={proposalBusy} onAttach={attachRecord} onClose={closePicker} />}
       </div>
@@ -3381,17 +3422,18 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   const sourceTurn = [check.user_message_id ? `user #${check.user_message_id}` : '', check.assistant_message_id ? `assistant #${check.assistant_message_id}` : ''].filter(Boolean).join(' → ') || 'session context';
   const completedAt = check.status === 'completed' && check.updated_at ? new Date(check.updated_at).toLocaleString() : '';
   return <article className="cloud-check-card" aria-label={`Cloud check ${check.id}: ${stateLabel}`}>
-    <strong>{check.provider} / {check.model || 'configured browser model'} · {stateLabel}</strong>
-    <small>{check.scope} · {includedCount} included messages · approximately {(check.prompt || '').length} characters</small>
-    <small>Source: {sourceTurn} · Privacy: {check.classification || 'pending'} · created {new Date(check.created_at).toLocaleString()}{completedAt ? ` · completed ${completedAt}` : ''}</small>
-    <button className="link" onClick={onHistory}>Open Cloud Consultation #{check.consultation_id}</button>
-    <details><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>
-    {check.response && <div className="message-body" aria-live="polite" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} />}
-    {check.error_detail && <small role="status">{check.error_detail}</small>}
-    {check.status === 'prepared' && (providerConnected ? <button onClick={() => onSend(check.id)}>Send reviewed prompt</button> : <><small role="status">No signed-in provider tab is connected. No prompt has been sent.</small><button onClick={onHistory}>Open browser connection setup</button></>)}
-    {check.status === 'active' && <button onClick={() => onCancel(check.id)}>Cancel cloud check</button>}
-    {['failed', 'cancelled'].includes(check.status) && <button onClick={() => onRetry(check.id)}>Retry cloud check</button>}
-    {check.status === 'completed' && <>{check.feedback_dismissed_at ? <small>Feedback dismissed; this historical card remains available for provenance.</small> : <><button onClick={() => onGuidance(check.id, !check.guidance_active)}>{check.guidance_active ? 'Remove guidance' : 'Use for next reply'}</button><button onClick={() => onDismiss(check.id)}>Dismiss</button></>}{check.memory_candidate_id ? <small>Memory candidate #{check.memory_candidate_id} is awaiting review.</small> : <button onClick={() => onSaveCandidate(check.id)}>Save as memory candidate</button>}</>}
+    <header className="cloud-check-head"><div><span className="cloud-provider-mark"><Sparkles size={15} aria-hidden="true" /></span><strong>{check.provider}</strong><small>{check.model || 'configured browser model'}</small></div><Pill tone={check.status === 'completed' ? 'good' : check.status === 'failed' || check.status === 'blocked' ? 'warn' : 'info'}>{stateLabel}</Pill></header>
+    <div className="cloud-check-meta"><small>{check.scope} · {includedCount} included messages · approximately {(check.prompt || '').length} characters</small><small>Source: {sourceTurn} · Privacy: {check.classification || 'pending'}</small><small>Created {new Date(check.created_at).toLocaleString()}{completedAt ? ` · completed ${completedAt}` : ''}</small></div>
+    <button className="link cloud-check-history" onClick={onHistory}>Open Cloud Consultation #{check.consultation_id}</button>
+    <details className="cloud-check-prompt"><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>
+    {check.response && <div className="cloud-check-response"><small>Provider response</small><div className="message-body" aria-live="polite" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} /></div>}
+    {check.error_detail && <small className="cloud-check-error" role="status">{check.error_detail}</small>}
+    <footer className="cloud-check-actions">
+      {check.status === 'prepared' && (providerConnected ? <button onClick={() => onSend(check.id)}>Send reviewed prompt</button> : <><small role="status">No signed-in provider tab is connected. No prompt has been sent.</small><button onClick={onHistory}>Open browser connection setup</button></>)}
+      {check.status === 'active' && <button onClick={() => onCancel(check.id)}>Cancel cloud check</button>}
+      {['failed', 'cancelled'].includes(check.status) && <button onClick={() => onRetry(check.id)}>Retry cloud check</button>}
+      {check.status === 'completed' && <>{check.feedback_dismissed_at ? <small>Feedback dismissed; this historical card remains available for provenance.</small> : <><button className={check.guidance_active ? 'selected' : ''} onClick={() => onGuidance(check.id, !check.guidance_active)}>{check.guidance_active ? 'Remove guidance' : 'Use for next reply'}</button><button onClick={() => onDismiss(check.id)}>Dismiss</button></>}{check.memory_candidate_id ? <small>Memory candidate #{check.memory_candidate_id} is awaiting review.</small> : <button onClick={() => onSaveCandidate(check.id)}>Save as memory candidate</button>}</>}
+    </footer>
   </article>;
 }
 
