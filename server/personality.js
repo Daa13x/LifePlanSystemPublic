@@ -1,3 +1,5 @@
+import { db } from './db.js';
+
 export const PERSONALITY_SETTING_KEY = 'assistantPersonalityProfile';
 
 export const DEFAULT_LPS_PERSONALITY_PROFILE = Object.freeze({
@@ -90,3 +92,40 @@ export function renderPersonalitySystemPrompt(value) {
     boundaries
   ].join('\n');
 }
+
+
+export function ensurePersonalityProfile() {
+  const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'settings'").get();
+  if (!exists) return DEFAULT_LPS_PERSONALITY_PROFILE;
+  db.prepare(`
+    INSERT INTO settings (key, value, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(key) DO NOTHING
+  `).run(PERSONALITY_SETTING_KEY, JSON.stringify(DEFAULT_LPS_PERSONALITY_PROFILE));
+  return getPersonalityProfile();
+}
+
+export function getPersonalityProfile() {
+  try {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(PERSONALITY_SETTING_KEY);
+    if (!row) return DEFAULT_LPS_PERSONALITY_PROFILE;
+    let value = row.value;
+    try { value = JSON.parse(value); } catch { /* normalize raw legacy text below */ }
+    return normalizePersonalityProfile(value);
+  } catch {
+    return DEFAULT_LPS_PERSONALITY_PROFILE;
+  }
+}
+
+export function renderCurrentPersonalitySystemPrompt() {
+  return renderPersonalitySystemPrompt(getPersonalityProfile());
+}
+
+// index.js calls migrate() synchronously during module startup. Scheduling this
+// one tick later lets fresh installs create the settings table first, while
+// existing installs are upgraded without overwriting later reviewed edits.
+setImmediate(() => {
+  try { ensurePersonalityProfile(); } catch (error) {
+    console.warn(`LPS personality profile could not be seeded: ${error.message}`);
+  }
+});
