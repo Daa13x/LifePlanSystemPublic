@@ -15,7 +15,7 @@
     "build": "node scripts/write-build-info.mjs && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "start": "node server/index.js",
-    "check": "npm run verify:sync-contract && npm run verify:navigation-consolidation && npm run verify:chat-capabilities && npm run verify:chat-behavior && npm run verify:chat-reliability && npm run verify:chat-cloud-checks && npm run verify:action-registry && npm run verify:chat-command-ui && npm run verify:action-control-inventory && npm run verify:renderer-bridge && npm run verify:capacity-planner && npm run verify:planner-completion-history && npm run verify:local-answerability && npm run verify:personal-identity-grounding && npm run verify:work-order && npm run verify:feedback-intake && npm run verify:unattended-loop-guard && npm run verify:loop-attempts-http && npm run verify:failure-taxonomy && npm run verify:cost-routing && npm run verify:authority-boundary && npm run verify:agent-mode && npm run verify:bible-harness && npm run verify:native-authority-doc && npm run verify:native-coding-readiness && npm run verify:onboarding-capture && npm run verify:ui-reality && npm run verify:accessibility && npm run verify:local-commands && npm run verify:sync-outbox && npm run verify:sync-exchange && npm run verify:sync-instance-isolation && npm run verify:sync-bridge-multiuser && npm run verify:hosted-multiuser-isolation && npm run verify:android-beta && npm run build",
+    "check": "npm run verify:sync-contract && npm run verify:navigation-consolidation && npm run verify:chat-capabilities && npm run verify:chat-behavior && npm run verify:personality-profile && npm run verify:chat-reliability && npm run verify:chat-cloud-checks && npm run verify:action-registry && npm run verify:chat-command-ui && npm run verify:action-control-inventory && npm run verify:renderer-bridge && npm run verify:capacity-planner && npm run verify:planner-completion-history && npm run verify:local-answerability && npm run verify:personal-identity-grounding && npm run verify:work-order && npm run verify:feedback-intake && npm run verify:unattended-loop-guard && npm run verify:loop-attempts-http && npm run verify:failure-taxonomy && npm run verify:cost-routing && npm run verify:authority-boundary && npm run verify:agent-mode && npm run verify:bible-harness && npm run verify:native-authority-doc && npm run verify:native-coding-readiness && npm run verify:onboarding-capture && npm run verify:ui-reality && npm run verify:accessibility && npm run verify:local-commands && npm run verify:sync-outbox && npm run verify:sync-exchange && npm run verify:sync-instance-isolation && npm run verify:sync-bridge-multiuser && npm run verify:hosted-multiuser-isolation && npm run verify:android-beta && npm run build",
     "verify:accessibility": "node scripts/verify-accessibility.mjs",
     "verify:legacy-user-migration": "node scripts/verify-legacy-user-migration.mjs",
     "verify:local-commands": "node --experimental-test-module-mocks --test scripts/verify-local-commands.mjs",
@@ -132,7 +132,8 @@
     "build:native": "powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1",
     "verify:native": "powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1 -SmokeTest",
     "verify:installer-safety": "node scripts/verify-installer-safety.mjs",
-    "verify:build-provenance": "node scripts/verify-build-provenance.mjs"
+    "verify:build-provenance": "node scripts/verify-build-provenance.mjs",
+    "verify:personality-profile": "node scripts/verify-personality-profile.mjs"
   },
   "dependencies": {
     "@capacitor-community/sqlite": "^8.1.1",
