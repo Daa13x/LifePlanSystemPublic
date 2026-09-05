@@ -108,6 +108,12 @@ try {
   const manual = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: manualBody, token: pairing.token });
   assert.equal(manual.body.data.lifecycleState, 'MANUAL_RELOAD_REQUIRED');
   assert.equal(manual.body.data.manualReloadRequired, true);
+  const legacyHeartbeat = await request(baseUrl, '/api/browser/extension/heartbeat', {
+    method: 'POST', body: JSON.stringify({ tabs: [] }), token: pairing.token
+  });
+  assert.equal(legacyHeartbeat.body.data.lifecycleState, 'RELOAD_REQUIRED');
+  const legacyInstallInfo = await request(baseUrl, '/api/browser/extension/install-info');
+  assert.equal(legacyInstallInfo.body.data.manualChromeStepRequired, true, 'legacy extension instructions expose a boolean manual boundary');
   await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: heartbeatBody, token: pairing.token });
 
   const installInfo = await request(baseUrl, '/api/browser/extension/install-info');

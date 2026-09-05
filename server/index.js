@@ -8072,7 +8072,7 @@ app.get('/api/browser/extension/install-info', (_req, res) => {
   const connected = Date.now() - browserExtensionState.lastSeen < 15000;
   const lifecycle = browserExtensionLifecycle();
   const currentCopyLoaded = probe.chromeLoaded && (probe.exactPathMatch || probe.currentContentMatch);
-  const legacyHeartbeat = connected && !lifecycle.runningVersion && lifecycle.expectedVersion;
+  const legacyHeartbeat = Boolean(connected && !lifecycle.runningVersion && lifecycle.expectedVersion);
   const recommendedAction = lifecycle.lifecycleState === 'CONNECTED_CURRENT'
     ? 'The connector heartbeat is live and its running version matches this LPS installation.'
     : lifecycle.lifecycleState === 'RELOAD_IN_PROGRESS'
