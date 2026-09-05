@@ -30,6 +30,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  buildDetailRows,
   parseLegacyAssistantMessage,
   buildLegacyDetailRows
 } from '../src/messageDetail.js';
@@ -41,6 +42,18 @@ const repoRoot = path.resolve(__dirname, '..');
 let failures = 0;
 const line = (ok, msg) => { if (!ok) failures++; console.log(`${ok ? 'ok  ' : 'FAIL'}  ${msg}`); };
 const rowsToMap = (rows) => Object.fromEntries(rows);
+const noToolRows = rowsToMap(buildDetailRows({
+  runtime: 'conversation',
+  memoryGovernance: { created: false },
+  execution: {
+    route: { runtime: 'conversation', endpointType: 'local-conversation' },
+    capabilitiesUsed: [], toolsUsed: [], contextRetrieved: {}, mutations: [], verification: [], receipts: {}
+  },
+  timingMs: 12
+}, 'detailed'));
+line(noToolRows['Tools used'] === 'None', 'receipt-backed details explicitly report no tools');
+line(noToolRows['Actions / mutations'] === 'No persistent actions', 'receipt-backed details do not invent mutations');
+line(noToolRows['Context retrieved'] === 'None', 'receipt-backed details do not invent retrieved context');
 // The panel is hidden in clean and open otherwise (mirrors LegacyMessageDetails).
 const legacyPanelVisible = (mode) => mode !== 'clean';
 

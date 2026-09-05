@@ -90,6 +90,10 @@ try {
   assert.equal(todayMetadata.actionDecision?.confirmationRequirement, 'none');
   assert.equal(todayMetadata.actionDecision?.result, 'success');
   assert.ok(todayMetadata.actionDecision?.correlationId);
+  assert.deepEqual(todayMetadata.execution?.capabilitiesUsed, ['planner.today']);
+  assert.ok(todayMetadata.execution?.toolsUsed.includes('Planner database'));
+  assert.ok(todayMetadata.execution?.toolsUsed.includes('Action registry'));
+  assert.equal(todayMetadata.execution?.mutations.length, 0);
   const todayAudit = database.prepare('SELECT * FROM chat_audit WHERE correlation_id = ?').get(todayMetadata.actionDecision.correlationId);
   assert.equal(todayAudit?.capability, 'planner.today');
   assert.match(todayAudit?.detail || '', /source=personality-reasoning/);
@@ -145,6 +149,11 @@ try {
   assert.equal(ask.status, 200);
   assert.match(ask.data.messages.at(-1).content, /ChatGPT consultation #[0-9]+[\s\S]*ATOMPROOF42/);
   assert.doesNotMatch(ask.data.messages.at(-1).content, /don'?t have access|no access/i);
+  const askMetadata = JSON.parse(ask.data.messages.at(-1).metadata || '{}');
+  assert.deepEqual(askMetadata.execution?.capabilitiesUsed, ['cloud.consultation.read']);
+  assert.ok(askMetadata.execution?.toolsUsed.includes('Cloud consultation store'));
+  assert.equal(askMetadata.execution?.receipts?.consultationId, consultationId);
+  assert.ok(askMetadata.execution?.verification.includes('Cloud evidence: LOCAL_RECORD_ONLY'));
 
   for (const [index, content] of [
     'call chatgpt and have it say hello',

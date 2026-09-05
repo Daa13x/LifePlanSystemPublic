@@ -2537,8 +2537,46 @@ async function runPlannerAssistant(sessionId, userMessage, signal, onToken, onSt
 function buildAssistantMetadata(sessionId, candidateId, assistant, elapsedMs) {
   const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
   const candidate = candidateId ? row('SELECT id, type, title, confidence FROM memory_candidates WHERE id = ?', [candidateId]) : null;
+  const actionDecision = assistant.diagnostics?.invocationSource
+    ? {
+        invocationSource: assistant.diagnostics.invocationSource,
+        selectionReason: assistant.diagnostics.selectionReason || null,
+        routingReason: assistant.diagnostics.routingReason || null,
+        actionId: assistant.diagnostics.actionId || null,
+        risk: assistant.diagnostics.actionRisk || null,
+        confirmationRequirement: assistant.diagnostics.confirmationRequirement || null,
+        verification: Boolean(assistant.diagnostics.verification),
+        result: assistant.diagnostics.actionResult || null,
+        correlationId: assistant.diagnostics.correlationId || null
+      }
+    : null;
+  const cloudCheck = assistant.diagnostics?.consultationId
+    ? row(`SELECT id, consultation_id, provider, model, status, verification_level, browser_job_id,
+        provider_tab_id, provider_url, dispatch_receipt, capture_receipt
+      FROM chat_cloud_checks WHERE session_id = ? AND consultation_id = ?`, [sessionId, assistant.diagnostics.consultationId])
+    : null;
+  const localSources = Array.isArray(assistant.localSources) ? assistant.localSources : [];
+  const capabilitiesUsed = [actionDecision?.actionId, cloudCheck ? 'cloud.consultation.read' : null].filter(Boolean);
+  const toolsUsed = [];
+  if (actionDecision?.actionId) toolsUsed.push('Action registry');
+  if (actionDecision?.actionId?.startsWith('planner.')) toolsUsed.push('Planner database');
+  if (actionDecision?.actionId?.startsWith('knowledge.')) toolsUsed.push('Knowledge index');
+  if (actionDecision?.actionId?.startsWith('workboard.')) toolsUsed.push('Workboard database');
+  if (actionDecision?.actionId?.startsWith('system.')) toolsUsed.push('Live system diagnostics');
+  if (cloudCheck) toolsUsed.push('Cloud consultation store');
+  const mutations = [];
+  if (candidateId) mutations.push(`Memory candidate #${candidateId} created for review`);
+  if (assistant.diagnostics?.routingReason === 'use') mutations.push(`Cloud guidance enabled from consultation #${cloudCheck?.consultation_id || assistant.diagnostics.consultationId}`);
+  if (assistant.diagnostics?.routingReason === 'remove') mutations.push(`Cloud guidance disabled for consultation #${cloudCheck?.consultation_id || assistant.diagnostics.consultationId}`);
+  const verification = [];
+  if (actionDecision?.correlationId) verification.push('Action receipt present');
+  if (cloudCheck?.verification_level) verification.push(`Cloud evidence: ${cloudCheck.verification_level}`);
+  if (assistant.diagnostics?.consistencyGuard) verification.push(`Consistency guard: ${assistant.diagnostics.consistencyGuard}`);
+  const parseReceipt = (value) => {
+    try { return value ? JSON.parse(value) : null; } catch { return null; }
+  };
   return {
-    version: 1,
+    version: 2,
     runtime: assistant.mode,
     endpointType: assistant.diagnostics?.endpointType || null,
     endpoint: assistant.diagnostics?.endpoint || null,
@@ -2556,24 +2594,40 @@ function buildAssistantMetadata(sessionId, candidateId, assistant, elapsedMs) {
           created: false,
           message: 'Saved to chat history; no memory candidate was extracted from this short note.'
         },
-    localSources: Array.isArray(assistant.localSources) ? assistant.localSources : [],
+    localSources,
     // Transparent local-answerability / controlled-escalation decision (null for
     // casual conversation). The UI can render this and offer the EXISTING
     // reviewed cloud-check control; it never triggers a send on its own.
     localAnswerability: assistant.answerability || null,
-    actionDecision: assistant.diagnostics?.invocationSource
-      ? {
-          invocationSource: assistant.diagnostics.invocationSource,
-          selectionReason: assistant.diagnostics.selectionReason || null,
-          routingReason: assistant.diagnostics.routingReason || null,
-          actionId: assistant.diagnostics.actionId || null,
-          risk: assistant.diagnostics.actionRisk || null,
-          confirmationRequirement: assistant.diagnostics.confirmationRequirement || null,
-          verification: Boolean(assistant.diagnostics.verification),
-          result: assistant.diagnostics.actionResult || null,
-          correlationId: assistant.diagnostics.correlationId || null
-        }
-      : null,
+    actionDecision,
+    execution: {
+      route: {
+        runtime: assistant.mode || null,
+        endpointType: assistant.diagnostics?.endpointType || null,
+        model: assistant.diagnostics?.model || null,
+        provider: assistant.diagnostics?.provider || cloudCheck?.provider || null,
+        fallback: (assistant.mode === 'unavailable' || assistant.mode === 'runtime error') ? assistant.mode : null
+      },
+      capabilitiesUsed,
+      toolsUsed: [...new Set(toolsUsed)],
+      contextRetrieved: {
+        attachedFiles: contexts.length,
+        localSources: localSources.length,
+        cloudConsultationId: cloudCheck?.consultation_id || null
+      },
+      mutations,
+      verification,
+      receipts: {
+        actionCorrelationId: actionDecision?.correlationId || null,
+        cloudCheckId: cloudCheck?.id || null,
+        consultationId: cloudCheck?.consultation_id || null,
+        browserJobId: cloudCheck?.browser_job_id || null,
+        providerTabId: cloudCheck?.provider_tab_id || null,
+        providerUrl: cloudCheck?.provider_url || null,
+        dispatch: parseReceipt(cloudCheck?.dispatch_receipt),
+        capture: parseReceipt(cloudCheck?.capture_receipt)
+      }
+    },
     tokens: assistant.diagnostics?.usage || null,
     timingMs: typeof elapsedMs === 'number' ? elapsedMs : null,
     fallback: (assistant.mode === 'unavailable' || assistant.mode === 'runtime error') ? assistant.mode : null,

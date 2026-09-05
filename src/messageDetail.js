@@ -28,16 +28,33 @@ export function hasStructuredMetadata(metadata) {
 export function buildDetailRows(metadata, mode) {
   const rows = [];
   const governance = metadata.memoryGovernance || {};
+  const execution = metadata.execution || null;
+
+  if (execution) {
+    const route = execution.route || {};
+    rows.push(['Route', [route.runtime, route.model, route.provider, route.endpointType].filter(Boolean).join(' · ') || 'Local deterministic reply']);
+    rows.push(['Capabilities used', execution.capabilitiesUsed?.length ? execution.capabilitiesUsed.join(', ') : 'None']);
+    rows.push(['Tools used', execution.toolsUsed?.length ? execution.toolsUsed.join(', ') : 'None']);
+    const context = execution.contextRetrieved || {};
+    const retrieved = [];
+    if (context.attachedFiles) retrieved.push(`${context.attachedFiles} attached file${context.attachedFiles === 1 ? '' : 's'}`);
+    if (context.localSources) retrieved.push(`${context.localSources} local source${context.localSources === 1 ? '' : 's'}`);
+    if (context.cloudConsultationId) retrieved.push(`consultation #${context.cloudConsultationId}`);
+    rows.push(['Context retrieved', retrieved.length ? retrieved.join(' · ') : 'None']);
+    rows.push(['Actions / mutations', execution.mutations?.length ? execution.mutations.join(' · ') : 'No persistent actions']);
+    rows.push(['Verification', execution.verification?.length ? execution.verification.join(' · ') : 'No action or external receipt']);
+    if (typeof metadata.timingMs === 'number') rows.push(['Timing', `${metadata.timingMs} ms total`]);
+  }
 
   const contextFiles = Array.isArray(metadata.contextFiles) ? metadata.contextFiles : [];
-  rows.push(['Attached context', contextFiles.length ? contextFiles.join(', ') : 'None attached']);
+  if (!execution) rows.push(['Attached context', contextFiles.length ? contextFiles.join(', ') : 'None attached']);
   rows.push([
     'Memory action',
     governance.created
       ? `Candidate created${governance.type ? ` (${governance.type})` : ''} — pending your review`
       : 'No memory candidate created'
   ]);
-  rows.push(['Runtime / provider', metadata.runtime || 'unknown']);
+  if (!execution) rows.push(['Runtime / provider', metadata.runtime || 'unknown']);
   const localSources = Array.isArray(metadata.localSources) ? metadata.localSources : [];
   if (localSources.length) {
     rows.push(['Local sources', localSources.map((source) => `${source.title} (${source.category}; ${source.state}; updated ${source.updatedAt || 'unknown'})`).join(' · ')]);
@@ -68,6 +85,7 @@ export function buildDetailRows(metadata, mode) {
     if (metadata.error) rows.push(['Error', metadata.error]);
     for (const source of localSources) rows.push(['Source detail', `${source.title}: ${source.whySelected || 'relevant'} · ${source.source || 'local'} · ${source.provenance || 'no additional provenance'}`]);
     if (metadata.generatedAt) rows.push(['Generated at', metadata.generatedAt]);
+    if (execution?.receipts) rows.push(['Advanced / raw receipts', JSON.stringify(execution.receipts)]);
   }
 
   return rows;
