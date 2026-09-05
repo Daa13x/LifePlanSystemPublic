@@ -304,7 +304,7 @@ try {
   const statusConfirmationsAfter = Number(statusConfirmationsAfterDb.prepare('SELECT COUNT(*) AS count FROM confirmations').get()?.count || 0);
   statusConfirmationsAfterDb.close();
   line(statusResponse.status === 200 && statusAction?.status === 'success' && statusAction?.actionId === 'system.status' && statusAction?.data?.sqlite?.ready === true && typeof statusAction?.data?.browserConnector?.connected === 'boolean', 'system.status returns a structured authoritative local receipt');
-  line(JSON.stringify(Object.keys(statusAction?.data || {}).sort()) === JSON.stringify(['browserConnector', 'health', 'model', 'repository', 'runtime', 'sqlite', 'workboard']) && JSON.stringify(statusAction?.data || {}).length < 3000, 'system.status response has a strict bounded top-level shape');
+  line(JSON.stringify(Object.keys(statusAction?.data || {}).sort()) === JSON.stringify(['browserConnector', 'currentState', 'health', 'model', 'recentActions', 'repository', 'runtime', 'sqlite', 'workboard']) && JSON.stringify(statusAction?.data || {}).length < 12000, 'system.status response has a strict bounded top-level shape');
   line(statusContextBefore.body?.data?.length === statusContextAfter.body?.data?.length && statusItemsBefore.body?.data?.length === statusItemsAfter.body?.data?.length && statusConfirmationsBefore === statusConfirmationsAfter, 'checking system status creates no attachment, Workboard item, or confirmation');
   const conversationalStatus = await api(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', json: { content: 'What is the current system status?' } });
   const conversationalReply = conversationalStatus.body?.data?.messages?.find((message) => message.role === 'assistant');

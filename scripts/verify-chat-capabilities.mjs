@@ -65,7 +65,9 @@ const deps = {
       runtime: { managedServerRunning: true, managedServerReady: true, endpoint: oversizedWorkboardText, endpointConfigured: true, llamaServerAvailable: true, llamaCliAvailable: false, lastResult: { output: oversizedWorkboardText } },
       workboard: { focus: 2, blockers: 1, waiting: 3, automatic: 4, stale: 5, approvals: 6, candidates: 7, injected: oversizedWorkboardText },
       browserConnector: { connected: true, secret: oversizedWorkboardText },
-      repository: { available: true, branch: oversizedWorkboardText, hasChanges: false, hasConflicts: false, ahead: 1, behind: 2, note: oversizedWorkboardText, remote: oversizedWorkboardText }
+      repository: { available: true, branch: oversizedWorkboardText, hasChanges: false, hasConflicts: false, ahead: 1, behind: 2, note: oversizedWorkboardText, remote: oversizedWorkboardText },
+      currentState: [{ key: 'service.chrome_connector.health', value: 'connected', status: 'CURRENT', freshnessClass: 'LIVE', lastVerified: '2026-09-05T00:00:00.000Z', source: oversizedWorkboardText }],
+      recentActions: [{ id: 7, capability: 'system.status', outcome: 'read', correlation_id: 'receipt-7', created_at: '2026-09-05T00:00:00.000Z', secret: oversizedWorkboardText }]
     };
   },
   listModels: async () => {
@@ -340,11 +342,13 @@ await checkAsync('system.runs returns bounded strict run summaries', async () =>
 await checkAsync('system.status returns one strict bounded receipt from the authoritative dependency', async () => {
   calls.length = 0;
   const r = await reg.invoke('system.status', {});
-  assert.deepEqual(Object.keys(r.data).sort(), ['browserConnector', 'health', 'model', 'repository', 'runtime', 'sqlite', 'workboard']);
+  assert.deepEqual(Object.keys(r.data).sort(), ['browserConnector', 'currentState', 'health', 'model', 'recentActions', 'repository', 'runtime', 'sqlite', 'workboard']);
   assert.deepEqual(Object.keys(r.data.runtime).sort(), ['endpoint', 'endpointConfigured', 'llamaCliAvailable', 'llamaServerAvailable', 'managedServerReady', 'managedServerRunning']);
   assert.deepEqual(Object.keys(r.data.repository).sort(), ['ahead', 'available', 'behind', 'branch', 'hasChanges', 'hasConflicts', 'note']);
   assert.equal(r.data.sqlite.ready, true);
   assert.equal(r.data.browserConnector.connected, true);
+  assert.deepEqual(Object.keys(r.data.currentState[0]).sort(), ['freshnessClass', 'key', 'lastVerified', 'source', 'status', 'value']);
+  assert.deepEqual(Object.keys(r.data.recentActions[0]).sort(), ['capability', 'correlationId', 'createdAt', 'id', 'outcome']);
   for (const value of [r.data.health.storageFile, r.data.model.name, r.data.model.file_error, r.data.runtime.endpoint, r.data.repository.branch, r.data.repository.note]) assert.match(value, /\[truncated \d+ chars\]$/);
   assert.ok(JSON.stringify(r.data).length < 3000, 'complete status receipt stays bounded');
   assert.deepEqual(calls, [['systemStatus']]);

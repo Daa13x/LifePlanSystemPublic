@@ -55,7 +55,7 @@ line(!ui.includes('up to eight scoped') && !ui.includes('/ 3 bounded gap-resolut
 line(ui.includes("['prepared', 'needs-evidence'].includes(selectedCodingTask.status)") && ui.includes('The in-scope read budget is exhausted.'), 'needs-evidence offers the truthful advisory-or-rescope path instead of presenting a blind rerun as recovery');
 line(ui.includes('Create a durable run confirmation') && ui.includes('Create a durable patch-apply confirmation') && ui.includes('Confirm once'), 'coding run and apply use explicit token-backed confirmation controls rather than UI-only success state');
 line(/button\.primary:disabled,[\s\S]*background: var\(--panel-2\)/.test(styles), 'disabled primary actions use a neutral unavailable state instead of success styling');
-for (const phrase of ['nothing recorded yet', 'Prepared — connection required', 'not tracked', 'local only']) {
+for (const phrase of ['nothing recorded yet', 'Prepared — review before sending', 'not tracked', 'local only']) {
   line(ui.includes(phrase), `honest-state language retained: "${phrase}"`);
 }
 
