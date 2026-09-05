@@ -281,6 +281,16 @@ function boundedSystemStatusResult(value) {
         candidates: count(status.workboard.candidates)
       }
     : null;
+  const currentState = Array.isArray(status.currentState) ? status.currentState.slice(0, 12).map((point) => ({
+    key: nullableText(point?.key, 160), value: nullableText(point?.value, 240),
+    status: nullableText(point?.status, 40), freshnessClass: nullableText(point?.freshnessClass, 40),
+    lastVerified: nullableText(point?.lastVerified, 80), source: nullableText(point?.source, LIMITS.provenanceSourceMaxLength)
+  })) : [];
+  const recentActions = Array.isArray(status.recentActions) ? status.recentActions.slice(0, 5).map((action) => ({
+    id: Number.isSafeInteger(action?.id) ? action.id : null,
+    capability: nullableText(action?.capability, 160), outcome: nullableText(action?.outcome, 80),
+    correlationId: nullableText(action?.correlation_id, 160), createdAt: nullableText(action?.created_at, 80)
+  })) : [];
   return {
     health: {
       db: status.health?.db === 'ready' ? 'ready' : 'unavailable',
@@ -311,7 +321,9 @@ function boundedSystemStatusResult(value) {
       ahead: nullableCount(status.repository?.ahead),
       behind: nullableCount(status.repository?.behind),
       note: nullableText(status.repository?.note, LIMITS.provenanceEvidenceMaxLength)
-    }
+    },
+    currentState,
+    recentActions
   };
 }
 
@@ -529,8 +541,8 @@ const ACTION_METADATA = Object.freeze({
     label: 'Read system status', feature: 'System', permission: 'system.read', risk: ACTION_RISKS.READ_ONLY,
     confirmation: ACTION_CONFIRMATIONS.NONE, sideEffects: [], sourceControls: ['chat.command.system-status'], testId: 'action.system.status',
     resultSchema: resultObject(
-      ['health', 'sqlite', 'model', 'runtime', 'workboard', 'browserConnector', 'repository'],
-      { health: { type: 'object' }, sqlite: { type: 'object' }, model: { type: 'object' }, runtime: { type: 'object' }, workboard: { type: ['object', 'null'] }, browserConnector: { type: 'object' }, repository: { type: 'object' } }
+      ['health', 'sqlite', 'model', 'runtime', 'workboard', 'browserConnector', 'repository', 'currentState', 'recentActions'],
+      { health: { type: 'object' }, sqlite: { type: 'object' }, model: { type: 'object' }, runtime: { type: 'object' }, workboard: { type: ['object', 'null'] }, browserConnector: { type: 'object' }, repository: { type: 'object' }, currentState: { type: 'array' }, recentActions: { type: 'array' } }
     )
   },
   'system.models': {

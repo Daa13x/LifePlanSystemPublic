@@ -47,6 +47,8 @@ console.log('--- chat behaviour verification ---');
     ['List my active Workboard project names.', 'workboard_list'],
     ['show me my projects', 'workboard_list'],
     ['Show me the current system status.', 'system_status'],
+    ['Inspect the current router and action audit.', 'system_status'],
+    ['What is the browser health?', 'system_status'],
     ['what is the system status', 'system_status'],
     ['Which model is active?', 'model_query'],
     ['what model is loaded right now', 'model_query'],

@@ -64,6 +64,7 @@ import {
 import { classifyCloudProviderIntent } from './cloudIntent.js';
 import { resolveAgentMode } from './agentMode.js';
 import { getPersonalityProfile } from './personality.js';
+import { listCurrentStatePoints, setCurrentStatePoint } from './temporalState.js';
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
 import { assessLocalAnswerability } from './localAnswerability.js';
 import { buildWorkOrder } from './workOrder.js';
@@ -1983,7 +1984,10 @@ function formatCapabilityChatReply(intent, data) {
       `- **Model:** ${data.model?.name || 'none assigned'} (${data.model?.assigned ? 'assigned' : 'not assigned'})`,
       `- **Runtime:** ${data.runtime?.managedServerRunning ? 'server running' : data.runtime?.endpointConfigured ? 'endpoint configured' : 'not running'}`,
       `- **Repository:** ${data.repository?.available ? data.repository.hasChanges ? 'has changes' : 'clean' : 'unavailable'}`,
-      `- **Browser connector:** ${data.browserConnector?.connected ? 'connected' : 'disconnected'}`
+      `- **Browser connector:** ${data.browserConnector?.connected ? 'connected' : 'disconnected'}`,
+      ...(data.currentState || []).map((point) => `- **${point.key}:** ${point.value} (${point.status.toLowerCase()}, ${point.freshnessClass.toLowerCase()}; verified ${point.lastVerified})`),
+      `- **Recent action receipts:** ${(data.recentActions || []).length}`,
+      ...(data.recentActions || []).map((action) => `  - ${action.capability} — ${action.outcome}${action.correlationId ? ` (${action.correlationId})` : ''}`)
     ].join('\n');
   }
   if (intent === 'model_query') {
@@ -4745,6 +4749,17 @@ const capabilityRegistry = createCapabilityRegistry({
       const snap = await gitStatusSnapshot();
       repository = { available: true, branch: snap.branch || null, hasChanges: (snap.changedFiles?.length || 0) > 0, hasConflicts: Boolean(snap.hasConflicts), ahead: snap.ahead ?? null, behind: snap.behind ?? null };
     } catch { /* repository detail is optional/best-effort */ }
+    const connectorConnected = browserConnectorConnected();
+    const providerTabs = agentTabsFromUrls(browserExtensionState.tabs);
+    const cloudBrowserWorking = connectorConnected && Object.values(providerTabs).some((provider) => provider.open);
+    setCurrentStatePoint(db, {
+      key: 'service.chrome_connector.health', value: connectorConnected ? 'connected' : 'disconnected', freshnessClass: 'LIVE',
+      source: 'system.status runtime probe', receiptId: `system-status:${Date.now()}`
+    });
+    setCurrentStatePoint(db, {
+      key: 'capability.cloud_browser.health', value: cloudBrowserWorking ? 'working' : 'unavailable', freshnessClass: 'LIVE',
+      source: 'system.status browser/provider probe', receiptId: `system-status:${Date.now()}`
+    });
     return {
       health: { db: 'ready', storageFile: path.basename(dbPath) },
       sqlite: { ready: true },
@@ -4759,8 +4774,10 @@ const capabilityRegistry = createCapabilityRegistry({
         lastResult: lastRuntimeResult
       },
       workboard,
-      browserConnector: { connected: browserConnectorConnected() },
-      repository
+      browserConnector: { connected: connectorConnected, providers: providerTabs },
+      repository,
+      currentState: listCurrentStatePoints(db, { limit: 12 }).map((point) => ({ key: point.key, value: point.value, status: point.status, freshnessClass: point.freshness_class, lastVerified: point.last_verified, source: point.source })),
+      recentActions: allRows('SELECT id, capability, outcome, correlation_id, created_at FROM chat_audit ORDER BY id DESC LIMIT 5')
     };
   },
   async listModels() {
@@ -7874,9 +7891,19 @@ app.post('/api/browser/extension/heartbeat', (req, res) => {
     .filter((tab) => Object.values(cloudAgentHosts).some((hosts) => tabMatchesAgent(tab.url, hosts)))
     .map((tab) => ({ id: tab.id, title: tab.title || '', url: tab.url || '' }))
     .slice(0, 100);
+  setCurrentStatePoint(db, {
+    key: 'service.chrome_connector.health', value: 'connected', freshnessClass: 'LIVE',
+    source: 'browser extension heartbeat', receiptId: `heartbeat:${browserExtensionState.lastSeen}`
+  });
+  const heartbeatProviders = agentTabsFromUrls(browserExtensionState.tabs);
+  setCurrentStatePoint(db, {
+    key: 'capability.cloud_browser.health',
+    value: Object.values(heartbeatProviders).some((provider) => provider.open) ? 'working' : 'unavailable',
+    freshnessClass: 'LIVE', source: 'browser extension heartbeat', receiptId: `heartbeat:${browserExtensionState.lastSeen}`
+  });
   ok(res, {
     connected: true,
-    agents: agentTabsFromUrls(browserExtensionState.tabs)
+    agents: heartbeatProviders
   });
 });
 
@@ -7970,6 +7997,11 @@ app.post('/api/browser/extension/jobs/:id', (req, res) => {
           .run(nextStatus, response || null, status === 'answered' ? null : (job.error || job.result.message || 'Provider request failed.'), providerUrl || null, captureReceipt, verificationLevel, check.id);
         db.prepare('UPDATE consultations SET external_response = COALESCE(?, external_response), opened_url = COALESCE(?, opened_url), opened_title = COALESCE(?, opened_title), captured_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE captured_at END, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(response || null, providerUrl || null, job.result.title || null, status === 'answered' ? 1 : 0, nextStatus, check.consultation_id);
+      });
+      if (check) setCurrentStatePoint(db, {
+        key: `capability.${String(check.provider || job.targetAgent).toLowerCase()}.invocation_health`,
+        value: status === 'answered' ? 'working' : status,
+        freshnessClass: 'LIVE', source: 'browser provider execution receipt', receiptId: `browser-job:${job.id}`
       });
     }
   }

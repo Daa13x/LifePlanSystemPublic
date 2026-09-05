@@ -39,6 +39,8 @@ export function classifyChatIntent(message) {
     || /\b(health|diagnostic|diagnostics)\s+(check|status|report|overview)\b/.test(lower)) {
     return 'system_status';
   }
+  if (/\b(?:router|routing|action\s+audit|recent\s+actions?|browser\s+(?:health|status)|cloud\s+controller|action\s+registry)\b/.test(lower)
+      && /\b(?:show|check|inspect|report|status|health|diagnostic|current|recent|what|is|are)\b/.test(lower)) return 'system_status';
 
   // Blocked items.
   if (/\bblock(ed|er|ers)\b/.test(lower) && asksWhat) {

@@ -286,6 +286,23 @@ export function migrate() {
     );
     CREATE INDEX IF NOT EXISTS idx_chat_cloud_checks_session ON chat_cloud_checks(session_id, created_at);
 
+    -- Machine-verifiable changing facts use a current projection plus an
+    -- append-only transition ledger. Reviewed Knowledge remains independent.
+    CREATE TABLE IF NOT EXISTS state_points (
+      key TEXT PRIMARY KEY, value_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'CURRENT',
+      freshness_class TEXT NOT NULL DEFAULT 'DYNAMIC', source TEXT NOT NULL, evidence_type TEXT NOT NULL,
+      verification_state TEXT NOT NULL DEFAULT 'verified', confidence REAL NOT NULL DEFAULT 1,
+      valid_from TEXT NOT NULL, valid_until TEXT, last_verified TEXT NOT NULL, current_event_id INTEGER,
+      receipt_id TEXT, originating_message_id INTEGER, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS state_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, point_key TEXT NOT NULL, previous_value_json TEXT, value_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'CURRENT', freshness_class TEXT NOT NULL, source TEXT NOT NULL, evidence_type TEXT NOT NULL,
+      verification_state TEXT NOT NULL, confidence REAL NOT NULL DEFAULT 1, valid_from TEXT NOT NULL, valid_until TEXT,
+      receipt_id TEXT, originating_message_id INTEGER, superseded_by INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_state_events_point ON state_events(point_key, id);
+
     -- Explicitly-selected Knowledge/Workboard records attached to a conversation
     -- as Chat context. Provenance (kind + ref_id + label) is retained so the
     -- assistant only ever sees records the user deliberately chose. Nothing is

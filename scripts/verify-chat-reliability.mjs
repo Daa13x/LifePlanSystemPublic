@@ -169,6 +169,7 @@ try {
   const diagnostic = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-reliability-diagnostic-0001', body: { content: 'Show the current system status and router diagnostics for ChatGPT. Do not return any previous consultation result.' } });
   assert.equal(diagnostic.status, 200);
   assert.doesNotMatch(diagnostic.data.messages.at(-1).content, /ATOMPROOF42/);
+  assert.match(diagnostic.data.messages.at(-1).content, /service\.chrome_connector\.health/);
   assert.equal(JSON.parse(diagnostic.data.messages.at(-1).metadata || '{}').actionDecision?.actionId, 'system.status');
 
   const contextual = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-reliability-context-0001', body: { content: "what's this?" } });
