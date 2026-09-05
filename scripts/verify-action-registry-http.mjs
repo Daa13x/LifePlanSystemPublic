@@ -374,7 +374,10 @@ try {
   const heartbeat = await fetch(`${base}/api/browser/extension/heartbeat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-LPS-Connector-Token': pairingConfig.token },
-    body: JSON.stringify({ tabs: [] })
+    body: JSON.stringify({
+      tabs: [],
+      runningVersion: JSON.parse(fs.readFileSync(path.join(process.cwd(), 'browser-extension', 'lps-browser-agent', 'manifest.json'), 'utf8')).version
+    })
   });
   line(heartbeat.ok, 'the disposable server\'s own pairing token authenticates a real connector heartbeat');
   const browserReadyProbe = await import('playwright').then(async ({ chromium }) => {

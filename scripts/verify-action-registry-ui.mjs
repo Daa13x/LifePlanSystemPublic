@@ -267,7 +267,7 @@ assert.doesNotMatch(ui, /function ChatConnectionBar\(/, 'the permanent technical
 assert.match(ui, /sidebarCollapsed && 'sidebar-collapsed'/, 'the conversation sidebar can release its width to Chat');
 assert.match(ui, /<Pencil size=\{15\}/, 'rename uses a recognisable pencil beside the title');
 assert.match(ui, /actionsOpen && <div className=\{cx\('context-bar', 'chat-actions-panel'/, 'attachments and actions are contextual rather than permanently open');
-assert.match(ui, /actionsOpen && <><div className="cloud-composer"/, 'cloud controls are contextual rather than permanent composer chrome');
+assert.match(ui, /\(actionsOpen \|\| cloudPreview\) && <><div className="cloud-composer"/, 'cloud controls remain contextual and an actively prepared review cannot be hidden');
 assert.match(ui, /prepareDirectUiAction\(outgoing\)/, 'desktop natural-language commands are checked before an ordinary model turn');
 assert.match(ui, /invokeAction\('planner\.propose_create',[\s\S]*setPlannerProposal\(/, 'natural-language task creation uses the existing proposal action and approval card');
 const historyFunctionStart = ui.indexOf('async function searchChatHistory(');

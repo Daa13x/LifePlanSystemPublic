@@ -2877,18 +2877,26 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       setCloudProvider(provider.provider);
       setCloudModel(provider.model || '');
       setCloudInstruction(outgoing);
+      setActionsOpen(true);
       setCloudPreview(await api(`/api/chat/sessions/${originSessionId}/cloud-checks/preview`, {
         method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: provider.provider, model: provider.model, instruction: outgoing, recordFailure: true })
       }));
       setNotice(`Prepared a reviewed ${provider.provider} cloud check. Review the exact prompt before sending.`);
     } catch (err) {
       setNotice(`Could not prepare the ${provider.provider} cloud check: ${err.message}`);
-      // The server persists only failures it actually observed. Re-read that
-      // durable conversation instead of synthesising a client-side receipt.
-      try {
-        const history = await api(`/api/chat/sessions/${originSessionId}/messages`);
-        if (canRenderOrigin()) setMessages(history);
-      } catch { /* retain the optimistic/saved view until reconnect */ }
+      // The server returns the exact assistant row it persisted. Render that
+      // receipt immediately instead of racing a follow-up history read; it is
+      // still server-owned evidence, never a client-synthesised failure.
+      if (canRenderOrigin() && err.persistedMessage) {
+        setMessages((current) => current.some((message) => message.id === err.persistedMessage.id)
+          ? current
+          : [...current, err.persistedMessage]);
+      } else {
+        try {
+          const history = await api(`/api/chat/sessions/${originSessionId}/messages`);
+          if (canRenderOrigin()) setMessages(history);
+        } catch { /* retain the optimistic/saved view until reconnect */ }
+      }
     } finally {
       if (canRenderOrigin()) setChatBusy(false);
       refreshAll();
@@ -3443,7 +3451,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
               ))}
             </div>
           )}
-          {!IS_NATIVE && actionsOpen && <><div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected', !item.configured && 'setup-required')} onClick={() => chooseCloudProvider(item)} title={item.configured ? `Prepare a reviewed ${item.provider} cloud check` : `Prepare locally, then connect ${item.provider}`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} aria-hidden="true" /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud provider model" value={cloudModel} onChange={(event) => { setCloudModel(event.target.value); setCloudPreview(null); }}><option value={cloudProviders.find((item) => item.provider === cloudProvider)?.model || ''}>{cloudProviders.find((item) => item.provider === cloudProvider)?.model || 'Provider default'}</option></select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => { setCloudScope(event.target.value); setCloudPreview(null); }}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider || cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS}>Review cloud prompt</button></> : <small>Enable a cloud provider in Settings with +.</small>}</div>
+          {!IS_NATIVE && (actionsOpen || cloudPreview) && <><div className="cloud-composer" aria-label="Cloud check controls"><span title="Cloud check"><Globe2 size={16} /></span>{cloudProviders.map((item) => <button key={item.provider} className={cx('cloud-provider-button', cloudProvider === item.provider && 'selected', !item.configured && 'setup-required')} onClick={() => chooseCloudProvider(item)} title={item.configured ? `Prepare a reviewed ${item.provider} cloud check` : `Prepare locally, then connect ${item.provider}`} aria-label={`Use ${item.provider}`}>{item.provider === 'ChatGPT' ? <Sparkles size={16} aria-hidden="true" /> : item.provider.slice(0, 1)}</button>)}<button className="cloud-provider-button" onClick={() => navigate('settings')} title="Manage cloud accounts" aria-label="Manage cloud accounts"><Plus size={16} /></button>{cloudProviders.length ? <><select aria-label="Cloud provider model" value={cloudModel} onChange={(event) => { setCloudModel(event.target.value); setCloudPreview(null); }}><option value={cloudProviders.find((item) => item.provider === cloudProvider)?.model || ''}>{cloudProviders.find((item) => item.provider === cloudProvider)?.model || 'Provider default'}</option></select><select aria-label="Cloud check scope" value={cloudScope} onChange={(event) => { setCloudScope(event.target.value); setCloudPreview(null); }}><option value="latest-turn">Latest turn</option><option value="full-conversation">Full conversation</option></select><button onClick={previewCloudCheck} disabled={!cloudProvider || cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS}>Review cloud prompt</button></> : <small>Enable a cloud provider in Settings with +.</small>}</div>
           {cloudPreview && <div className="cloud-preview"><strong>{cloudProvider} cloud check</strong><small>{cloudPreview.model} · {cloudPreview.classification} · {cloudPreview.messageCount} messages · {cloudPreview.characters} characters</small><label>Focus for the cloud consultant (optional)<textarea value={cloudInstruction} onChange={(event) => setCloudInstruction(event.target.value)} placeholder="For example: focus on missing risks and a clearer next reply." /></label><small className={cx('character-count', cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS && 'over-limit')}>{cloudInstruction.length.toLocaleString()} / {CLOUD_GUIDANCE_MAX_CHARS.toLocaleString()} characters. Use Full conversation for larger in-chat context; text over the limit stays here until you edit it.</small>{cloudPreview.instruction !== cloudInstruction && <small role="status">Guidance changed. Review the exact prompt again before sending.</small>}<details open><summary>Exact authorised prompt</summary><pre>{cloudPreview.prompt}</pre></details>{cloudPreview.blocked ? <small>Blocked server-side; no provider request can be made.</small> : <button className="primary" onClick={createCloudCheck} disabled={cloudPreview.instruction !== cloudInstruction || cloudInstruction.length > CLOUD_GUIDANCE_MAX_CHARS}>Ask {cloudProvider}</button>}</div>}</>}
           {!IS_NATIVE && cloudChecks.some((check) => check.guidance_active) && <div className="source-warning info cloud-guidance-banner" role="status"><strong>Cloud guidance active</strong><small>The selected completed cloud feedback will advise this session's next successfully stored assistant reply once, then be removed.</small></div>}
           <button className={cx('icon-button', 'chat-actions-toggle', actionsOpen && 'selected')} onClick={() => setActionsOpen((value) => !value)} aria-label={actionsOpen ? 'Close actions and attachments' : 'Open actions and attachments'} title={actionsOpen ? 'Close actions and attachments' : 'Actions and attachments'}><Paperclip size={18} /></button>

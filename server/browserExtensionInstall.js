@@ -2,6 +2,63 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const LPS_BROWSER_EXTENSION_NAME = 'Life Planner Browser Agent';
+export const BROWSER_EXTENSION_RELOAD_WINDOW_MS = 60 * 60 * 1000;
+export const BROWSER_EXTENSION_RELOAD_GRACE_MS = 15 * 1000;
+export const BROWSER_EXTENSION_LIFECYCLE_STATES = Object.freeze([
+  'CONNECTED_CURRENT',
+  'CONNECTED_STALE',
+  'RELOAD_REQUIRED',
+  'RELOAD_IN_PROGRESS',
+  'MANUAL_RELOAD_REQUIRED',
+  'OFFLINE'
+]);
+
+const EXTENSION_VERSION = /^\d+(?:\.\d+){1,3}$/;
+
+export function bundledBrowserExtensionIdentity(extensionPath) {
+  const manifest = readJson(path.join(extensionPath, 'manifest.json'));
+  if (!manifest || manifest.name !== LPS_BROWSER_EXTENSION_NAME || !EXTENSION_VERSION.test(String(manifest.version || ''))) {
+    return { available: false, name: '', version: '' };
+  }
+  return { available: true, name: manifest.name, version: String(manifest.version) };
+}
+
+function validAttempt(value) {
+  if (!value || typeof value !== 'object') return null;
+  const expectedVersion = String(value.expectedVersion || '');
+  const attemptedAt = Date.parse(value.attemptedAt);
+  const result = String(value.result || '');
+  if (!EXTENSION_VERSION.test(expectedVersion) || !Number.isFinite(attemptedAt) || !['in_progress', 'manual_required'].includes(result)) return null;
+  return { expectedVersion, attemptedAt, result };
+}
+
+export function resolveBrowserExtensionLifecycle({
+  heartbeatFresh,
+  runningVersion,
+  expectedVersion,
+  reloadAttempt = null,
+  now = Date.now(),
+  recoveryWindowMs = BROWSER_EXTENSION_RELOAD_WINDOW_MS,
+  reloadGraceMs = BROWSER_EXTENSION_RELOAD_GRACE_MS
+} = {}) {
+  if (!heartbeatFresh) return { lifecycleState: 'OFFLINE', reloadRequired: false, manualReloadRequired: false };
+  const running = String(runningVersion || '');
+  const expected = String(expectedVersion || '');
+  if (!EXTENSION_VERSION.test(expected)) return { lifecycleState: 'CONNECTED_STALE', reloadRequired: false, manualReloadRequired: false };
+  if (running === expected) return { lifecycleState: 'CONNECTED_CURRENT', reloadRequired: false, manualReloadRequired: false };
+  if (running && !EXTENSION_VERSION.test(running)) return { lifecycleState: 'CONNECTED_STALE', reloadRequired: false, manualReloadRequired: false };
+
+  const attempt = validAttempt(reloadAttempt);
+  const attemptAge = attempt ? now - attempt.attemptedAt : Infinity;
+  const sameExpectedAttempt = attempt?.expectedVersion === expected && attemptAge >= 0 && attemptAge <= recoveryWindowMs;
+  if (sameExpectedAttempt && attempt.result === 'in_progress' && attemptAge <= reloadGraceMs) {
+    return { lifecycleState: 'RELOAD_IN_PROGRESS', reloadRequired: false, manualReloadRequired: false };
+  }
+  if (sameExpectedAttempt) {
+    return { lifecycleState: 'MANUAL_RELOAD_REQUIRED', reloadRequired: false, manualReloadRequired: true };
+  }
+  return { lifecycleState: 'RELOAD_REQUIRED', reloadRequired: true, manualReloadRequired: false };
+}
 
 export function chromeExtensionEnabled(setting) {
   if (!setting || typeof setting !== 'object') return false;

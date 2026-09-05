@@ -1,7 +1,15 @@
+importScripts('reloadPolicy.js');
+
 const LPS = 'http://127.0.0.1:4177';
 const JOB_SENT_MESSAGE = 'lps-browser-agent-job-sent';
+const RELOAD_GUARD_KEY = 'lpsBrowserAgentReloadAttempt';
 let pairingConfigPromise;
-const bridgeState = { lastSuccessAt: '', lastError: '', lastPollAt: '' };
+let reloadScheduled = false;
+const bridgeState = {
+  lastSuccessAt: '', lastError: '', lastPollAt: '',
+  runningVersion: chrome.runtime.getManifest().version,
+  expectedVersion: '', lifecycleState: 'CONNECTED_STALE', reloadState: 'idle'
+};
 
 const AGENT_URLS = {
   ChatGPT: 'https://chatgpt.com/',
@@ -78,21 +86,71 @@ async function visibleTabs() {
     .map((tab) => ({ id: tab.id, title: tab.title || '', url: tab.url || '' }));
 }
 
+async function readReloadAttempt() {
+  const stored = await chrome.storage.local.get(RELOAD_GUARD_KEY);
+  return stored?.[RELOAD_GUARD_KEY] || null;
+}
+
+async function clearReloadAttempt() {
+  await chrome.storage.local.remove(RELOAD_GUARD_KEY);
+}
+
+async function applyReloadDecision(lifecycle, priorAttempt) {
+  const decision = LpsBrowserReloadPolicy.decide({
+    ...lifecycle,
+    reloadAttempt: priorAttempt,
+    recoveryWindowMs: lifecycle.recoveryWindowMs
+  });
+  bridgeState.lifecycleState = decision.lifecycleState;
+  if (decision.action === 'CLEAR') {
+    bridgeState.reloadState = priorAttempt ? 'settled' : 'idle';
+    if (priorAttempt) await clearReloadAttempt();
+    return;
+  }
+  if (decision.action === 'MANUAL') {
+    bridgeState.reloadState = 'manual_required';
+    if (priorAttempt?.result !== 'manual_required') {
+      await chrome.storage.local.set({ [RELOAD_GUARD_KEY]: {
+        expectedVersion: lifecycle.expectedVersion,
+        attemptedAt: priorAttempt?.attemptedAt || new Date().toISOString(),
+        result: 'manual_required'
+      } });
+    }
+    return;
+  }
+  if (decision.action !== 'RELOAD' || reloadScheduled) return;
+  const attempt = { expectedVersion: lifecycle.expectedVersion, attemptedAt: new Date().toISOString(), result: 'in_progress' };
+  await chrome.storage.local.set({ [RELOAD_GUARD_KEY]: attempt });
+  bridgeState.lifecycleState = 'RELOAD_IN_PROGRESS';
+  bridgeState.reloadState = 'automatic_reload_scheduled';
+  reloadScheduled = true;
+  setTimeout(() => chrome.runtime.reload(), 100);
+}
+
 async function heartbeat() {
   bridgeState.lastPollAt = new Date().toISOString();
   try {
+    const reloadAttempt = await readReloadAttempt();
     const result = await api('/api/browser/extension/heartbeat', {
       method: 'POST',
-      body: JSON.stringify({ tabs: await visibleTabs() })
+      body: JSON.stringify({
+        tabs: await visibleTabs(),
+        runningVersion: bridgeState.runningVersion,
+        reloadAttempt
+      })
     });
     if (!result?.ok) throw new Error(result?.error || 'The local bridge rejected the heartbeat.');
+    const lifecycle = result.data || {};
+    bridgeState.expectedVersion = lifecycle.expectedVersion || '';
+    bridgeState.lifecycleState = lifecycle.lifecycleState || 'CONNECTED_STALE';
+    await applyReloadDecision(lifecycle, reloadAttempt);
     bridgeState.lastSuccessAt = new Date().toISOString();
     bridgeState.lastError = '';
-    return true;
+    return { bridgeReachable: true, lifecycleState: bridgeState.lifecycleState };
   } catch (error) {
     bridgeState.lastError = String(error?.message || 'The local bridge did not respond.').slice(0, 300);
     // LPS may be closed; try again on the next tick.
-    return false;
+    return { bridgeReachable: false, lifecycleState: 'OFFLINE' };
   }
 }
 
@@ -297,7 +355,8 @@ async function handleJob(job) {
 }
 
 async function poll() {
-  await heartbeat();
+  const health = await heartbeat();
+  if (!health.bridgeReachable || health.lifecycleState !== 'CONNECTED_CURRENT') return;
   try {
     const result = await api('/api/browser/extension/next');
     if (result.ok && result.data?.job) await handleJob(result.data.job);
@@ -328,14 +387,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   void (async () => {
     const config = await pairingConfig();
     const tabs = await visibleTabs();
-    const bridgeReachable = await heartbeat();
+    const health = await heartbeat();
     sendResponse({
       ok: true,
       bridgeUrl: config.bridgeUrl || LPS,
-      bridgeReachable,
+      bridgeReachable: health.bridgeReachable,
       lastSuccessAt: bridgeState.lastSuccessAt,
       lastPollAt: bridgeState.lastPollAt,
       lastError: bridgeState.lastError,
+      runningVersion: bridgeState.runningVersion,
+      expectedVersion: bridgeState.expectedVersion,
+      lifecycleState: bridgeState.lifecycleState,
+      reloadState: bridgeState.reloadState,
       tabs
     });
   })().catch((error) => sendResponse({ ok: false, error: error?.message || 'Unable to read connector status.' }));

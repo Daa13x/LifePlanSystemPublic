@@ -74,6 +74,7 @@ try {
   assert.match(pairing.token, /^[a-f0-9]{64}$/);
 
   const heartbeatBody = JSON.stringify({
+    runningVersion: '0.1.2',
     tabs: [
       { id: 1, title: 'ChatGPT', url: 'https://chatgpt.com/' },
       { id: 2, title: 'Private bank', url: 'https://bank.example/account' }
@@ -81,7 +82,38 @@ try {
   });
   assert.equal((await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: heartbeatBody })).status, 401);
   assert.equal((await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: heartbeatBody, token: '0'.repeat(64) })).status, 401);
-  assert.equal((await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: heartbeatBody, token: pairing.token })).status, 200);
+  const currentHeartbeat = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: heartbeatBody, token: pairing.token });
+  assert.equal(currentHeartbeat.status, 200);
+  assert.equal(currentHeartbeat.body.data.lifecycleState, 'CONNECTED_CURRENT');
+  assert.equal(currentHeartbeat.body.data.runningVersion, '0.1.2');
+  assert.equal(currentHeartbeat.body.data.expectedVersion, '0.1.2');
+
+  const mismatchBody = JSON.stringify({ runningVersion: '0.1.1', tabs: [{ id: 1, title: 'ChatGPT', url: 'https://chatgpt.com/' }] });
+  const mismatch = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: mismatchBody, token: pairing.token });
+  assert.equal(mismatch.body.data.lifecycleState, 'RELOAD_REQUIRED');
+  assert.equal(mismatch.body.data.reloadRequired, true);
+  const staleNext = await request(baseUrl, '/api/browser/extension/next', { token: pairing.token });
+  assert.equal(staleNext.status, 409, 'a stale running extension cannot claim browser work');
+  assert.equal(staleNext.body.failure.errorCode, 'BROWSER_CONNECTOR_STALE');
+  const inProgressBody = JSON.stringify({
+    runningVersion: '0.1.1', tabs: [],
+    reloadAttempt: { expectedVersion: '0.1.2', attemptedAt: new Date().toISOString(), result: 'in_progress' }
+  });
+  const inProgress = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: inProgressBody, token: pairing.token });
+  assert.equal(inProgress.body.data.lifecycleState, 'RELOAD_IN_PROGRESS');
+  const manualBody = JSON.stringify({
+    runningVersion: '0.1.1', tabs: [],
+    reloadAttempt: { expectedVersion: '0.1.2', attemptedAt: new Date(Date.now() - 20_000).toISOString(), result: 'in_progress' }
+  });
+  const manual = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: manualBody, token: pairing.token });
+  assert.equal(manual.body.data.lifecycleState, 'MANUAL_RELOAD_REQUIRED');
+  assert.equal(manual.body.data.manualReloadRequired, true);
+  await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: heartbeatBody, token: pairing.token });
+
+  const installInfo = await request(baseUrl, '/api/browser/extension/install-info');
+  assert.equal(installInfo.body.data.lifecycleState, 'CONNECTED_CURRENT');
+  assert.equal(installInfo.body.data.runningVersion, installInfo.body.data.expectedVersion);
+  assert.equal(installInfo.body.data.manualReloadRequired, false);
 
   const tabs = await request(baseUrl, '/api/browser/agent-tabs');
   assert.equal(tabs.status, 200);
@@ -188,6 +220,25 @@ try {
   });
   assert.equal(blockedPreview.status, 200);
   assert.equal(blockedPreview.body.data.blocked, true, 'sensitive cloud egress is blocked server-side');
+
+  const failedCreate = await mutate(`/api/chat/sessions/${sessionId}/cloud-checks`, {
+    scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: '', idempotency_key: 'connector-behaviour-failure-0001'
+  });
+  assert.equal((await mutate(`/api/chat/cloud-checks/${failedCreate.body.data.check.id}/send`, {})).status, 200);
+  const failedClaim = await request(baseUrl, '/api/browser/extension/next', { token: pairing.token });
+  const failedResult = await request(baseUrl, `/api/browser/extension/jobs/${failedClaim.body.data.job.id}`, {
+    method: 'POST', token: pairing.token,
+    body: JSON.stringify({ status: 'error', claimToken: failedClaim.body.data.job.claimToken, error: 'No content-script result.' })
+  });
+  assert.equal(failedResult.status, 200);
+  const failureHistory = await (await fetch(`${baseUrl}/api/chat/sessions/${sessionId}/messages`)).json();
+  const browserFailureMessage = failureHistory.data.at(-1);
+  const browserFailureMetadata = JSON.parse(browserFailureMessage.metadata || '{}');
+  assert.equal(browserFailureMetadata.failure?.errorCode, 'BROWSER_DISPATCH_FAILED');
+  assert.equal(browserFailureMetadata.failure?.lastSuccessfulStage, 'browser.job.claimed');
+  assert.equal(browserFailureMetadata.failure?.causedBy?.errorCode, 'BROWSER_ADAPTER_FAILURE');
+  assert.ok(browserFailureMetadata.failure?.receiptIds.includes(`browser-job:${failedClaim.body.data.job.id}`));
+  assert.match(browserFailureMessage.content, /BROWSER_DISPATCH_FAILED/, 'a Browser Agent failure is visible in the conversation, not only the cloud card');
   console.log('Chat cloud workflow HTTP verification passed: dispatch, capture, guidance, candidate, cancellation, and privacy boundaries.');
 
   const settings = await request(baseUrl, '/api/settings');

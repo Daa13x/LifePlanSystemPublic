@@ -12,15 +12,16 @@
     h1,h2,p { margin:0; } h1 { font-size:16px; } h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:7px; }
     .state { color:var(--warn); } .state.ok { color:var(--good); } .mono { font-family:ui-monospace,Consolas,monospace; overflow-wrap:anywhere; }
     ul { margin:0; padding-left:18px; } button { border:1px solid var(--line); border-radius:6px; background:#263740; color:var(--text); padding:8px 10px; cursor:pointer; } button:focus-visible { outline:2px solid var(--good); outline-offset:2px; }
-    .actions { display:flex; gap:8px; } small,.diagnostic { color:var(--muted); } .diagnostic { margin-top:8px; }
+    .actions { display:flex; gap:8px; } small,.diagnostic { color:var(--muted); } .diagnostic { margin-top:8px; } [hidden] { display:none !important; }
   </style>
 </head>
 <body>
   <main>
     <section><h1>Life Planner Browser Agent</h1><p id="state" class="state" aria-live="polite">Checking the local bridge…</p></section>
+    <section><h2>Version</h2><p>Running: <span id="running" class="mono">—</span></p><p>Life Planner expects: <span id="expected" class="mono">—</span></p><small id="reload-state">Checking update state…</small></section>
     <section><h2>Local bridge</h2><div id="bridge" class="mono">—</div><small>This extension only talks to the paired local LPS bridge.</small><p id="diagnostic" class="diagnostic" aria-live="polite"></p></section>
     <section><h2>Supported signed-in tabs</h2><ul id="tabs"><li>Checking…</li></ul></section>
-    <section class="actions"><button id="refresh" type="button">Refresh status</button><button id="extensions" type="button">Open extensions</button></section>
+    <section class="actions"><button id="refresh" type="button">Refresh status</button><button id="extensions" type="button" hidden>Open extensions to Reload</button></section>
   </main>
   <script src="popup.js"></script>
 </body>

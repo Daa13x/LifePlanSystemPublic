@@ -91,7 +91,13 @@ import {
   enforceChangedFiles
 } from './executorEnforcement.js';
 import { resolveRunCliCwd } from './runCliCwd.js';
-import { chromeProfileArgument, probeChromeExtension } from './browserExtensionInstall.js';
+import {
+  BROWSER_EXTENSION_RELOAD_WINDOW_MS,
+  bundledBrowserExtensionIdentity,
+  chromeProfileArgument,
+  probeChromeExtension,
+  resolveBrowserExtensionLifecycle
+} from './browserExtensionInstall.js';
 import { NativeCodingWorker, NATIVE_CODING_LIMITS, NATIVE_CODING_VALIDATIONS, nativeCodingTaskSeal } from './nativeCodingWorker.js';
 import { buildNativeCodingReadinessReceipt, publicNativeCodingReadiness } from './nativeCodingReadiness.js';
 import {
@@ -229,7 +235,10 @@ let browserAgentJobSeq = 1;
 const browserAgentJobs = new Map();
 const browserExtensionState = {
   lastSeen: 0,
-  tabs: []
+  tabs: [],
+  runningVersion: '',
+  reloadAttempt: null,
+  lifecycleState: 'OFFLINE'
 };
 
 function emptyInstallerBuildState() {
@@ -837,6 +846,25 @@ function browserExtensionProbe() {
     userDataRoot: chromeUserDataRoot(),
     extensionPath: browserAgentExtensionDir()
   });
+}
+
+function browserExtensionLifecycle(now = Date.now()) {
+  const expected = bundledBrowserExtensionIdentity(browserAgentExtensionDir());
+  const lifecycle = resolveBrowserExtensionLifecycle({
+    heartbeatFresh: now - browserExtensionState.lastSeen < 15000,
+    runningVersion: browserExtensionState.runningVersion,
+    expectedVersion: expected.version,
+    reloadAttempt: browserExtensionState.reloadAttempt,
+    now
+  });
+  return {
+    ...lifecycle,
+    runningVersion: browserExtensionState.runningVersion || null,
+    expectedVersion: expected.version || null,
+    expectedVersionAvailable: expected.available,
+    lastHeartbeatAt: browserExtensionState.lastSeen ? new Date(browserExtensionState.lastSeen).toISOString() : null,
+    recoveryWindowMs: BROWSER_EXTENSION_RELOAD_WINDOW_MS
+  };
 }
 
 async function chromeDebugEndpointAvailable(endpoint = 'http://127.0.0.1:9222') {
@@ -2764,7 +2792,7 @@ function persistChatFailureMessage(sessionId, failure) {
 }
 
 function browserConnectorConnected() {
-  return Date.now() - browserExtensionState.lastSeen < 15000;
+  return browserExtensionLifecycle().lifecycleState === 'CONNECTED_CURRENT';
 }
 
 function browserSetupText(status = {}, connectorConnected = false) {
@@ -5763,7 +5791,7 @@ app.get('/api/chat/sessions/:id/cloud-checks', (req, res) => {
 app.get('/api/chat/cloud-providers', (_req, res) => {
   const enabled = getSetting('cloudEnabledProviders', Object.keys(cloudAgentHosts));
   const selected = Array.isArray(enabled) ? enabled.filter((provider) => Object.hasOwn(cloudAgentHosts, provider)) : Object.keys(cloudAgentHosts);
-  const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
+  const connectorConnected = browserExtensionLifecycle().lifecycleState === 'CONNECTED_CURRENT';
   const sessions = agentTabsFromUrls(browserExtensionState.tabs);
   ok(res, selected.map((provider) => ({
     provider,
@@ -5795,7 +5823,7 @@ app.get('/api/chat/answerability', (req, res) => {
 app.get('/api/cloud/accounts', (_req, res) => {
   const enabled = getSetting('cloudEnabledProviders', []);
   const selected = Array.isArray(enabled) ? enabled : [];
-  const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
+  const connectorConnected = browserExtensionLifecycle().lifecycleState === 'CONNECTED_CURRENT';
   const sessions = agentTabsFromUrls(browserExtensionState.tabs);
   ok(res, Object.keys(cloudAgentHosts).map((provider) => ({
     provider,
@@ -5920,12 +5948,46 @@ app.post('/api/chat/cloud-checks/:id/send', (req, res) => {
   if (!check) return fail(res, 404, 'Cloud check not found.');
   if (check.status === 'blocked') return fail(res, 409, 'This cloud check is blocked by the server privacy policy.');
   if (['sent', 'active', 'completed'].includes(check.status)) return ok(res, { check, reused: true });
-  if (getSetting('browserAgentMode', 'myChromeConnector') !== 'myChromeConnector' || Date.now() - browserExtensionState.lastSeen >= 15000) {
-    return fail(res, 409, 'The configured browser provider is not connected. No prompt was sent.');
+  const lifecycle = browserExtensionLifecycle();
+  if (getSetting('browserAgentMode', 'myChromeConnector') !== 'myChromeConnector' || lifecycle.lifecycleState === 'OFFLINE') {
+    const failure = createFailureEnvelope({
+      errorCode: 'BROWSER_CONNECTOR_OFFLINE', message: 'The configured browser provider is not connected. No prompt was sent.',
+      subsystem: 'browser.connector', stage: 'browser.connector.connect', operation: 'dispatch_cloud_check', reason: 'connector_offline',
+      lastSuccessfulStage: 'consultation.prepare', failedStage: 'browser.connector.connect', capability: 'cloud.browser.execute',
+      provider: check.provider, model: check.model, receiptIds: [`cloud-check:${check.id}`, `consultation:${check.consultation_id}`],
+      retryable: true, userActionRequired: true,
+      persistentChanges: ['User message saved', `Consultation #${check.consultation_id} prepared`, 'Prompt not sent'],
+      lastConfirmed: 'consultation.prepare', firstUnconfirmed: 'browser.job.create'
+    });
+    const message = persistChatFailureMessage(check.session_id, failure);
+    return fail(res, 409, failure.message, { failure, message, lifecycle });
+  }
+  if (lifecycle.lifecycleState !== 'CONNECTED_CURRENT') {
+    const failure = createFailureEnvelope({
+      errorCode: 'BROWSER_CONNECTOR_STALE', message: 'The Browser Agent is connected but its running version is not current. No prompt was sent.',
+      subsystem: 'browser.connector', stage: 'browser.version.verify', operation: 'dispatch_cloud_check', reason: 'version_mismatch',
+      lastSuccessfulStage: 'browser.heartbeat.receive', failedStage: 'browser.version.verify', capability: 'cloud.browser.execute',
+      provider: check.provider, model: check.model, receiptIds: [`cloud-check:${check.id}`, `consultation:${check.consultation_id}`],
+      retryable: true, userActionRequired: lifecycle.manualReloadRequired,
+      persistentChanges: ['User message saved', `Consultation #${check.consultation_id} prepared`, 'Prompt not sent'],
+      lastConfirmed: 'browser.heartbeat.receive', firstUnconfirmed: 'browser.job.create'
+    });
+    const message = persistChatFailureMessage(check.session_id, failure);
+    return fail(res, 409, failure.message, { failure, message, lifecycle });
   }
   const providerSession = agentTabsFromUrls(browserExtensionState.tabs)[check.provider];
   if (!providerSession?.open) {
-    return fail(res, 409, `No signed-in ${check.provider} tab is connected. No prompt was sent.`);
+    const failure = createFailureEnvelope({
+      errorCode: 'CLOUD_PROVIDER_UNAVAILABLE', message: `No signed-in ${check.provider} tab is connected. No prompt was sent.`,
+      subsystem: 'cloud.consult', stage: 'browser.provider.resolve', operation: 'resolve_provider_tab', reason: 'provider_tab_unavailable',
+      lastSuccessfulStage: 'browser.version.verify', failedStage: 'browser.provider.resolve', capability: 'cloud.browser.execute',
+      provider: check.provider, model: check.model, receiptIds: [`cloud-check:${check.id}`, `consultation:${check.consultation_id}`],
+      retryable: true, userActionRequired: true,
+      persistentChanges: ['User message saved', `Consultation #${check.consultation_id} prepared`, 'Prompt not sent'],
+      lastConfirmed: 'browser.version.verify', firstUnconfirmed: 'browser.job.create'
+    });
+    const message = persistChatFailureMessage(check.session_id, failure);
+    return fail(res, 409, failure.message, { failure, message, lifecycle });
   }
   const job = { id: browserAgentJobSeq++, status: 'pending', targetAgent: check.provider, url: defaultCloudAgentUrl(check.provider), prompt: check.prompt, chatCheckId: check.id, createdAt: Date.now(), updatedAt: Date.now(), result: null, error: '' };
   browserAgentJobs.set(job.id, job);
@@ -7897,9 +7959,9 @@ app.post('/api/browser/consult', async (req, res) => {
     const contexts = prepared.contexts;
     const prompt = prepared.prompt;
     if (getSetting('browserAgentMode', 'myChromeConnector') === 'myChromeConnector') {
-      const connectorFresh = Date.now() - browserExtensionState.lastSeen < 15000;
-      if (!connectorFresh) {
-        return fail(res, 409, 'Chrome connector is not connected. Install or reload the unpacked extension in browser-extension/lps-browser-agent, then keep LPS open in your normal Chrome.');
+      const connectorConnected = browserConnectorConnected();
+      if (!connectorConnected) {
+        return fail(res, 409, 'Chrome connector is unavailable or its running version is stale. Install or reload the unpacked extension in browser-extension/lps-browser-agent, then keep LPS open in your normal Chrome.');
       }
       const id = browserAgentJobSeq++;
       const job = {
@@ -7967,9 +8029,12 @@ app.post('/api/browser/consult', async (req, res) => {
 app.get('/api/browser/agent-tabs', async (_req, res) => {
   const connectorFresh = Date.now() - browserExtensionState.lastSeen < 15000;
   if (connectorFresh) {
+    const lifecycle = browserExtensionLifecycle();
     return ok(res, {
       cdpAvailable: false,
-      connectorAvailable: true,
+      connectorAvailable: lifecycle.lifecycleState === 'CONNECTED_CURRENT',
+      connectorHeartbeatFresh: true,
+      lifecycle,
       agents: agentTabsFromUrls(browserExtensionState.tabs)
     });
   }
@@ -8005,9 +8070,21 @@ app.get('/api/browser/extension/install-info', (_req, res) => {
   const extensionPath = browserAgentExtensionDir();
   const probe = browserExtensionProbe();
   const connected = Date.now() - browserExtensionState.lastSeen < 15000;
+  const lifecycle = browserExtensionLifecycle();
   const currentCopyLoaded = probe.chromeLoaded && (probe.exactPathMatch || probe.currentContentMatch);
-  const recommendedAction = connected
-    ? 'The connector heartbeat is live.'
+  const legacyHeartbeat = connected && !lifecycle.runningVersion && lifecycle.expectedVersion;
+  const recommendedAction = lifecycle.lifecycleState === 'CONNECTED_CURRENT'
+    ? 'The connector heartbeat is live and its running version matches this LPS installation.'
+    : lifecycle.lifecycleState === 'RELOAD_IN_PROGRESS'
+      ? 'A Browser Agent update was detected and one automatic reload is in progress.'
+      : lifecycle.lifecycleState === 'MANUAL_RELOAD_REQUIRED'
+        ? 'The automatic reload was already attempted but the running version is still stale. Reload the Life Planner Browser Agent once in chrome://extensions.'
+        : legacyHeartbeat
+          ? 'This running Browser Agent predates version self-recovery. Reload it once to activate the current bundled generation.'
+          : lifecycle.lifecycleState === 'RELOAD_REQUIRED'
+            ? 'A Browser Agent update was detected. The extension will attempt one guarded automatic reload.'
+            : connected
+              ? 'The connector heartbeat is live, but its version could not be verified.'
     : probe.installedInChrome && !probe.chromeLoaded
       ? 'Enable the Life Planner Browser Agent in the detected Chrome profile.'
       : probe.chromeLoaded && !currentCopyLoaded
@@ -8030,13 +8107,14 @@ app.get('/api/browser/extension/install-info', (_req, res) => {
     otherBrowserAgentPaths: probe.otherBrowserAgentPaths,
     exactPathMatch: probe.exactPathMatch,
     currentContentMatch: probe.currentContentMatch,
+    ...lifecycle,
     requiresInstall: !probe.installedInChrome,
     requiresEnable: probe.installedInChrome && !probe.chromeLoaded,
-    requiresReload: probe.chromeLoaded && !currentCopyLoaded,
+    requiresReload: (probe.chromeLoaded && !currentCopyLoaded) || ['RELOAD_REQUIRED', 'RELOAD_IN_PROGRESS', 'MANUAL_RELOAD_REQUIRED'].includes(lifecycle.lifecycleState),
     waitingForHeartbeat: currentCopyLoaded && !connected,
     recommendedAction,
     chromeExtensionsUrl: 'chrome://extensions',
-    manualChromeStepRequired: !connected,
+    manualChromeStepRequired: !probe.installedInChrome || !probe.chromeLoaded || (probe.chromeLoaded && !currentCopyLoaded) || legacyHeartbeat || lifecycle.manualReloadRequired,
     manualChromeBoundary: 'Chrome requires your own click for Developer mode, Load unpacked, Enable, and Reload. LPS opens the correct screen and folder but does not automate protected extension controls.',
     instructions: [
       'Open chrome://extensions in the Chrome profile that runs LPS.',
@@ -8085,6 +8163,14 @@ app.post('/api/browser/extension/heartbeat', (req, res) => {
   if (!requireBrowserExtension(req, res)) return;
   const tabs = Array.isArray(req.body.tabs) ? req.body.tabs : [];
   browserExtensionState.lastSeen = Date.now();
+  browserExtensionState.runningVersion = String(req.body.runningVersion || '').trim().slice(0, 32);
+  browserExtensionState.reloadAttempt = req.body.reloadAttempt && typeof req.body.reloadAttempt === 'object'
+    ? {
+        expectedVersion: String(req.body.reloadAttempt.expectedVersion || '').slice(0, 32),
+        attemptedAt: String(req.body.reloadAttempt.attemptedAt || '').slice(0, 40),
+        result: String(req.body.reloadAttempt.result || '').slice(0, 32)
+      }
+    : null;
   browserExtensionState.tabs = tabs
     .filter((tab) => tab && typeof tab.url === 'string')
     .filter((tab) => Object.values(cloudAgentHosts).some((hosts) => tabMatchesAgent(tab.url, hosts)))
@@ -8095,19 +8181,45 @@ app.post('/api/browser/extension/heartbeat', (req, res) => {
     source: 'browser extension heartbeat', receiptId: `heartbeat:${browserExtensionState.lastSeen}`
   });
   const heartbeatProviders = agentTabsFromUrls(browserExtensionState.tabs);
+  const lifecycle = browserExtensionLifecycle(browserExtensionState.lastSeen);
+  browserExtensionState.lifecycleState = lifecycle.lifecycleState;
+  setCurrentStatePoint(db, {
+    key: 'service.chrome_connector.lifecycle', value: lifecycle.lifecycleState, freshnessClass: 'LIVE',
+    source: 'browser extension version heartbeat', receiptId: `heartbeat:${browserExtensionState.lastSeen}`
+  });
+  setCurrentStatePoint(db, {
+    key: 'service.chrome_connector.version',
+    value: `${lifecycle.runningVersion || 'unknown'} / expected ${lifecycle.expectedVersion || 'unknown'}`,
+    freshnessClass: 'LIVE', source: 'browser extension version heartbeat', receiptId: `heartbeat:${browserExtensionState.lastSeen}`
+  });
   setCurrentStatePoint(db, {
     key: 'capability.cloud_browser.health',
-    value: Object.values(heartbeatProviders).some((provider) => provider.open) ? 'working' : 'unavailable',
+    value: lifecycle.lifecycleState === 'CONNECTED_CURRENT' && Object.values(heartbeatProviders).some((provider) => provider.open) ? 'working' : 'unavailable',
     freshnessClass: 'LIVE', source: 'browser extension heartbeat', receiptId: `heartbeat:${browserExtensionState.lastSeen}`
   });
   ok(res, {
     connected: true,
-    agents: heartbeatProviders
+    agents: heartbeatProviders,
+    ...lifecycle
   });
 });
 
 app.get('/api/browser/extension/next', (req, res) => {
   if (!requireBrowserExtension(req, res)) return;
+  const lifecycle = browserExtensionLifecycle();
+  if (lifecycle.lifecycleState !== 'CONNECTED_CURRENT') {
+    const failure = createFailureEnvelope({
+      errorCode: 'BROWSER_CONNECTOR_STALE',
+      message: 'The Browser Agent cannot accept work until its running version matches this LPS installation.',
+      subsystem: 'browser.connector', stage: 'browser.version.verify', operation: 'claim_next_job', reason: 'version_mismatch',
+      lastSuccessfulStage: 'browser.heartbeat.receive', failedStage: 'browser.version.verify',
+      capability: 'cloud.browser.execute', tool: 'Life Planner Browser Agent',
+      retryable: true, userActionRequired: lifecycle.manualReloadRequired,
+      lastConfirmed: 'browser.heartbeat.receive', firstUnconfirmed: 'browser.job.claim',
+      receiptIds: lifecycle.lastHeartbeatAt ? [`heartbeat:${lifecycle.lastHeartbeatAt}`] : []
+    });
+    return fail(res, 409, failure.message, { failure, lifecycle });
+  }
   const now = Date.now();
   for (const item of browserAgentJobs.values()) {
     if (item.status === 'claimed' && item.leaseExpiresAt < now) {
@@ -8202,6 +8314,48 @@ app.post('/api/browser/extension/jobs/:id', (req, res) => {
         value: status === 'answered' ? 'working' : status,
         freshnessClass: 'LIVE', source: 'browser provider execution receipt', receiptId: `browser-job:${job.id}`
       });
+      if (check && status !== 'answered') {
+        const timedOut = /within 90 seconds|timed? out|deadline/i.test(String(job.error || job.result.message || ''));
+        const dispatched = Boolean(check.dispatch_receipt);
+        const errorCode = timedOut ? 'REMOTE_RESPONSE_TIMEOUT' : dispatched ? 'REMOTE_RESPONSE_CAPTURE_FAILED' : 'BROWSER_DISPATCH_FAILED';
+        const failedStage = timedOut ? 'remote.response.detected' : dispatched ? 'remote.response.capture' : 'browser.prompt.submit';
+        const lastConfirmed = dispatched ? 'browser.prompt.submitted' : 'browser.job.claimed';
+        const failure = createFailureEnvelope({
+          errorCode,
+          message: timedOut
+            ? `The ${check.provider} prompt was submitted, but no completed response was observed before the deadline.`
+            : dispatched
+              ? `The ${check.provider} prompt was submitted, but its response could not be captured.`
+              : `The Browser Agent could not submit the ${check.provider} prompt.`,
+          subsystem: dispatched ? 'browser.capture' : 'browser.dispatch',
+          stage: failedStage,
+          operation: timedOut ? 'wait_for_response' : dispatched ? 'capture_response' : 'submit_prompt',
+          reason: status === 'blocked' ? 'provider_or_composer_blocked' : 'adapter_reported_failure',
+          lastSuccessfulStage: lastConfirmed,
+          failedStage,
+          capability: 'cloud.browser.execute',
+          tool: 'Life Planner Browser Agent',
+          provider: check.provider,
+          model: check.model,
+          receiptIds: [`cloud-check:${check.id}`, `consultation:${check.consultation_id}`, `browser-job:${job.id}`],
+          retryable: true,
+          userActionRequired: status === 'blocked',
+          persistentChanges: [
+            'User message saved',
+            `Consultation #${check.consultation_id} created`,
+            ...(dispatched ? ['Prompt submitted'] : ['Prompt not confirmed as submitted']),
+            'No remote response stored'
+          ],
+          lastConfirmed,
+          firstUnconfirmed: failedStage,
+          causedBy: {
+            errorCode: status === 'blocked' ? 'BROWSER_PROVIDER_BLOCKED' : 'BROWSER_ADAPTER_FAILURE',
+            subsystem: 'browser.extension', stage: failedStage, operation: 'report_job_result',
+            reason: status === 'blocked' ? 'blocked' : 'error'
+          }
+        });
+        persistChatFailureMessage(check.session_id, failure);
+      }
     }
   }
   ok(res, { job });
@@ -9660,7 +9814,7 @@ app.post('/api/source/build-installer', async (_req, res) => {
 app.get('/api/source/coding/status', async (_req, res) => {
   const model = await nativeCodingModelConfig();
   const recoveredWorktrees = await nativeCodingWorker.cleanupOrphanedWorktrees();
-  const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
+  const connectorConnected = browserConnectorConnected();
   const providerTabs = agentTabsFromUrls(browserExtensionState.tabs);
   ok(res, {
     // Each task carries a redacted lease-observability view (owner, expiry,
@@ -9764,7 +9918,7 @@ app.post('/api/source/coding/tasks/:id/advice/send', async (req, res) => {
     if (advice.provider === 'ChatGPT' && req.body?.temporaryChatConfirmed !== true) {
       return fail(res, 428, 'Confirm ChatGPT Temporary Chat before sending coding context. LPS cannot verify that setting automatically.');
     }
-    const connectorConnected = Date.now() - browserExtensionState.lastSeen < 15000;
+    const connectorConnected = browserConnectorConnected();
     const providerConnected = Boolean(connectorConnected && agentTabsFromUrls(browserExtensionState.tabs)[advice.provider]?.open);
     if (!providerConnected) {
       advice.status = 'unavailable';

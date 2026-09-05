@@ -159,11 +159,48 @@ try {
   assert.equal(await page.getByText('Custom shortcuts', { exact: true }).count(), 1, 'Settings exposes the constrained custom-command foundation');
 
   await page.goto(`http://127.0.0.1:${port}/#chat`, { waitUntil: 'domcontentloaded' });
+  const firstChatUrl = page.url();
   await page.getByRole('button', { name: 'New chat', exact: true }).click();
+  await page.waitForURL((url) => url.href !== firstChatUrl && /#chat\/\d+$/.test(url.hash));
   await page.getByRole('heading', { name: 'New planning chat', exact: true }).waitFor();
+
+  const directCloudText = 'Ask ChatGPT to reply with exactly CONNECTED';
+  const firstTurnPreviewResponse = page.waitForResponse((response) => /\/cloud-checks\/preview$/.test(response.url()));
+  await input.fill(directCloudText);
+  await input.press('Enter');
+  assert.equal((await firstTurnPreviewResponse).status(), 200, 'a direct cloud request in an empty Chat prepares successfully');
+  await page.locator('.message.user .message-body').filter({ hasText: directCloudText }).waitFor();
+  try {
+    await page.locator('.cloud-preview').waitFor({ timeout: 5000 });
+  } catch (error) {
+    throw new Error(`Direct cloud preview did not render. Composer: ${await page.locator('.composer').innerText()} Notices: ${(await page.locator('.notice-banner').allTextContents()).join(' | ')}`, { cause: error });
+  }
+  const firstTurnSessionId = Number(new URL(page.url()).hash.match(/#chat\/(\d+)/)?.[1]);
+  assert.equal(database.prepare("SELECT COUNT(*) count FROM chat_messages WHERE session_id = ? AND role = 'user' AND content = ?").get(firstTurnSessionId, directCloudText).count, 1, 'the exact direct cloud request is durably persisted');
+
+  const directChatUrl = page.url();
+  await page.getByRole('button', { name: 'New chat', exact: true }).click();
+  await page.waitForURL((url) => url.href !== directChatUrl && /#chat\/\d+$/.test(url.hash));
+  await page.waitForFunction(() => document.querySelectorAll('.message').length === 0);
+  const failureText = `Ask ChatGPT ${'x'.repeat(8000)}`;
+  const failurePreviewResponse = page.waitForResponse((response) => /\/cloud-checks\/preview$/.test(response.url()));
+  await input.fill(failureText);
+  await input.press('Enter');
+  assert.equal((await failurePreviewResponse).status(), 400, 'a proved cloud preparation failure is returned structurally');
+  const errorBubble = page.locator('.message.assistant.error').last();
+  try {
+    await errorBubble.waitFor({ timeout: 5000 });
+  } catch (error) {
+    throw new Error(`Structured failure did not render. URL: ${page.url()} Messages: ${JSON.stringify(await page.locator('.message').evaluateAll((items) => items.map((item) => ({ className: item.className, text: item.textContent?.slice(0, 240) }))))}`, { cause: error });
+  }
+  assert.match(await errorBubble.innerText(), /CLOUD_CONSULTATION_CREATE_FAILED/);
+  assert.equal(await errorBubble.locator('.message-details').count(), 1, 'the visible failure reuses the message Details owner');
+  const failureSessionId = Number(new URL(page.url()).hash.match(/#chat\/(\d+)/)?.[1]);
+  assert.equal(database.prepare("SELECT COUNT(*) count FROM chat_messages WHERE session_id = ? AND role = 'user' AND content = ?").get(failureSessionId, failureText).count, 1, 'the failed command remains durably visible');
+
   page.once('dialog', (dialog) => dialog.accept());
   await page.getByRole('button', { name: 'Delete chat', exact: true }).click();
-  await page.getByRole('heading', { name: 'Command plane proof', exact: true }).waitFor();
+  await page.getByRole('heading', { name: /New planning chat|Command plane proof/, exact: true }).first().waitFor();
 
   console.log(`Rendered Chat command UI verification passed. Evidence: ${screenshots.default}; ${screenshots.command}`);
 } finally {
