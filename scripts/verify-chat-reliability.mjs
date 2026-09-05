@@ -62,13 +62,61 @@ try {
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
     });
     const json = await response.json();
-    return { status: response.status, data: json.data, error: json.error };
+    return { status: response.status, data: json.data, error: json.error, failure: json.failure, message: json.message };
   }
 
   const createdSession = await request('/api/chat/sessions', { method: 'POST', body: { title: 'Reliability proof' } });
   assert.equal(createdSession.status, 200);
   const sessionId = createdSession.data.id;
   database = new DatabaseSync(dbPath);
+
+  const emptySession = await request('/api/chat/sessions', { method: 'POST', body: { title: 'Empty cloud failure proof' } });
+  const emptyFailure = await request(`/api/chat/sessions/${emptySession.data.id}/cloud-checks/preview`, {
+    method: 'POST',
+    body: { scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: 'Reply exactly CONNECTED', recordFailure: true }
+  });
+  assert.equal(emptyFailure.status, 400);
+  assert.equal(emptyFailure.failure?.errorCode, 'CLOUD_CHECK_NO_COMPLETED_TURN');
+  assert.equal(emptyFailure.failure?.lastSuccessfulStage, 'cloud.intent.classify');
+  assert.equal(emptyFailure.failure?.failedStage, 'consultation.prepare.resolve_source_turn');
+  assert.ok(emptyFailure.message?.id, 'the server persists its proved preparation failure as an assistant message');
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM consultations WHERE chat_session_id = ?').get(emptySession.data.id).count, 0, 'failed preparation does not invent a consultation');
+  const emptyFailureMetadata = JSON.parse(emptyFailure.message.metadata || '{}');
+  assert.equal(emptyFailureMetadata.failure?.errorCode, 'CLOUD_CHECK_NO_COMPLETED_TURN');
+
+  const directSession = await request('/api/chat/sessions', { method: 'POST', body: { title: 'First-turn cloud proof' } });
+  const directText = 'Ask ChatGPT to reply with exactly CONNECTED';
+  const directTurn = await request(`/api/chat/sessions/${directSession.data.id}/messages`, {
+    method: 'POST', key: 'chat-first-turn-cloud-0001', body: { content: directText }
+  });
+  assert.equal(directTurn.status, 200);
+  assert.equal(directTurn.data.messages[0].content, directText, 'the submitted cloud command is durably retained');
+  assert.equal(JSON.parse(directTurn.data.messages.at(-1).metadata || '{}').endpointType, 'cloud-invocation-request');
+  const firstTurnPreview = await request(`/api/chat/sessions/${directSession.data.id}/cloud-checks/preview`, {
+    method: 'POST', body: { scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: directText, recordFailure: true }
+  });
+  assert.equal(firstTurnPreview.status, 200, 'a newly submitted first turn is sufficient for reviewed cloud preparation');
+  assert.ok(firstTurnPreview.data.messages.some((message) => message.role === 'user' && message.id === directTurn.data.messages[0].id));
+
+  const overlongText = `Ask ChatGPT ${'x'.repeat(CLOUD_GUIDANCE_MAX_CHARS)}`;
+  const overlongTurn = await request(`/api/chat/sessions/${directSession.data.id}/messages`, {
+    method: 'POST', key: 'chat-cloud-visible-failure-0001', body: { content: overlongText }
+  });
+  assert.equal(overlongTurn.status, 200);
+  const overlongFailure = await request(`/api/chat/sessions/${directSession.data.id}/cloud-checks/preview`, {
+    method: 'POST', body: { scope: 'latest-turn', provider: 'ChatGPT', model: 'Current model selected in ChatGPT', instruction: overlongText, recordFailure: true }
+  });
+  assert.equal(overlongFailure.status, 400);
+  assert.equal(overlongFailure.failure?.errorCode, 'CLOUD_CONSULTATION_CREATE_FAILED');
+  assert.equal(overlongFailure.failure?.lastSuccessfulStage, 'chat.message.persist');
+  assert.equal(overlongFailure.failure?.failedStage, 'consultation.prepare.validate_guidance');
+  assert.ok(overlongFailure.failure?.persistentChanges.includes('User message saved'));
+  const visibleHistory = await request(`/api/chat/sessions/${directSession.data.id}/messages`);
+  assert.ok(visibleHistory.data.some((message) => message.role === 'user' && message.content === overlongText), 'failed cloud processing never removes the user message');
+  const visibleError = visibleHistory.data.at(-1);
+  assert.equal(visibleError.role, 'assistant');
+  assert.match(visibleError.content, /CLOUD_CONSULTATION_CREATE_FAILED/);
+  assert.equal(JSON.parse(visibleError.metadata || '{}').failure?.operation, 'validate_guidance');
   database.prepare(`INSERT INTO planner_tasks (title, next_action, status, user_id)
     VALUES ('Review personality behaviour proof', 'Run the focused verifier', 'active', 1)`).run();
   database.prepare(`INSERT INTO planner_tasks (title, status, user_id, completed_at)

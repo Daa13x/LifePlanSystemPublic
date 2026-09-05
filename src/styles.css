@@ -722,6 +722,13 @@ h3 { font-size: 14px; font-weight: 700; }
   border: 1px solid var(--line);
 }
 .message.user { margin-left: auto; border-color: color-mix(in srgb, var(--accent) 32%, var(--line)); }
+.message.assistant.error {
+  border-color: color-mix(in srgb, var(--red) 62%, var(--line));
+  background: color-mix(in srgb, var(--panel-2) 88%, var(--red) 12%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--red) 82%, transparent);
+}
+.message.assistant.error > span,
+.message.assistant.error .message-details summary { color: var(--red); }
 .message p { margin: 5px 0 0; color: var(--text); font-size: 14px; }
 
 /* Rendered Markdown body for a chat message. This setting controls diagnostic

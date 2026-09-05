@@ -29,6 +29,24 @@ export function buildDetailRows(metadata, mode) {
   const rows = [];
   const governance = metadata.memoryGovernance || {};
   const execution = metadata.execution || null;
+  const failure = metadata.failure || null;
+
+  if (failure) {
+    const causeCodes = [];
+    let cause = failure.causedBy;
+    while (cause && causeCodes.length < 4) {
+      causeCodes.push(cause.errorCode || 'UNKNOWN_INTERNAL_ERROR');
+      cause = cause.causedBy;
+    }
+    rows.push(['Failure', `${failure.errorCode} — ${failure.message}`]);
+    rows.push(['Failure boundary', `${failure.subsystem} · ${failure.stage} · ${failure.operation}`]);
+    rows.push(['Last successful', failure.lastSuccessfulStage || failure.lastConfirmed || 'Not available']);
+    rows.push(['Failed / unconfirmed', failure.failedStage || failure.firstUnconfirmed || 'Not available']);
+    rows.push(['Retryable', failure.retryable ? 'Yes' : 'No']);
+    rows.push(['User action required', failure.userActionRequired ? 'Yes' : 'No']);
+    if (failure.correlationId) rows.push(['Correlation', failure.correlationId]);
+    if (causeCodes.length) rows.push(['Caused by', causeCodes.join(' → ')]);
+  }
 
   if (execution) {
     const route = execution.route || {};
@@ -83,6 +101,9 @@ export function buildDetailRows(metadata, mode) {
       if (parts.length) rows.push(['Tokens', parts.join(' · ')]);
     }
     if (metadata.error) rows.push(['Error', metadata.error]);
+    if (failure?.reason) rows.push(['Failure reason', failure.reason]);
+    if (failure?.receiptIds?.length) rows.push(['Failure receipts', failure.receiptIds.join(' · ')]);
+    if (failure?.persistentChanges?.length) rows.push(['Persistent changes', failure.persistentChanges.join(' · ')]);
     for (const source of localSources) rows.push(['Source detail', `${source.title}: ${source.whySelected || 'relevant'} · ${source.source || 'local'} · ${source.provenance || 'no additional provenance'}`]);
     if (metadata.generatedAt) rows.push(['Generated at', metadata.generatedAt]);
     if (execution?.receipts) rows.push(['Advanced / raw receipts', JSON.stringify(execution.receipts)]);

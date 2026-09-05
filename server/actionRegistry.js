@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+import { createFailureEnvelope } from './failureContract.js';
+
 // Pure, dependency-injected action contract and dispatcher. It deliberately
 // knows nothing about Express, SQLite, the filesystem, or model prompts. A
 // caller supplies registered handlers plus a trusted invocation context; the
@@ -278,7 +280,34 @@ function requestedActionId(id) {
 }
 
 function errorResult(status, actionId, correlationId, code, message) {
-  return { status, actionId, correlationId, error: { code, message: String(message).slice(0, 500) } };
+  const boundaryByCode = {
+    UNKNOWN_ACTION: ['action.registry.resolve', 'resolve_action', 'action.request.accepted'],
+    UNAUTHORIZED: ['action.permission.authorize', 'authorize_caller', 'action.registry.resolve'],
+    CANCELLED: ['action.execution.cancel', 'observe_cancellation', 'action.permission.authorize'],
+    AVAILABILITY_CHECK_FAILED: ['action.availability.check', 'check_availability', 'action.permission.authorize'],
+    UNAVAILABLE: ['action.availability.check', 'check_availability', 'action.permission.authorize'],
+    INVALID_ARGUMENTS: ['action.arguments.validate', 'validate_arguments', 'action.availability.check'],
+    INVALID_CONFIRMATION_RESULT: ['action.result.validate', 'validate_confirmation', 'action.handler.execute'],
+    HANDLER_FAILED: ['action.handler.execute', 'invoke_handler', 'action.arguments.validate'],
+    CORRELATION_ID_FAILURE: ['action.receipt.create', 'create_correlation', 'action.request.accepted']
+  };
+  const [failedStage, operation, lastSuccessfulStage] = boundaryByCode[code] || ['action.execution', 'execute', 'action.request.accepted'];
+  const failure = createFailureEnvelope({
+    errorCode: code === 'HANDLER_FAILED' ? 'ACTION_EXECUTION_FAILED' : code,
+    message,
+    subsystem: 'action.registry',
+    stage: failedStage,
+    operation,
+    reason: String(code || 'ACTION_FAILED').toLowerCase(),
+    lastSuccessfulStage,
+    failedStage,
+    capability: actionId || null,
+    correlationId: correlationId || null,
+    receiptIds: correlationId ? [correlationId] : [],
+    retryable: ['failed', 'unavailable'].includes(status),
+    userActionRequired: ['blocked', 'needs_confirmation', 'needs_approval'].includes(status)
+  });
+  return { status, actionId, correlationId, error: { code, message: String(message).slice(0, 500) }, failure };
 }
 
 export function createActionRegistry(actions, { correlationIdFactory = randomUUID } = {}) {

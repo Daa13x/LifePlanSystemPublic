@@ -196,7 +196,11 @@ async function api(path, options = {}) {
   if (!payload.ok) {
     if (response.status === 403) csrfToken = '';
     if (response.status === 401 && authToken) setAuthToken('');
-    throw new Error(payload.error || 'Request failed');
+    const error = new Error(payload.error || 'Request failed');
+    error.code = payload.failure?.errorCode || null;
+    error.failure = payload.failure || null;
+    error.persistedMessage = payload.message || null;
+    throw error;
   }
   return payload.data;
 }
@@ -375,7 +379,10 @@ async function invokeNeutralAction(name, args = {}, chatSessionId = null) {
   }
   const result = await api(`/api/actions/${encodeURIComponent(name)}/invoke`, { method: 'POST', body: JSON.stringify(body) });
   if (!['success', 'needs_confirmation', 'needs_approval'].includes(result.status)) {
-    throw new Error(result.error?.message || `Action ${name} did not complete.`);
+    const error = new Error(result.error?.message || `Action ${name} did not complete.`);
+    error.code = result.failure?.errorCode || result.error?.code || 'ACTION_EXECUTION_FAILED';
+    error.failure = result.failure || null;
+    throw error;
   }
   return result;
 }
@@ -2276,9 +2283,11 @@ function MessageVoice({ text }) {
 function MessageBubble({ message, mode, onPin }) {
   let body = message.content;
   let details = null;
+  let failure = null;
 
   if (message.role === 'assistant') {
     const metadata = parseMessageMetadata(message.metadata);
+    failure = metadata?.failure || null;
     if (hasStructuredMetadata(metadata)) {
       details = <MessageDetails metadata={metadata} mode={mode} />;
     } else {
@@ -2291,7 +2300,7 @@ function MessageBubble({ message, mode, onPin }) {
   }
 
   return (
-    <div className={cx('message', message.role)}>
+    <div className={cx('message', message.role, failure && 'error')}>
       <span>{message.role}</span>
       <div className="message-body" dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }} />
       {message.role === 'assistant' && Array.isArray(parseMessageMetadata(message.metadata)?.localSources) && (
@@ -2851,16 +2860,39 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
       navigate('settings');
       return true;
     }
+    const originSessionId = selectedSession;
+    const optimisticId = `tmp-cloud-${Date.now()}`;
+    const requestKey = crypto.randomUUID().replaceAll('-', '');
+    const canRenderOrigin = () => isChatSendOriginActive(selectedSessionRef.current, originSessionId, chatInstanceActiveRef.current);
+    setChatBusy(true);
+    setDraft('');
+    setAutoFollow(true);
+    setShowJump(false);
+    setMessages((current) => [...current, { id: optimisticId, role: 'user', content: outgoing }]);
     try {
+      // Use the existing durable Chat-send owner first. The new provider
+      // imperative therefore remains visible and supplies the source turn for
+      // a first-message consultation; preview remains local and review-only.
+      await sendViaJson(outgoing, optimisticId, requestKey, originSessionId);
       setCloudProvider(provider.provider);
       setCloudModel(provider.model || '');
       setCloudInstruction(outgoing);
-      setCloudPreview(await api(`/api/chat/sessions/${selectedSession}/cloud-checks/preview`, {
-        method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: provider.provider, model: provider.model, instruction: outgoing })
+      setCloudPreview(await api(`/api/chat/sessions/${originSessionId}/cloud-checks/preview`, {
+        method: 'POST', body: JSON.stringify({ scope: cloudScope, provider: provider.provider, model: provider.model, instruction: outgoing, recordFailure: true })
       }));
       setNotice(`Prepared a reviewed ${provider.provider} cloud check. Review the exact prompt before sending.`);
     } catch (err) {
       setNotice(`Could not prepare the ${provider.provider} cloud check: ${err.message}`);
+      // The server persists only failures it actually observed. Re-read that
+      // durable conversation instead of synthesising a client-side receipt.
+      try {
+        const history = await api(`/api/chat/sessions/${originSessionId}/messages`);
+        if (canRenderOrigin()) setMessages(history);
+      } catch { /* retain the optimistic/saved view until reconnect */ }
+    } finally {
+      if (canRenderOrigin()) setChatBusy(false);
+      refreshAll();
+      if (canRenderOrigin()) { loadConnection(originSessionId); loadCloudChecks(originSessionId); }
     }
     return true;
   }

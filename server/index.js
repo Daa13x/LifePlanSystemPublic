@@ -62,6 +62,7 @@ import {
   requestedConsultationId
 } from './chatReliability.js';
 import { classifyCloudProviderIntent } from './cloudIntent.js';
+import { createFailureEnvelope, failureChatContent, normalizeFailure as normalizeStructuredFailure, StructuredFailureError } from './failureContract.js';
 import { resolveAgentMode } from './agentMode.js';
 import { getPersonalityProfile } from './personality.js';
 import { listCurrentStatePoints, setCurrentStatePoint } from './temporalState.js';
@@ -357,7 +358,11 @@ function startInstallerBuild() {
 app.use(express.json({ limit: '25mb' }));
 
 const ok = (res, data) => res.json({ ok: true, data });
-const fail = (res, status, message) => res.status(status).json({ ok: false, error: message });
+const fail = (res, status, message, details = null) => res.status(status).json({
+  ok: false,
+  error: message,
+  ...(details && typeof details === 'object' ? details : {})
+});
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1623,9 +1628,42 @@ function chatCloudScope(sessionId, scope) {
   const messages = allRows("SELECT id, role, content, created_at FROM chat_messages WHERE session_id = ? AND role IN ('user', 'assistant') ORDER BY created_at ASC, id ASC", [sessionId]);
   if (scope === 'full-conversation') return messages;
   const latestUserIndex = messages.map((message) => message.role).lastIndexOf('user');
-  if (latestUserIndex < 0) throw new Error('Cloud check needs a completed user turn.');
+  if (latestUserIndex < 0) throw new StructuredFailureError({
+    errorCode: 'CLOUD_CHECK_NO_COMPLETED_TURN',
+    message: 'Could not prepare the cloud check because this chat has no user message to review.',
+    subsystem: 'cloud.consult',
+    stage: 'consultation.prepare',
+    operation: 'resolve_source_turn',
+    reason: 'no_completed_user_turn',
+    lastSuccessfulStage: 'cloud.intent.classify',
+    failedStage: 'consultation.prepare.resolve_source_turn',
+    capability: 'cloud.consultation.prepare',
+    retryable: true,
+    userActionRequired: false,
+    lastConfirmed: 'cloud.intent.classify',
+    firstUnconfirmed: 'consultation.source_turn.resolved'
+  });
   const latest = messages.slice(latestUserIndex).filter((message) => message.role === 'user' || message.role === 'assistant').slice(0, 2);
-  if (latest.length < 2 || latest[0].role !== 'user' || latest[1].role !== 'assistant') throw new Error('Cloud check needs the latest user message and its completed assistant response.');
+  // A direct provider imperative is itself a valid, reviewable source turn.
+  // Requiring an assistant reply first made the empty-chat adapter fail before
+  // it had persisted the user's request. Egress classification still sees the
+  // exact bounded prompt and all sending remains explicitly review-gated.
+  if (!latest.length || latest[0].role !== 'user') throw new StructuredFailureError({
+    errorCode: 'CLOUD_CHECK_NO_COMPLETED_TURN',
+    message: 'Could not prepare the cloud check because LPS could not resolve the submitted user turn.',
+    subsystem: 'cloud.consult',
+    stage: 'consultation.prepare',
+    operation: 'resolve_source_turn',
+    reason: 'source_turn_unresolved',
+    lastSuccessfulStage: 'chat.message.persist',
+    failedStage: 'consultation.prepare.resolve_source_turn',
+    capability: 'cloud.consultation.prepare',
+    retryable: true,
+    userActionRequired: false,
+    persistentChanges: ['User message saved'],
+    lastConfirmed: 'chat.message.persist',
+    firstUnconfirmed: 'consultation.source_turn.resolved'
+  });
   return latest;
 }
 
@@ -2045,7 +2083,12 @@ async function answerDataQuery(intent, userId, signal, { sessionId = null, invoc
   if (!request) throw new Error(`Unsupported local data intent: ${intent}`);
   const contract = await capabilityRegistry.inspect(request.actionId, { caller: 'human-ui', signal });
   const result = await capabilityRegistry.execute(request.actionId, request.args, { caller: 'human-ui', signal, userId });
-  if (result.status !== 'success') throw new Error(result.error?.message || `${request.actionId} was blocked.`);
+  if (result.status !== 'success') {
+    const error = new Error(result.error?.message || `${request.actionId} was blocked.`);
+    error.code = result.failure?.errorCode || result.error?.code || 'ACTION_EXECUTION_FAILED';
+    error.failure = result.failure || null;
+    throw error;
+  }
   writeChatAudit(
     sessionId,
     request.actionId,
@@ -2638,6 +2681,86 @@ function buildAssistantMetadata(sessionId, candidateId, assistant, elapsedMs) {
     error: assistant.diagnostics?.error || null,
     generatedAt: new Date().toISOString()
   };
+}
+
+function buildFailureMetadata(sessionId, failure, elapsedMs = 0) {
+  const contexts = allRows('SELECT path FROM chat_context_files WHERE session_id = ? ORDER BY added_at DESC', [sessionId]);
+  const capabilitiesUsed = failure.capability ? [failure.capability] : [];
+  const toolsUsed = failure.tool ? [failure.tool] : [];
+  return {
+    version: 2,
+    runtime: 'structured failure',
+    endpointType: 'failure-receipt',
+    endpoint: null,
+    model: failure.model || null,
+    contextFiles: contexts.map((item) => item.path),
+    memoryGovernance: { created: false, message: 'Failure reporting does not create a memory candidate.' },
+    localSources: [],
+    localAnswerability: null,
+    actionDecision: failure.capability
+      ? {
+          invocationSource: 'chat-failure',
+          selectionReason: null,
+          routingReason: failure.reason,
+          actionId: failure.capability,
+          risk: null,
+          confirmationRequirement: null,
+          verification: false,
+          result: 'failed',
+          correlationId: failure.correlationId || null
+        }
+      : null,
+    execution: {
+      route: {
+        runtime: 'structured failure',
+        endpointType: 'failure-receipt',
+        model: failure.model || null,
+        provider: failure.provider || null,
+        fallback: null
+      },
+      capabilitiesUsed,
+      toolsUsed,
+      contextRetrieved: { attachedFiles: contexts.length, localSources: 0, cloudConsultationId: null },
+      mutations: failure.persistentChanges || [],
+      verification: [
+        `Last confirmed: ${failure.lastConfirmed || failure.lastSuccessfulStage || 'not available'}`,
+        `Failed or unconfirmed: ${failure.firstUnconfirmed || failure.failedStage}`
+      ],
+      receipts: {
+        actionCorrelationId: failure.correlationId || null,
+        failureReceiptIds: failure.receiptIds || [],
+        cloudCheckId: null,
+        consultationId: null,
+        browserJobId: null,
+        providerTabId: null,
+        providerUrl: null,
+        dispatch: null,
+        capture: null
+      }
+    },
+    failure,
+    tokens: null,
+    timingMs: typeof elapsedMs === 'number' ? elapsedMs : null,
+    fallback: null,
+    error: failure.message,
+    generatedAt: failure.timestamp
+  };
+}
+
+function persistChatFailureMessage(sessionId, failure) {
+  const assistantMessageId = persistChatAssistantTurn(
+    sessionId,
+    failureChatContent(failure),
+    buildFailureMetadata(sessionId, failure)
+  );
+  writeChatAudit(
+    sessionId,
+    failure.capability || failure.subsystem,
+    'failed',
+    `${failure.errorCode}; stage=${failure.failedStage}`,
+    failure.correlationId || null
+  );
+  return row('SELECT * FROM chat_messages WHERE id = ?', [assistantMessageId]);
 }
 
 function browserConnectorConnected() {
@@ -3924,14 +4047,41 @@ function settleChatGeneration({ sessionId, claim, assistant = null, requestedSta
       const cancelled = state === 'cancelled';
       const failed = state === 'retryable_error';
       const runtime = cancelled ? 'cancelled' : failed ? 'setup/runtime error' : assistant.mode;
-      const terminalError = cancelled
-        ? 'Local model generation was cancelled. Your message was saved.'
-        : failed ? `${error?.message || 'Local generation failed.'} Your message was saved; retry is available.` : null;
-      const content = cancelled
-        ? '_Generation cancelled. Your message was saved; you can retry when ready._'
-        : failed ? '_I could not complete that reply. Your message was saved; please retry._' : assistant.content;
-      const metadata = cancelled || failed
-        ? { terminalState: state, retryable: true, error: error?.message || terminalError }
+      const failure = cancelled
+        ? createFailureEnvelope({
+            errorCode: 'CHAT_GENERATION_CANCELLED',
+            message: 'Generation was cancelled. Your message was saved.',
+            subsystem: 'chat.generate',
+            stage: 'chat.reply.generate',
+            operation: 'generate_reply',
+            reason: 'cancelled_by_user',
+            lastSuccessfulStage: 'chat.message.persist',
+            failedStage: 'chat.reply.generate',
+            retryable: true,
+            userActionRequired: false,
+            persistentChanges: ['User message saved'],
+            lastConfirmed: 'chat.message.persist',
+            firstUnconfirmed: 'chat.reply.complete'
+          })
+        : failed ? normalizeStructuredFailure(error, {
+            errorCode: error?.code === 'ACTION_EXECUTION_FAILED' ? 'ACTION_EXECUTION_FAILED' : 'MODEL_ROUTE_FAILED',
+            message: `${error?.message || 'LPS could not complete the reply.'} Your message was saved; retry is available.`,
+            subsystem: error?.failure?.subsystem || 'chat.model',
+            stage: error?.failure?.stage || 'model.route.execute',
+            operation: error?.failure?.operation || 'generate_reply',
+            reason: error?.failure?.reason || 'reply_generation_failed',
+            lastSuccessfulStage: 'chat.message.persist',
+            failedStage: error?.failure?.failedStage || 'model.route.execute',
+            retryable: true,
+            userActionRequired: false,
+            persistentChanges: ['User message saved'],
+            lastConfirmed: 'chat.message.persist',
+            firstUnconfirmed: error?.failure?.firstUnconfirmed || 'chat.reply.complete'
+          }) : null;
+      const terminalError = failure?.message || null;
+      const content = failure ? failureChatContent(failure) : assistant.content;
+      const metadata = failure
+        ? { ...buildFailureMetadata(sessionId, failure, Date.now() - startedAt), terminalState: state, retryable: failure.retryable }
         : buildAssistantMetadata(sessionId, identity.candidateId, assistant, Date.now() - startedAt);
       const assistantMessageId = insertChatAssistantTurn(sessionId, content, metadata, {
         consumeGuidance: state === 'completed' && assistant?.mode !== 'cloud guidance selection'
@@ -5660,17 +5810,34 @@ app.get('/api/cloud/accounts', (_req, res) => {
 });
 
 app.post('/api/chat/sessions/:id/cloud-checks/preview', (req, res) => {
+  const sessionId = Number(req.params.id);
+  let provider = String(req.body?.provider || 'ChatGPT').trim();
   try {
-    const sessionId = Number(req.params.id);
     const session = row('SELECT id FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [sessionId, req.userId]);
     if (!session) return fail(res, 404, 'Chat session not found.');
     const scope = req.body?.scope === 'full-conversation' ? 'full-conversation' : req.body?.scope === 'latest-turn' ? 'latest-turn' : null;
-    if (!scope) return fail(res, 400, 'Cloud check scope must be latest-turn or full-conversation.');
-    const provider = String(req.body?.provider || 'ChatGPT').trim();
-    if (!Object.hasOwn(cloudAgentHosts, provider)) return fail(res, 400, 'Unsupported configured cloud provider.');
+    if (!scope) throw new StructuredFailureError({
+      errorCode: 'CLOUD_CONSULTATION_CREATE_FAILED', message: 'Cloud check scope must be latest-turn or full-conversation.',
+      subsystem: 'cloud.consult', stage: 'consultation.prepare', operation: 'validate_scope', reason: 'invalid_scope',
+      lastSuccessfulStage: 'cloud.intent.classify', failedStage: 'consultation.prepare.validate_scope',
+      capability: 'cloud.consultation.prepare', provider, retryable: true, userActionRequired: true
+    });
+    provider = String(req.body?.provider || 'ChatGPT').trim();
+    if (!Object.hasOwn(cloudAgentHosts, provider)) throw new StructuredFailureError({
+      errorCode: 'CLOUD_PROVIDER_UNAVAILABLE', message: 'The selected cloud provider is not available in this LPS installation.',
+      subsystem: 'cloud.consult', stage: 'consultation.prepare', operation: 'resolve_provider', reason: 'unsupported_provider',
+      lastSuccessfulStage: 'cloud.intent.classify', failedStage: 'consultation.prepare.resolve_provider',
+      capability: 'cloud.consultation.prepare', provider, retryable: false, userActionRequired: true
+    });
     const model = cloudModelFor(provider, String(req.body?.model || '').trim());
     const instruction = String(req.body?.instruction || '').trim();
-    if (instruction.length > CLOUD_GUIDANCE_MAX_CHARS) return fail(res, 400, `Cloud-check guidance must be ${CLOUD_GUIDANCE_MAX_CHARS.toLocaleString('en-GB')} characters or fewer. Your text was not truncated.`);
+    if (instruction.length > CLOUD_GUIDANCE_MAX_CHARS) throw new StructuredFailureError({
+      errorCode: 'CLOUD_CONSULTATION_CREATE_FAILED',
+      message: `Cloud-check guidance must be ${CLOUD_GUIDANCE_MAX_CHARS.toLocaleString('en-GB')} characters or fewer. Your text was not truncated.`,
+      subsystem: 'cloud.consult', stage: 'consultation.prepare', operation: 'validate_guidance', reason: 'guidance_too_long',
+      lastSuccessfulStage: 'consultation.provider.resolve', failedStage: 'consultation.prepare.validate_guidance',
+      capability: 'cloud.consultation.prepare', provider, retryable: true, userActionRequired: true
+    });
     const messages = chatCloudScope(sessionId, scope);
     const rawPrompt = chatCloudPrompt({ provider, model, scope, instruction, messages });
     const classified = classifyAndRedactCloudPrompt(rawPrompt);
@@ -5680,7 +5847,39 @@ app.post('/api/chat/sessions/:id/cloud-checks/preview', (req, res) => {
       messageCount: messages.length, characters: classified.prompt.length, prompt: classified.prompt, promptHash,
       findings: classified.findings, blocked: classified.blocked,
       classification: classified.blocked ? 'blocked' : classified.changed ? 'redacted' : 'clear' });
-  } catch (error) { fail(res, 400, error.message); }
+  } catch (error) {
+    let failure = normalizeStructuredFailure(error, {
+      errorCode: 'CLOUD_CONSULTATION_CREATE_FAILED',
+      message: 'Could not prepare the cloud consultation.',
+      subsystem: 'cloud.consult',
+      stage: 'consultation.prepare',
+      operation: 'prepare_preview',
+      reason: 'preview_failed',
+      lastSuccessfulStage: 'cloud.intent.classify',
+      failedStage: 'consultation.prepare',
+      capability: 'cloud.consultation.prepare',
+      provider,
+      retryable: true,
+      userActionRequired: false,
+      lastConfirmed: 'cloud.intent.classify',
+      firstUnconfirmed: 'consultation.preview.created'
+    });
+    let message = null;
+    const visibleFailure = req.body?.recordFailure === true
+      && row('SELECT id FROM chat_sessions WHERE id = ? AND deleted = 0 AND user_id = ?', [sessionId, req.userId]);
+    if (visibleFailure) {
+      const savedUser = row("SELECT id FROM chat_messages WHERE session_id = ? AND role = 'user' ORDER BY id DESC LIMIT 1", [sessionId]);
+      failure = createFailureEnvelope({
+        ...failure,
+        provider,
+        persistentChanges: savedUser ? ['User message saved', 'Consultation not created'] : ['Consultation not created'],
+        lastSuccessfulStage: savedUser ? 'chat.message.persist' : failure.lastSuccessfulStage,
+        lastConfirmed: savedUser ? 'chat.message.persist' : failure.lastConfirmed
+      });
+      message = persistChatFailureMessage(sessionId, failure);
+    }
+    fail(res, 400, failure.message, { failure, ...(message ? { message } : {}) });
+  }
 });
 
 app.post('/api/chat/sessions/:id/cloud-checks', (req, res) => {
