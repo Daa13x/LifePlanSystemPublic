@@ -275,6 +275,12 @@ export function migrate() {
       guidance_consumed_at TEXT,
       feedback_dismissed_at TEXT,
       memory_candidate_id INTEGER REFERENCES memory_candidates(id) ON DELETE SET NULL,
+      browser_job_id INTEGER,
+      provider_tab_id TEXT,
+      provider_url TEXT,
+      dispatch_receipt TEXT,
+      capture_receipt TEXT,
+      verification_level TEXT NOT NULL DEFAULT 'LOCAL_RECORD_ONLY',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -363,7 +369,16 @@ export function migrate() {
     try { db.exec(`ALTER TABLE consultations ADD COLUMN ${column[0]} ${column[1]}`); } catch { /* already present */ }
   }
 
-  for (const column of [['feedback_dismissed_at', 'TEXT'], ['instruction', "TEXT NOT NULL DEFAULT ''"]]) {
+  for (const column of [
+    ['feedback_dismissed_at', 'TEXT'],
+    ['instruction', "TEXT NOT NULL DEFAULT ''"],
+    ['browser_job_id', 'INTEGER'],
+    ['provider_tab_id', 'TEXT'],
+    ['provider_url', 'TEXT'],
+    ['dispatch_receipt', 'TEXT'],
+    ['capture_receipt', 'TEXT'],
+    ['verification_level', "TEXT NOT NULL DEFAULT 'LOCAL_RECORD_ONLY'"]
+  ]) {
     try { db.exec(`ALTER TABLE chat_cloud_checks ADD COLUMN ${column[0]} ${column[1]}`); } catch { /* already present */ }
   }
 

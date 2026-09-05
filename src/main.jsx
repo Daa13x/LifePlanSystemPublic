@@ -2506,9 +2506,15 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   async function cancelCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/cancel`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function dismissCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/dismiss`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
   async function retryCloudCheck(id) { try { await api(`/api/chat/cloud-checks/${id}/retry`, { method: 'POST' }); await api(`/api/chat/cloud-checks/${id}/send`, { method: 'POST' }); await loadCloudChecks(); } catch (err) { setNotice(err.message); } }
-  const cloudStateLabel = (status) => ({
-    'checking-sharing-permissions': 'Checking sharing permissions', prepared: 'Prepared — connection required', active: 'Waiting for provider', completed: 'Completed', blocked: 'Blocked', failed: 'Failed', cancelled: 'Cancelled'
-  }[status] || 'Preparing cloud prompt');
+  const cloudStateLabel = (check) => {
+    if (check.status === 'active' && check.verification_level === 'BROWSER_DISPATCHED') return `Sent to ${check.provider} · waiting`;
+    if (check.status === 'active') return 'Queued for connected browser';
+    if (check.status === 'completed' && check.verification_level === 'VERIFIED_BROWSER_ROUNDTRIP') return 'Response captured · verified';
+    if (check.status === 'completed') return 'Response stored';
+    return ({
+      'checking-sharing-permissions': 'Checking sharing permissions', prepared: 'Prepared — review before sending', blocked: 'Blocked', failed: 'Failed', cancelled: 'Cancelled'
+    }[check.status] || 'Preparing cloud prompt');
+  };
 
   async function loadContextRecords(sessionId = selectedSession) {
     if (IS_NATIVE) { setContextRecords([]); return; }
@@ -3376,7 +3382,7 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
         </div>}
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {showPinnedOnly && !messages.some((message) => message.pinned) && <Empty title="No pinned messages" body="Pin a user message or reply to keep it in this conversation's focused view." />}
-          {messages.filter((message) => !showPinnedOnly || message.pinned).map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} onPin={IS_NATIVE ? null : toggleMessagePin} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check.status)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
+          {messages.filter((message) => !showPinnedOnly || message.pinned).map((message) => <React.Fragment key={message.id}><MessageBubble message={message} mode={detailMode} onPin={IS_NATIVE ? null : toggleMessagePin} />{cloudChecks.filter((check) => Number(check.assistant_message_id) === Number(message.id) && !check.feedback_dismissed_at).map((check) => <CloudCheckCard key={`cloud-${check.id}`} check={check} providerConnected={Boolean(cloudProviders.find((provider) => provider.provider === check.provider)?.configured)} stateLabel={cloudStateLabel(check)} onSend={sendCloudCheck} onCancel={cancelCloudCheck} onRetry={retryCloudCheck} onGuidance={setCloudGuidance} onSaveCandidate={saveCloudCandidate} onDismiss={dismissCloudCheck} onHistory={() => navigate('system', 'browser')} />)}</React.Fragment>)}
           {streamingText !== null && (
             <div className="message assistant streaming" aria-live="polite">
               <span>assistant</span>
@@ -3424,9 +3430,15 @@ function CloudCheckCard({ check, providerConnected, stateLabel, onSend, onCancel
   try { includedCount = JSON.parse(check.included_message_ids || '[]').length; } catch { /* malformed legacy metadata remains displayable */ }
   const sourceTurn = [check.user_message_id ? `user #${check.user_message_id}` : '', check.assistant_message_id ? `assistant #${check.assistant_message_id}` : ''].filter(Boolean).join(' → ') || 'session context';
   const completedAt = check.status === 'completed' && check.updated_at ? new Date(check.updated_at).toLocaleString() : '';
+  const evidenceLabel = ({
+    LOCAL_RECORD_ONLY: 'Stored historical result — browser origin not verified',
+    BROWSER_DISPATCHED: `Sent to ${check.provider} — awaiting a captured response`,
+    REMOTE_RESPONSE_CAPTURED: `Received from ${check.provider} — browser provenance incomplete`,
+    VERIFIED_BROWSER_ROUNDTRIP: `Received from ${check.provider} — verified browser round trip`
+  })[check.verification_level] || 'Evidence level unavailable';
   return <article className="cloud-check-card" aria-label={`Cloud check ${check.id}: ${stateLabel}`}>
     <header className="cloud-check-head"><div><span className="cloud-provider-mark"><Sparkles size={15} aria-hidden="true" /></span><strong>{check.provider}</strong><small>{check.model || 'configured browser model'}</small></div><Pill tone={check.status === 'completed' ? 'good' : check.status === 'failed' || check.status === 'blocked' ? 'warn' : 'info'}>{stateLabel}</Pill></header>
-    <div className="cloud-check-meta"><small>{check.scope} · {includedCount} included messages · approximately {(check.prompt || '').length} characters</small><small>Source: {sourceTurn} · Privacy: {check.classification || 'pending'}</small><small>Created {new Date(check.created_at).toLocaleString()}{completedAt ? ` · completed ${completedAt}` : ''}</small></div>
+    <div className="cloud-check-meta"><small>{check.scope} · {includedCount} included messages · approximately {(check.prompt || '').length} characters</small><small>Source: {sourceTurn} · Privacy: {check.classification || 'pending'}</small><small>Evidence: {evidenceLabel}</small><small>Created {new Date(check.created_at).toLocaleString()}{completedAt ? ` · completed ${completedAt}` : ''}</small></div>
     <button className="link cloud-check-history" onClick={onHistory}>Open Cloud Consultation #{check.consultation_id}</button>
     <details className="cloud-check-prompt"><summary>Exact authorised prompt</summary><pre>{check.prompt}</pre></details>
     {check.response && <div className="cloud-check-response"><small>Provider response</small><div className="message-body" aria-live="polite" dangerouslySetInnerHTML={{ __html: renderMarkdown(check.response) }} /></div>}

@@ -137,15 +137,24 @@ try {
   assert.equal(claimed.status, 200);
   assert.equal(claimed.body.data.job.targetAgent, 'ChatGPT');
   assert.equal(claimed.body.data.job.prompt, create.body.data.prompt, 'connector receives the exact authorised prompt');
+  const sent = await request(baseUrl, `/api/browser/extension/jobs/${claimed.body.data.job.id}`, {
+    method: 'POST', token: pairing.token,
+    body: JSON.stringify({ status: 'sent', claimToken: claimed.body.data.job.claimToken, url: 'https://chatgpt.com/c/connector-proof', title: 'ChatGPT' })
+  });
+  assert.equal(sent.status, 200);
   const answered = await request(baseUrl, `/api/browser/extension/jobs/${claimed.body.data.job.id}`, {
     method: 'POST', token: pairing.token,
-    body: JSON.stringify({ status: 'answered', claimToken: claimed.body.data.job.claimToken, answer: 'External advisory response.', title: 'ChatGPT' })
+    body: JSON.stringify({ status: 'answered', claimToken: claimed.body.data.job.claimToken, answer: 'External advisory response.', title: 'ChatGPT', url: 'https://chatgpt.com/c/connector-proof' })
   });
   assert.equal(answered.status, 200);
   const checksAfterAnswer = await (await fetch(`${baseUrl}/api/chat/sessions/${sessionId}/cloud-checks`)).json();
   const completed = checksAfterAnswer.data.find((item) => item.id === cloudCheckId);
   assert.equal(completed.status, 'completed');
   assert.equal(completed.response, 'External advisory response.');
+  assert.equal(completed.verification_level, 'VERIFIED_BROWSER_ROUNDTRIP');
+  assert.equal(JSON.parse(completed.dispatch_receipt).browserJobId, claimed.body.data.job.id);
+  assert.equal(JSON.parse(completed.capture_receipt).providerUrlVerified, true);
+  assert.match(JSON.parse(completed.capture_receipt).responseSha256, /^[a-f0-9]{64}$/);
   const candidate = await mutate(`/api/chat/cloud-checks/${cloudCheckId}/memory-candidate`, {});
   assert.equal(candidate.status, 200);
   const candidateReplay = await mutate(`/api/chat/cloud-checks/${cloudCheckId}/memory-candidate`, {});

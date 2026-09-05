@@ -5653,13 +5653,16 @@ app.post('/api/chat/cloud-checks/:id/send', (req, res) => {
   if (getSetting('browserAgentMode', 'myChromeConnector') !== 'myChromeConnector' || Date.now() - browserExtensionState.lastSeen >= 15000) {
     return fail(res, 409, 'The configured browser provider is not connected. No prompt was sent.');
   }
-  if (!agentTabsFromUrls(browserExtensionState.tabs)[check.provider]?.open) {
+  const providerSession = agentTabsFromUrls(browserExtensionState.tabs)[check.provider];
+  if (!providerSession?.open) {
     return fail(res, 409, `No signed-in ${check.provider} tab is connected. No prompt was sent.`);
   }
   const job = { id: browserAgentJobSeq++, status: 'pending', targetAgent: check.provider, url: defaultCloudAgentUrl(check.provider), prompt: check.prompt, chatCheckId: check.id, createdAt: Date.now(), updatedAt: Date.now(), result: null, error: '' };
   browserAgentJobs.set(job.id, job);
+  const providerTab = providerSession.tabs[0] || null;
   transaction(() => {
-    db.prepare("UPDATE chat_cloud_checks SET status = 'active', error_detail = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(check.id);
+    db.prepare("UPDATE chat_cloud_checks SET status = 'active', browser_job_id = ?, provider_tab_id = ?, provider_url = ?, verification_level = 'LOCAL_RECORD_ONLY', dispatch_receipt = NULL, capture_receipt = NULL, error_detail = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+      .run(job.id, providerTab?.id == null ? null : String(providerTab.id), providerTab?.url || job.url, check.id);
     db.prepare("UPDATE consultations SET status = 'sent', sent_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(check.consultation_id);
   });
   ok(res, { check: row('SELECT * FROM chat_cloud_checks WHERE id = ?', [check.id]), jobId: job.id, reused: false });
@@ -7871,6 +7874,22 @@ app.post('/api/browser/extension/jobs/:id', (req, res) => {
     answer: req.body.answer || '',
     message: req.body.message || ''
   };
+  if (status === 'sent' && job.chatCheckId) {
+    const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [job.chatCheckId]);
+    if (check && check.status !== 'cancelled') {
+      const providerUrl = String(req.body.url || job.url || '').trim();
+      const dispatchReceipt = JSON.stringify({
+        browserJobId: job.id,
+        provider: job.targetAgent,
+        providerTabId: check.provider_tab_id || null,
+        providerUrl,
+        promptHash: check.prompt_hash,
+        observedAt: new Date().toISOString()
+      });
+      db.prepare("UPDATE chat_cloud_checks SET verification_level = 'BROWSER_DISPATCHED', dispatch_receipt = ?, provider_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?")
+        .run(dispatchReceipt, providerUrl || check.provider_url, check.id);
+    }
+  }
   if (['answered', 'blocked', 'error'].includes(status)) {
     job.claimToken = '';
     job.leaseExpiresAt = 0;
@@ -7878,10 +7897,25 @@ app.post('/api/browser/extension/jobs/:id', (req, res) => {
       const check = row('SELECT * FROM chat_cloud_checks WHERE id = ?', [job.chatCheckId]);
       if (check && check.status !== 'cancelled') transaction(() => {
         const nextStatus = status === 'answered' ? 'completed' : status === 'blocked' ? 'blocked' : 'failed';
-        db.prepare('UPDATE chat_cloud_checks SET status = ?, response = ?, error_detail = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-          .run(nextStatus, job.result.answer || null, status === 'answered' ? null : (job.error || job.result.message || 'Provider request failed.'), check.id);
-        db.prepare('UPDATE consultations SET external_response = COALESCE(?, external_response), captured_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE captured_at END, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-          .run(job.result.answer || null, status === 'answered' ? 1 : 0, nextStatus, check.consultation_id);
+        const providerUrl = String(req.body.url || '').trim();
+        const response = String(job.result.answer || '');
+        const providerUrlVerified = Boolean(providerUrl && tabMatchesAgent(providerUrl, cloudAgentHosts[check.provider] || []));
+        const verificationLevel = status === 'answered'
+          ? (check.dispatch_receipt && providerUrlVerified ? 'VERIFIED_BROWSER_ROUNDTRIP' : 'REMOTE_RESPONSE_CAPTURED')
+          : check.verification_level;
+        const captureReceipt = status === 'answered' ? JSON.stringify({
+          browserJobId: job.id,
+          provider: check.provider,
+          providerUrl: providerUrl || null,
+          responseSha256: crypto.createHash('sha256').update(response, 'utf8').digest('hex'),
+          dispatchReceiptPresent: Boolean(check.dispatch_receipt),
+          providerUrlVerified,
+          observedAt: new Date().toISOString()
+        }) : null;
+        db.prepare('UPDATE chat_cloud_checks SET status = ?, response = ?, error_detail = ?, provider_url = COALESCE(?, provider_url), capture_receipt = COALESCE(?, capture_receipt), verification_level = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(nextStatus, response || null, status === 'answered' ? null : (job.error || job.result.message || 'Provider request failed.'), providerUrl || null, captureReceipt, verificationLevel, check.id);
+        db.prepare('UPDATE consultations SET external_response = COALESCE(?, external_response), opened_url = COALESCE(?, opened_url), opened_title = COALESCE(?, opened_title), captured_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE captured_at END, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(response || null, providerUrl || null, job.result.title || null, status === 'answered' ? 1 : 0, nextStatus, check.consultation_id);
       });
     }
   }

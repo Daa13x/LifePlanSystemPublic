@@ -169,6 +169,7 @@ try {
   const use = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-reliability-use-0001', body: { content: 'use that answer' } });
   assert.equal(use.status, 200);
   let check = database.prepare('SELECT * FROM chat_cloud_checks WHERE id = ?').get(checkId);
+  assert.equal(check.verification_level, 'LOCAL_RECORD_ONLY', 'legacy/stored consultation evidence is not upgraded without browser receipts');
   assert.equal(check.guidance_active, 1, 'selection acknowledgement must not consume its own guidance');
   assert.equal(check.guidance_consumed_at, null);
 
