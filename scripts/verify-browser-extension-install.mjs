@@ -65,6 +65,10 @@ try {
   assert.match(worker, /lps-browser-agent-status/, 'the popup reads a bounded local status message');
   assert.match(worker, /lastSuccessAt/, 'the popup can distinguish a live bridge from an active extension');
   assert.match(worker, /lastError/, 'the popup receives a bounded recovery diagnostic');
+  assert.match(worker, /lps-browser-agent-job-sent/, 'the content automation emits a distinct provider-dispatch observation');
+  assert.match(worker, /status:\s*'sent'/, 'the paired background worker records the intermediate dispatch receipt');
+  assert.match(worker, /type:\s*JOB_SENT_MESSAGE,\s*jobId:/, 'the serialised page function receives the receipt message type explicitly');
+  assert.match(worker, /jobReceipt\?\.claimToken/, 'the dispatch receipt is bound to the claimed browser job lease');
   assert.ok(fs.existsSync(path.join(extensionRoot, 'popup.html')));
   assert.ok(fs.existsSync(path.join(extensionRoot, 'popup.js')));
   assert.match(fs.readFileSync(path.join(extensionRoot, 'popup.js'), 'utf8'), /bridgeReachable/);

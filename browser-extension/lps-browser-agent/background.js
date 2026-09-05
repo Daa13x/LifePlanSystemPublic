@@ -1,4 +1,5 @@
 const LPS = 'http://127.0.0.1:4177';
+const JOB_SENT_MESSAGE = 'lps-browser-agent-job-sent';
 let pairingConfigPromise;
 const bridgeState = { lastSuccessAt: '', lastError: '', lastPollAt: '' };
 
@@ -49,6 +50,27 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+// The page automation knows the exact moment the provider composer is
+// submitted, while only the background worker owns the paired bridge token.
+// Relay that observation here so LPS can distinguish a browser dispatch from
+// a response that was merely captured later. The final answered/blocked event
+// remains the terminal receipt for the same leased job.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== JOB_SENT_MESSAGE) return false;
+  api(`/api/browser/extension/jobs/${message.jobId}`, {
+    method: 'POST',
+    body: JSON.stringify({
+      status: 'sent',
+      claimToken: message.claimToken,
+      url: message.url,
+      title: message.title
+    })
+  })
+    .then((result) => sendResponse(result))
+    .catch((error) => sendResponse({ ok: false, error: String(error?.message || 'Dispatch receipt failed.') }));
+  return true;
+});
+
 async function visibleTabs() {
   const tabs = await chrome.tabs.query({});
   return tabs
@@ -87,7 +109,7 @@ async function tabForJob(job) {
   return created.id;
 }
 
-async function runContentSend(targetAgent, prompt) {
+async function runContentSend(targetAgent, prompt, jobReceipt) {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const adapters = {
     ChatGPT: { composer: ['[data-testid="prompt-textarea"]', '#prompt-textarea'], send: ['[data-testid="send-button"]', '[data-testid="composer-submit-button"]'], assistant: '[data-message-author-role="assistant"]' },
@@ -183,6 +205,25 @@ async function runContentSend(targetAgent, prompt) {
     box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
   }
 
+  // Submission is an observable intermediate boundary, not proof of a
+  // response. Report it before waiting for the provider output so the server
+  // can retain separate dispatch and capture receipts.
+  try {
+    const receipt = await chrome.runtime.sendMessage({
+      type: jobReceipt?.type,
+      jobId: jobReceipt?.jobId,
+      claimToken: jobReceipt?.claimToken,
+      url: location.href,
+      title: document.title
+    });
+    if (!receipt?.ok) console.warn('Life Planner dispatch receipt was not accepted.', receipt?.error || 'Unknown bridge response.');
+  } catch (error) {
+    // The provider submission has already happened. Continue capture so LPS
+    // can honestly retain REMOTE_RESPONSE_CAPTURED evidence even if this
+    // intermediate receipt could not be recorded.
+    console.warn('Life Planner dispatch receipt could not be delivered.', error);
+  }
+
   let lastText = '';
   let stableTicks = 0;
   for (let tick = 0; tick < 90; tick += 1) {
@@ -239,7 +280,7 @@ async function handleJob(job) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: runContentSend,
-      args: [job.targetAgent, job.prompt]
+      args: [job.targetAgent, job.prompt, { type: JOB_SENT_MESSAGE, jobId: job.id, claimToken: job.claimToken }]
     }).then(async ([result]) => {
       const data = result?.result || { status: 'error', error: 'No content-script result.' };
       await api(`/api/browser/extension/jobs/${job.id}`, {
