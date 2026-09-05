@@ -123,15 +123,31 @@ jobs:
       # Keep the complete safety output as a failure artifact. This is Windows-
       # native and explicitly checks the external process exit code, avoiding the
       # fragile Bash/tee diagnostic experiment that was reverted on 2026-08-20.
+      # A Windows Node fast-fail (0xC0000409 / -1073740791) has occurred in
+      # distinct disposable node:sqlite verifiers without an assertion failure.
+      # Retry that runtime crash once only; every semantic test failure remains
+      # fail-closed and cannot be retried by this guard.
       - name: Verify runtime safety
         shell: pwsh
         run: |
           $diagnostics = Join-Path $env:RUNNER_TEMP 'lps-ci-diagnostics'
           New-Item -ItemType Directory -Force -Path $diagnostics | Out-Null
           $log = Join-Path $diagnostics 'runtime-safety.log'
-          npm run verify:runtime-safety 2>&1 | Tee-Object -FilePath $log
-          if ($LASTEXITCODE -ne 0) {
-            throw "Runtime safety verification failed with exit code $LASTEXITCODE."
+          $exitCode = 1
+          for ($attempt = 1; $attempt -le 2; $attempt++) {
+            "Runtime safety attempt $attempt/2" | Tee-Object -FilePath $log -Append
+            npm run verify:runtime-safety 2>&1 | Tee-Object -FilePath $log -Append
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) { break }
+            if ($exitCode -eq -1073740791 -and $attempt -lt 2) {
+              Write-Warning 'Node fast-failed without a verifier assertion; retrying once.'
+              Start-Sleep -Seconds 5
+              continue
+            }
+            throw "Runtime safety verification failed with exit code $exitCode."
+          }
+          if ($exitCode -ne 0) {
+            throw "Runtime safety verification failed with exit code $exitCode."
           }
 
       # Exercise the existing Phase 2 source contracts on one fresh disposable
