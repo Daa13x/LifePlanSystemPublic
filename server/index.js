@@ -61,6 +61,7 @@ import {
   formatConsultationReply,
   requestedConsultationId
 } from './chatReliability.js';
+import { classifyCloudProviderIntent } from './cloudIntent.js';
 import { resolveAgentMode } from './agentMode.js';
 import { getPersonalityProfile } from './personality.js';
 import { answerLocalKnowledgeQuestion, isLocalKnowledgeQuestion, personalKnowledgeCoverage, retrieveLocalKnowledge, shouldGroundConversationInLocalKnowledge, sourceRegistry } from './localKnowledge.js';
@@ -2133,6 +2134,32 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
     if (typeof onToken === 'function') onToken(content);
     return { mode: 'onboarding acknowledgment', content, diagnostics: { endpointType: 'onboarding-acknowledgment', candidateCreated: Boolean(candidateId) } };
   }
+  // Live deterministic diagnostics and explicit commands outrank historical
+  // provider references. A provider imperative is a NEW reviewed request and
+  // can never silently reuse the last completed consultation.
+  const intent = classifyChatIntent(userMessage);
+  if (intent !== 'conversation') {
+    const invocationSource = /^\s*\//.test(userMessage) ? 'explicit-command' : 'natural-language-intent';
+    const answer = await answerDataQuery(intent, userId, signal, { sessionId, invocationSource });
+    if (typeof onToken === 'function' && answer.content) onToken(answer.content);
+    return answer;
+  }
+  const cloudIntent = classifyCloudProviderIntent(userMessage);
+  if (cloudIntent.kind === 'invoke') {
+    const content = `I recognised this as a new ${cloudIntent.provider} request. Review the exact bounded prompt in the Cloud check before it is sent; I will not substitute an older consultation result.`;
+    if (typeof onToken === 'function') onToken(content);
+    return {
+      mode: 'cloud invocation request',
+      content,
+      diagnostics: {
+        endpointType: 'cloud-invocation-request',
+        invocationSource: 'natural-language-intent',
+        routingReason: 'new-provider-invocation',
+        provider: cloudIntent.provider,
+        actionResult: 'review_required'
+      }
+    };
+  }
   const consultation = completedConsultationForMessage(sessionId, userMessage);
   const consultationIntent = classifyConsultationReference(userMessage, { hasCompletedConsultation: Boolean(consultation?.response) });
   if (consultationIntent) {
@@ -2155,13 +2182,6 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
     }
     if (typeof onToken === 'function') onToken(content);
     return { mode, content, diagnostics: { endpointType: 'cloud-consultation-receipt', provider: consultation?.provider || null, model: consultation?.model || null, consultationId: consultation?.consultation_id || null, routingReason: consultationIntent } };
-  }
-  const intent = classifyChatIntent(userMessage);
-  if (intent !== 'conversation') {
-    const invocationSource = /^\s*\//.test(userMessage) ? 'explicit-command' : 'natural-language-intent';
-    const answer = await answerDataQuery(intent, userId, signal, { sessionId, invocationSource });
-    if (typeof onToken === 'function' && answer.content) onToken(answer.content);
-    return answer;
   }
   const personalityPlan = selectPersonalityCapabilityPlan(userMessage, getPersonalityProfile());
   if (personalityPlan) {

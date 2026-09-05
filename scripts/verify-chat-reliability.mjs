@@ -146,6 +146,22 @@ try {
   assert.match(ask.data.messages.at(-1).content, /ChatGPT consultation #[0-9]+[\s\S]*ATOMPROOF42/);
   assert.doesNotMatch(ask.data.messages.at(-1).content, /don'?t have access|no access/i);
 
+  for (const [index, content] of [
+    'call chatgpt and have it say hello',
+    'no im asking for you to open chatgpt and type and send a hello and give me the response here.'
+  ].entries()) {
+    const invocation = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: `chat-reliability-new-cloud-000${index + 1}`, body: { content } });
+    assert.equal(invocation.status, 200);
+    const reply = invocation.data.messages.at(-1);
+    assert.doesNotMatch(reply.content, /ATOMPROOF42/);
+    assert.equal(JSON.parse(reply.metadata || '{}').endpointType, 'cloud-invocation-request');
+  }
+
+  const diagnostic = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-reliability-diagnostic-0001', body: { content: 'Show the current system status and router diagnostics for ChatGPT. Do not return any previous consultation result.' } });
+  assert.equal(diagnostic.status, 200);
+  assert.doesNotMatch(diagnostic.data.messages.at(-1).content, /ATOMPROOF42/);
+  assert.equal(JSON.parse(diagnostic.data.messages.at(-1).metadata || '{}').actionDecision?.actionId, 'system.status');
+
   const contextual = await request(`/api/chat/sessions/${sessionId}/messages`, { method: 'POST', key: 'chat-reliability-context-0001', body: { content: "what's this?" } });
   assert.equal(contextual.status, 200);
   assert.match(contextual.data.messages.at(-1).content, /saved result[\s\S]*ATOMPROOF42/i);

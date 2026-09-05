@@ -2,6 +2,8 @@
 // do not execute capabilities or mutate state; server/index.js remains the only
 // owner of persistence, action receipts, permissions, and provider dispatch.
 
+import { classifyCloudProviderIntent } from './cloudIntent.js';
+
 export const CHAT_MESSAGE_MAX_CHARS = 20_000;
 export const CLOUD_GUIDANCE_MAX_CHARS = 8_000;
 export const CHAT_HISTORY_MAX_MESSAGES = 14;
@@ -14,6 +16,7 @@ const VAGUE_REFERENCE = /\b(?:what(?:'s| is)|explain|describe)\s+(?:this|that)(?
 
 export function classifyConsultationReference(message, { hasCompletedConsultation = false } = {}) {
   const text = String(message || '').trim();
+  if (classifyCloudProviderIntent(text).kind) return null;
   const vagueUse = /\b(?:use|remove|clear|stop)\b[^.?!]*\b(?:(?:that|this|its|the)\s+)?(?:answer|response|advice|guidance|result)\b/i.test(text);
   if (!text || (!CLOUD_REFERENCE.test(text) && !(hasCompletedConsultation && (VAGUE_REFERENCE.test(text) || vagueUse)))) return null;
   if (/\b(?:remove|clear|stop|don'?t use|do not use)\b[^.?!]*\b(?:guidance|advice|answer|response)\b/i.test(text)) return 'remove';

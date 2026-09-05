@@ -54,6 +54,7 @@ import { renderMarkdown } from './markdown.js';
 import { normalizeNativeServerUrl } from './nativeConnection.js';
 import { awaitChatSendResult, isChatSendOriginActive, isLatestChatConnectionRequest } from './chatSendClient.js';
 import { CHAT_MESSAGE_MAX_CHARS, CLOUD_GUIDANCE_MAX_CHARS } from '../server/chatReliability.js';
+import { classifyCloudProviderIntent } from '../server/cloudIntent.js';
 import {
   normalizeDetailMode,
   parseMessageMetadata,
@@ -2836,11 +2837,11 @@ function Chat({ sessions, activeSession, selectedSession, setSelectedSession, se
   }
 
   async function prepareDirectCloudRequest(outgoing) {
-    const match = String(outgoing || '').match(/\b(?:ask|use|consult|check with)\s+(chatgpt|gemini|grok|claude)\b/i);
-    if (!match) return false;
-    const provider = cloudProviders.find((item) => item.provider.toLowerCase() === match[1].toLowerCase());
+    const intent = classifyCloudProviderIntent(outgoing);
+    if (intent.kind !== 'invoke') return false;
+    const provider = cloudProviders.find((item) => item.provider.toLowerCase() === intent.provider.toLowerCase());
     if (!provider) {
-      setNotice(`${match[1]} is not connected. Open Cloud accounts with + to connect a signed-in browser session first.`);
+      setNotice(`${intent.provider} is not connected. Open Cloud accounts with + to connect a signed-in browser session first.`);
       navigate('settings');
       return true;
     }

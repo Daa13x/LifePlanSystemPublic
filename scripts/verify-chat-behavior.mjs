@@ -23,6 +23,7 @@ import {
 import { buildChatCommandCatalog, CHAT_COMMANDS, explicitChatCommand } from '../server/chatCommands.js';
 import { createCapabilityRegistry } from '../server/chatCapabilities.js';
 import { renderMarkdown } from '../src/markdown.js';
+import { classifyCloudProviderIntent } from '../server/cloudIntent.js';
 import {
   boundedConversationHistory,
   classifyConsultationReference,
@@ -75,6 +76,13 @@ console.log('--- chat behaviour verification ---');
 {
   const consultation = { id: 19, consultation_id: 19, provider: 'ChatGPT', model: 'Current model selected in ChatGPT', status: 'completed', response: 'ATOMPROOF42' };
   line(classifyConsultationReference('what did you get from chatgpt?', { hasCompletedConsultation: true }) === 'result', 'ChatGPT result question resolves to the completed consultation');
+  line(classifyCloudProviderIntent('call chatgpt and have it say hello').kind === 'invoke', 'call ChatGPT is a new invocation');
+  line(classifyCloudProviderIntent('no im asking for you to open chatgpt and type and send a hello and give me the response here.').kind === 'invoke', 'open/type/send ChatGPT is a new invocation');
+  line(classifyCloudProviderIntent('send this question to ChatGPT').kind === 'invoke', 'send-to-provider is a new invocation');
+  line(classifyConsultationReference('call chatgpt and have it say hello', { hasCompletedConsultation: true }) === null, 'new invocation cannot reuse an old consultation');
+  line(classifyCloudProviderIntent('Do not ask ChatGPT anything.').kind === null, 'negated provider invocation is respected');
+  line(classifyCloudProviderIntent('Inspect the router diagnostics for ChatGPT. Do not return any previous consultation result.').kind === 'diagnostic', 'explicit diagnostic outranks provider history');
+  line(classifyConsultationReference('Inspect the router diagnostics for ChatGPT. Do not return any previous consultation result.', { hasCompletedConsultation: true }) === null, 'diagnostic cannot reuse an old consultation');
   line(classifyConsultationReference('use that answer', { hasCompletedConsultation: true }) === 'use', 'contextual use-that-answer resolves to one-shot guidance');
   line(classifyConsultationReference('remove guidance', { hasCompletedConsultation: true }) === 'remove', 'contextual guidance removal resolves to the same owner');
   line(classifyConsultationReference("what's this?", { hasCompletedConsultation: true }) === 'describe', 'vague reference prefers the current consultation object');
