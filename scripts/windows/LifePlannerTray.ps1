@@ -16,6 +16,7 @@ $PortableRoot = [System.IO.Path]::GetFullPath($PortableRoot)
 $appRoot = Join-Path $PortableRoot 'app'
 $nodeExe = Join-Path $PortableRoot 'node\node.exe'
 $serverEntry = Join-Path $appRoot 'server\index.js'
+$nativeExe = Join-Path $PortableRoot 'native\LifePlanSystem.Native.exe'
 $playwrightRoot = Join-Path $appRoot 'data\ms-playwright'
 $playwrightInstaller = Join-Path $PortableRoot 'Install Playwright Chromium.cmd'
 $logRoot = Join-Path $appRoot 'data\logs'
@@ -24,7 +25,7 @@ $stderrLog = Join-Path $logRoot 'life-planner-server-error.log'
 $appUrl = "http://127.0.0.1:$Port/"
 $healthUrl = "http://127.0.0.1:$Port/api/health"
 
-foreach ($requiredPath in @($appRoot, $nodeExe, $serverEntry)) {
+foreach ($requiredPath in @($appRoot, $nodeExe, $serverEntry, $nativeExe)) {
   if (-not (Test-Path -LiteralPath $requiredPath)) {
     [System.Windows.Forms.MessageBox]::Show(
       "Life Planner could not start because a required file is missing:`r`n$requiredPath",
@@ -63,7 +64,7 @@ function Test-ServerHealth {
 
 if (-not $createdNew) {
   if (Test-ServerHealth) {
-    Start-Process $appUrl | Out-Null
+    Start-Process -FilePath $nativeExe -WorkingDirectory (Split-Path -Parent $nativeExe) | Out-Null
   }
   else {
     [System.Windows.Forms.MessageBox]::Show(
@@ -253,7 +254,7 @@ function Stop-LifePlannerServer {
 
 function Open-LifePlanner {
   if (Test-ServerHealth) {
-    Start-Process $appUrl | Out-Null
+    Start-Process -FilePath $nativeExe -WorkingDirectory (Split-Path -Parent $nativeExe) | Out-Null
     return
   }
   $notifyIcon.ShowBalloonTip(

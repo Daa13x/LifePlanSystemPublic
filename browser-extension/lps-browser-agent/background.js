@@ -197,6 +197,17 @@ async function runContentSend(targetAgent, prompt, jobReceipt) {
     const rect = node.getBoundingClientRect();
     return rect.width > 20 && rect.height > 10;
   };
+  // A stable fragment is not a completed provider reply. In particular,
+  // ChatGPT can pause after its opening token while its visible Stop control
+  // remains present. Do not certify that fragment as a browser round-trip.
+  const isProviderGenerating = () => {
+    const selectors = targetAgent === 'ChatGPT'
+      ? ['[data-testid="stop-button"]', 'button[aria-label*="Stop generating" i]', 'button[aria-label*="Stop streaming" i]']
+      : ['[data-is-streaming="true"]', 'button[aria-label*="Stop" i]'];
+    return selectors
+      .flatMap((selector) => [...document.querySelectorAll(selector)])
+      .some(isVisibleNode);
+  };
   const extractResponseText = (node) => {
     const raw = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
     const text = stripStatusPrefix(raw);
@@ -307,10 +318,10 @@ async function runContentSend(targetAgent, prompt, jobReceipt) {
     // window). One extra, longer confirmation read after reaching the window
     // guards against exactly that without slowing down the normal case, where
     // the text is already genuinely finished and this confirmation is a no-op.
-    if (stableTicks >= 3) {
+    if (stableTicks >= 3 && !isProviderGenerating()) {
       await sleep(2500);
       const confirmed = readLatestResponse(beforeTurnCount);
-      if (confirmed === text) {
+      if (confirmed === text && !isProviderGenerating()) {
         return {
           status: 'answered',
           url: location.href,

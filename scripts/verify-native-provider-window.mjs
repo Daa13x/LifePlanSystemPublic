@@ -12,6 +12,7 @@ const ui = read('src/main.jsx');
 assert.match(main, /IsTrustedMainUri\(source\)/, 'only the local LPS view may request a provider window');
 assert.match(main, /open-provider-window/, 'native request type is explicit');
 assert.match(main, /provider\.GetString\(\), "chatgpt"/, 'native request is limited to ChatGPT');
+assert.match(read('native/LifePlanSystem.Native/NativeRuntimeIdentity.cs'), /"native-shell"/, 'the native runtime identifies the normal shell without creating a new provider owner');
 assert.match(provider, /"webview", "providers", _providerId/, 'provider uses a profile separate from the main LPS view');
 assert.match(provider, /IsAllowedNavigation\(_providerId/, 'every provider navigation is allow-listed');
 assert.match(provider, /WebMessageReceived.*no native message channel/s, 'provider pages cannot invoke native commands');

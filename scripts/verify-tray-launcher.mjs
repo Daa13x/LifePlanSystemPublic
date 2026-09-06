@@ -24,9 +24,12 @@ assert.match(tray, /Stop-LifePlannerServer\s*\n\s*throw \$failureMessage/);
 assert.match(tray, /Ensure-LocalModelRuntime/);
 assert.match(tray, /Life Planner restarted/);
 assert.match(tray, /Start-LifePlannerServer\s*\n\s*\$notifyIcon\.ShowBalloonTip/);
+assert.match(tray, /LifePlanSystem\.Native\.exe/);
+assert.match(tray, /Start-Process -FilePath \$nativeExe/, 'the normal tray open path starts the existing native shell');
 
 assert.match(packaging, /LifePlannerTray\.ps1/);
 assert.match(packaging, /Start Life Planner\.vbs/);
+assert.match(packaging, /Start-NativeShell\.ps1/, 'the generated default VBS launcher enters the native shell lifecycle');
 assert.match(packaging, /life-planner-app\.ico/);
 assert.match(packaging, /Install-LlamaRuntime\.ps1/);
 assert.doesNotMatch(packaging, /timeout\s+\/t\s+2/i);

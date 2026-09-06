@@ -8,6 +8,10 @@ namespace LifePlanSystem.Native.Runtime;
 
 internal sealed class NativeHealthService(NativeRuntimeIdentity identity, NativeReadProfileLocator profileLocator) : BackgroundService
 {
+    // 4178 is the desktop phone-sync service. The native shell must never
+    // compete with it: the shell is a client of the same local runtime, not a
+    // second server owner. Keep this diagnostic listener loopback-only.
+    internal const int HealthPort = 4179;
     private readonly HttpListener _listener = new();
 
     public override async Task StopAsync(CancellationToken cancellationToken)
@@ -18,7 +22,7 @@ internal sealed class NativeHealthService(NativeRuntimeIdentity identity, Native
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _listener.Prefixes.Add("http://127.0.0.1:4178/native/");
+        _listener.Prefixes.Add($"http://127.0.0.1:{HealthPort}/native/");
         _listener.Start();
         try
         {

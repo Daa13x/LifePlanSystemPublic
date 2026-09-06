@@ -47,9 +47,9 @@ if ($SmokeTest) {
     $deadline = (Get-Date).AddSeconds(8)
     $health = $null
     while ((Get-Date) -lt $deadline -and -not $health) {
-      try { $health = Invoke-RestMethod -Uri 'http://127.0.0.1:4178/native/health' -TimeoutSec 1 } catch { Start-Sleep -Milliseconds 200 }
+      try { $health = Invoke-RestMethod -Uri 'http://127.0.0.1:4179/native/health' -TimeoutSec 1 } catch { Start-Sleep -Milliseconds 200 }
     }
-    if (-not $health -or -not $health.ok -or $health.data.runtime.runtimeMode -ne 'native-shell-compatibility') {
+    if (-not $health -or -not $health.ok -or $health.data.runtime.runtimeMode -ne 'native-shell') {
       throw 'Native health smoke test did not return the expected native runtime identity.'
     }
   }

@@ -245,7 +245,7 @@ Dim shell, fso, root, scriptPath, command
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 root = fso.GetParentFolderName(WScript.ScriptFullName)
-scriptPath = fso.BuildPath(root, "LifePlannerTray.ps1")
+scriptPath = fso.BuildPath(root, "Start-NativeShell.ps1")
 command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & scriptPath & Chr(34)
 shell.Run command, 0, False
 '@ | Set-Content -Path (Join-Path $portableRoot "Start Life Planner.vbs") -Encoding ASCII
@@ -285,7 +285,8 @@ exit /b %ERRORLEVEL%
 @'
 # Life Planner Portable
 
-Run `Start Life Planner.vbs` (or the compatibility `Start Life Planner.cmd`).
+Run `Start Life Planner.vbs` (or `Start Life Planner.cmd`). It starts the
+tray-owned local server and opens the native WebView2 Life Planner shell.
 
 Life Planner starts without a Node terminal and remains available from its app icon in the Windows notification area. The tray menu provides:
 
@@ -298,10 +299,10 @@ The app opens at:
 
 http://127.0.0.1:4177/
 
-`Start Native Shell.cmd` is an opt-in compatibility shell. It starts the existing
-local server first, then opens the same React interface in the isolated native
-WebView2 window. It does not replace the tray launcher, own the database, or
-change provider credentials.
+`Start Native Shell.cmd` is the direct native-shell entry point. It starts the
+existing local server first, then opens the same React interface in the isolated
+native WebView2 window. It does not own the database or change provider
+credentials. The default launcher uses this same lifecycle.
 
 Server output is written under:
 
