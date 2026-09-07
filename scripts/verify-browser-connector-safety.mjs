@@ -74,7 +74,7 @@ try {
   assert.match(pairing.token, /^[a-f0-9]{64}$/);
 
   const heartbeatBody = JSON.stringify({
-    runningVersion: '0.1.3',
+    runningVersion: '0.1.4',
     tabs: [
       { id: 1, title: 'ChatGPT', url: 'https://chatgpt.com/' },
       { id: 2, title: 'Private bank', url: 'https://bank.example/account' }
@@ -85,8 +85,8 @@ try {
   const currentHeartbeat = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: heartbeatBody, token: pairing.token });
   assert.equal(currentHeartbeat.status, 200);
   assert.equal(currentHeartbeat.body.data.lifecycleState, 'CONNECTED_CURRENT');
-  assert.equal(currentHeartbeat.body.data.runningVersion, '0.1.3');
-  assert.equal(currentHeartbeat.body.data.expectedVersion, '0.1.3');
+  assert.equal(currentHeartbeat.body.data.runningVersion, '0.1.4');
+  assert.equal(currentHeartbeat.body.data.expectedVersion, '0.1.4');
 
   const mismatchBody = JSON.stringify({ runningVersion: '0.1.2', tabs: [{ id: 1, title: 'ChatGPT', url: 'https://chatgpt.com/' }] });
   const mismatch = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: mismatchBody, token: pairing.token });
@@ -96,14 +96,14 @@ try {
   assert.equal(staleNext.status, 409, 'a stale running extension cannot claim browser work');
   assert.equal(staleNext.body.failure.errorCode, 'BROWSER_CONNECTOR_STALE');
   const inProgressBody = JSON.stringify({
-    runningVersion: '0.1.2', tabs: [],
-    reloadAttempt: { expectedVersion: '0.1.3', attemptedAt: new Date().toISOString(), result: 'in_progress' }
+    runningVersion: '0.1.3', tabs: [],
+    reloadAttempt: { expectedVersion: '0.1.4', attemptedAt: new Date().toISOString(), result: 'in_progress' }
   });
   const inProgress = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: inProgressBody, token: pairing.token });
   assert.equal(inProgress.body.data.lifecycleState, 'RELOAD_IN_PROGRESS');
   const manualBody = JSON.stringify({
-    runningVersion: '0.1.2', tabs: [],
-    reloadAttempt: { expectedVersion: '0.1.3', attemptedAt: new Date(Date.now() - 20_000).toISOString(), result: 'in_progress' }
+    runningVersion: '0.1.3', tabs: [],
+    reloadAttempt: { expectedVersion: '0.1.4', attemptedAt: new Date(Date.now() - 20_000).toISOString(), result: 'in_progress' }
   });
   const manual = await request(baseUrl, '/api/browser/extension/heartbeat', { method: 'POST', body: manualBody, token: pairing.token });
   assert.equal(manual.body.data.lifecycleState, 'MANUAL_RELOAD_REQUIRED');
@@ -257,23 +257,11 @@ try {
   assert.match(serverSource, /claimToken/);
   assert.match(extensionSource, /claimToken: job\.claimToken/);
 
-  // Regression (2026-08-29): a 3-second text-stability window alone falsely
-  // finalized a longer, multi-sentence real ChatGPT reply after it happened to
-  // pause mid-stream, capturing it truncated. runContentSend must not return
-  // an answered result straight off the stability check -- it must take one
-  // longer confirmation read first and only finalize if the text held.
-  const stableTicksBlockMatch = extensionSource.match(/if \(stableTicks >= 3 && !isProviderGenerating\(\)\) \{[\s\S]*?\n  \}/);
-  assert.ok(stableTicksBlockMatch, 'runContentSend must retain its stableTicks >= 3 completion branch');
-  const stableTicksBlock = stableTicksBlockMatch[0];
-  assert.match(stableTicksBlock, /await sleep\(\d+\)/, 'reaching the stability window must wait for one more confirmation read before finalizing');
-  assert.match(stableTicksBlock, /const confirmed = readLatestResponse\(beforeTurnCount\)/, 'the confirmation read must re-derive the answer the same way the polling loop does');
-  assert.match(stableTicksBlock, /!isProviderGenerating\(\)/, 'a visible provider stop/generation control prevents premature response certification');
-  assert.match(stableTicksBlock, /if \(confirmed === text && !isProviderGenerating\(\)\)/, "a result may only be returned as 'answered' if the confirmation read matches and the provider is no longer generating");
-  assert.doesNotMatch(
-    stableTicksBlock.slice(0, stableTicksBlock.indexOf('if (confirmed === text && !isProviderGenerating())')),
-    /status: 'answered'/,
-    'runContentSend must not return answered before the post-stability confirmation read'
-  );
+  assert.match(extensionSource, /generationStateFor/, 'capture uses tri-state provider generation evidence');
+  assert.match(extensionSource, /\? 'idle' : 'ambiguous'/, 'missing generation controls fail closed as ambiguous');
+  assert.match(extensionSource, /candidate\.node === stableCandidate\.node/, 'stability is bound to exact assistant DOM node identity');
+  assert.match(extensionSource, /confirmed\.node === candidate\.node/, 'final confirmation re-resolves and matches the current assistant node');
+  assert.match(extensionSource, /generationStateFor\(confirmed\.node\) === 'idle'/, 'final confirmation rechecks positive provider-idle evidence');
 
   console.log('Browser connector authentication and privacy verification passed.');
 } finally {

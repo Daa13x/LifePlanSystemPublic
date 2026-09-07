@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Life Planner Browser Agent",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Lets local Life Planner send browser-agent questions through the user's Chrome tabs.",
   "icons": {
     "16": "icons/icon16.png",

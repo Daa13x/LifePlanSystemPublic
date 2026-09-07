@@ -197,16 +197,30 @@ async function runContentSend(targetAgent, prompt, jobReceipt) {
     const rect = node.getBoundingClientRect();
     return rect.width > 20 && rect.height > 10;
   };
-  // A stable fragment is not a completed provider reply. In particular,
-  // ChatGPT can pause after its opening token while its visible Stop control
-  // remains present. Do not certify that fragment as a browser round-trip.
-  const isProviderGenerating = () => {
-    const selectors = targetAgent === 'ChatGPT'
-      ? ['[data-testid="stop-button"]', 'button[aria-label*="Stop generating" i]', 'button[aria-label*="Stop streaming" i]']
-      : ['[data-is-streaming="true"]', 'button[aria-label*="Stop" i]'];
-    return selectors
+  // Provider generation is deliberately tri-state. A missing/changed Stop
+  // selector is not proof that generation ended: only an explicit terminal
+  // turn state or the provider's visible, enabled send control proves idle.
+  const generationStateFor = (assistantNode) => {
+    const activeSelectors = targetAgent === 'ChatGPT'
+      ? ['[data-testid="stop-button"]', 'button[aria-label*="Stop" i]', '[data-is-streaming="true"]', '[aria-busy="true"]']
+      : ['[data-is-streaming="true"]', '[aria-busy="true"]', 'button[aria-label*="Stop" i]'];
+    const active = activeSelectors
       .flatMap((selector) => [...document.querySelectorAll(selector)])
       .some(isVisibleNode);
+    if (active) return 'generating';
+
+    let explicitIdle = false;
+    for (let node = assistantNode, depth = 0; node && depth < 5; node = node.parentElement, depth += 1) {
+      const streaming = String(node.getAttribute?.('data-is-streaming') || '').toLowerCase();
+      const busy = String(node.getAttribute?.('aria-busy') || '').toLowerCase();
+      const state = String(node.getAttribute?.('data-state') || '').toLowerCase();
+      if (streaming === 'true' || busy === 'true' || /stream|generat|pending|running/.test(state)) return 'generating';
+      if (streaming === 'false' || busy === 'false' || /complete|finished|done/.test(state)) explicitIdle = true;
+    }
+    const sendReady = sendSelectors
+      .flatMap((selector) => [...document.querySelectorAll(selector)])
+      .some((node) => isVisibleNode(node) && !node.disabled);
+    return explicitIdle || sendReady ? 'idle' : 'ambiguous';
   };
   const extractResponseText = (node) => {
     const raw = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
@@ -218,21 +232,26 @@ async function runContentSend(targetAgent, prompt, jobReceipt) {
     }
     return text.slice(0, 12000);
   };
-  // On ChatGPT pages capture is scoped to assistant turns at index >= minTurnIndex
-  // (turns created after the prompt was sent), with no fallback to older turns or
-  // generic containers — falling back returned stale answers from earlier turns.
+  // Capture is bound to the current terminal post-dispatch assistant DOM node,
+  // not just its array index or equivalent text. React may replace a streaming
+  // node in place; object identity makes that replacement invalidate stability.
   const assistantTurnCount = () => document.querySelectorAll(adapter.assistant).length;
-  const readLatestResponse = (minTurnIndex = 0) => {
+  const readCurrentResponse = (minTurnIndex = 0) => {
     const assistantNodes = [...document.querySelectorAll(adapter.assistant)];
-    if (assistantNodes.length) {
-      const candidates = assistantNodes.slice(minTurnIndex).filter(isVisibleNode);
-      for (const node of candidates.reverse()) {
-        const text = extractResponseText(node);
-        if (text) return text;
-      }
-      return '';
-    }
-    return '';
+    const visible = assistantNodes
+      .map((node, index) => ({ node, index }))
+      .filter(({ node }) => isVisibleNode(node));
+    const terminal = visible[visible.length - 1];
+    if (!terminal || terminal.index < minTurnIndex) return null;
+    const text = extractResponseText(terminal.node);
+    if (!text) return null;
+    return {
+      node: terminal.node,
+      index: terminal.index,
+      turnCount: assistantNodes.length,
+      text,
+      pageUrl: location.href
+    };
   };
 
   let box = null;
@@ -261,7 +280,7 @@ async function runContentSend(targetAgent, prompt, jobReceipt) {
   // Snapshot immediately before send (page fully loaded) so late-rendering
   // conversation history cannot be mistaken for a new reply.
   const beforeTurnCount = assistantTurnCount();
-  const beforeText = readLatestResponse();
+  const beforeText = readCurrentResponse()?.text || '';
 
   const button = sendSelectors.map((selector) => document.querySelector(selector)).find((node) => {
     if (!node) return false;
@@ -293,44 +312,49 @@ async function runContentSend(targetAgent, prompt, jobReceipt) {
     console.warn('Life Planner dispatch receipt could not be delivered.', error);
   }
 
-  let lastText = '';
+  let stableCandidate = null;
   let stableTicks = 0;
   for (let tick = 0; tick < 90; tick += 1) {
     await sleep(1000);
-    const text = readLatestResponse(beforeTurnCount);
+    const candidate = readCurrentResponse(beforeTurnCount);
     // A repeated identical answer (text === beforeText) still counts when it comes
     // from a genuinely new assistant turn (turn count grew past the send snapshot).
-    if (!text || (text === beforeText && assistantTurnCount() <= beforeTurnCount)) {
+    if (!candidate || (candidate.text === beforeText && candidate.turnCount <= beforeTurnCount)) {
       stableTicks = 0;
-      lastText = text;
+      stableCandidate = null;
       continue;
     }
-    if (text === lastText) {
+    const sameCandidate = stableCandidate
+      && candidate.node === stableCandidate.node
+      && candidate.index === stableCandidate.index
+      && candidate.text === stableCandidate.text
+      && candidate.pageUrl === stableCandidate.pageUrl;
+    if (sameCandidate) {
       stableTicks += 1;
     } else {
-      lastText = text;
+      stableCandidate = candidate;
       stableTicks = 1;
     }
-    // A 3-second stability window still passes if the provider's own streaming
-    // rendering happens to pause for a few seconds mid-generation (observed
-    // 2026-08-29: a longer multi-sentence ChatGPT reply was captured truncated
-    // to its first 7 characters after a mid-stream pause satisfied this exact
-    // window). One extra, longer confirmation read after reaching the window
-    // guards against exactly that without slowing down the normal case, where
-    // the text is already genuinely finished and this confirmation is a no-op.
-    if (stableTicks >= 3 && !isProviderGenerating()) {
-      await sleep(2500);
-      const confirmed = readLatestResponse(beforeTurnCount);
-      if (confirmed === text && !isProviderGenerating()) {
+    if (stableTicks >= 3 && generationStateFor(candidate.node) === 'idle') {
+      // Final confirmation deliberately crosses another observation boundary,
+      // re-resolves the terminal assistant turn, and rechecks provider state.
+      await sleep(1000);
+      const confirmed = readCurrentResponse(beforeTurnCount);
+      const sameCurrentTurn = confirmed
+        && confirmed.node === candidate.node
+        && confirmed.index === candidate.index
+        && confirmed.text === candidate.text
+        && confirmed.pageUrl === candidate.pageUrl;
+      if (sameCurrentTurn && generationStateFor(confirmed.node) === 'idle') {
         return {
           status: 'answered',
           url: location.href,
           title: document.title,
-          answer: text,
+          answer: confirmed.text,
           message: 'Prompt sent and response captured from the Life Planner Chrome connector.'
         };
       }
-      lastText = confirmed;
+      stableCandidate = confirmed;
       stableTicks = confirmed ? 1 : 0;
     }
   }
