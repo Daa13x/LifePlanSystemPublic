@@ -72,7 +72,9 @@ if (process.platform === 'win32') {
     const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script], { encoding: 'utf8', windowsHide: true, timeout: 40000 });
     assert.equal(result.status, 0, `generated launcher exits successfully: ${result.error || result.stderr}`);
     const observed = JSON.parse(fs.readFileSync(path.join(installRoot, 'argv.json'), 'utf8').replace(/^\ufeff/, ''));
-    assert.equal(observed.root, installRoot, 'the complete install root reaches the tray unchanged');
+    // Hosted Windows TEMP can use an 8.3 alias (RUNNER~1); PowerShell expands
+    // that alias. Require the same existing directory, not the same spelling.
+    assert.equal(fs.realpathSync.native(observed.root), fs.realpathSync.native(installRoot), 'the complete install root reaches the tray unchanged');
     assert.equal(observed.noAutoOpen, false, 'the tray owns opening after validated readiness');
 
     // Exercise actual tray health/open/stop functions without starting the UI,
