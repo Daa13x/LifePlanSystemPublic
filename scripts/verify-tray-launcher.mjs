@@ -203,7 +203,8 @@ $runtimeVersion = 'fixture'; $runtimeServerSha256 = $starterSha256; $runtimeBase
 $persistentCache = $false
 foreach ($case in @(@('extract','runtime.extract'), @('payload','runtime.validate-payload'), @('promotion','runtime.promote-runtime'))) {
   $script:scenario = $case[0]
-  $portableRootPath = Join-Path $FixtureRoot $script:scenario
+  # Match the real provisioner's root normalization, including Windows 8.3 aliases.
+  $portableRootPath = [System.IO.Path]::GetFullPath((Join-Path $FixtureRoot $script:scenario))
   New-Item -ItemType Directory -Path $portableRootPath | Out-Null
   $runtimeRoot = Join-Path $portableRootPath 'llama'
   $downloadRoot = Join-Path $portableRootPath '.runtime-downloads'

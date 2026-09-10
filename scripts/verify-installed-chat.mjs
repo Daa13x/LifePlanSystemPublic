@@ -18,10 +18,11 @@ import {
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const portableRoot = process.argv[2] ? path.resolve(process.argv[2]) : null;
-const appRoot = portableRoot ? path.join(portableRoot, 'app') : repoRoot;
-const nodeCommand = portableRoot ? path.join(portableRoot, 'node', 'node.exe') : process.execPath;
-const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lps-installed-chat-'));
-const dbPath = path.join(probeRoot, 'data', 'life-planner.sqlite');
+const probeRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'lps-installed-chat-')));
+const fixturePortableRoot = portableRoot ? path.join(probeRoot, 'portable') : null;
+const appRoot = portableRoot ? path.join(fixturePortableRoot, 'app') : repoRoot;
+const nodeCommand = portableRoot ? path.join(fixturePortableRoot, 'node', 'node.exe') : process.execPath;
+const dbPath = path.join(portableRoot ? appRoot : probeRoot, 'data', 'life-planner.sqlite');
 const evidence = { target: portableRoot ? 'portable' : 'production-dist', pageUrl: '', build: null, request: null, response: null, persisted: null, visible: null, localKnowledgeVisible: false, localSourceCount: 0, idempotentReplay: false, reopened: false, setupRecoveryLoaded: false, rejectedTokenSurfaced: false, cloudPreviewProtected: false, cloudSendRejectedWithoutProviderTab: false, cloudComposerVisible: false, cloudProviderButtonVisible: false, directCloudRequestPrepared: false };
 
 function freePort() {
@@ -79,12 +80,32 @@ async function startServer(port) {
 let child = null;
 let browser = null;
 await runWithFinalizers(async () => {
+  if (portableRoot) {
+    // Exercise unchanged package code/runtime with its canonical database layout
+    // inside the existing disposable fixture. Never override the packaged path
+    // guard, mutate the supplied artifact, or copy its personal data/configuration.
+    const sourceApp = path.join(portableRoot, 'app');
+    fs.mkdirSync(appRoot, { recursive: true });
+    for (const entry of ['server', 'src', 'dist', 'public', 'node_modules', 'scripts', 'docs', 'package.json', 'package-lock.json']) {
+      const source = path.join(sourceApp, entry);
+      if (fs.existsSync(source)) fs.cpSync(source, path.join(appRoot, entry), { recursive: true });
+    }
+    fs.cpSync(path.join(portableRoot, 'node'), path.join(fixturePortableRoot, 'node'), { recursive: true });
+  }
   assert.ok(fs.existsSync(path.join(appRoot, 'dist', 'index.html')), `Missing built frontend: ${path.join(appRoot, 'dist', 'index.html')}`);
   assert.ok(fs.existsSync(nodeCommand), `Missing runtime: ${nodeCommand}`);
   const port = await freePort();
   const started = await startServer(port);
   child = started.child;
   const { base } = started;
+  if (portableRoot) {
+    const runtime = (await (await fetch(`${base}/api/health`)).json()).data.runtime;
+    assert.equal(runtime.runtimeMode, 'portable');
+    assert.equal(runtime.packageChanged, false);
+    assert.equal(fs.realpathSync.native(runtime.database.path), fs.realpathSync.native(dbPath));
+    assert.equal(fs.realpathSync.native(runtime.process.executable), fs.realpathSync.native(nodeCommand));
+    evidence.portableLayoutVerified = true;
+  }
     const csrf = (await (await fetch(`${base}/api/csrf-token`)).json()).data.token;
     const mutate = async (route, body) => {
       const response = await fetch(`${base}${route}`, { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json', 'X-LPS-CSRF': csrf }, body: JSON.stringify(body) });
