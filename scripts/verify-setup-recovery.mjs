@@ -22,7 +22,9 @@ import {
   applyPendingRestore,
   detectLegacyData,
   importLegacyAsBackup,
-  isSqliteFile
+  isSqliteFile,
+  verifyRuntimeDatabase,
+  rememberRuntimeDatabase
 } from '../server/setupRecovery.js';
 
 let failures = 0;
@@ -66,15 +68,36 @@ try {
   line(assessment.checks.some((c) => c.id === 'database' && c.ok), 'database check passes for a valid DB');
 
   // Backup + validation.
-  const backup = createBackup({ dbPath, label: 'manual', now: now() });
+  const backup = await createBackup({ dbPath, label: 'manual', now: now() });
   line(fs.existsSync(path.join(backup.dir, 'manifest.json')), 'createBackup writes a manifest');
   line(backup.manifest.recoveryScope?.kind === 'sqlite-database-snapshot' && backup.manifest.recoveryScope.tables.length > 0, 'backup manifest lists included SQLite tables');
   line(backup.manifest.recoveryScope?.credentialHandling?.includes('DPAPI') && backup.manifest.recoveryScope.excluded.includes('logs'), 'backup manifest truthfully records DPAPI credential handling and excluded local files');
   line(validateBackup(backup.dir).ok, 'a fresh backup validates');
   line(listBackups(dbPath).length >= 1, 'listBackups returns the new backup');
 
+  // A pinned reader prevents a full WAL checkpoint. Backups must include the
+  // later committed value anyway, without changing implicit rowids.
+  const writer = new DatabaseSync(dbPath);
+  const reader = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    writer.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE rowid_fixture (value TEXT); INSERT INTO rowid_fixture(rowid,value) VALUES (42,\'kept\')');
+    reader.exec('BEGIN');
+    reader.prepare('SELECT * FROM kv').all();
+    writer.prepare('UPDATE kv SET v=? WHERE k=?').run('WAL-COMMITTED', 'marker');
+    const checkpoint = writer.prepare('PRAGMA wal_checkpoint(PASSIVE)').get();
+    line(checkpoint.log > checkpoint.checkpointed, 'fixture has committed WAL frames not copied to the main database');
+    const walBackup = await createBackup({ dbPath, label: 'wal-snapshot', now: now() });
+    const copyPath = path.join(walBackup.dir, 'life-planner.sqlite');
+    const copyDb = new DatabaseSync(copyPath, { readOnly: true });
+    try {
+      line(copyDb.prepare('SELECT v FROM kv WHERE k=?').get('marker').v === 'WAL-COMMITTED', 'live backup includes committed WAL data despite a pinned reader');
+      line(copyDb.prepare('SELECT rowid FROM rowid_fixture').get().rowid === 42, 'backup preserves implicit rowids');
+    } finally { copyDb.close(); }
+    line(validateBackup(walBackup.dir).ok, 'WAL snapshot is a standalone validated backup');
+  } finally { reader.close(); writer.close(); }
+
   // Tampered backup fails validation and cannot be staged.
-  const tampered = createBackup({ dbPath, label: 'tamper', now: now() });
+  const tampered = await createBackup({ dbPath, label: 'tamper', now: now() });
   fs.appendFileSync(path.join(tampered.dir, 'life-planner.sqlite'), Buffer.from([0]));
   line(!validateBackup(tampered.dir).ok, 'a tampered backup fails validation (hash mismatch)');
   let stageThrew = false;
@@ -82,12 +105,12 @@ try {
   line(stageThrew, 'staging an invalid backup is refused');
 
   // Manifest entries and restore locations are boundaries, not caller input.
-  const traversal = createBackup({ dbPath, label: 'traversal', now: now() });
+  const traversal = await createBackup({ dbPath, label: 'traversal', now: now() });
   const traversalManifest = JSON.parse(fs.readFileSync(path.join(traversal.dir, 'manifest.json'), 'utf8'));
   traversalManifest.files[0].name = '../outside.sqlite';
   fs.writeFileSync(path.join(traversal.dir, 'manifest.json'), JSON.stringify(traversalManifest));
   line(!validateBackup(traversal.dir).ok, 'a traversal manifest entry is rejected');
-  const schemaMismatch = createBackup({ dbPath, label: 'schema-mismatch', now: now() });
+  const schemaMismatch = await createBackup({ dbPath, label: 'schema-mismatch', now: now() });
   const schemaManifest = JSON.parse(fs.readFileSync(path.join(schemaMismatch.dir, 'manifest.json'), 'utf8'));
   schemaManifest.schemaVersion += 1;
   fs.writeFileSync(path.join(schemaMismatch.dir, 'manifest.json'), JSON.stringify(schemaManifest));
@@ -185,19 +208,53 @@ try {
   line(fs.existsSync(path.join(dataDir, 'pending-restore.json.failed')), 'the invalid marker is retired to a .failed file');
 
   // Legacy data-only migration through the same safe, hashed, staged path.
+  rememberRuntimeDatabase(dbPath);
+  const attestationMarker = stageRestore({ dbPath, backupDir: backup.dir, now: now() });
+  fs.renameSync(dbPath, `${dbPath}.before-attestation`);
+  fs.copyFileSync(path.join(backup.dir, 'life-planner.sqlite'), dbPath);
+  fs.writeFileSync(path.join(dataDir, 'pending-restore.json'), JSON.stringify({ ...attestationMarker, state: 'verified' }));
+  let identityRejected = false;
+  try { verifyRuntimeDatabase(dbPath); } catch { identityRejected = true; }
+  line(identityRejected, 'interrupted attestation fixture contains the old identity and verified replacement');
+  line(applyPendingRestore({ dbPath, now: now() }).applied && verifyRuntimeDatabase(dbPath).state === 'established', 'verified restore resumes attestation before clearing its pending marker');
+
+  for (const boundary of ['before-rename', 'after-rename']) {
+    writeValue(dbPath, `ORIGINAL-${boundary}`);
+    rememberRuntimeDatabase(dbPath);
+    const rollbackIdentity = JSON.parse(fs.readFileSync(path.join(dataDir, 'runtime-database-state.json'), 'utf8')).file;
+    const rollbackDir = path.join(dataDir, `rollback-${boundary}`);
+    fs.mkdirSync(rollbackDir);
+    const rollbackFile = path.join(rollbackDir, 'life-planner.sqlite');
+    fs.renameSync(dbPath, rollbackFile);
+    if (boundary === 'after-rename') fs.renameSync(rollbackFile, dbPath);
+    fs.writeFileSync(path.join(dataDir, 'pending-restore.json'), JSON.stringify({ formatVersion: 1, state: 'rollback-in-progress', rollbackDir, rollbackIdentity }));
+    const rollbackResult = applyPendingRestore({ dbPath, now: now() });
+    line(rollbackResult.applied === false && rollbackResult.reason === 'rolled-back', `interrupted rollback ${boundary} is reported as rollback, never restore success`);
+    line(readValue(dbPath) === `ORIGINAL-${boundary}` && verifyRuntimeDatabase(dbPath).state === 'established' && !readPendingRestore(dbPath), `interrupted rollback ${boundary} preserves and attests the original before clearing intent`);
+  }
+
   const legacyDir = path.join(probeRoot, 'legacy-data');
   fs.mkdirSync(legacyDir, { recursive: true });
   writeValue(path.join(legacyDir, 'life-planner.sqlite'), 'LEGACY');
   line(detectLegacyData({ legacyDataDir: legacyDir }).detected, 'detectLegacyData finds a legacy database');
   line(assessEnvironment({ dbPath, legacyDataDir: legacyDir, now: now() }).legacyDetected === true, 'assessEnvironment surfaces a legacy install');
-  const legacyBackup = importLegacyAsBackup({ dbPath, legacyDataDir: legacyDir, now: now() });
+  const legacyWriter = new DatabaseSync(path.join(legacyDir, 'life-planner.sqlite'));
+  legacyWriter.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0');
+  const legacyReader = new DatabaseSync(path.join(legacyDir, 'life-planner.sqlite'), { readOnly: true });
+  legacyReader.exec('BEGIN');
+  legacyReader.prepare('SELECT * FROM kv').all();
+  legacyWriter.prepare('UPDATE kv SET v=? WHERE k=?').run('LEGACY-WAL', 'marker');
+  let legacyBackup;
+  try { legacyBackup = await importLegacyAsBackup({ dbPath, legacyDataDir: legacyDir, now: now() }); }
+  finally { legacyReader.close(); legacyWriter.close(); }
+  line(readValue(path.join(legacyBackup.dir, 'life-planner.sqlite')) === 'LEGACY-WAL', 'legacy import snapshots committed WAL data from the original connection');
   line(validateBackup(legacyBackup.dir).ok, 'imported legacy backup validates');
   stageRestore({ dbPath, backupDir: legacyBackup.dir, confirmationId: 'c2', idempotencyKey: 'legacy-1', now: now() });
   const legacyApplied = applyPendingRestore({ dbPath, now: now() });
-  line(legacyApplied.applied === true && readValue(dbPath) === 'LEGACY', 'legacy data-only migration applies through the staged restore path');
+  line(legacyApplied.applied === true && readValue(dbPath) === 'LEGACY-WAL', 'legacy data-only migration applies through the staged restore path');
 
   // No user-data loss: the restored/migrated DB is a real DB with the expected row.
-  line(isSqliteFile(dbPath) && readValue(dbPath) === 'LEGACY', 'final database is valid with the expected data (no loss)');
+  line(isSqliteFile(dbPath) && readValue(dbPath) === 'LEGACY-WAL', 'final database is valid with the expected data (no loss)');
 } finally {
   fs.rmSync(probeRoot, { recursive: true, force: true });
 }

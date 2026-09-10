@@ -8,10 +8,10 @@
 // applyPendingRestore is idempotent and keeps a rollback copy, so a crash during
 // the swap is safe: the marker persists and the next start finishes the swap.
 
-import path from 'node:path';
-import { applyPendingRestore, readPendingRestore } from './setupRecovery.js';
+import { applyPendingRestore, readPendingRestore, verifyRuntimeDatabase } from './setupRecovery.js';
+import { resolveRuntimePaths } from './runtimeIdentity.js';
 
-const dbPath = path.resolve(process.env.LIFE_PLANNER_DB || path.join(process.cwd(), 'data', 'life-planner.sqlite'));
+const { dbPath, packaged } = resolveRuntimePaths();
 
 if (readPendingRestore(dbPath)) {
   const result = applyPendingRestore({ dbPath });
@@ -26,5 +26,7 @@ if (readPendingRestore(dbPath)) {
     throw new Error(`Setup and Recovery requires human action before startup can continue: ${result.reason || 'unresolved restore'}.`);
   }
 }
+
+if (packaged) verifyRuntimeDatabase(dbPath);
 
 export const restoreBootstrapDbPath = dbPath;

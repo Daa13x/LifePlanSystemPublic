@@ -33,7 +33,9 @@ if ($sdkExit -ne 0 -or $sdkMajor -lt 9) {
 }
 
 Write-Host "Using .NET SDK $sdkVersion from $DotNetPath"
-& $DotNetPath publish $project --configuration Release --runtime win-x64 --self-contained false --output $publishRoot
+$buildCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $buildCommit -notmatch '^[a-f0-9]{40}$') { throw 'Native publishing requires a verifiable source commit.' }
+& $DotNetPath publish $project --configuration Release --runtime win-x64 --self-contained false --output $publishRoot "-p:LpsBuildCommit=$buildCommit"
 if ($LASTEXITCODE -ne 0) { throw "Native publish failed with exit code $LASTEXITCODE." }
 
 $nativeExe = Join-Path $publishRoot 'LifePlanSystem.Native.exe'

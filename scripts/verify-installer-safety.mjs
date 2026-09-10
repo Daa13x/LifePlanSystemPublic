@@ -58,9 +58,10 @@ line(
   iss.includes('Source: "{#PortableSource}\\*"') && iss.includes('app\\*.log')
     && iss.includes('node\\*')
     && /Source:\s*"\{#PortableSource\}\\node\\\*"[\s\S]*?Check:\s*NeedsEmbeddedNodeRuntime/i.test(iss)
-    && /function\s+NeedsEmbeddedNodeRuntime[\s\S]*?FileExists\(ExpandConstant\('\{app\}\\node\\node\.exe'\)\)/i.test(iss)
+    && /function\s+NeedsEmbeddedNodeRuntime[\s\S]*?GetVersionNumbersString\(ExpandConstant\('\{app\}\\node\\node\.exe'\), InstalledVersion\)/i.test(iss)
+    && iss.includes("InstalledVersion <> '{#EmbeddedNodeVersion}'")
     && !/\[InstallDelete\]|ClearStaleFrontendAssets|DelTree\(ExpandConstant\('\{app\}\\app\\dist\\assets'\)/i.test(iss),
-  'installer copies the complete current frontend payload, preserves a running embedded runtime during updates, and never deletes generated assets or app data during an update'
+  'installer copies the complete frontend, upgrades a mismatched embedded runtime, and never deletes generated assets or app data during an update'
 );
 
 console.log(`\n${failures === 0 ? 'ALL PASS - installer is lowest-privilege, runs no elevated downloads, and launches the app as the standard user.' : failures + ' CHECK(S) FAILED'}`);

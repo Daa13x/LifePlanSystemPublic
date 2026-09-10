@@ -3,6 +3,7 @@
 #define MyAppPublisher "Life Planner"
 #define TrayLauncherName "Start Life Planner.vbs"
 #define PortableSource "..\release\LifePlannerPortable"
+#define EmbeddedNodeVersion GetVersionNumbersString(AddBackslash(SourcePath) + PortableSource + "\node\node.exe")
 #define InstallerAssets "assets"
 #define InstalledIconName "life-planner-app.ico"
 
@@ -34,16 +35,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Vite assets are content-hashed. Preserve prior bundles during updates and
 ; always copy the complete current payload; index.html references current
 ; hashes, while retaining old files prevents deletion of the active UI bundle.
-; The local server holds its embedded node.exe open while running. Preserve an
-; existing runtime during updates so that an app update cannot roll back after
-; copying the UI; first installs still receive the complete embedded runtime.
+; Keep an identical runtime, but deliver the package's corrected Node version
+; on upgrade. Exit the tray environment before setup; Inno's normal file-in-use
+; handling remains active. Merely finding node.exe is not version attestation.
 Source: "{#PortableSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "node\*,app\data\*,app\.env,app\*.sqlite,app\*.sqlite3,app\*.db,app\*.gguf,app\*.safetensors,app\*.onnx,app\*.log"
 Source: "{#PortableSource}\node\*"; DestDir: "{app}\node"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: NeedsEmbeddedNodeRuntime
 
 [Code]
 function NeedsEmbeddedNodeRuntime(): Boolean;
+var
+  InstalledVersion: String;
 begin
-  Result := not FileExists(ExpandConstant('{app}\node\node.exe'));
+  Result := not GetVersionNumbersString(ExpandConstant('{app}\node\node.exe'), InstalledVersion);
+  if not Result then Result := InstalledVersion <> '{#EmbeddedNodeVersion}';
 end;
 
 [Icons]

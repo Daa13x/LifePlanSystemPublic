@@ -8,6 +8,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { pipeline } from 'node:stream/promises';
 import { execFileWithTreeAbort } from './processTree.js';
+import { resolveRuntimePaths, captureRuntimeIdentity, runtimeFailure } from './runtimeIdentity.js';
 // Imported before ./db.js so any staged database restore is applied before the
 // SQLite connection is opened.
 import './restoreBootstrap.js';
@@ -25,6 +26,7 @@ import {
   detectLegacyData,
   importLegacyAsBackup
 } from './setupRecovery.js';
+import { rememberRuntimeDatabase } from './setupRecovery.js';
 import {
   canonicalFeedbackState,
   canonicalPlannerTaskState,
@@ -40,7 +42,7 @@ import {
   workboardItemStateToken
 } from './chatCapabilities.js';
 import { createRendererBridge } from './rendererBridge.js';
-import { buildManagedLlamaArgs, DEFAULT_LLAMA_GPU_LAYERS, normalizeLlamaGpuLayers } from './llamaLaunch.js';
+import { buildManagedLlamaArgs, DEFAULT_LLAMA_GPU_LAYERS, normalizeLlamaGpuLayers, startupProvisioningDecision, configuredLlamaRuntimeAvailable } from './llamaLaunch.js';
 import { planDay, normalizeCapacityMode, CAPACITY_MODES, DEFAULT_CAPACITY_MODE } from './capacityPlanner.js';
 import {
   capabilityRequestForChatIntent,
@@ -130,6 +132,7 @@ import { assertNoMaReferenceMaterial } from './maReferenceGuard.js';
 import { createPartnerRelayClient } from './partnerRelay.js';
 
 migrate();
+if (resolveRuntimePaths().packaged) rememberRuntimeDatabase(dbPath);
 const chatSendCoordinator = createChatSendCoordinator({ db, transaction });
 const partnerRelay = createPartnerRelayClient({ db, getSetting, setSetting });
 // Restart safety: settle any confirmation left mid-apply by a previous crash.
@@ -213,6 +216,7 @@ app.set('trust proxy', 'loopback');
 const port = Number(process.env.LIFE_PLANNER_PORT || 4177);
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
+const runtimeInfo = captureRuntimeIdentity({ ...resolveRuntimePaths(), root, dbPath });
 let lastPersonalRetrieval = { at: null, sourceCount: 0, resultType: 'none' };
 let managedLlamaServer = null;
 let managedLlamaServerReady = false;
@@ -365,6 +369,13 @@ function startInstallerBuild() {
 }
 
 app.use(express.json({ limit: '25mb' }));
+app.use((req, res, next) => {
+  if (isMutation(req.method) && runtimeInfo().packageChanged) {
+    const { failure } = runtimeFailure('PACKAGE_CHANGED_RESTART_REQUIRED', 'package.verify', 'Restart the environment after its package update before changing saved data.');
+    return res.status(503).json({ ok: false, error: failure.message, failure });
+  }
+  next();
+});
 
 const ok = (res, data) => res.json({ ok: true, data });
 const fail = (res, status, message, details = null) => res.status(status).json({
@@ -1767,12 +1778,13 @@ function bundledLocalRuntime() {
 
 function ensureBundledLocalRuntimeDefaults() {
   const bundled = bundledLocalRuntime();
+  const bundledRoot = path.dirname(bundled.serverPath);
   const configuredServer = String(getSetting('llamaServerPath', '') || '').trim();
-  if (fs.existsSync(bundled.serverPath) && (!configuredServer || !fs.existsSync(configuredServer))) {
+  if (configuredLlamaRuntimeAvailable(bundled.serverPath, bundledRoot) && !configuredLlamaRuntimeAvailable(configuredServer, bundledRoot)) {
     setSetting('llamaServerPath', bundled.serverPath);
   }
   const configuredCli = String(getSetting('llamaCliPath', '') || '').trim();
-  if (fs.existsSync(bundled.cliPath) && (!configuredCli || !fs.existsSync(configuredCli))) {
+  if (configuredLlamaRuntimeAvailable(bundled.cliPath, bundledRoot) && !configuredLlamaRuntimeAvailable(configuredCli, bundledRoot)) {
     setSetting('llamaCliPath', bundled.cliPath);
   }
   if (!fs.existsSync(bundled.starterModelPath)) return;
@@ -2312,6 +2324,7 @@ async function generateAssistantTurn(sessionId, userMessage, signal, onToken, on
 }
 
 async function localModelStatus() {
+  const bundledRoot = path.dirname(bundledLocalRuntime().serverPath);
   const model = assignedPlannerModel();
   const modelFile = modelFileState(model);
   const endpoint = String(getSetting('localModelEndpoint', '') || '').trim();
@@ -2330,10 +2343,10 @@ async function localModelStatus() {
     endpointModelName,
     llamaCliConfigured: Boolean(llamaCliPath),
     llamaCliPath,
-    llamaCliExists: Boolean(llamaCliPath && fs.existsSync(llamaCliPath)),
+    llamaCliExists: configuredLlamaRuntimeAvailable(llamaCliPath, bundledRoot),
     llamaServerConfigured: Boolean(llamaServerPath),
     llamaServerPath,
-    llamaServerExists: Boolean(llamaServerPath && fs.existsSync(llamaServerPath)),
+    llamaServerExists: configuredLlamaRuntimeAvailable(llamaServerPath, bundledRoot),
     llamaServerPort,
     llamaContextSize,
     llamaGpuLayers,
@@ -2342,7 +2355,7 @@ async function localModelStatus() {
     managedServerRunning: Boolean(managedLlamaServer && !managedLlamaServer.killed),
     managedServerReady: Boolean(managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady),
     managedEndpoint: managedLlamaServer && !managedLlamaServer.killed && managedLlamaServerReady ? `http://127.0.0.1:${llamaServerPort}` : '',
-    bundledRuntime: fs.existsSync(bundledLocalRuntime().serverPath)
+    bundledRuntime: configuredLlamaRuntimeAvailable(bundledLocalRuntime().serverPath, bundledRoot)
   };
 }
 
@@ -2913,49 +2926,24 @@ async function refreshPlannerState() {
   };
 }
 
-// Build provenance embedded at build time (public/build-info.json -> dist/).
-// Read from the built dist first (installed/portable app), then the source
-// public/ folder (dev). Never throws; returns unknowns if absent.
+// Never relabel a running process with newer files copied over its package.
 function readBuildInfo() {
-  for (const candidate of [path.join(root, 'dist', 'build-info.json'), path.join(root, 'public', 'build-info.json')]) {
-    try {
-      const info = JSON.parse(fs.readFileSync(candidate, 'utf8'));
-      return { source: 'embedded', ...info };
-    } catch { /* try next */ }
-  }
-  return { source: 'unavailable', version: null, commit: 'unknown', shortCommit: 'unknown', buildTime: null, repository: 'Daa13x/LifePlanSystemPublic', dirty: null };
+  return runtimeInfo().build;
 }
 
 app.get('/api/version', (_req, res) => ok(res, readBuildInfo()));
 
-function runtimeMode() {
-  const normalized = root.replace(/\\/g, '/').toLowerCase();
-  if (normalized.includes('/programs/life planner/app')) return 'installed';
-  if (path.basename(path.dirname(root)).toLowerCase() === 'lifeplannerportable') return 'portable';
-  return 'development';
-}
-
-function frontendAssetBuildId() {
-  try {
-    const html = fs.readFileSync(path.join(root, 'dist', 'index.html'), 'utf8');
-    return html.match(/\/assets\/(index-[A-Za-z0-9_-]+\.js)/)?.[1] || 'unknown';
-  } catch { return 'unbuilt'; }
-}
-
-function runtimeInfo() {
-  return {
-    build: readBuildInfo(),
-    runtimeMode: runtimeMode(),
-    serverRoot: root,
-    frontendAssetBuildId: frontendAssetBuildId(),
-    database: { basename: path.basename(dbPath), directory: path.basename(path.dirname(dbPath)) }
-  };
-}
-
 // Local-only server identity: enough to prove the launched server and static
 // frontend came from the same package, without exposing secrets or file data.
 app.get('/api/runtime-info', (_req, res) => ok(res, runtimeInfo()));
-app.get('/api/health', (_req, res) => ok(res, { db: 'ready', storage: dbPath, runtime: runtimeInfo() }));
+app.get('/api/health', (_req, res) => {
+  const runtime = runtimeInfo();
+  if (runtime.packageChanged) {
+    const { failure } = runtimeFailure('PACKAGE_CHANGED_RESTART_REQUIRED', 'package.verify', 'The package changed after this process started. Exit the environment and reopen the normal shortcut.');
+    return res.status(503).json({ ok: false, error: failure.message, failure, data: { db: 'ready', storage: dbPath, runtime } });
+  }
+  ok(res, { db: 'ready', storage: dbPath, runtime });
+});
 
 function runtimeDiagnostics() {
   const coverage = personalKnowledgeCoverage(db, { dbPath, userDataPath: path.dirname(dbPath), repoRoot: root });
@@ -2971,6 +2959,10 @@ app.get('/api/runtime-diagnostics', (_req, res) => ok(res, runtimeDiagnostics())
 app.get('/api/csrf-token', (_req, res) => ok(res, { token: MUTATION_TOKEN }));
 
 app.get('/api/bootstrap', async (req, res) => {
+  if (runtimeInfo().packageChanged) {
+    const { failure } = runtimeFailure('PACKAGE_CHANGED_RESTART_REQUIRED', 'package.verify', 'The installed package changed. Restart the environment before editing saved data.');
+    return res.status(503).json({ ok: false, error: failure.message, failure });
+  }
   ok(res, {
     settings: readSettingsRedacted(),
     build: readBuildInfo(),
@@ -3084,10 +3076,9 @@ app.get('/api/recovery/status', (_req, res) => {
   });
 });
 
-app.post('/api/recovery/backup', (_req, res) => {
+app.post('/api/recovery/backup', async (_req, res) => {
   try {
-    try { db.exec('PRAGMA wal_checkpoint(TRUNCATE)'); } catch { /* best effort */ }
-    const backup = createBackup({ dbPath, label: 'manual', provenance: { version: readBuildInfo()?.version || null } });
+    const backup = await createBackup({ dbPath, label: 'manual', provenance: { version: readBuildInfo()?.version || null } });
     ok(res, { name: path.basename(backup.dir), createdAt: backup.manifest.createdAt, files: backup.manifest.files.map((file) => ({ name: file.name, size: file.size })) });
   } catch (error) {
     fail(res, 500, error.message);
@@ -3116,10 +3107,10 @@ app.post('/api/recovery/restore/propose', (req, res) => {
 
 app.post('/api/recovery/restore/confirm', (req, res) => confirmStagedRestore(req, res, 'backup.restore'));
 
-app.post('/api/recovery/legacy-migrate/propose', (_req, res) => {
+app.post('/api/recovery/legacy-migrate/propose', async (_req, res) => {
   if (!LEGACY_DATA_DIR || !detectLegacyData({ legacyDataDir: LEGACY_DATA_DIR }).detected) return fail(res, 404, 'No legacy installation data was found.');
   let imported;
-  try { imported = importLegacyAsBackup({ dbPath, legacyDataDir: LEGACY_DATA_DIR }); } catch (error) { return fail(res, 400, error.message); }
+  try { imported = await importLegacyAsBackup({ dbPath, legacyDataDir: LEGACY_DATA_DIR }); } catch (error) { return fail(res, 400, error.message); }
   proposeStagedRestore(res, imported.dir, path.basename(imported.dir), 'legacy.migrate', 'recovery-legacy');
 });
 
@@ -7061,7 +7052,8 @@ app.delete('/api/models/:id', (req, res) => {
 });
 
 app.get('/api/models/runtime', async (_req, res) => {
-  ok(res, await localModelStatus());
+  const status = await localModelStatus();
+  ok(res, { ...status, startupProvisioning: startupProvisioningDecision(status) });
 });
 
 app.post('/api/models/server/start', async (req, res) => {

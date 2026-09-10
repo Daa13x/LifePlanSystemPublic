@@ -1,5 +1,55 @@
 # LifePlanSystemPublic Portable, Installer, and CI Reference
 
+## 2026-09-10 implementation delta (installed acceptance still pending)
+
+The numbered reference below records the older snapshot, not current launch
+behaviour. Current source uses Node 24.16.0, `npm ci`, a hidden VBS → native-launch
+script → single-instance tray → existing native host path. Complete PowerShell
+file/root arguments are quoted. The tray alone opens the native host after
+matching package, process/launch identity, application root and database path.
+An unrelated port owner is neither adopted nor terminated. Normal tray Exit
+terminates only its recorded child after PID, creation-time and executable checks.
+
+Startup reads the canonical model-runtime API before deciding on provisioning.
+A valid saved assignment with a runtime, or a configured endpoint, skips the
+starter. A valid model missing only its runtime uses `RuntimeOnly`; a broken
+saved assignment requests repair without replacement. Unknown backend state is
+not an empty registry. Existing Settings/Refresh controls retain their owners;
+unloaded defaults cannot be saved over unverified persisted settings.
+Executable paths must be regular files; bundled readiness verifies the existing
+runtime manifest's server and base-library digests. Cached starter files are
+hashed before reuse. These checks prove payload presence, not successful inference.
+
+Running build identity is captured once. A changed package produces
+`PACKAGE_CHANGED_RESTART_REQUIRED`; an unexpected packaged cwd/database override
+or missing/replaced established DB fails closed before opening fresh SQLite.
+The existing Setup and Recovery owner records DB file identity and settles it
+inside resumable restore/rollback, before clearing recovery intent. Genuine
+first use with no established marker remains supported. This is accidental
+drift protection, not tamper-proof storage or cross-machine identity attestation.
+
+Setup and Recovery and legacy import use SQLite online snapshots, including WAL
+commits and implicit rowids. Provisioner failure records contain stage, exception
+type and correlation ID; they do not include raw exception text. The tray retains
+the child stderr locally for script-parse/process-boundary diagnosis.
+Extraction, payload validation and promotion have distinct failure stages.
+
+The installer preserves an identical Node version and replaces a mismatched
+version with the packaged runtime. Exit the tray environment before installation.
+Native commit provenance is embedded at build time rather than read from a
+mutable environment variable. Source build/tests are not hosted package or
+normal-shortcut acceptance. Require the exact approved hosted SHA/artifact,
+verified backup, preserved personal DB/model/settings, cold launch, normal Exit
+and second cold launch before accepting deployment.
+The existing `verify:runtime-safety` command includes build-provenance and
+installer-safety verifiers, in addition to tray, model-runtime and recovery tests.
+
+Primary API references: [PowerShell Start-Process argument handling](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/start-process?view=powershell-5.1),
+[Node SQLite backup](https://nodejs.org/download/release/v24.15.0/docs/api/sqlite.html#sqlitebackupsourceDb-path-options),
+[Inno binary version inspection](https://jrsoftware.org/ishelp/topic_isxfunc_getversionnumbersstring.htm).
+
+## Historical reference
+
 Status: complete source-level reference for the portable file layout, packaging scripts, Inno Setup installer, and GitHub Actions build/release workflow. Successful runtime installation and a successful hosted workflow run remain separate acceptance evidence.
 
 Last updated: 2026-07-16

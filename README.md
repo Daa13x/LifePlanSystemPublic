@@ -57,7 +57,7 @@ This repository is `Daa13x/LifePlanSystemPublic`; its default branch is `main`.
 
 Requirements:
 
-- Node.js 24 or newer.
+- Node.js 24.16.0 or newer (also the pinned Windows package runtime).
 - npm.
 - Git.
 - Optional: GitHub CLI for login-driven GitHub workflows.

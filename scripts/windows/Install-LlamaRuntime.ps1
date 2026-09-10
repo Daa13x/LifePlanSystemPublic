@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$PortableRoot,
   [string]$CacheRoot = '',
-  [switch]$RuntimeOnly
+  [switch]$RuntimeOnly,
+  [string]$DiagnosticPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,15 +105,19 @@ function Download-VerifiedFile(
   for ($attempt = 1; $attempt -le 3; $attempt += 1) {
     if (Test-Path -LiteralPath $partialPath) { Remove-Item -LiteralPath $partialPath -Force }
     try {
+      $script:provisioningStage = "$script:provisioningPhase.download"
       Invoke-WebRequest -Uri $Url -OutFile $partialPath -UseBasicParsing
+      $script:provisioningStage = "$script:provisioningPhase.validate-size"
       $size = (Get-Item -LiteralPath $partialPath).Length
       if ($ExpectedSize -gt 0 -and $size -ne $ExpectedSize) {
         throw "Downloaded size $size does not match the published size $ExpectedSize."
       }
       $actualSha256 = Get-Sha256 $partialPath
+      $script:provisioningStage = "$script:provisioningPhase.validate-digest"
       if ($actualSha256 -ne $ExpectedSha256.ToLowerInvariant()) {
         throw "Downloaded SHA-256 $actualSha256 does not match the pinned digest."
       }
+      $script:provisioningStage = "$script:provisioningPhase.promote-download"
       Move-Item -LiteralPath $partialPath -Destination $targetPath -Force
       return
     }
@@ -130,9 +135,11 @@ function Install-LlamaRuntime {
 
   $runtimeCache = if ($persistentCache) { Assert-ProvisioningPath (Join-Path $downloadRoot "runtime-$runtimeVersion") } else { '' }
   if ($persistentCache -and (Test-LlamaRuntimePayload $runtimeCache)) {
+    $script:provisioningStage = 'runtime.stage-cache'
     $cachedStaging = Assert-ContainedPath (Join-Path $portableRootPath "llama.ready.$PID")
     if (Test-Path -LiteralPath $cachedStaging) { Remove-Item -LiteralPath $cachedStaging -Recurse -Force }
     Copy-Item -LiteralPath $runtimeCache -Destination $cachedStaging -Recurse -Force
+    $script:provisioningStage = 'runtime.promote-runtime'
     if (Test-Path -LiteralPath $runtimeRoot) { Remove-Item -LiteralPath $runtimeRoot -Recurse -Force }
     Move-Item -LiteralPath $cachedStaging -Destination $runtimeRoot
     return
@@ -143,10 +150,13 @@ function Install-LlamaRuntime {
   Download-VerifiedFile $runtimeUrl $archivePath $runtimeSha256
 
   $stagingRoot = Assert-ContainedPath (Join-Path $portableRootPath "llama.pending.$PID")
+  $script:provisioningStage = 'runtime.prepare-extraction'
   if (Test-Path -LiteralPath $stagingRoot) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force }
   New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
   try {
+    $script:provisioningStage = 'runtime.extract'
     Expand-Archive -LiteralPath $archivePath -DestinationPath $stagingRoot -Force
+    $script:provisioningStage = 'runtime.validate-payload'
     $server = Get-ChildItem -LiteralPath $stagingRoot -Filter 'llama-server.exe' -File -Recurse | Select-Object -First 1
     if (-not $server) { throw 'Pinned llama.cpp archive did not contain llama-server.exe.' }
     $payloadRoot = $server.Directory.FullName
@@ -160,6 +170,7 @@ function Install-LlamaRuntime {
       throw 'Pinned llama.cpp archive contained an unexpected ggml-base.dll digest.'
     }
     $finalStaging = Assert-ContainedPath (Join-Path $portableRootPath "llama.ready.$PID")
+    $script:provisioningStage = 'runtime.stage-payload'
     if (Test-Path -LiteralPath $finalStaging) { Remove-Item -LiteralPath $finalStaging -Recurse -Force }
     Copy-Item -LiteralPath $payloadRoot -Destination $finalStaging -Recurse -Force
     @{
@@ -171,12 +182,14 @@ function Install-LlamaRuntime {
       installedAt = (Get-Date).ToUniversalTime().ToString('o')
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $finalStaging 'runtime-manifest.json') -Encoding UTF8
     if ($persistentCache) {
+      $script:provisioningStage = 'runtime.promote-cache'
       $cacheStaging = Assert-ProvisioningPath (Join-Path $downloadRoot "runtime-$runtimeVersion.pending.$PID")
       if (Test-Path -LiteralPath $cacheStaging) { Remove-Item -LiteralPath $cacheStaging -Recurse -Force }
       Copy-Item -LiteralPath $finalStaging -Destination $cacheStaging -Recurse -Force
       if (Test-Path -LiteralPath $runtimeCache) { Remove-Item -LiteralPath $runtimeCache -Recurse -Force }
       Move-Item -LiteralPath $cacheStaging -Destination $runtimeCache
     }
+    $script:provisioningStage = 'runtime.promote-runtime'
     if (Test-Path -LiteralPath $runtimeRoot) { Remove-Item -LiteralPath $runtimeRoot -Recurse -Force }
     Move-Item -LiteralPath $finalStaging -Destination $runtimeRoot
   }
@@ -190,14 +203,16 @@ function Install-LlamaRuntime {
 }
 
 function Install-StarterModel {
+  $script:provisioningStage = 'starter.validate-cache'
   if ((Test-Path -LiteralPath $modelPath) -and (Test-Path -LiteralPath $modelManifestPath)) {
     $manifest = Get-Content -LiteralPath $modelManifestPath -Raw | ConvertFrom-Json
     $actualSize = (Get-Item -LiteralPath $modelPath).Length
-    if ($actualSize -eq $starterSize -and $manifest.sha256 -eq $starterSha256) { return }
+    if ($actualSize -eq $starterSize -and $manifest.sha256 -eq $starterSha256 -and (Get-Sha256 $modelPath) -eq $starterSha256) { return }
   }
 
   New-Item -ItemType Directory -Path $modelRoot -Force | Out-Null
   Download-VerifiedFile $starterUrl $modelPath $starterSha256 $starterSize
+  $script:provisioningStage = 'starter.write-manifest'
   @{
     repo = $starterRepo
     file = $starterFile
@@ -207,5 +222,40 @@ function Install-StarterModel {
   } | ConvertTo-Json | Set-Content -LiteralPath $modelManifestPath -Encoding UTF8
 }
 
-Install-LlamaRuntime
-if (-not $RuntimeOnly) { Install-StarterModel }
+$provisioningStage = 'runtime.install'
+$provisioningPhase = 'runtime'
+try {
+  Install-LlamaRuntime
+  if (-not $RuntimeOnly) {
+    $provisioningPhase = 'starter'
+    $provisioningStage = 'starter.install'
+    Install-StarterModel
+  }
+}
+catch {
+  if ($DiagnosticPath) {
+    # Emit the existing failure-contract fields. Do not persist exception text:
+    # network errors can contain signed URLs, proxy credentials or other secrets.
+    $safeDiagnosticPath = Assert-ContainedPath $DiagnosticPath
+    @{
+      version = 1
+      errorCode = 'MODEL_PROVISIONING_FAILED'
+      subsystem = 'local-model'
+      stage = $provisioningStage
+      failedStage = $provisioningStage
+      operation = 'provision'
+      reason = 'installer.exception'
+      message = 'Provisioning failed. Inspect the recorded stage and exception type; existing model settings were not changed.'
+      exceptionType = $_.Exception.GetType().FullName
+      hresult = $_.Exception.HResult
+      scriptLineNumber = $_.InvocationInfo.ScriptLineNumber
+      correlationId = [System.IO.Path]::GetFileNameWithoutExtension($safeDiagnosticPath).Replace('model-provisioning-', '')
+      retryable = $true
+      userActionRequired = $true
+      persistentChanges = @('Provisioner may have installed validated runtime/model files before failure; inspect the pinned manifests before retry.')
+      timestamp = [DateTime]::UtcNow.ToString('o')
+    } | ConvertTo-Json | Set-Content -LiteralPath $safeDiagnosticPath -Encoding UTF8
+  }
+  [Console]::Error.WriteLine("MODEL_PROVISIONING_FAILED at $provisioningStage ($($_.Exception.GetType().Name)).")
+  exit 1
+}

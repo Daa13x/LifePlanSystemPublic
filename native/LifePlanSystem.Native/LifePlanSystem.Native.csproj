@@ -9,6 +9,7 @@
     <AssemblyName>LifePlanSystem.Native</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <AssemblyMetadata Include="LpsBuildCommit" Value="$(LpsBuildCommit)" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.10" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.10" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />

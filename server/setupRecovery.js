@@ -3,7 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync, backup as sqliteBackup } from 'node:sqlite';
+import { runtimeFailure } from './runtimeIdentity.js';
 
 const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
 const PENDING_MARKER = 'pending-restore.json';
@@ -54,6 +55,29 @@ function atomicWrite(file, value) {
   fs.renameSync(temp, file);
 }
 function atomicJson(file, value) { atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`); }
+
+// Recovery owns the established-database marker. It is not a model/settings
+// registry: it detects a lost/replaced database before SQLite can create one.
+const runtimeDatabaseMarker = (file) => path.join(dataDir(file), 'runtime-database-state.json');
+function databaseFileIdentity(file) {
+  const stat = fs.statSync(file, { bigint: true });
+  return { inode: String(stat.ino), birthtime: String(stat.birthtimeNs), basename: path.basename(file) };
+}
+export function verifyRuntimeDatabase(dbPath) {
+  const marker = runtimeDatabaseMarker(dbPath);
+  if (!fs.existsSync(marker)) return { state: fs.existsSync(dbPath) ? 'existing-unattested' : 'first-use' };
+  try {
+    const recorded = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    if (recorded.version !== 1 || !isSqliteFile(dbPath) || JSON.stringify(recorded.file) !== JSON.stringify(databaseFileIdentity(dbPath))) throw new Error('mismatch');
+    return { state: 'established' };
+  } catch {
+    throw runtimeFailure('DATABASE_IDENTITY_MISMATCH', 'database.verify', 'The previously established database is missing, replaced, or its recovery marker is unreadable. Startup was stopped before creating fresh data. Use Setup and Recovery with a verified backup.');
+  }
+}
+export function rememberRuntimeDatabase(dbPath) {
+  if (!isSqliteFile(dbPath)) throw runtimeFailure('DATABASE_UNVERIFIED', 'database.verify', 'Cannot record runtime identity for an invalid database.');
+  atomicJson(runtimeDatabaseMarker(dbPath), { version: 1, file: databaseFileIdentity(dbPath) });
+}
 function moveIfPresent(from, to) {
   if (fs.existsSync(from)) fs.renameSync(from, to);
 }
@@ -142,7 +166,18 @@ export function assessEnvironment({ dbPath, modelAssigned = false, runtimePresen
   return { firstRun: !dbExists, ready: missingRequired.length === 0 && !pending?.invalid, missingRequired, legacyDetected, pendingRestore: Boolean(pending), checks, generatedAt: iso(now) };
 }
 
-export function createBackup({ dbPath, sources = null, label = 'manual', provenance = null, now = Date.now() }) {
+async function copySqliteSnapshot(file, copy) {
+  const sourceDb = new DatabaseSync(file, { readOnly: true });
+  try {
+    sourceDb.exec('BEGIN');
+    sourceDb.prepare('SELECT count(*) FROM sqlite_master').get();
+    await sqliteBackup(sourceDb, copy);
+    const snapshot = new DatabaseSync(copy);
+    try { snapshot.exec('PRAGMA journal_mode=DELETE'); } finally { snapshot.close(); }
+  } finally { sourceDb.close(); }
+}
+
+export async function createBackup({ dbPath, sources = null, label = 'manual', provenance = null, now = Date.now() }) {
   const root = dataDir(dbPath);
   const backupRoot = backupsDir(dbPath);
   fs.mkdirSync(backupRoot, { recursive: true });
@@ -161,8 +196,15 @@ export function createBackup({ dbPath, sources = null, label = 'manual', provena
     for (const file of files) {
       const namePart = path.basename(file);
       if (!safeName(namePart)) throw new Error('Backup file name is invalid.');
+      if (namePart === `${databaseName}-wal` || namePart === `${databaseName}-shm`) continue;
       const copy = path.join(staging, namePart);
-      fs.copyFileSync(file, copy, fs.constants.COPYFILE_EXCL);
+      if (namePart === databaseName) {
+        // SQLite's online backup includes committed WAL pages and preserves
+        // rowids. A raw main-file copy is not a live-database snapshot.
+        await copySqliteSnapshot(file, copy);
+      } else {
+        fs.copyFileSync(file, copy, fs.constants.COPYFILE_EXCL);
+      }
       const fd = fs.openSync(copy, 'r+'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
       manifestFiles.push({ name: namePart, sha256: sha256File(copy), size: fs.statSync(copy).size });
     }
@@ -261,11 +303,36 @@ export function readPendingRestore(dbPath) {
 
 export function clearPendingRestore(dbPath) { removeIfPresent(markerPath(dbPath)); }
 
+function finishInterruptedRollback(dbPath, marker, now) {
+  try {
+    const rollbackDb = assertWithin(dataDir(dbPath), path.join(marker.rollbackDir, path.basename(dbPath)), 'Rollback database');
+    if (fs.existsSync(rollbackDb)) {
+      assertExistingRegularWithin(dataDir(dbPath), rollbackDb, 'Rollback database');
+      if (JSON.stringify(databaseFileIdentity(rollbackDb)) !== JSON.stringify(marker.rollbackIdentity) || !sqliteDetails(rollbackDb).ok) throw new Error('Rollback identity is unverified.');
+      removeIfPresent(dbPath);
+      removeIfPresent(`${dbPath}-wal`);
+      removeIfPresent(`${dbPath}-shm`);
+      fs.renameSync(rollbackDb, dbPath);
+      for (const suffix of ['-wal', '-shm']) moveIfPresent(`${rollbackDb}${suffix}`, `${dbPath}${suffix}`);
+    }
+    // When the original has already been renamed back, prove its identity;
+    // never mistake the replacement or an absent database for a finished undo.
+    if (JSON.stringify(databaseFileIdentity(dbPath)) !== JSON.stringify(marker.rollbackIdentity) || !sqliteDetails(dbPath).ok) throw new Error('Restored original identity is unverified.');
+    rememberRuntimeDatabase(dbPath);
+    const failedMarker = retireMarker(dbPath, 'failed', { ...marker, state: 'rolled-back', failedAt: iso(now) });
+    return { applied: false, reason: 'rolled-back', failedMarker };
+  } catch {
+    // Keep the durable intent and both surviving artifacts for a safe retry.
+    return { applied: false, reason: 'rollback-required', error: 'Interrupted rollback needs recovery; its pending marker and surviving data were preserved.' };
+  }
+}
+
 export function applyPendingRestore({ dbPath, now = Date.now() }) {
   const root = dataDir(dbPath);
   let marker = readPendingRestore(dbPath);
   if (!marker) return { applied: false, reason: 'no-pending-restore' };
   if (marker.invalid) return { applied: false, reason: 'invalid-marker', failedMarker: retireMarker(dbPath, 'failed', marker) };
+  if (marker.state === 'rollback-in-progress') return finishInterruptedRollback(dbPath, marker, now);
   let validation;
   try {
     assertWithin(backupsDir(dbPath), marker.backupDir, 'Restore backup');
@@ -326,7 +393,7 @@ export function applyPendingRestore({ dbPath, now = Date.now() }) {
         }
         marker = updateMarker(dbPath, marker, 'live-moved-aside', { rollbackDir });
       } else marker = updateMarker(dbPath, marker, 'live-moved-aside', { rollbackDir: null });
-    } else if (marker.state === 'live-moved-aside' || marker.state === 'replacement-installed') {
+    } else if (['live-moved-aside', 'replacement-installed', 'verified', 'completed'].includes(marker.state)) {
       // Resuming past the rename step also means the original is already
       // moved aside -- otherwise the marker could not have reached this
       // state (see the transitions above, both of which set it beforehand).
@@ -368,6 +435,10 @@ export function applyPendingRestore({ dbPath, now = Date.now() }) {
       if (!installed.ok) throw new Error(installed.error);
       marker = updateMarker(dbPath, marker, 'verified');
     }
+    // Attestation is part of the resumable swap, not a post-completion hook.
+    // A crash after verification retains the pending marker and retries this
+    // write before normal startup can open a replacement database.
+    rememberRuntimeDatabase(dbPath);
     const logPath = path.join(root, RESTORE_LOG);
     const log = fs.existsSync(logPath) ? JSON.parse(fs.readFileSync(logPath, 'utf8')) : [];
     log.push({ appliedAt: iso(now), backupDir: path.basename(marker.backupDir), rollbackDir: marker.rollbackDir ? path.basename(marker.rollbackDir) : null, confirmationId: marker.confirmationId, idempotencyKey: marker.idempotencyKey, state: 'completed' });
@@ -376,7 +447,6 @@ export function applyPendingRestore({ dbPath, now = Date.now() }) {
     clearPendingRestore(dbPath);
     return { applied: true, backupDir: marker.backupDir, rollbackDir: marker.rollbackDir || null };
   } catch (error) {
-    let rolledBack = false;
     // Only ever restore from rollbackDb into dbPath once liveMovedAside is
     // known true. Persisting rollbackDir to the marker before the rename (the
     // fix above) means a rename that itself throws (e.g. a stray file/dir
@@ -386,17 +456,13 @@ export function applyPendingRestore({ dbPath, now = Date.now() }) {
     const rollbackDb = liveMovedAside && marker.rollbackDir ? path.join(marker.rollbackDir, path.basename(dbPath)) : null;
     try {
       if (rollbackDb && fs.existsSync(rollbackDb)) {
-        removeIfPresent(dbPath);
-        removeIfPresent(`${dbPath}-wal`);
-        removeIfPresent(`${dbPath}-shm`);
-        fs.renameSync(rollbackDb, dbPath);
-        for (const suffix of ['-wal', '-shm']) moveIfPresent(`${rollbackDb}${suffix}`, `${dbPath}${suffix}`);
-        rolledBack = true;
+        marker = updateMarker(dbPath, marker, 'rollback-in-progress', { rollbackIdentity: databaseFileIdentity(rollbackDb), error: String(error.message || error) });
+        return finishInterruptedRollback(dbPath, marker, now);
       }
-    } catch { /* preserve the marker for manual recovery */ }
-    const failed = { ...marker, state: rolledBack ? 'rolled-back' : 'rollback-required', error: String(error.message || error), failedAt: iso(now) };
+    } catch { return { applied: false, reason: 'rollback-required', error: 'Could not persist rollback intent; existing data and pending restore were preserved.' }; }
+    const failed = { ...marker, state: 'rollback-required', error: String(error.message || error), failedAt: iso(now) };
     const failedMarker = retireMarker(dbPath, 'failed', failed);
-    return { applied: false, reason: rolledBack ? 'rolled-back' : 'rollback-required', error: failed.error, failedMarker };
+    return { applied: false, reason: 'rollback-required', error: failed.error, failedMarker };
   }
 }
 
@@ -406,13 +472,16 @@ export function detectLegacyData({ legacyDataDir }) {
   return { detected: fs.existsSync(candidate) && sqliteDetails(candidate).ok, databaseFile: fs.existsSync(candidate) ? candidate : null };
 }
 
-export function importLegacyAsBackup({ dbPath, legacyDataDir, now = Date.now() }) {
+export async function importLegacyAsBackup({ dbPath, legacyDataDir, now = Date.now() }) {
   const legacy = detectLegacyData({ legacyDataDir });
   if (!legacy.detected) throw new Error('No valid legacy database was found to migrate.');
   const root = dataDir(dbPath);
   const tempDir = fs.mkdtempSync(path.join(root, 'legacy-import-'));
   const tempDb = path.join(tempDir, path.basename(dbPath));
-  fs.copyFileSync(legacy.databaseFile, tempDb);
-  try { return createBackup({ dbPath, sources: [tempDb], label: 'legacy-migrate', provenance: { importedFromLegacy: true }, now }); }
+  try {
+    const source = assertExistingRegularWithin(legacyDataDir, legacy.databaseFile, 'Legacy database');
+    await copySqliteSnapshot(source, tempDb);
+    return await createBackup({ dbPath, sources: [tempDb], label: 'legacy-migrate', provenance: { importedFromLegacy: true }, now });
+  }
   finally { fs.rmSync(tempDir, { recursive: true, force: true }); }
 }

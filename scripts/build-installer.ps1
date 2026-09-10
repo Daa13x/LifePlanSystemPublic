@@ -1,5 +1,5 @@
 param(
-  [string]$NodeVersion = "24.15.0",
+  [string]$NodeVersion = "24.16.0",
   [string]$Configuration = "Release",
   [switch]$SkipDependencyInstall,
   [switch]$SkipBuild
@@ -44,7 +44,8 @@ Write-Host "Compiling installer with: $iscc"
 if (Test-Path -LiteralPath $setupExe) {
   Remove-Item -LiteralPath $setupExe -Force
 }
-$compiler = Start-Process -FilePath $iscc -ArgumentList @($issPath) -Wait -PassThru -WindowStyle Hidden
+$compilerArguments = '"{0}"' -f $issPath
+$compiler = Start-Process -FilePath $iscc -ArgumentList $compilerArguments -Wait -PassThru -WindowStyle Hidden
 if ($compiler.ExitCode -ne 0) {
   throw "Inno Setup compiler failed with exit code $($compiler.ExitCode)"
 }

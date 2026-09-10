@@ -5,10 +5,11 @@ import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { createConfirmationsTable } from './confirmations.js';
 import { createUsersTables, LOCAL_USER_ID } from './auth.js';
+import { resolveRuntimePaths } from './runtimeIdentity.js';
 
-const root = process.cwd();
+const { root, dbPath: resolvedDatabasePath } = resolveRuntimePaths();
 const dataDir = path.join(root, 'data');
-export const dbPath = path.resolve(process.env.LIFE_PLANNER_DB || path.join(dataDir, 'life-planner.sqlite'));
+export const dbPath = resolvedDatabasePath;
 
 fs.mkdirSync(dataDir, { recursive: true });
 

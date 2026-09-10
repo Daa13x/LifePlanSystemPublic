@@ -1,5 +1,5 @@
 param(
-  [string]$NodeVersion = "24.15.0",
+  [string]$NodeVersion = "24.16.0",
   [string]$Configuration = "Release",
   [switch]$SkipDependencyInstall,
   [switch]$SkipBuild
@@ -210,7 +210,6 @@ $ErrorActionPreference = 'Stop'
 $portableRoot = Split-Path -Parent $PSCommandPath
 $trayScript = Join-Path $portableRoot 'LifePlannerTray.ps1'
 $nativeExe = Join-Path $portableRoot 'native\LifePlanSystem.Native.exe'
-$healthUrl = 'http://127.0.0.1:4177/api/health'
 
 foreach ($requiredPath in @($trayScript, $nativeExe)) {
   if (-not (Test-Path -LiteralPath $requiredPath)) {
@@ -220,23 +219,14 @@ foreach ($requiredPath in @($trayScript, $nativeExe)) {
   }
 }
 
-Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $trayScript, '-PortableRoot', $portableRoot, '-NoAutoOpen') -WindowStyle Hidden
-$deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
-while ([DateTimeOffset]::UtcNow -lt $deadline) {
-  try {
-    $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
-    if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
-      Start-Process -FilePath $nativeExe -WorkingDirectory (Split-Path -Parent $nativeExe) | Out-Null
-      exit 0
-    }
-  }
-  catch { }
-  Start-Sleep -Milliseconds 300
-}
-
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.MessageBox]::Show('Life Planner did not become ready for the native shell within 30 seconds. Check the Life Planner tray status and logs.', 'Life Planner', 'OK', 'Error') | Out-Null
-exit 1
+# Start-Process joins ArgumentList with spaces; it does not quote array items.
+# Windows file names cannot contain double quotes. Quote both complete paths
+# explicitly, including roots containing spaces, apostrophes or shell metacharacters.
+$trayArguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -PortableRoot "{1}"' -f $trayScript, $portableRoot
+Start-Process powershell.exe -ArgumentList $trayArguments -WindowStyle Hidden
+# The tray owns readiness, single-instance recovery and native opening. Never
+# open a second path based on an unauthenticated HTTP 200 from the fixed port.
+exit 0
 '@ | Set-Content -Path (Join-Path $portableRoot "Start-NativeShell.ps1") -Encoding UTF8
 
 @'

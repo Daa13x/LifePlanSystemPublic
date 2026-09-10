@@ -538,6 +538,7 @@ function App() {
   const [route, setRoute] = useState(() => routeFromLocation(window.location.pathname, window.location.search, window.location.hash));
   const [theme, setTheme] = useState(() => localStorage.getItem('life-planner-theme') || 'dark');
   const [boot, setBoot] = useState(null);
+  const [bootStatus, setBootStatus] = useState('loading');
   const [planner, setPlanner] = useState(null);
   const [approvals, setApprovals] = useState([]);
   const [memory, setMemory] = useState({ candidates: [], items: [] });
@@ -604,6 +605,7 @@ function App() {
   }
 
   async function refreshAll() {
+    setBootStatus('loading');
     // On native, a phone with no reachable server must still show its own
     // chat sessions -- never leave Chat's sidebar empty just because the
     // (optional, desktop-only-for-now) bootstrap call failed.
@@ -633,9 +635,10 @@ function App() {
       api('/api/bootstrap').catch((error) => { if (!IS_NATIVE) throw error; return null; }),
       api('/api/memory').catch((error) => { if (!IS_NATIVE) throw error; return null; }),
       api('/api/approvals').catch(() => null)
-    ]);
-    if (!data) return; // No server reachable on native -- local Today/Chat already work independently.
+    ]).catch((error) => { setBootStatus('unavailable'); throw error; });
+    if (!data) { setBootStatus('unavailable'); return; } // Native local Today/Chat remain independent.
     setBoot(data);
+    setBootStatus('ready');
     setPlanner(data.planner);
     setProjects(data.projects);
     setModels(data.models);
@@ -869,7 +872,11 @@ function App() {
         {route.section === 'knowledge' && <Knowledge route={route} navigate={navigate} memory={memory} refresh={reloadPlanner} setNotice={setNotice} refreshSignal={refreshSignal} />}
         {route.section === 'system' && <System route={route} selectedSession={selectedSession} boot={boot} planner={planner} sessions={sessions} models={models} setNotice={setNotice} refresh={reloadPlanner} refreshSignal={refreshSignal} proposeFeedbackTriage={proposeFeedbackTriage} confirmFeedbackTriage={confirmFeedbackTriage} />}
         {route.section === 'settings' && (
-          <SettingsView
+          !IS_NATIVE && bootStatus !== 'ready' ? <div className="panel" role="status">
+            <h2>{bootStatus === 'loading' ? 'Loading saved settings' : 'Backend unavailable — saved settings unverified'}</h2>
+            <p>Your saved configuration has not been loaded. This does not mean no model is assigned. Editing is unavailable until the backend responds.</p>
+            <p>Use Refresh in the app toolbar to retry loading saved settings.</p>
+          </div> : <SettingsView
             settings={settings}
             setSettings={setSettings}
             models={models}
@@ -7163,6 +7170,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
   const [modelSearch, setModelSearch] = useState('Qwen GGUF');
   const [hardware, setHardware] = useState(null);
   const [runtime, setRuntime] = useState(null);
+  const [runtimeUnavailable, setRuntimeUnavailable] = useState(false);
   const [modelDeleteArmed, setModelDeleteArmed] = useState(null);
   const [exportScope, setExportScope] = useState('all');
   const [publicExportPreview, setPublicExportPreview] = useState(null);
@@ -7191,7 +7199,7 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
       setRuntime(data);
       if (!llamaServerPath && data.llamaServerPath) setLlamaServerPath(data.llamaServerPath);
       if (!llamaCliPath && data.llamaCliPath) setLlamaCliPath(data.llamaCliPath);
-    }).catch((err) => setNotice(err.message));
+    }).catch((err) => { setRuntimeUnavailable(true); setNotice(err.message); });
     api('/api/cloud/accounts').then(setCloudAccounts).catch((err) => setNotice(err.message));
     api('/api/partner-relay/status').then((status) => {
       setPartnerRelay(status);
@@ -7626,12 +7634,12 @@ function SettingsView({ settings, setSettings, models, setModels, setNotice, ope
         <h2>Local Model Registry</h2>
         <p>Rescan folders for real GGUF files, verify each file is readable, and assign one model to Planner Assistant.</p>
         <div className="runtime-card">
-          <Pill tone={runtime?.endpointConfigured || runtime?.assigned ? 'good' : 'warn'}>{runtime?.endpointConfigured ? 'Endpoint configured' : runtime?.assigned ? 'Model assigned' : 'No model assigned'}</Pill>
-          <strong>{runtime?.endpointConfigured ? runtime.endpointModelName : runtime?.model?.name || 'Planner Assistant unavailable'}</strong>
-          <span>{runtime?.managedServerRunning ? `Managed llama-server running: ${runtime.managedEndpoint}` : runtime?.endpointConfigured ? `Endpoint: ${runtime.endpoint}` : runtime?.llamaCliConfigured ? `llama-cli: ${runtime.llamaCliExists ? 'found' : 'missing'}` : 'Configure a local endpoint, llama-server, or llama-cli to generate chat responses.'}</span>
+          <Pill tone={runtime?.endpointConfigured || runtime?.assigned ? 'good' : 'warn'}>{!runtime ? runtimeUnavailable ? 'Backend unavailable' : 'Checking model state' : runtime.endpointConfigured ? 'Endpoint configured' : runtime.assigned ? 'Model assigned' : 'No model assigned'}</Pill>
+          <strong>{!runtime ? 'Saved model state unverified' : runtime.endpointConfigured ? runtime.endpointModelName : runtime.model?.name || 'Planner Assistant unavailable'}</strong>
+          <span>{!runtime ? 'No model change is indicated. Retry after the backend is available.' : runtime.managedServerRunning ? `Managed llama-server running: ${runtime.managedEndpoint}` : runtime.endpointConfigured ? `Endpoint: ${runtime.endpoint}` : runtime.llamaCliConfigured ? `llama-cli: ${runtime.llamaCliExists ? 'found' : 'missing'}` : 'Configure a local endpoint, llama-server, or llama-cli to generate chat responses.'}</span>
         </div>
         <div className={cx('source-warning', runtime?.endpointConfigured || runtime?.assigned ? 'info' : 'warn')}>
-          <strong>{runtime?.endpointConfigured || runtime?.assigned ? 'Model setup saved' : 'Model setup needed'}</strong>
+          <strong>{!runtime ? 'Model readiness unverified' : runtime.endpointConfigured || runtime.assigned ? 'Model setup saved' : 'Model setup needed'}</strong>
           <small>{saveStatus}</small>
         </div>
         <label>Model folders</label>

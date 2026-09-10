@@ -55,7 +55,7 @@ let database;
 try {
   await waitForServer();
   database = new DatabaseSync(dbPath);
-  const fixtureSession = database.prepare('SELECT id FROM chat_sessions ORDER BY id LIMIT 1').get();
+  const fixtureSession = database.prepare('SELECT id, title FROM chat_sessions ORDER BY id LIMIT 1').get();
   const fixtureUser = Number(database.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'user', 'Ask ChatGPT for a historical UI proof.')").run(fixtureSession.id).lastInsertRowid);
   const fixtureAssistant = Number(database.prepare("INSERT INTO chat_messages (session_id, role, content) VALUES (?, 'assistant', 'The reviewed cloud result appears below.')").run(fixtureSession.id).lastInsertRowid);
   const fixtureConsultation = Number(database.prepare(`INSERT INTO consultations
@@ -67,6 +67,21 @@ try {
     .run(fixtureConsultation, fixtureSession.id, fixtureUser, fixtureAssistant, JSON.stringify([fixtureUser, fixtureAssistant]));
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+  await page.route('**/api/bootstrap', (route) => route.abort());
+  await page.goto(`http://127.0.0.1:${port}/#settings`, { waitUntil: 'domcontentloaded' });
+  await page.getByRole('heading', { name: 'Backend unavailable — saved settings unverified', exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: 'Save', exact: true }).count(), 0, 'unloaded defaults cannot be saved over existing settings');
+  assert.equal(await page.getByText('No model assigned', { exact: true }).count(), 0, 'bootstrap failure does not claim an empty model registry');
+  await page.unroute('**/api/bootstrap');
+  await page.route('**/api/models/runtime', (route) => route.abort());
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByText('Backend unavailable', { exact: true }).waitFor();
+  assert.equal(await page.getByText('No model assigned', { exact: true }).count(), 0, 'runtime API failure is unknown, not no model');
+  assert.equal(await page.getByText('Model setup needed', { exact: true }).count(), 0);
+  await page.unroute('**/api/models/runtime');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.getByText('No model assigned', { exact: true }).waitFor();
+  console.log('Rendered Settings distinguish unavailable/unverified from verified empty state and block saving unloaded defaults.');
   await page.goto(`http://127.0.0.1:${port}/#chat`, { waitUntil: 'domcontentloaded' });
   await page.locator('.chat-layout').waitFor();
   await page.locator('.composer textarea').waitFor();
@@ -74,7 +89,7 @@ try {
   assert.equal(await page.locator('.connection-bar').count(), 0, 'the permanent technical dashboard is absent');
   assert.equal(await page.getByRole('button', { name: 'Open actions and attachments' }).count(), 1, 'one minimal attachment/action entry is visible');
   assert.equal(await page.getByText('Attach Knowledge', { exact: true }).count(), 0, 'context tools are not permanently visible');
-  assert.ok(await page.getByRole('heading', { name: /planning chat|chat/i }).first().isVisible(), 'the compact conversation title is visible');
+  await page.getByRole('heading', { name: fixtureSession.title, exact: true }).waitFor({ state: 'visible' });
   await page.locator('.cloud-check-card').waitFor();
   assert.equal(await page.locator('.cloud-check-head').count(), 1, 'historical provider data renders in a grouped cloud-card header');
   assert.equal(await page.locator('.cloud-check-meta').count(), 1, 'historical source/privacy metadata has a dedicated readable group');

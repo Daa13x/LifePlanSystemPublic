@@ -41,7 +41,7 @@ New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 $hashProvider = [System.Security.Cryptography.SHA256]::Create()
 try {
-  $identityBytes = [System.Text.Encoding]::UTF8.GetBytes("$PortableRoot|$Port")
+  $identityBytes = [System.Text.Encoding]::UTF8.GetBytes("$($PortableRoot.ToLowerInvariant())|$Port")
   $identityHash = [System.BitConverter]::ToString($hashProvider.ComputeHash($identityBytes)).Replace('-', '')
 }
 finally {
@@ -55,31 +55,36 @@ $instanceMutex = [System.Threading.Mutex]::new($true, $mutexName, [ref]$createdN
 function Test-ServerHealth {
   try {
     $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
-    return $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
+    if ($response.StatusCode -ne 200) { return $false }
+    $health = $response.Content | ConvertFrom-Json
+    $runtime = $health.data.runtime
+    $expectedBuild = Get-Content -LiteralPath (Join-Path $appRoot 'dist\build-info.json') -Raw | ConvertFrom-Json
+    if (-not $health.ok -or $health.data.db -ne 'ready' -or $runtime.packageChanged -ne $false) { return $false }
+    if ($expectedBuild.commit -notmatch '^[a-f0-9]{40}$' -or $expectedBuild.dirty -ne $false) { return $false }
+    if ($runtime.build.commit -ne $expectedBuild.commit -or $runtime.build.buildTime -ne $expectedBuild.buildTime -or $runtime.build.dirty -ne $false) { return $false }
+    if (-not (Test-SameRuntimePath $runtime.serverRoot $appRoot)) { return $false }
+    if (-not (Test-SameRuntimePath $health.data.storage (Join-Path $appRoot 'data\life-planner.sqlite'))) { return $false }
+    if (-not (Test-SameRuntimePath $runtime.process.executable $nodeExe)) { return $false }
+    if ($runtime.process.pid -le 0 -or (Get-PortOwnerProcessId) -ne $runtime.process.pid) { return $false }
+    if (-not (Test-IsBundledNodeProcess $runtime.process.pid)) { return $false }
+    if ($script:launchId -and $runtime.process.launchId -ne $script:launchId) { return $false }
+    if ($script:serverProcess -and $runtime.process.pid -ne $script:serverProcess.Id) { return $false }
+    return $true
   }
   catch {
     return $false
   }
 }
 
-if (-not $createdNew) {
-  if (Test-ServerHealth) {
-    Start-Process -FilePath $nativeExe -WorkingDirectory (Split-Path -Parent $nativeExe) | Out-Null
-  }
-  else {
-    [System.Windows.Forms.MessageBox]::Show(
-      'Life Planner is already open but the environment is paused or still starting. Use the Life Planner tray icon to resume it.',
-      'Life Planner',
-      [System.Windows.Forms.MessageBoxButtons]::OK,
-      [System.Windows.Forms.MessageBoxIcon]::Information
-    ) | Out-Null
-  }
-  $instanceMutex.Dispose()
-  exit 0
+function Test-SameRuntimePath($Actual, $Expected) {
+  if ([string]::IsNullOrWhiteSpace($Actual)) { return $false }
+  return [System.IO.Path]::GetFullPath($Actual).Equals([System.IO.Path]::GetFullPath($Expected), [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 $script:serverProcess = $null
 $script:ownsServerProcess = $false
+$script:serverStartTicks = $null
+$script:launchId = $null
 $script:trayState = 'starting'
 $script:exiting = $false
 $script:iconHandle = $null
@@ -144,6 +149,17 @@ function Wait-ForServerHealth([int]$TimeoutSeconds = 30) {
   return $false
 }
 
+# All health dependencies are defined before the duplicate-instance path runs.
+if (-not $createdNew) {
+  if (Test-ServerHealth) {
+    Start-Process -FilePath $nativeExe -WorkingDirectory (Split-Path -Parent $nativeExe) | Out-Null
+  } else {
+    [System.Windows.Forms.MessageBox]::Show('Life Planner is already open but its runtime identity is not ready or the environment is paused. Use the existing tray to resume, or Exit and reopen after an update.', 'Life Planner', 'OK', 'Information') | Out-Null
+  }
+  $instanceMutex.Dispose()
+  exit 0
+}
+
 function Ensure-PlaywrightChromium {
   if ((Test-Path -LiteralPath $playwrightRoot) -and (Get-ChildItem -LiteralPath $playwrightRoot -Force -ErrorAction SilentlyContinue | Select-Object -First 1)) {
     return
@@ -161,16 +177,35 @@ function Ensure-PlaywrightChromium {
 }
 
 function Ensure-LocalModelRuntime {
-  $installer = Join-Path $PortableRoot 'Install Local Model Runtime.cmd'
-  $starterModel = Join-Path $appRoot 'data\models\Qwen2.5-1.5B-Instruct-Q4_K_M.gguf'
-  if ((Test-Path -LiteralPath $starterModel) -or -not (Test-Path -LiteralPath $installer)) { return }
+  # Ask the live canonical model owner after backend startup. An absent API is
+  # unknown state, not authority to replace settings or download a starter.
+  $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/models/runtime" -TimeoutSec 5
+  if (-not $response.ok) { throw 'MODEL_STATE_UNVERIFIED: backend model state could not be verified; no provisioning started.' }
+  $decision = $response.data.startupProvisioning
+  if ($decision -in @('none', 'configured-endpoint')) { return }
+  if ($decision -eq 'repair-required') { throw 'MODEL_CONFIGURATION_NEEDS_REPAIR: the saved assignment is unavailable. No starter download or model replacement was started. Review its file path in Settings.' }
+  if ($decision -notin @('starter', 'runtime-only')) { throw 'MODEL_STATE_UNVERIFIED: backend did not supply a supported provisioning decision; no download started.' }
+  $installer = Join-Path $appRoot 'scripts\windows\Install-LlamaRuntime.ps1'
+  if (-not (Test-Path -LiteralPath $installer)) { throw 'MODEL_PROVISIONER_MISSING: use Setup and Recovery to repair the installed package.' }
 
   Set-TrayState 'preparing-model'
-  $arguments = '/d /s /c ""{0}""' -f $installer
-  $installProcess = Start-Process -FilePath $env:ComSpec -ArgumentList $arguments -WorkingDirectory $PortableRoot -WindowStyle Hidden -Wait -PassThru
+  $correlationId = [Guid]::NewGuid().ToString('N')
+  $diagnosticPath = Join-Path $logRoot "model-provisioning-$correlationId.json"
+  $diagnosticStderr = Join-Path $logRoot "model-provisioning-$correlationId.stderr.log"
+  $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -PortableRoot "{1}" -DiagnosticPath "{2}"' -f $installer, $PortableRoot, $diagnosticPath
+  if ($decision -eq 'runtime-only') { $arguments += ' -RuntimeOnly' }
+  $installProcess = Start-Process -FilePath powershell.exe -ArgumentList $arguments -WorkingDirectory $PortableRoot -WindowStyle Hidden -RedirectStandardError $diagnosticStderr -Wait -PassThru
   if ($installProcess.ExitCode -ne 0) {
-    throw "Local model provisioning failed with exit code $($installProcess.ExitCode). The app will still open; retry from Settings when internet access is available."
+    $stage = 'process-start-or-script-parse'
+    if (Test-Path -LiteralPath $diagnosticPath) {
+      try { $stage = (Get-Content -LiteralPath $diagnosticPath -Raw | ConvertFrom-Json).stage } catch { }
+    }
+    throw "MODEL_PROVISIONING_FAILED at $stage (exit $($installProcess.ExitCode), correlation $correlationId). Existing model settings were not changed by the tray. Diagnostic: $diagnosticPath; child stderr: $diagnosticStderr"
   }
+  # The existing startup default owner imports a newly installed starter and
+  # runtime paths. Restart only our backend, never rewrite model rows here.
+  Stop-LifePlannerServer
+  Start-LifePlannerServer
 }
 
 function Start-LifePlannerServer {
@@ -190,18 +225,14 @@ function Start-LifePlannerServer {
 
   $existingProcessId = Get-PortOwnerProcessId
   if ($existingProcessId -gt 0) {
-    if ((Test-IsBundledNodeProcess $existingProcessId) -and (Test-ServerHealth)) {
-      $script:serverProcess = Get-Process -Id $existingProcessId -ErrorAction Stop
-      $script:ownsServerProcess = $true
-      Set-TrayState 'running'
-      return
-    }
-    throw "Port $Port is already in use by another process. Close that process or change LIFE_PLANNER_PORT before starting Life Planner."
+    throw "RUNTIME_PORT_OWNED: port $Port already has a process not launched by this tray. It was left running. Exit the existing Life Planner environment, or inspect that process before retrying."
   }
 
   Set-TrayState 'starting'
   $env:LIFE_PLANNER_PORT = [string]$Port
   $env:PLAYWRIGHT_BROWSERS_PATH = $playwrightRoot
+  $script:launchId = [Guid]::NewGuid().ToString('N')
+  $env:LPS_LAUNCH_ID = $script:launchId
 
   $script:serverProcess = Start-Process `
     -FilePath $nodeExe `
@@ -212,6 +243,7 @@ function Start-LifePlannerServer {
     -RedirectStandardError $stderrLog `
     -PassThru
   $script:ownsServerProcess = $true
+  $script:serverStartTicks = $script:serverProcess.StartTime.Ticks
 
   if (-not (Wait-ForServerHealth 30)) {
     $exitDetail = ''
@@ -220,7 +252,7 @@ function Start-LifePlannerServer {
       if ($script:serverProcess.HasExited) { $exitDetail = " Server exit code: $($script:serverProcess.ExitCode)." }
     }
     catch {}
-    $failureMessage = "Life Planner did not become healthy within 30 seconds.$exitDetail Check $stderrLog"
+    $failureMessage = "RUNTIME_IDENTITY_UNVERIFIED: Life Planner did not establish matching package, process and database identity within 30 seconds.$exitDetail Check $stderrLog"
     Stop-LifePlannerServer
     throw $failureMessage
   }
@@ -238,18 +270,20 @@ function Stop-LifePlannerServer {
     catch {}
   }
 
-  if ($processId -le 0) {
-    $candidate = Get-PortOwnerProcessId
-    if (Test-IsBundledNodeProcess $candidate) { $processId = $candidate }
-  }
-
   if ($processId -gt 0 -and $script:ownsServerProcess) {
-    & $env:SystemRoot\System32\taskkill.exe /PID $processId /T /F *> $null
-    Start-Sleep -Milliseconds 250
+    # Revalidate the actual child, including creation time, before termination.
+    # Never acquire ownership from a port lookup or kill a reused PID.
+    $current = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if ($current -and $current.StartTime.Ticks -eq $script:serverStartTicks -and (Test-IsBundledNodeProcess $processId)) {
+      & $env:SystemRoot\System32\taskkill.exe /PID $processId /T /F *> $null
+      Start-Sleep -Milliseconds 250
+    }
   }
 
   $script:serverProcess = $null
   $script:ownsServerProcess = $false
+  $script:serverStartTicks = $null
+  $script:launchId = $null
 }
 
 function Open-LifePlanner {
@@ -387,7 +421,7 @@ $exitItem.Add_Click({
 })
 
 $healthTimer = New-Object System.Windows.Forms.Timer
-$healthTimer.Interval = 2000
+$healthTimer.Interval = 5000
 $healthTimer.Add_Tick({
   if ($script:exiting -or $script:trayState -ne 'running') { return }
   if ($script:serverProcess) {
@@ -408,6 +442,9 @@ $healthTimer.Add_Tick({
           Show-StartupError "The local server stopped unexpectedly and could not restart. $($_.Exception.Message) Check $stderrLog"
         }
       }
+      elseif (-not (Test-ServerHealth)) {
+        Show-StartupError 'RUNTIME_IDENTITY_UNVERIFIED: the running environment no longer matches its package, process or database identity. Exit the environment and reopen the normal shortcut.'
+      }
     }
     catch {
       Show-StartupError $_.Exception.Message
@@ -420,14 +457,16 @@ Set-TrayState 'starting'
 [System.Windows.Forms.Application]::DoEvents()
 
 try {
+  Ensure-PlaywrightChromium
+  Start-LifePlannerServer
   try {
     Ensure-LocalModelRuntime
   }
   catch {
     $notifyIcon.ShowBalloonTip(5000, 'Local model setup needs attention', $_.Exception.Message, [System.Windows.Forms.ToolTipIcon]::Warning)
   }
-  Ensure-PlaywrightChromium
-  Start-LifePlannerServer
+  if (-not (Test-ServerHealth)) { throw 'BACKEND_UNAVAILABLE: local model setup ended without a healthy backend.' }
+  Set-TrayState 'running'
   $notifyIcon.ShowBalloonTip(2200, 'Life Planner is running', 'Use the tray icon to open, pause, resume, or exit the local environment.', [System.Windows.Forms.ToolTipIcon]::Info)
   if (-not $NoAutoOpen) { Open-LifePlanner }
 }

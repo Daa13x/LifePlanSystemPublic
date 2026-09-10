@@ -79,9 +79,9 @@ assert.match(trayScript, /Resume environment/);
 assert.match(trayScript, /Exit environment/);
 assert.match(vbsLauncher, /WindowStyle Hidden/);
 assert.match(nativeLauncher, /LifePlannerTray\.ps1/);
-assert.match(nativeLauncher, /-NoAutoOpen/);
+assert.doesNotMatch(nativeLauncher, /-NoAutoOpen/);
 assert.match(nativeLauncher, /LifePlanSystem\.Native\.exe/);
-assert.match(nativeLauncher, /127\.0\.0\.1:4177\/api\/health/);
+assert.doesNotMatch(nativeLauncher, /Invoke-WebRequest/, 'tray is the sole readiness owner');
 const modelInstaller = fs.readFileSync(path.join(portableRoot, 'Install Local Model Runtime.cmd'), 'utf8');
 assert.match(modelInstaller, /Install-LlamaRuntime\.ps1/);
 
