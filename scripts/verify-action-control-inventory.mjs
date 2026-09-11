@@ -14,8 +14,7 @@ import { createCapabilityRegistry } from '../server/chatCapabilities.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const baselinePath = path.join(root, 'docs', 'audits', 'ACTION_CONTROL_INVENTORY_BASELINE.json');
-const source = fs.readFileSync(path.join(root, 'src', 'main.jsx'), 'utf8');
-const ast = parse(source, { sourceType: 'module', plugins: ['jsx'] });
+const sourceFiles = ['src/main.jsx', 'src/ModuleRecovery.jsx'];
 const interactiveTags = new Set(['button', 'input', 'select', 'textarea', 'summary']);
 const controls = [];
 const ownerOrdinals = new Map();
@@ -38,6 +37,7 @@ function directText(element) {
 }
 
 function functionOwner(node, owner) {
+  if (node.type === 'ClassDeclaration' && node.id?.name) return node.id.name;
   if (node.type === 'FunctionDeclaration' && node.id?.name) return node.id.name;
   if ((node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') && node.__variableOwner) return node.__variableOwner;
   return owner;
@@ -77,7 +77,7 @@ function walk(node, owner = '<module>') {
   }
 }
 
-walk(ast);
+for (const file of sourceFiles) walk(parse(fs.readFileSync(path.join(root, file), 'utf8'), { sourceType: 'module', plugins: ['jsx'] }));
 
 for (const control of controls) {
   assert.equal(Boolean(control.actionId), Boolean(control.controlId), `control ${control.owner}#${control.ordinal} must declare both data-action-id and data-control-id or neither`);
@@ -99,7 +99,7 @@ for (const control of controls) {
 const fingerprintInput = controls.map(({ owner, ordinal, tag, actionId, controlId, label }) => ({ owner, ordinal, tag, actionId, controlId, label }));
 const actual = {
   schemaVersion: 1,
-  source: 'src/main.jsx',
+  source: sourceFiles.join(', '),
   total: controls.length,
   mapped: controls.filter((item) => item.actionId).length,
   unmapped: controls.filter((item) => !item.actionId).length,

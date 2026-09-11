@@ -26,6 +26,7 @@
     "verify:hosted-multiuser-isolation": "node scripts/verify-hosted-multiuser-isolation.mjs",
     "verify:android-beta": "node --experimental-test-module-mocks --test scripts/verify-native-local-data.mjs && node scripts/verify-android-beta.mjs && node scripts/verify-android-ui.mjs",
     "verify:navigation-consolidation": "node scripts/verify-navigation-consolidation.mjs",
+    "verify:module-recovery": "node scripts/verify-module-recovery.mjs",
     "verify:chat-capabilities": "node scripts/verify-chat-capabilities.mjs",
     "verify:action-registry": "node scripts/verify-action-registry.mjs && node scripts/verify-action-registry-ui.mjs && node scripts/verify-action-registry-http.mjs",
     "verify:chat-command-ui": "node scripts/verify-chat-command-ui.mjs",

@@ -139,8 +139,18 @@ jobs:
       # Exercise the existing Phase 2 source contracts on one fresh disposable
       # database, including confirmation resume, reviewed memory, scheduled
       # review, and narrow-screen Workboard/Knowledge visibility.
-      - name: Verify Phase 2 source goal-to-review journey
-        run: npm run verify:phase2-goal-to-review:built
+      - name: Verify source journey and UI resilience
+        run: |
+          npm run verify:phase2-goal-to-review:built
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run verify:module-recovery
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run verify:navigation-consolidation
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run verify:accessibility
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/verify-android-ui.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install Inno Setup
         shell: pwsh

@@ -108,9 +108,8 @@ try {
     await assertWithinWidth(messageActions.locator('button, input, select'), viewport.width, 'expanded message feedback controls');
     await assertNoOverlap(messageActions.locator('button, input, select'), 'expanded message feedback');
 
-    await page.locator('.nav-trigger').click();
     await page.getByRole('button', { name: /^Workboard/ }).first().click();
-    await page.locator('.nav-subpages').getByRole('button', { name: 'Today', exact: true }).click();
+    await page.locator('.section-navigation-row').getByRole('button', { name: 'Today', exact: true }).click();
     await page.getByRole('heading', { name: 'Today', exact: true }).waitFor();
     await page.getByText('Test', { exact: true }).waitFor();
     const taskActions = page.locator('.table-list .item-row').filter({ hasText: 'Test' }).locator(':scope > .button-row button');
@@ -126,11 +125,9 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1), true, `populated Today has no horizontal page overflow at ${viewport.width}px`);
 
     if (viewport.width === 390) {
-      await page.locator('.nav-trigger').click();
       await page.getByRole('button', { name: /^Workboard/ }).first().click();
-      await page.locator('.nav-subpages').getByRole('button', { name: 'Projects', exact: true }).click();
+      await page.locator('.section-navigation-row').getByRole('button', { name: 'Projects', exact: true }).click();
       await page.getByText('Android beta', { exact: true }).waitFor();
-      await page.locator('.nav-trigger').click();
       assert.equal(await page.getByPlaceholder('New project name').isEnabled(), true, 'Projects stays usable without a PC');
 
       for (const name of ['Refresh', 'Pair with my LifePlanSystem PC', 'Configure optional hosted LifePlanSystem server']) assert.equal(await page.getByRole('button', { name }).count(), 1, `${name} is reachable in the phone top bar`);

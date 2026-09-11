@@ -1,5 +1,24 @@
 # Action-control inventory baseline — 2026-08-28
 
+## 2026-09-11 module-resilience delta
+
+The current scanner includes main.jsx and the extracted ModuleRecovery.jsx,
+including class component ownership. Shared wrapping navigation removes two
+intrinsic controls (separate Chat shortcut and popup toggle); the existing mapped
+actions are unchanged. Recovery adds four presentation controls (retry existing
+refresh/remount, previous known location, Chat, copy allowlisted diagnostics) and
+one read-only diagnostic textarea. No operational mutation or new backend action
+is introduced. These five controls are explicitly unmapped presentation debt,
+not hidden by extraction: 500 total, 32 mapped, 468 unmapped. The prior baseline
+was 497/32/465. Existing annotation/manifest checks remain enforced. Unknown URL
+text, session IDs, exceptions, response bodies and settings are never copied.
+
+The module browser verifier exercises all canonical routes, populated Overview,
+render faults/retry, unknown/malformed locations, clipboard redaction, pending/
+empty content watchdog and navigation widths. This is source/disposable evidence,
+not installed/native UI acceptance. Installed module defects remain open until
+the approved hosted package is installed and accepted.
+
 This is a source-derived Phase 3 debt baseline, not a completeness claim.
 
 `scripts/verify-action-control-inventory.mjs` parses the real React source and

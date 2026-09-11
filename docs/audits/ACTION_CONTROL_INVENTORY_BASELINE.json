@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "source": "src/main.jsx",
-  "total": 497,
+  "source": "src/main.jsx, src/ModuleRecovery.jsx",
+  "total": 500,
   "mapped": 32,
-  "unmapped": 465,
-  "fingerprint": "c18074a3a6aae2d18412d88a30000e16e87018a35e6dbcceab3ce483b454fcc9",
+  "unmapped": 468,
+  "fingerprint": "62024c2cf319f8bbf76b115d4e9dde24a8c86055f1b0f8f16e8d64032b905b3b",
   "byOwner": {
     "App": {
       "total": 8,
@@ -106,6 +106,11 @@
       "mapped": 0,
       "unmapped": 1
     },
+    "ModuleRecovery": {
+      "total": 5,
+      "mapped": 0,
+      "unmapped": 5
+    },
     "NativeAuthGate": {
       "total": 6,
       "mapped": 0,
@@ -122,9 +127,9 @@
       "unmapped": 7
     },
     "NavigationMenu": {
-      "total": 4,
+      "total": 2,
       "mapped": 0,
-      "unmapped": 4
+      "unmapped": 2
     },
     "OpenHandsPanel": {
       "total": 25,

@@ -46,6 +46,7 @@ import {
   X
 } from 'lucide-react';
 import './styles.css';
+import ModuleRecovery from './ModuleRecovery.jsx';
 import { PRIMARY_NAVIGATION, MOBILE_PRIMARY_NAVIGATION, SECTION_TABS, MOBILE_SECTION_TABS, isMemoryApproval, routeFor, routeFromLocation } from './navigation.js';
 import { localPlannerApi, localChatApi, localListMessages, localAppendMessage, localCreateNote, localListNotes, localCreateMemoryCandidate, localCompleteTask, localDeferTask, localListTasks, localListProjects, localCreateProject, localUpdateProject, localListProjectCards, localSyncSettings, localSetSyncPairing, localRemoveSyncPairing, localSyncNow } from './localData.js';
 import { matchLocalCommand, LOCAL_COMMAND_EXAMPLES } from './localCommands.js';
@@ -536,6 +537,15 @@ function repoBoundaryLabel(repoPath = '', repoName = '') {
 
 function App() {
   const [route, setRoute] = useState(() => routeFromLocation(window.location.pathname, window.location.search, window.location.hash));
+  const lastRoute = useRef(route);
+  const previousRoute = useRef({ section: 'chat', tab: null });
+  const [moduleAttempt, setModuleAttempt] = useState(0);
+  // Chat owns session transitions; remount only when changing module/submodule.
+  const routeKey = `${route.section}/${route.tab || ''}`;
+  if (lastRoute.current.section !== route.section || lastRoute.current.tab !== route.tab || lastRoute.current.sessionId !== route.sessionId) {
+    previousRoute.current = lastRoute.current;
+    lastRoute.current = route;
+  }
   const [theme, setTheme] = useState(() => localStorage.getItem('life-planner-theme') || 'dark');
   const [boot, setBoot] = useState(null);
   const [bootStatus, setBootStatus] = useState('loading');
@@ -581,6 +591,7 @@ function App() {
 
   function navigate(section, tab = null, sessionId = null) {
     const next = { section, tab: tab || nav.find((entry) => entry.id === section)?.defaultTab || null, sessionId, legacy: false };
+    if (sessionId === null && next.section === route.section && next.tab === route.tab) setModuleAttempt((value) => value + 1);
     const path = routeFor(next.section, next.tab, next.sessionId);
     if (path !== window.location.hash) window.history.pushState({}, '', path);
     setRoute(next);
@@ -853,6 +864,10 @@ function App() {
           </div>
         )}
 
+        <ModuleRecovery key={`${routeKey}:${moduleAttempt}`} route={route} previousRoute={previousRoute.current} backendBuild={boot?.build?.commit}
+          onRetry={async () => { await refreshCurrentView(); setModuleAttempt((value) => value + 1); }}
+          onBack={() => { const previous = previousRoute.current; navigate(previous.section === 'unknown' ? 'chat' : previous.section, previous.tab); }}
+          onHome={() => navigate('chat')}>
         {route.section === 'workboard' && <Workboard route={route} navigate={navigate} planner={planner} projects={projects} setProjects={setProjects} refresh={reloadPlanner} refreshAll={refreshAll} runRefresh={runPlannerRefresh} proposeCodingTask={proposeCodingTask} confirmCodingTask={confirmCodingTask} proposeWorkboardItemUpdate={proposeWorkboardItemUpdate} confirmWorkboardItemUpdate={confirmWorkboardItemUpdate} setNotice={setNotice} refreshSignal={refreshSignal} />}
         {route.section === 'chat' && (
           <Chat
@@ -886,49 +901,31 @@ function App() {
             openChatGptSync={openChatGptSyncFromShell}
           />
         )}
+        </ModuleRecovery>
       </main>
     </div>
   );
 }
 
 function NavigationMenu({ route, navigate, candidateCount, operationalApprovalCount, completedWorkboardCount }) {
-  const [open, setOpen] = useState(false);
-  const menuEntries = nav.filter((entry) => entry.id !== 'chat');
-  const selectedSection = route.section === 'chat' ? 'knowledge' : route.section;
-  const [previewSection, setPreviewSection] = useState(selectedSection);
-  const selected = nav.find((entry) => entry.id === selectedSection);
-  const preview = nav.find((entry) => entry.id === previewSection);
-  const SelectedIcon = selected?.icon || Route;
   const tabBadges = { candidates: candidateCount || null, review: operationalApprovalCount || null, completed: completedWorkboardCount || null };
   return (
     <nav className="navigation-menu" aria-label="Main navigation">
-      <button className={cx('nav-item', 'nav-chat-link', route.section === 'chat' && 'selected')} onClick={() => { navigate('chat'); setOpen(false); setPreviewSection('knowledge'); }} aria-current={route.section === 'chat' ? 'page' : undefined}>
-        <MessageSquareText size={18} /><span>Chat</span>
-      </button>
-      <div className="nav-menu-anchor">
-        <button className="nav-trigger" onClick={() => { setPreviewSection(selectedSection); setOpen((value) => !value); }} aria-expanded={open} aria-controls="main-navigation-options">
-          {SelectedIcon && <SelectedIcon size={18} />}
-          <span>{selected?.label || 'Menu'}</span>
-          <ChevronDown size={18} className={cx('nav-trigger-chevron', open && 'open')} aria-hidden="true" />
-        </button>
-        {open && (
-          <div id="main-navigation-options" className="nav-options">
-            {menuEntries.map((entry) => {
+      <div className="primary-navigation-row">
+            {nav.map((entry) => {
               const Icon = entry.icon;
-              return <button key={entry.id} className={cx('nav-item', route.section === entry.id && 'selected')} onMouseEnter={() => setPreviewSection(entry.id)} onFocus={() => setPreviewSection(entry.id)} onClick={() => { setPreviewSection(entry.id); navigate(entry.id); }} aria-current={route.section === entry.id ? 'page' : undefined}>
+              return <button key={entry.id} className={cx('nav-item', route.section === entry.id && 'selected')} onClick={() => navigate(entry.id)} aria-current={route.section === entry.id ? 'page' : undefined}>
                 <Icon size={18} /><span>{entry.label}</span>
                 {entry.id === 'workboard' && operationalApprovalCount > 0 && <span className="nav-badge" aria-label={`${operationalApprovalCount} operational approvals awaiting review`}>{operationalApprovalCount}</span>}
                 {entry.id === 'knowledge' && candidateCount > 0 && <span className="nav-badge" aria-label={`${candidateCount} memory candidates awaiting review`}>{candidateCount}</span>}
               </button>;
             })}
-            {VISIBLE_SECTION_TABS[previewSection] && <div className="nav-subpages" onMouseEnter={() => setPreviewSection(previewSection)} style={{ '--active-index': menuEntries.findIndex((entry) => entry.id === previewSection) }} aria-label={`${preview?.label} pages`}>
-              {VISIBLE_SECTION_TABS[previewSection].map((tab) => <button key={tab.id} className={cx('nav-subpage', route.section === previewSection && route.tab === tab.id && 'selected')} onClick={() => { setPreviewSection(previewSection); navigate(previewSection, tab.id); }}>
+      </div>
+            {VISIBLE_SECTION_TABS[route.section] && <div className="section-navigation-row" aria-label={`${nav.find((entry) => entry.id === route.section)?.label} pages`}>
+              {VISIBLE_SECTION_TABS[route.section].map((tab) => <button key={tab.id} className={cx('nav-subpage', route.tab === tab.id && 'selected')} aria-current={route.tab === tab.id ? 'page' : undefined} onClick={() => navigate(route.section, tab.id)}>
                 <span>{tab.label}</span>{tabBadges[tab.id] ? <span className="nav-badge">{tabBadges[tab.id]}</span> : null}
               </button>)}
             </div>}
-          </div>
-        )}
-      </div>
     </nav>
   );
 }
@@ -2113,7 +2110,7 @@ function CodingWorkQueue({ navigate, proposeCodingTask, confirmCodingTask, setNo
   </div>;
 }
 
-function Planner({ planner, refresh, runRefresh, proposeCodingTask, confirmCodingTask, setNotice, navigate }) {
+function Planner({ planner, refresh, runRefresh, proposeCodingTask, confirmCodingTask, proposeWorkboardItemUpdate, confirmWorkboardItemUpdate, setNotice, navigate }) {
   if (!planner) return <div className="loading">Loading Workboard context...</div>;
   const nextBestBody = planner.nextBest?.body
     || (planner.nextBest?.action_type ? 'Review and approve, deny, or defer this proposed change.' : 'Add goals, projects, or memory candidates to feed the Workboard.');

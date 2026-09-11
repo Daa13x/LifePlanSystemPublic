@@ -80,16 +80,18 @@ export function routeFor(section, tab = null, sessionId = null) {
 export function routeFromHash(hash = '') {
   const value = String(hash || '').replace(/^#/, '').replace(/^\/+|\/+$/g, '');
   if (!value) return { section: 'chat', tab: null, sessionId: null, legacy: true };
-  const parts = value.split('/').filter(Boolean).map((part) => decodeURIComponent(part));
+  let parts;
+  try { parts = value.split('/').filter(Boolean).map((part) => decodeURIComponent(part)); }
+  catch { return unknownRoute(); }
   const section = parts[0];
   if (section === 'chat') {
-    if (parts.length > 2) return { section: 'chat', tab: null, sessionId: null, legacy: true };
+    if (parts.length > 2) return unknownRoute();
     return { section: 'chat', tab: null, sessionId: parts[1] || null, legacy: false };
   }
-  if (section === 'settings') return { section: 'settings', tab: null, sessionId: null, legacy: parts.length !== 1 };
+  if (section === 'settings') return parts.length === 1 ? { section: 'settings', tab: null, sessionId: null, legacy: false } : unknownRoute();
   const fallback = defaultTab(section);
   const tab = parts[1] || fallback;
-  if (!fallback || !knownTab(section, tab) || parts.length > 2) return { section: 'chat', tab: null, sessionId: null, legacy: true };
+  if (!fallback || !knownTab(section, tab) || parts.length > 2) return unknownRoute();
   return { section, tab, sessionId: null, legacy: false };
 }
 
@@ -101,7 +103,19 @@ export function routeFromLocation(pathname = '/', search = '', hash = '') {
     const memoryApproval = normalized === '/approvals' && new URLSearchParams(search).get('domain') === 'memory';
     return { ...(memoryApproval ? { section: 'knowledge', tab: 'candidates' } : legacy), sessionId: null, legacy: true };
   }
-  return { section: 'chat', tab: null, sessionId: null, legacy: true };
+  return normalized === '/' ? { section: 'chat', tab: null, sessionId: null, legacy: true } : unknownRoute();
+}
+
+function unknownRoute() {
+  return { section: 'unknown', tab: null, sessionId: null, legacy: false };
+}
+
+export function diagnosticRoute(route) {
+  const section = PRIMARY_NAVIGATION.find((entry) => entry.id === route?.section);
+  if (route?.section === 'settings') return 'Settings';
+  if (!section) return 'Unknown location (URL omitted)';
+  const tab = SECTION_TABS[section.id]?.find((entry) => entry.id === route.tab);
+  return tab ? `${section.label} → ${tab.label}` : section.label;
 }
 
 export function isMemoryApproval(approval = {}) {

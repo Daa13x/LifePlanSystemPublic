@@ -49,7 +49,10 @@ assert.deepEqual(routeFromHash('#knowledge/candidates'), { section: 'knowledge',
 assert.deepEqual(routeFromHash('#settings'), { section: 'settings', tab: null, sessionId: null, legacy: false });
 assert.deepEqual(routeFromLocation('/', '', '#workboard/projects'), { section: 'workboard', tab: 'projects', sessionId: null, legacy: false });
 assert.deepEqual(routeFromLocation('/', '', ''), { section: 'chat', tab: null, sessionId: null, legacy: true });
-assert.deepEqual(routeFromHash('#not-a-screen'), { section: 'chat', tab: null, sessionId: null, legacy: true });
+for (const hash of ['#not-a-screen', '#workboard/no-such-tab', '#settings/extra', '#chat/1/extra', '#%E0%A4%A']) {
+  assert.deepEqual(routeFromHash(hash), { section: 'unknown', tab: null, sessionId: null, legacy: false });
+}
+assert.equal(routeFromLocation('/not-a-screen').section, 'unknown');
 assert.deepEqual(approvalDestination({ action_type: 'update_memory' }), { section: 'knowledge', tab: 'candidates' });
 assert.deepEqual(approvalDestination({ action_type: 'update_project' }), { section: 'workboard', tab: 'review' });
 
@@ -58,7 +61,7 @@ const [appSource, styles] = await Promise.all([
   readFile(new URL('../src/styles.css', import.meta.url), 'utf8')
 ]);
 assert.match(appSource, /<nav className="navigation-menu" aria-label="Main navigation">/, 'primary navigation must have an accessible label');
-assert.match(appSource, /aria-label=\{`\$\{preview\?\.label\} pages`\}/, 'secondary navigation must identify the previewed section');
+assert.match(appSource, /className="section-navigation-row" aria-label=/, 'shared secondary navigation must identify the current section');
 assert.match(appSource, /aria-current=\{route\.section === entry\.id \? 'page' : undefined\}/, 'active primary navigation must be announced');
 assert.match(appSource, /aria-label="Open Settings"/, 'Settings must be an accessible top-bar control, not a sidebar destination');
 assert.match(appSource, /window\.addEventListener\('hashchange', onPopState\)/, 'hash back/forward navigation must update the screen');
@@ -70,7 +73,7 @@ assert.match(appSource, /<CompletedWorkboard/, 'completed view must use existing
 assert.match(appSource, /api\('\/api\/items\?all=1'\)/, 'completed planner records must be read from the existing API');
 assert.match(styles, /@media \(max-width: 760px\)/, 'narrow-screen layout must be defined');
 assert.match(styles, /\.navigation-menu \{ max-width: 100%; \}/, 'narrow primary navigation must remain within the viewport');
-assert.match(styles, /\.nav-subpages \{[\s\S]*left: 0;[\s\S]*top: calc\(100% \+ 6px\);/, 'narrow secondary navigation must remain within the viewport');
+assert.match(styles, /\.primary-navigation-row, \.section-navigation-row \{[^}]*flex-wrap: wrap/, 'canonical navigation must wrap instead of using clipped floating submenus');
 assert.match(styles, /\.icon-button\.active/, 'active Settings state must have a visible style');
 
 console.log('Navigation consolidation verification passed.');

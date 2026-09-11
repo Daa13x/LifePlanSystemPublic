@@ -182,9 +182,20 @@ p, .item-meta, .message span, .model-row span, label, .review-card span { color:
   text-align: center;
 }
 
-.main { position: relative; padding: 20px 24px 28px; overflow: hidden; }
+.main { position: relative; min-width: 0; min-height: 100dvh; padding: 20px 24px 28px; }
 .topbar { display: flex; align-items: center; justify-content: flex-start; gap: 18px; margin-bottom: 20px; }
-.topbar-heading { flex: 1; min-width: 0; }
+.topbar-heading { flex: 1 0 100%; min-width: 0; order: 3; }
+.topbar { flex-wrap: wrap; }
+.topbar .navigation-menu { display: flex; flex-direction: column; align-items: stretch; flex: 1 1 420px; min-width: 0; max-width: 100%; }
+.primary-navigation-row, .section-navigation-row { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.primary-navigation-row .nav-item { width: auto; }
+.section-navigation-row .nav-subpage { padding: 6px 10px; min-width: 0; white-space: normal; }
+.module-content { min-width: 0; }
+.chat-main-shell > .module-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat-main-shell > .module-content > .chat-layout { flex: 1; min-height: 0; }
+.module-recovery { min-width: 0; max-width: 100%; overflow: auto; }
+.module-recovery textarea { display: block; width: 100%; min-height: 240px; overflow-wrap: anywhere; }
+.module-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
 .topbar-heading p { margin: 0; }
 .topbar .top-actions { margin-left: auto; }
 .auth-gate {
@@ -296,7 +307,7 @@ h3 { font-size: 14px; font-weight: 700; }
   background: color-mix(in srgb, currentColor 13%, transparent);
 }
 
-.icon-button, .primary, .decision-row button, .link-button, .inline-form button, .model-row button, .import-export button, .panel-heading button {
+.icon-button, .primary, .decision-row button, .link-button, .inline-form button, .model-row button, .import-export button, .panel-heading button, .module-recovery-actions button {
   min-height: 36px;
   border-radius: 8px;
   padding: 0 12px;
@@ -1283,6 +1294,7 @@ textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
   .nav-item { min-width: 0; min-height: 36px; padding: 0 8px; gap: 6px; font-size: 12px; }
   .main { padding: 14px 12px 20px; }
   .topbar { align-items: flex-start; flex-direction: column; margin-bottom: 14px; }
+  .topbar .navigation-menu { flex: 0 0 auto; width: 100%; }
   .top-actions { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
   .completed-grid, .status-grid, .bucket-grid, .settings-grid, .repo-layout, .tooling-grid, .calibration-grid { grid-template-columns: minmax(0, 1fr); }
   .theme-choice { min-width: 0; }
