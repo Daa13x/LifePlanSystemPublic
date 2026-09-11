@@ -16,7 +16,9 @@ export function configuredLlamaRuntimeAvailable(file, bundledRoot) {
     const bundle = path.resolve(bundledRoot);
     const same = process.platform === 'win32' ? parent.toLowerCase() === bundle.toLowerCase() : parent === bundle;
     if (!same) return true;
-    const manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'runtime-manifest.json'), 'utf8'));
+    // The existing Windows PowerShell provisioner emits UTF-8 with a BOM.
+    // Normalize only that leading encoding marker; JSON and digests stay strict.
+    const manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'runtime-manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
     for (const [name, expected] of [['llama-server.exe', manifest.serverSha256], ['ggml-base.dll', manifest.baseDllSha256]]) {
       const candidate = path.join(bundle, name);
       if (!/^[a-f0-9]{64}$/i.test(expected || '') || !fs.statSync(candidate).isFile()) return false;

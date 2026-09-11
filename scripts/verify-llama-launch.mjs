@@ -39,6 +39,16 @@ try {
   const digest = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
   fs.writeFileSync(path.join(bundle, 'runtime-manifest.json'), JSON.stringify({ serverSha256: digest(executable), baseDllSha256: digest(baseDll) }));
   assert.equal(configuredLlamaRuntimeAvailable(executable, bundle), true);
+  // Windows PowerShell 5.1 Set-Content -Encoding UTF8 (the provisioner owner)
+  // writes a BOM. Accept that encoding without relaxing payload digest checks.
+  const manifestPath = path.join(bundle, 'runtime-manifest.json');
+  const manifest = fs.readFileSync(manifestPath, 'utf8');
+  fs.writeFileSync(manifestPath, '\ufeff' + manifest);
+  assert.equal(configuredLlamaRuntimeAvailable(executable, bundle), true, 'the provisioner UTF-8 BOM must not force runtime repair');
+  assert.equal(startupProvisioningDecision({ assigned: true, llamaServerExists: configuredLlamaRuntimeAvailable(executable, bundle) }), 'none');
+  fs.writeFileSync(manifestPath, '\ufeff{invalid-json');
+  assert.equal(configuredLlamaRuntimeAvailable(executable, bundle), false, 'BOM handling must not accept malformed JSON');
+  fs.writeFileSync(manifestPath, '\ufeff' + manifest);
   fs.writeFileSync(baseDll, 'base-dll-corrupt');
   assert.equal(configuredLlamaRuntimeAvailable(executable, bundle), false, 'corrupted bundled dependency cannot suppress repair');
   assert.equal(startupProvisioningDecision({ assigned: true, llamaServerExists: configuredLlamaRuntimeAvailable(executable, bundle) }), 'runtime-only');
